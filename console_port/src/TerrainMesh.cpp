@@ -99,6 +99,9 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
         const int data=world.getData(x,y,z);
         if(b==116)mesh.enchantTables.push_back({x,y,z});
         switch(static_cast<int>(b)){
+        // PistonMovingPiece draws with its tile entity (buildMovingPieceMesh).
+        case 36:continue;
+        case 29:case 33:case 34:
         case 50:case 51:case 55:case 69:case 70:case 72:case 75:case 76:case 77:case 93:case 94:case 96:case 143:{
             // TileRenderer's shapes for fire, torches, dust, levers and
             // repeaters (ported/TileRender.cpp), and the updateShape box of
@@ -353,5 +356,29 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
         }
     }
 return mesh;
+}
+std::vector<Vertex> buildMovingPieceMesh(const World& world,const MovingPiece& piece){
+    const auto at=[&](int x,int y,int z){return x==piece.x && y==piece.y && z==piece.z;};
+    const std::function<int(int,int,int)> tileAt=[&](int x,int y,int z){return at(x,y,z)?piece.tile:int(world.get(x,y,z));};
+    const std::function<int(int,int,int)> dataAt=[&](int x,int y,int z){return at(x,y,z)?piece.data:world.getData(x,y,z);};
+    static constexpr int portFace[6]{1,0,4,5,2,3};
+    const int light=world.inside(piece.x,piece.y,piece.z)?world.renderLight(piece.x,piece.y,piece.z):0;
+    tile_render::LevelSource level{tileAt,dataAt,
+        [&](int x,int y,int z){return sim::isTopSolidBlocking(tileAt(x,y,z),dataAt(x,y,z));},
+        [&](int x,int y,int z){return sim::isSolidBlockingTile(tileAt(x,y,z));},
+        [&](int x,int y,int z){return sim::fireCanBurn(tileAt(x,y,z));},
+        [&](int x,int y,int z,int direction){return sim::dustShouldConnectTo(tileAt,dataAt,x,y,z,direction);},
+        [&](int,int,int){return light;},
+        [&](int tile,int face,int tileData){return textureTile(static_cast<Block>(tile),portFace[face<0||face>5?1:face],tileData);},
+        [&](int x,int y,int z){return sim::tileShape(tileAt(x,y,z),dataAt(x,y,z));}};
+    const auto quads=tile_render::tesselateMovingPiece(level,piece.tile,piece.x,piece.y,piece.z,piece.sourcePiston,piece.extending,piece.progress);
+    std::vector<Vertex> mesh;
+    static const int indices[]{0,1,2,0,2,3};
+    for(std::size_t q=0;q+3<quads.size();q+=4)for(int k:indices){
+        const auto& v=quads[q+k];
+        mesh.push_back({v.x+piece.xOff,v.y+piece.yOff,v.z+piece.zOff,v.u,v.v,v.r,v.g,v.b,1,
+                        (((v.light>>4)&15)+.5f)/16,(((v.light>>20)&15)+.5f)/16});
+    }
+    return mesh;
 }
 }

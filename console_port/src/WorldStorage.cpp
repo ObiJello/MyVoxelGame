@@ -273,14 +273,19 @@ void World::tickTime(){
     // ServerLevel::tick: Level::tick (weather), the time step (define its
     // console wrap explicitly), then tickPendingTicks and tickTiles.
     tickWeather();
+    // ServerLevel::tick runs the tile events before the time step and again
+    // after the tile ticks.
+    runTileEvents();
     state->metadata->setTime(std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(time())+1));
     tickPendingTicks();
     tickTiles();
+    runTileEvents();
     tickFurnaces();
     tickBrewingStands();
     tickPlayerEffects();
     tickPlayerSurvival();
     tickEntities();
+    tickTileEntities();
     tickFallingBlocks();
     tickInsideTiles();
 }
@@ -436,6 +441,8 @@ bool World::streamAround(Vec3 player,int chunkBudget){
                     key.second>=pending.z/16-depth/32-2 && key.second<pending.z/16+depth/32+2;
             };
             for(const auto& [key,chunk]:state->region.chunks)if(!retained(key))pending.outgoing.push_back(key);
+            // Moving piston pieces are not archived: finish them first.
+            finishPistons();
             pending.captureRevision=revision;
             pending.phase=State::Pending::Phase::Evicting;
             return false;
@@ -503,6 +510,7 @@ bool World::streamAround(Vec3 player,int chunkBudget){
     }
 }
 void World::save(const std::filesystem::path& path){
+    finishPistons();
     if(state->lightDirty)state->ensureLighting(seed);
     auto candidate=PS3WorldStorage::read(state->archive->serialize());
     auto metadata=std::make_unique<LevelData>(state->metadata.get());metadata->setSeed(seed);candidate->putMetadata(*metadata);

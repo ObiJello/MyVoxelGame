@@ -396,6 +396,8 @@ void Renderer::world(const World& source,Vec3 eye,double yaw,double pitch,double
         if(!mesh.terrain.empty())draw(mesh.terrain,textures_.at("terrain").id);
         if(!mesh.items.empty())draw(mesh.items,textures_.at("items").id);
     }
+    for(const auto& piece:source.movingPieces())
+        draw(buildMovingPieceMesh(source,piece),textures_.at("terrain").id);
     for(const auto& block:source.fallingBlocks()){
         const double dx=block.position.x-eye.x,dy=block.position.y-eye.y,dz=block.position.z-eye.z;
         if(dx*dx+dy*dy+dz*dz>distance*distance)continue;

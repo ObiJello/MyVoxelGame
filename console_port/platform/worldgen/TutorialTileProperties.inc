@@ -3,7 +3,9 @@
 CONSOLE_TUTORIAL_TILE(26,cloth,false,0,0) // BedTile
 CONSOLE_TUTORIAL_TILE(27,decoration,false,0,0) // RailTile
 CONSOLE_TUTORIAL_TILE(29,piston,false,0,0) // PistonBaseTile
+CONSOLE_TUTORIAL_TILE(33,piston,false,0,0) // PistonBaseTile
 CONSOLE_TUTORIAL_TILE(34,piston,false,0,0) // PistonExtensionTile
+CONSOLE_TUTORIAL_TILE(36,piston,false,0,0) // PistonMovingPiece
 CONSOLE_TUTORIAL_TILE(50,decoration,false,0,14) // TorchTile
 CONSOLE_TUTORIAL_TILE(51,fire,false,0,15) // FireTile
 CONSOLE_TUTORIAL_TILE(52,stone,false,0,0) // MobSpawnerTile

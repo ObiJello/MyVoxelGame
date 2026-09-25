@@ -10,6 +10,7 @@
 #include "FoodData.h"
 #include "PlayerExperience.h"
 #include "ScheduledTickQueue.h"
+#include "TileTickHost.h"
 #include <set>
 namespace console {
 struct World::State {
@@ -63,6 +64,19 @@ struct World::State {
     } tileTickHost{*this};
     ScheduledTickQueue tileTicks{tileTickHost};
     std::vector<FallingBlock> fallingBlocks;
+    // Level's tile entities the port runs (piston pieces), in level
+    // coordinates, and the ones Level::tickEntities ticks.
+    std::map<std::tuple<int,int,int>,std::shared_ptr<console::sim::TileEntity>> tileEntities;
+    std::vector<std::shared_ptr<console::sim::TileEntity>> tickingTileEntities;
+    // ServerLevel's two tile event lists (TileEventData).
+    struct TileEvent {
+        int x,y,z,tile,paramA,paramB;
+        bool operator==(const TileEvent&)const=default;
+    };
+    std::vector<TileEvent> tileEvents[2];
+    int activeTileEvents=0;
+    // How far pistons pushed the player since the client last asked.
+    Vec3 playerPush;
     std::vector<SimulatedEntity> entities;
     std::vector<ExperienceOrbState> experienceOrbs;
     int playerXpPickupDelay=0;

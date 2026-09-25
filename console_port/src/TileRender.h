@@ -95,6 +95,27 @@ public:
     // DiodeTile.cpp
     static constexpr double DELAY_RENDER_OFFSETS[4]={-1.0f/16.0f,1.0f/16.0f,3.0f/16.0f,5.0f/16.0f};
 };
+// PistonBaseTile's facing and icons (piston_side, piston_top,
+// piston_top_sticky, piston_inner_top in PreStitchedTextureMap).
+class PistonBaseTile:public Tile {
+public:
+    static const int EXTENDED_BIT=8;
+    static constexpr float PLATFORM_THICKNESS=4.0f;
+    static inline const wstring EDGE_TEX=L"piston_side",PLATFORM_TEX=L"piston_top",
+        PLATFORM_STICKY_TEX=L"piston_top_sticky",INSIDE_TEX=L"piston_inner_top";
+    static int getFacing(int data){return data&0x7;}
+    static Icon* getTexture(const wstring& name){
+        static Icon edge=Icon::slot(108),platform=Icon::slot(107),sticky=Icon::slot(106),inside=Icon::slot(110);
+        return name==EDGE_TEX?&edge:name==PLATFORM_TEX?&platform:name==PLATFORM_STICKY_TEX?&sticky:&inside;
+    }
+    // The source's way of telling getTexture to use the inside icon for an
+    // extended piston's front; the texture callback reads the extended bit.
+    void updateShape(float,float,float,float,float,float){}
+};
+class PistonExtensionTile:public Tile {
+public:
+    static int getFacing(int data){return data&0x7;}
+};
 // RedStoneDustTile's four icons (PreStitchedTextureMap slots) and
 // shouldConnectTo, answered by the world.
 class RedStoneDustTile:public Tile {
@@ -136,6 +157,10 @@ public:
     // and bottom).
     float tileShapeX0=0,tileShapeY0=0,tileShapeZ0=0,tileShapeX1=1,tileShapeY1=1,tileShapeZ1=1;
     int faceMask=0x3f;
+    // Per-face texture rotation (TileRenderer's northFlip...upFlip).
+    static const int FLIP_NONE=0,FLIP_CW=1,FLIP_CCW=2,FLIP_180=3;
+    int northFlip=FLIP_NONE,southFlip=FLIP_NONE,eastFlip=FLIP_NONE,westFlip=FLIP_NONE,upFlip=FLIP_NONE,downFlip=FLIP_NONE;
+    bool noCulling=false;
     void setShape(float x0,float y0,float z0,float x1,float y1,float z1){
         tileShapeX0=x0;tileShapeY0=y0;tileShapeZ0=z0;tileShapeX1=x1;tileShapeY1=y1;tileShapeZ1=z1;
     }
@@ -157,6 +182,11 @@ public:
     void tesselateDiodeInWorld(DiodeTile* tt,int x,int y,int z,int dir);
     bool tesselateLeverInWorld(Tile* tt,int x,int y,int z);
     bool tesselateDustInWorld(Tile* tt,int x,int y,int z);
+    bool tesselatePistonBaseInWorld(Tile* tt,int x,int y,int z,bool forceExtended,int forceData=-1);
+    void renderPistonArmUpDown(float x0,float x1,float y0,float y1,float z0,float z1,float br,float armLengthPixels);
+    void renderPistonArmNorthSouth(float x0,float x1,float y0,float y1,float z0,float z1,float br,float armLengthPixels);
+    void renderPistonArmEastWest(float x0,float x1,float y0,float y1,float z0,float z1,float br,float armLengthPixels);
+    bool tesselatePistonExtensionInWorld(Tile* tt,int x,int y,int z,bool fullArm,int forceData=-1);
 };
 
 inline bool TileRenderer::tesselateBlockInWorld(Tile* tt,int x,int y,int z){
@@ -164,12 +194,19 @@ inline bool TileRenderer::tesselateBlockInWorld(Tile* tt,int x,int y,int z){
     t->tex2(getLightColor(tt,level,x,y,z));
     const int data=level->getData(x,y,z);
     const float X0=x+tileShapeX0,X1=x+tileShapeX1,Y0=y+tileShapeY0,Y1=y+tileShapeY1,Z0=z+tileShapeZ0,Z1=z+tileShapeZ1;
+    const int flips[6]{downFlip,upFlip,northFlip,southFlip,westFlip,eastFlip};
     auto face=[&](int facing,float shade,const std::array<std::array<float,3>,4>& p,float ua,float ub,float va,float vb){
         if(!(faceMask&(1<<facing)))return;
         Icon* tex=hasFixedTexture()?fixedTexture:getTexture(tt,facing,data);
         t->color(shade,shade,shade);
         const float us[4]{ua,ua,ub,ub},vs[4]{va,vb,vb,va};
-        for(int i=0;i<4;++i)t->vertexUV(p[i][0],p[i][1],p[i][2],tex->getU(us[i]*16),tex->getV(vs[i]*16));
+        // Rotate the texture a quarter turn per step (clockwise takes each
+        // corner's coordinates from the next corner round).
+        const int turn=flips[facing]==FLIP_CW?1:flips[facing]==FLIP_CCW?3:flips[facing]==FLIP_180?2:0;
+        for(int i=0;i<4;++i){
+            const int k=(i+turn)%4;
+            t->vertexUV(p[i][0],p[i][1],p[i][2],tex->getU(us[k]*16),tex->getV(vs[k]*16));
+        }
     };
     // Outward winding, first corner at the face's top left.
     face(Facing::DOWN,.5f,{{{X0,Y0,Z1},{X0,Y0,Z0},{X1,Y0,Z0},{X1,Y0,Z1}}},tileShapeX0,tileShapeX1,tileShapeZ1,tileShapeZ0);
@@ -183,8 +220,9 @@ inline bool TileRenderer::tesselateBlockInWorld(Tile* tt,int x,int y,int z){
 }
 
 // The quads of the tile at x, y, z, or none when the tile has no shape here:
-// fire, torches, redstone dust, levers, repeaters, and the plain shaped
-// blocks (buttons, pressure plates, trapdoors) drawn as their updateShape box.
+// fire, torches, redstone dust, levers, repeaters, pistons and their heads,
+// and the plain shaped blocks (buttons, pressure plates, trapdoors) drawn as
+// their updateShape box.
 inline std::vector<TileVertex> tesselate(LevelSource& level,int id,int x,int y,int z){
     static FireTile fire=[]{FireTile tile;tile.id=51;return tile;}();
     static Tile cobble=[]{Tile tile;tile.id=Tile::stoneBrick_Id;return tile;}();
@@ -204,7 +242,33 @@ inline std::vector<TileVertex> tesselate(LevelSource& level,int id,int x,int y,i
         // DiodeTile::shouldRenderFace: up and down are the shape renderer's.
         box();renderer.faceMask=0x3c;renderer.tesselateDiodeInWorld(&tile,x,y,z);break;
     case 70:case 72:case 77:case 96:case 143:box();renderer.tesselateBlockInWorld(&tile,x,y,z);break;
+    case 29:case 33:{PistonBaseTile base;base.id=id;renderer.tesselatePistonBaseInWorld(&base,x,y,z,false);break;}
+    case 34:{Tile head;head.id=id;renderer.tesselatePistonExtensionInWorld(&head,x,y,z,true);break;}
     default:break;
+    }
+    t->out=nullptr;
+    return out;
+}
+
+// PistonPieceRenderer: a moving piece is drawn where the piece entity has got
+// to. A retracting piston's own base draws extended with its arm; a head
+// short of halfway draws with a half arm; anything else is its own shape
+// (a full cube for ordinary blocks).
+inline std::vector<TileVertex> tesselateMovingPiece(LevelSource& level,int id,int x,int y,int z,
+                                                    bool sourcePiston,bool extending,float progress){
+    std::vector<TileVertex> out;
+    auto* t=Tesselator::getInstance();
+    t->out=&out;t->color(1,1,1);
+    TileRenderer renderer;renderer.level=&level;renderer.noCulling=true;
+    if(id==34 && progress<.5f){Tile head;head.id=id;renderer.tesselatePistonExtensionInWorld(&head,x,y,z,false);}
+    else if(sourcePiston && !extending){PistonBaseTile base;base.id=id;renderer.tesselatePistonBaseInWorld(&base,x,y,z,true);}
+    else{
+        t->out=nullptr;
+        out=tesselate(level,id,x,y,z);
+        if(out.empty()){
+            t->out=&out;
+            Tile tile;tile.id=id;renderer.setShape(0,0,0,1,1,1);renderer.tesselateBlockInWorld(&tile,x,y,z);
+        }
     }
     t->out=nullptr;
     return out;

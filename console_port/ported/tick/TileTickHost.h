@@ -46,12 +46,32 @@ struct SoundType {
     float getPitch()const{return 1;}
 };
 struct Abilities { bool instabuild=false; };
-class Entity { public: virtual ~Entity()=default; };
+// Entity::move: the host moves the real entity (pistons push them).
+class Entity { public: virtual ~Entity()=default; virtual void move(double,double,double){} };
 // Mob (a player's or a mob's facing, in the source's degrees) and Arrow: the
 // classes pressure plates and wooden buttons look for.
 class Mob:public Entity { public: float yRot=0; };
 class Arrow:public Entity {};
-class TileEntity {};
+class Level;
+// TileEntity: the fields and removal flag the piston pieces use.
+class TileEntity {
+public:
+    Level* level=nullptr;
+    int x=0,y=0,z=0;
+    bool removed=false;
+    virtual ~TileEntity()=default;
+    virtual void tick(){}
+    void setRemoved(){removed=true;}
+    void clearRemoved(){removed=false;}
+    bool isRemoved()const{return removed;}
+};
+// The Win32 thread-local slots the source uses (TlsAlloc/TlsGetValue/TlsSetValue);
+// slot 0 is Tile's shape storage.
+using DWORD=unsigned;
+using LPVOID=void*;
+inline DWORD TlsAlloc(){static DWORD next=1;return next++;}
+inline void*& tlsSlot(DWORD index){static thread_local void* slots[16]{};return slots[index%16];}
+inline void TlsSetValue(DWORD index,void* value){tlsSlot(index)=value;}
 // Statistics and achievements are not ported.
 struct GenericStats {
     static int portalsCreated(){return 0;}
@@ -61,6 +81,9 @@ struct GenericStats {
 };
 class Player:public Mob {
 public:
+    // Entity position and heightOffset (PistonBaseTile::getNewFacing).
+    double x=0,y=0,z=0;
+    float heightOffset=1.62f;
     Abilities abilities;
     bool mayBuild(int,int,int){return true;}
     void awardStat(int,int){}
@@ -98,15 +121,22 @@ struct TilePosKeyHash { int operator()(const TilePos& k)const{return TilePos::ha
 struct TilePosKeyEq { bool operator()(const TilePos& a,const TilePos& b)const{return TilePos::eq_test(a,b);} };
 struct LevelEvent { static const int SOUND_OPEN_DOOR=1003; };
 // Sounds and particles are client effects; the ids are what the calls name.
-enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK };
+enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK,
+    eSoundType_TILE_PISTON_OUT,eSoundType_TILE_PISTON_IN };
 enum ePARTICLE_TYPE { eParticleType_largesmoke,eParticleType_smoke };
 inline void MemSect(int){}
+// PIX profiler markers.
+inline void PIXBeginNamedEvent(int,const char*,...){}
+inline void PIXEndNamedEvent(){}
 // Math::random: java.lang.Math's shared generator.
 struct Math { static double random(){static Random generator;return generator.nextDouble();} };
 
 struct Dimension {
     int id=0;
     bool ultraWarm=false,hasCeiling=false;
+    // Dimension::getXZSize: the world's width in chunks.
+    int xzSize=54;
+    int getXZSize()const{return xzSize;}
     bool isNaturalDimension()const{return id==0;}
 };
 
@@ -155,6 +185,13 @@ public:
     virtual int getData(int x,int y,int z)=0;
     virtual bool setTileAndDataNoUpdate(int x,int y,int z,int tile,int data)=0;
     virtual bool setDataNoUpdate(int x,int y,int z,int data)=0;
+    // The 4J overload whose last argument only concerns sending to clients.
+    bool setTileAndDataNoUpdate(int x,int y,int z,int tile,int data,bool){return setTileAndDataNoUpdate(x,y,z,tile,data);}
+    // Tile entities (the piston pieces) and ServerLevel::tileEvent.
+    virtual shared_ptr<TileEntity> getTileEntity(int,int,int){return nullptr;}
+    virtual void setTileEntity(int,int,int,shared_ptr<TileEntity>){}
+    virtual void removeTileEntity(int,int,int){}
+    virtual void tileEvent(int,int,int,int,int,int){}
     bool setTileNoUpdate(int x,int y,int z,int tile){return setTileAndDataNoUpdate(x,y,z,tile,0);}
     // Level::setTile / setTileAndData / setData: store, then tileUpdated.
     bool setTile(int x,int y,int z,int tile){
@@ -209,19 +246,17 @@ public:
     // Level::getTime (the game time) and the entities in a box.
     virtual std::int64_t getTime(){return 0;}
     enum class EntityClass { Any,Mob,Player,Arrow };
-    virtual bool hasEntitiesIn(const AABB&,EntityClass){return false;}
+    // The entities in a box, as stand-ins whose move() moves the real one.
+    virtual std::vector<shared_ptr<Entity>> entitiesIn(const AABB&,EntityClass){return {};}
     // Level::getEntities (the level's own list) and getEntitiesOfClass (a new
-    // list the caller deletes); only whether they are empty matters here.
+    // list the caller deletes).
     std::vector<shared_ptr<Entity>>* getEntities(shared_ptr<Entity>,AABB* box){
-        found.clear();
-        if(box && hasEntitiesIn(*box,EntityClass::Any))found.push_back(std::make_shared<Entity>());
+        found=box?entitiesIn(*box,EntityClass::Any):std::vector<shared_ptr<Entity>>{};
         return &found;
     }
     std::vector<shared_ptr<Entity>>* getEntitiesOfClass(const std::type_info& type,AABB* box){
-        auto* list=new std::vector<shared_ptr<Entity>>();
         const auto kind=type==typeid(Player)?EntityClass::Player:type==typeid(Arrow)?EntityClass::Arrow:EntityClass::Mob;
-        if(box && hasEntitiesIn(*box,kind))list->push_back(std::make_shared<Entity>());
-        return list;
+        return new std::vector<shared_ptr<Entity>>(box?entitiesIn(*box,kind):std::vector<shared_ptr<Entity>>{});
     }
     std::vector<shared_ptr<Entity>> found;
     void addParticle(int,double,double,double,double,double,double){}
@@ -290,6 +325,7 @@ public:
     static TntTile* tnt;
     static PortalTile* portalTile;
     static Tile *lightGem,*wood,*rock,*stoneSlab,*redStoneDust,*notGate_on,*notGate_off;
+    static class PistonMovingPiece* pistonMovingPiece;
     // Tile::setShape writes the shape to thread storage (TlsGetValue).
     class ThreadStorage {
     public:
@@ -315,7 +351,33 @@ public:
     virtual bool isCubeShaped(){return cubeShaped;}
     // The constructor-time render solidity (LeafTile answers true on the server).
     virtual bool isSolidRender(bool isServerLevel=false){(void)isServerLevel;return solidRender;}
-    virtual AABB* getAABB(Level*,int,int,int){return nullptr;}
+    // Tile::getAABB with the default shape: a full cube for a tile that blocks
+    // motion (the non-colliding tiles return none in the source).
+    virtual AABB* getAABB(Level*,int x,int y,int z){
+        return material && material->blocksMotion()?AABB::newTemp(x,y,z,x+1,y+1,z+1):nullptr;
+    }
+    // Pistons: push reaction, destroy time, tile entity classes, tile events.
+    static constexpr float INDESTRUCTIBLE_DESTROY_TIME=-1.0f;
+    float destroyTime=0;
+    bool entityTile=false;
+    float getDestroySpeed(Level*,int,int,int){return destroyTime;}
+    bool isEntityTile()const{return entityTile;}
+    virtual int getPistonPushReaction();
+    virtual void triggerEvent(Level*,int,int,int,int,int){}
+    // Tile::addAABBs: the current shape's box when it meets `box` (the host
+    // passes none to collect them all).
+    virtual void addAABBs(Level*,int x,int y,int z,AABB* box,std::vector<AABB*>* boxes,shared_ptr<Entity>){
+        auto* s=shapeStorage();
+        AABB* shape=AABB::newTemp(x+s->xx0,y+s->yy0,z+s->zz0,x+s->xx1,y+s->yy1,z+s->zz1);
+        if(!box || (shape->x1>box->x0 && shape->x0<box->x1 && shape->y1>box->y0 && shape->y0<box->y1 &&
+                    shape->z1>box->z0 && shape->z0<box->z1))boxes->push_back(shape);
+    }
+    double getShapeX0(){return shapeStorage()->xx0;}
+    double getShapeY0(){return shapeStorage()->yy0;}
+    double getShapeZ0(){return shapeStorage()->zz0;}
+    double getShapeX1(){return shapeStorage()->xx1;}
+    double getShapeY1(){return shapeStorage()->yy1;}
+    double getShapeZ1(){return shapeStorage()->zz1;}
     virtual int getTickDelay(){return 10;}
     virtual void tick(Level*,int,int,int,Random*){}
     virtual bool shouldTileTick(Level*,int,int,int){return true;}
@@ -340,13 +402,17 @@ public:
     virtual bool getDirectSignal(Level*,int,int,int,int){return false;}
     // spawnResources(level, x, y, z, data, playerBonusLevel): the item drops
     // (ported SurvivalRules, including the leaf and cocoa overrides).
-    void spawnResources(Level* level,int x,int y,int z,int data,int){level->spawnResources(x,y,z,id,data);}
+    virtual void spawnResources(Level* level,int x,int y,int z,int data,float,int){level->spawnResources(x,y,z,id,data);}
+    void spawnResources(Level* level,int x,int y,int z,int data,int bonus){spawnResources(level,x,y,z,data,1.0f,bonus);}
 };
 
-// TlsGetValue(Tile::tlsIdxShape): this thread's shape storage.
-inline void* TlsGetValue(int){return Tile::shapeStorage();}
+// TlsGetValue(Tile::tlsIdxShape) is this thread's shape storage.
+inline void* TlsGetValue(DWORD index){return index==0?static_cast<void*>(Tile::shapeStorage()):tlsSlot(index);}
 
-class EntityTile:public Tile {};
+class EntityTile:public Tile {
+public:
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+};
 
 class Bush:public Tile {
 public:
@@ -475,6 +541,7 @@ public:
 };
 class IceTile:public Tile {
 public:
+    int getPistonPushReaction()override;
     void tick(Level* level,int x,int y,int z,Random* random)override;
     bool shouldTileTick(Level* level,int x,int y,int z)override;
 };
@@ -548,6 +615,7 @@ public:
     int getCompositeData(LevelSource* level,int x,int y,int z);
     bool TestUse()override;
     bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    int getPistonPushReaction()override;
 };
 class HeavyTile:public Tile {
 public:
@@ -744,6 +812,7 @@ public:
     bool getDirectSignal(Level* level,int x,int y,int z,int dir)override;
     bool isSignalSource()override;
     bool shouldTileTick(Level* level,int x,int y,int z)override;
+    int getPistonPushReaction()override;
 };
 class DiodeTile:public DirectionalTile {
 public:
@@ -800,6 +869,85 @@ public:
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
     static bool isOpen(int data);
 };
+// Only their push reactions: beds and rails are otherwise not ported yet.
+class BedTile:public DirectionalTile { public: int getPistonPushReaction()override; };
+class RailTile:public Tile { public: int getPistonPushReaction()override; };
+class PistonPieceEntity;
+class PistonBaseTile:public Tile {
+public:
+    TILE_CONSTANTS_PistonBaseTile
+    // PistonBaseTile.h: static const float PLATFORM_THICKNESS = 4.0f (defined in the .cpp).
+    static constexpr float PLATFORM_THICKNESS=4.0f;
+    static DWORD tlsIdx;
+    bool isSticky=false;
+    static bool ignoreUpdate();
+    static void ignoreUpdate(bool set);
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void setPlacedBy(Level* level,int x,int y,int z,shared_ptr<Mob> by)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    void onPlace(Level* level,int x,int y,int z)override;
+    void checkIfExtend(Level* level,int x,int y,int z);
+    bool getNeighborSignal(Level* level,int x,int y,int z,int facing);
+    void triggerEvent(Level* level,int x,int y,int z,int param1,int facing)override;
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    static int getFacing(int data);
+    static bool isExtended(int data);
+    static int getNewFacing(Level* level,int x,int y,int z,shared_ptr<Player> player);
+    static bool isPushable(int block,Level* level,int cx,int cy,int cz,bool allowDestroyable);
+    static bool canPush(Level* level,int sx,int sy,int sz,int facing);
+    // 4J: stop the client level sharing the chunk's tiles (one process here).
+    static void stopSharingIfServer(Level*,int,int,int){}
+    bool createPush(Level* level,int sx,int sy,int sz,int facing);
+};
+using AABBList=std::vector<AABB*>;
+class PistonExtensionTile:public Tile {
+public:
+    TILE_CONSTANTS_PistonExtensionTile
+    void addAABBs(Level* level,int x,int y,int z,AABB* box,AABBList* boxes,shared_ptr<Entity> source)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    bool mayPlace(Level* level,int x,int y,int z,int face)override;
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    static int getFacing(int data);
+};
+class PistonMovingPiece:public EntityTile {
+public:
+    void onPlace(Level* level,int x,int y,int z)override;
+    void onRemove(Level* level,int x,int y,int z,int id,int data)override;
+    bool mayPlace(Level* level,int x,int y,int z)override;
+    bool mayPlace(Level* level,int x,int y,int z,int face)override;
+    bool TestUse()override{return false;}
+    bool use(Level* level,int x,int y,int z,shared_ptr<Player> player,int clickedFace,float clickX,float clickY,float clickZ,bool soundOnly=false)override;
+    void spawnResources(Level* level,int x,int y,int z,int data,float odds,int playerBonus)override;
+    using Tile::spawnResources;
+    void neighborChanged(Level* level,int x,int y,int z,int type)override;
+    static shared_ptr<TileEntity> newMovingPieceEntity(int block,int data,int facing,bool extending,bool isSourcePiston);
+    AABB* getAABB(Level* level,int x,int y,int z)override;
+    AABB* getAABB(Level* level,int x,int y,int z,int tile,float progress,int facing);
+    void updateShape(LevelSource* level,int x,int y,int z,int forceData=-1,shared_ptr<TileEntity> forceEntity=nullptr)override;
+    shared_ptr<PistonPieceEntity> getEntity(LevelSource* level,int x,int y,int z);
+};
+class PistonPieceEntity:public TileEntity {
+public:
+    int id=0,data=0,facing=0;
+    bool extending=false,_isSourcePiston=false;
+    float progress=0,progressO=0;
+    PistonPieceEntity();
+    PistonPieceEntity(int id,int data,int facing,bool extending,bool isSourcePiston);
+    int getId();
+    int getData();
+    bool isExtending();
+    int getFacing();
+    bool isSourcePiston();
+    float getProgress(float a);
+    float getXOff(float a);
+    float getYOff(float a);
+    float getZOff(float a);
+    void moveCollidedEntities(float progress,float amount);
+    void finalTick();
+    void tick()override;
+};
 class StairTile:public Tile { public: TILE_CONSTANTS_StairTile };
 class HalfSlabTile:public Tile { public: TILE_CONSTANTS_HalfSlabTile };
 
@@ -847,6 +995,9 @@ bool isSolidBlockingTile(int tile);
 bool dustShouldConnectTo(const std::function<int(int,int,int)>& tile,const std::function<int(int,int,int)>& data,
                          int x,int y,int z,int direction);
 std::array<float,6> tileShape(int tile,int data);
+// Tile::addAABBs for one tile (the piston head's plate and arm), relative to
+// its cell.
+std::vector<std::array<float,6>> tileCollisionBoxes(int tile,int data);
 // Whether a scheduled tick of this tile runs original code here; the ticks of
 // the other tiles stay in the saved chunk untouched.
 bool tickPorted(int id);

@@ -1632,3 +1632,29 @@ reconstruct is now taken from the source:
 - `console_tile_tick_core` drives a lever through dust to a lamp (signal strength
   falling by one per dust, the lamp's four-tick delay), a redstone torch inverting,
   a repeater's delay and delay cycling, a pressure plate under the player, and doors.
+
+### Pistons (September 25)
+
+- Extracted: `PistonBaseTile` (signal check, `canPush`/`createPush` with the 12-block
+  limit and the finite-world edge, `triggerEvent` for extending and retracting, sticky
+  pulling, `getNewFacing` from the player), `PistonExtensionTile` (the head, its
+  `addAABBs` collision), `PistonMovingPiece` and `PistonPieceEntity` (two ticks of
+  motion, `finalTick`, pushing entities), `EntityTile::onRemove`, and the push
+  reactions pistons consult (`Tile`, doors, ice, plates, beds, rails; beds and rails
+  are otherwise unported). Chests, furnaces and the other `EntityTile` classes are not
+  pushed; bedrock and portals are indestructible.
+- `ServerLevel::tileEvent`/`runTileEvents` (two lists, run before the time step and
+  after the tile ticks) and `Level`'s tile entities: the World keeps the piston pieces,
+  ticks them after the entities (`Level::tickEntities`), and points them at the
+  current tick `Level` while one exists. Pieces are finished (`finalTick`) before a
+  save or an eviction, since they are not saved. Pushed mobs, items and orbs move;
+  the player's push goes to the client (`World::takePlayerPush`), which moves the
+  player axis by axis as far as nothing blocks.
+- Drawing: `tesselatePistonBaseInWorld`, `tesselatePistonExtensionInWorld` and the
+  three `renderPistonArm*` join `ported/TileRender.cpp`; the stand-in
+  `tesselateBlockInWorld` now applies the renderer's per-face UV flips. Moving pieces
+  are drawn at their offset (`buildMovingPieceMesh`, after `PistonPieceRenderer`), at
+  the end of each tick rather than interpolated between ticks.
+- Tests: pistons extend and retract through a lever, a sticky piston pulls its block
+  back, obsidian stops a piston, the head pushes the player, and placement faces a
+  direction; the meshes, the head's collision and the side texture's orientation.

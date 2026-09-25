@@ -9,6 +9,7 @@
 #include "GenerationDecorator.h"
 #include "CompoundTag.h"
 #include <algorithm>
+#include <functional>
 #include <cmath>
 #include <memory>
 
@@ -54,6 +55,7 @@ class WorldTickLevel final:public sim::Level {
     World::State& s_;
     sim::Dimension overworld_;
     sim::CurrentLevel current_{this};
+    sim::Level* previous_=nullptr;
     int skyDarken_=0;
     bool resident(int x,int z)const{return s_.region.hasChunk(Mth::intFloorDiv(x,16),Mth::intFloorDiv(z,16));}
     int raw(int x,int y,int z,bool propagate,int dampen){
@@ -92,6 +94,8 @@ public:
         dimension=&overworld_;
         chunkSourceXZSize=s_.metadata->getXZSize();
         identity=&s_;
+        previous_=current_.previous;
+        for(auto& te:s_.tickingTileEntities)te->level=this;
         skyDarken_=consoleOldSkyDarken(world.dayTime(),world.rainLevel(),world.thunderLevel());
     }
     int getTile(int x,int y,int z)override{
@@ -154,28 +158,84 @@ public:
     std::int64_t getTime()override{return world_.time();}
     // Level::getEntities / getEntitiesOfClass over a box: the player (a Mob
     // and a Player), the mobs, and for any entity also dropped items and
-    // experience orbs. Arrows are not ported.
-    bool hasEntitiesIn(const sim::AABB& box,EntityClass kind)override{
+    // experience orbs (arrows are not ported). Each comes back as a stand-in
+    // whose move() moves the real one; the player's is handed to the client
+    // (World::takePlayerPush).
+    std::vector<std::shared_ptr<sim::Entity>> entitiesIn(const sim::AABB& box,EntityClass kind)override{
+        struct Moved final:sim::Player {
+            std::function<void(double,double,double)> apply;
+            void move(double dx,double dy,double dz)override{apply(dx,dy,dz);}
+        };
+        std::vector<std::shared_ptr<sim::Entity>> found;
+        auto add=[&](std::function<void(double,double,double)> apply){
+            auto entity=std::make_shared<Moved>();entity->apply=std::move(apply);found.push_back(entity);
+        };
         const auto overlaps=[&](double x,double y,double z,double width,double height){
             x-=half;z-=half;
             return x+width/2>box.x0 && x-width/2<box.x1 && y+height>box.y0 && y<box.y1 &&
                    z+width/2>box.z0 && z-width/2<box.z1;
         };
-        if(kind==EntityClass::Arrow)return false;
+        if(kind==EntityClass::Arrow)return found;
         if(s_.hasPlayerPosition && s_.playerHurt.health>0 &&
-           overlaps(s_.playerPosition.x,s_.playerPosition.y,s_.playerPosition.z,.6,1.8))return true;
-        if(kind==EntityClass::Player)return false;
-        for(const auto& entity:s_.entities){
+           overlaps(s_.playerPosition.x,s_.playerPosition.y,s_.playerPosition.z,.6,1.8))
+            add([this](double dx,double dy,double dz){
+                s_.playerPush.x+=dx;s_.playerPush.y+=dy;s_.playerPush.z+=dz;
+                s_.playerPosition.x+=dx;s_.playerPosition.y+=dy;s_.playerPosition.z+=dz;
+            });
+        if(kind==EntityClass::Player)return found;
+        for(std::size_t i=0;i<s_.entities.size();++i){
+            const auto& entity=s_.entities[i];
             if(entity.health<=0)continue;
             const auto [width,height]=entitySizeOf(entity.id,entity.slimeSize);
-            if(overlaps(entity.position.x,entity.position.y,entity.position.z,width,height))return true;
+            if(overlaps(entity.position.x,entity.position.y,entity.position.z,width,height))
+                add([this,i](double dx,double dy,double dz){auto& p=s_.entities[i].position;p.x+=dx;p.y+=dy;p.z+=dz;});
         }
-        if(kind==EntityClass::Mob)return false;
-        for(const auto& item:s_.droppedItems)
-            if(overlaps(item.position.x,item.position.y,item.position.z,.25,.25))return true;
-        for(const auto& orb:s_.experienceOrbs)
-            if(overlaps(orb.position.x,orb.position.y,orb.position.z,.5,.5))return true;
-        return false;
+        if(kind==EntityClass::Mob)return found;
+        for(std::size_t i=0;i<s_.droppedItems.size();++i){
+            const auto& p=s_.droppedItems[i].position;
+            if(overlaps(p.x,p.y,p.z,.25,.25))
+                add([this,i](double dx,double dy,double dz){auto& q=s_.droppedItems[i].position;q.x+=dx;q.y+=dy;q.z+=dz;});
+        }
+        for(std::size_t i=0;i<s_.experienceOrbs.size();++i){
+            const auto& p=s_.experienceOrbs[i].position;
+            if(overlaps(p.x,p.y,p.z,.5,.5))
+                add([this,i](double dx,double dy,double dz){auto& q=s_.experienceOrbs[i].position;q.x+=dx;q.y+=dy;q.z+=dz;});
+        }
+        return found;
+    }
+    // Level::getTileEntity / setTileEntity / removeTileEntity for the tile
+    // entities the port keeps here (piston pieces), with LevelChunk's rule
+    // that only an EntityTile holds one.
+    std::shared_ptr<sim::TileEntity> getTileEntity(int x,int y,int z)override{
+        auto it=s_.tileEntities.find({x,y,z});
+        return it==s_.tileEntities.end() || it->second->isRemoved()?nullptr:it->second;
+    }
+    void setTileEntity(int x,int y,int z,std::shared_ptr<sim::TileEntity> te)override{
+        if(!te || te->isRemoved())return;
+        s_.tickingTileEntities.push_back(te);
+        te->level=this;te->x=x;te->y=y;te->z=z;
+        const int tile=getTile(x,y,z);
+        if(tile==0 || !sim::Tile::tiles[tile] || !sim::Tile::tiles[tile]->isEntityTile())return;
+        if(auto it=s_.tileEntities.find({x,y,z});it!=s_.tileEntities.end() && it->second!=te)it->second->setRemoved();
+        te->clearRemoved();
+        s_.tileEntities[{x,y,z}]=te;
+    }
+    void removeTileEntity(int x,int y,int z)override{
+        if(auto it=s_.tileEntities.find({x,y,z});it!=s_.tileEntities.end()){
+            it->second->setRemoved();s_.tileEntities.erase(it);
+        }
+    }
+    // ServerLevel::tileEvent: queued once per identical event, run by
+    // World::runTileEvents.
+    void tileEvent(int x,int y,int z,int tile,int b0,int b1)override{
+        auto& list=s_.tileEvents[s_.activeTileEvents];
+        const World::State::TileEvent event{x,y,z,tile,b0,b1};
+        if(std::find(list.begin(),list.end(),event)==list.end())list.push_back(event);
+    }
+    ~WorldTickLevel()override{
+        // The tile entities hold their level: hand them back to the level
+        // that was current when this one was made.
+        for(auto& te:s_.tickingTileEntities)if(te->level==this)te->level=previous_;
     }
     // Biome::isHumid: downfall above 0.85.
     bool isHumidAt(int x,int,int z)override{
@@ -481,11 +541,13 @@ bool World::useBlock(int x,int y,int z,double yaw){
     return true;
 }
 
-void World::tilePlacedBy(int x,int y,int z,double yaw){
+void World::tilePlacedBy(int x,int y,int z,double yaw,Vec3 feet){
     if(!inside(x,y,z))return;
     WorldTickLevel level(*this,*state);
-    auto by=std::make_shared<sim::Mob>();
+    // The player: Entity y is the feet plus heightOffset.
+    auto by=std::make_shared<sim::Player>();
     by->yRot=sourceYRot(yaw);
+    by->x=feet.x-width/2;by->y=feet.y+by->heightOffset;by->z=feet.z-depth/2;
     if(auto* tile=sim::Tile::tiles[get(x,y,z)])tile->setPlacedBy(&level,x-width/2,y,z-depth/2,by);
 }
 
@@ -518,6 +580,63 @@ void World::tickInsideTiles(){
     }
     for(std::size_t i=0;i<state->droppedItems.size();++i)checkInside(state->droppedItems[i].position,.25,.25);
     for(std::size_t i=0;i<state->experienceOrbs.size();++i)checkInside(state->experienceOrbs[i].position,.5,.5);
+}
+
+void World::runTileEvents(){
+    if(state->pending)return;
+    WorldTickLevel level(*this,*state);
+    // ServerLevel::runTileEvents: swap lists until both are empty; doTileEvent
+    // runs Tile::triggerEvent when the tile is still there.
+    while(!state->tileEvents[state->activeTileEvents].empty()){
+        const int run=state->activeTileEvents;
+        state->activeTileEvents^=1;
+        const auto events=std::move(state->tileEvents[run]);
+        state->tileEvents[run].clear();
+        for(const auto& event:events){
+            const int tile=level.getTile(event.x,event.y,event.z);
+            if(tile==event.tile && tile>0 && sim::Tile::tiles[tile])
+                sim::Tile::tiles[tile]->triggerEvent(&level,event.x,event.y,event.z,event.paramA,event.paramB);
+        }
+    }
+}
+
+void World::tickTileEntities(){
+    if(state->pending || state->tickingTileEntities.empty())return;
+    WorldTickLevel level(*this,*state);
+    // Level::tickEntities: tick the list as it stands (pieces made meanwhile
+    // wait for the next tick), then drop the removed ones.
+    const auto ticking=state->tickingTileEntities;
+    for(const auto& te:ticking)if(!te->isRemoved())te->tick();
+    auto& list=state->tickingTileEntities;
+    list.erase(std::remove_if(list.begin(),list.end(),[](const auto& te){return te->isRemoved();}),list.end());
+}
+
+void World::finishPistons(){
+    if(state->tickingTileEntities.empty())return;
+    WorldTickLevel level(*this,*state);
+    const auto ticking=state->tickingTileEntities;
+    for(const auto& te:ticking)
+        if(auto piece=std::dynamic_pointer_cast<sim::PistonPieceEntity>(te))piece->finalTick();
+    auto& list=state->tickingTileEntities;
+    list.erase(std::remove_if(list.begin(),list.end(),[](const auto& te){return te->isRemoved();}),list.end());
+}
+
+std::vector<MovingPiece> World::movingPieces()const{
+    std::vector<MovingPiece> pieces;
+    for(const auto& [position,te]:state->tileEntities){
+        auto piece=std::dynamic_pointer_cast<sim::PistonPieceEntity>(te);
+        if(!piece || piece->isRemoved())continue;
+        const auto [x,y,z]=position;
+        pieces.push_back({x+width/2,y,z+depth/2,piece->getId(),piece->getData(),piece->isExtending(),
+                          piece->isSourcePiston(),piece->getProgress(1),piece->getXOff(1),piece->getYOff(1),piece->getZOff(1)});
+    }
+    return pieces;
+}
+
+Vec3 World::takePlayerPush(){
+    const Vec3 push=state->playerPush;
+    state->playerPush={};
+    return push;
 }
 
 ScheduledTickQueue& World::tileTicks(){

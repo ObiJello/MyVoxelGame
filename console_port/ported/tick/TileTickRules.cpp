@@ -4496,4 +4496,1031 @@ bool DoorTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player,
 	return true;
 }
 
+// Tile.cpp
+int Tile::getPistonPushReaction()
+{
+	return material->getPushReaction();
+}
+
+// EntityTile.cpp
+void EntityTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    Tile::onRemove(level, x, y, z, id, data);
+    level->removeTileEntity(x, y, z);
+}
+
+// DoorTile.cpp
+int DoorTile::getPistonPushReaction()
+{
+	return Material::PUSH_DESTROY;
+}
+
+// IceTile.cpp
+int IceTile::getPistonPushReaction()
+{
+	return Material::PUSH_NORMAL;
+}
+
+// PressurePlateTile.cpp
+int PressurePlateTile::getPistonPushReaction()
+{
+	return Material::PUSH_DESTROY;
+}
+
+// BedTile.cpp
+int BedTile::getPistonPushReaction()
+{
+	return Material::PUSH_DESTROY;
+}
+
+// RailTile.cpp
+int RailTile::getPistonPushReaction()
+{
+	return Material::PUSH_NORMAL;
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::ignoreUpdate()
+{
+	return (TlsGetValue(tlsIdx) != NULL);
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::ignoreUpdate(bool set)
+{
+	TlsSetValue(tlsIdx,(LPVOID)(set?1:0));
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	return false;
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::setPlacedBy(Level *level, int x, int y, int z, shared_ptr<Mob> by)
+{
+    int targetData = getNewFacing(level, x, y, z, dynamic_pointer_cast<Player>(by) );
+    level->setData(x, y, z, targetData);
+    if (!level->isClientSide && !ignoreUpdate())
+	{
+        checkIfExtend(level, x, y, z);
+    }
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (!level->isClientSide && !ignoreUpdate())
+	{
+        checkIfExtend(level, x, y, z);
+    }
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::onPlace(Level *level, int x, int y, int z)
+{
+    if (!level->isClientSide && level->getTileEntity(x, y, z) == NULL && !ignoreUpdate())
+	{
+        checkIfExtend(level, x, y, z);
+    }
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::checkIfExtend(Level *level, int x, int y, int z)
+{
+    int data = level->getData(x, y, z);
+    int facing = getFacing(data);
+
+    if (facing == UNDEFINED_FACING)
+	{
+        return;
+    }
+    bool extend = getNeighborSignal(level, x, y, z, facing);
+
+    if (extend && !isExtended(data))
+	{
+        if (canPush(level, x, y, z, facing))
+		{
+            //level->setDataNoUpdate(x, y, z, facing | EXTENDED_BIT);
+            level->tileEvent(x, y, z, id, TRIGGER_EXTEND, facing);
+        }
+    }
+	else if (!extend && isExtended(data))
+	{
+        //level->setDataNoUpdate(x, y, z, facing);
+        level->tileEvent(x, y, z, id, TRIGGER_CONTRACT, facing);
+    }
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::getNeighborSignal(Level *level, int x, int y, int z, int facing)
+{
+    // check adjacent neighbors, but not in push direction
+    if (facing != Facing::DOWN && level->getSignal(x, y - 1, z, Facing::DOWN)) return true;
+    if (facing != Facing::UP && level->getSignal(x, y + 1, z, Facing::UP)) return true;
+    if (facing != Facing::NORTH && level->getSignal(x, y, z - 1, Facing::NORTH)) return true;
+    if (facing != Facing::SOUTH && level->getSignal(x, y, z + 1, Facing::SOUTH)) return true;
+    if (facing != Facing::EAST && level->getSignal(x + 1, y, z, Facing::EAST)) return true;
+    if (facing != Facing::WEST && level->getSignal(x - 1, y, z, Facing::WEST)) return true;
+
+    // check signals above
+    if (level->getSignal(x, y, z, 0)) return true;
+    if (level->getSignal(x, y + 2, z, 1)) return true;
+    if (level->getSignal(x, y + 1, z - 1, 2)) return true;
+    if (level->getSignal(x, y + 1, z + 1, 3)) return true;
+    if (level->getSignal(x - 1, y + 1, z, 4)) return true;
+    if (level->getSignal(x + 1, y + 1, z, 5)) return true;
+
+    return false;
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::triggerEvent(Level *level, int x, int y, int z, int param1, int facing)
+{
+	ignoreUpdate(true);
+
+	if (param1 == TRIGGER_EXTEND)
+	{
+		level->setDataNoUpdate(x, y, z, facing | EXTENDED_BIT);
+	}
+	else
+	{
+		level->setDataNoUpdate(x, y, z, facing);
+	}
+
+    if (param1 == TRIGGER_EXTEND)
+	{
+		PIXBeginNamedEvent(0,"Create push\n");
+        if (createPush(level, x, y, z, facing))
+		{
+			// 4J - it is (currently) critical that this setData sends data to the client, so have added a bool to the method so that it sends data even if the data was already set to the same value
+			// as before, which was actually its behaviour until a change in 1.0.1 meant that setData only conditionally sent updates to listeners. If the data update Isn't sent, then what
+			// can happen is:
+			// (1) the host sends the tile event to the client
+			// (2) the client gets the tile event, and sets the tile/data value locally.
+			// (3) just before setting the tile/data locally, the client will put the old value in the vector of things to be restored should an update not be received back from the host
+			// (4) we don't get any update of the tile from the host, and so the old value gets restored on the client
+			// (5) the piston base ends up being restored to its retracted state whilst the piston arm is extended
+			// We really need to spend some time investigating a better way for pistons to work as it all seems a bit scary how the host/client interact, but forcing this to send should at least
+			// restore the behaviour of the pistons to something closer to what they were before the 1.0.1 update. By sending this data update, then (4) in the list above doesn't happen
+			// because the client does actually receive an update for this tile from the host after the event has been processed on the cient.
+            level->setData(x, y, z, facing | EXTENDED_BIT, true);
+            level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_TILE_PISTON_OUT, 0.5f, level->random->nextFloat() * 0.25f + 0.6f);
+        }
+		else
+		{
+			level->setDataNoUpdate(x, y, z, facing);
+		}
+		PIXEndNamedEvent();
+    }
+	else if (param1 == TRIGGER_CONTRACT)
+	{
+		PIXBeginNamedEvent(0,"Contract phase A\n");
+        shared_ptr<TileEntity> prevTileEntity = level->getTileEntity(x + Facing::STEP_X[facing], y + Facing::STEP_Y[facing], z + Facing::STEP_Z[facing]);
+        if (prevTileEntity != NULL && dynamic_pointer_cast<PistonPieceEntity>(prevTileEntity) != NULL)
+		{
+            dynamic_pointer_cast<PistonPieceEntity>(prevTileEntity)->finalTick();
+        }
+
+		stopSharingIfServer(level, x, y, z);	// 4J added
+        level->setTileAndDataNoUpdate(x, y, z, Tile::pistonMovingPiece_Id, facing);
+        level->setTileEntity(x, y, z, PistonMovingPiece::newMovingPieceEntity(id, facing, facing, false, true));
+
+		PIXEndNamedEvent();
+
+        // sticky movement
+        if (isSticky)
+		{
+			PIXBeginNamedEvent(0,"Contract sticky phase A\n");
+            int twoX = x + Facing::STEP_X[facing] * 2;
+            int twoY = y + Facing::STEP_Y[facing] * 2;
+            int twoZ = z + Facing::STEP_Z[facing] * 2;
+            int block = level->getTile(twoX, twoY, twoZ);
+            int blockData = level->getData(twoX, twoY, twoZ);
+            bool pistonPiece = false;
+
+			PIXEndNamedEvent();
+
+            if (block == Tile::pistonMovingPiece_Id)
+			{
+				PIXBeginNamedEvent(0,"Contract sticky phase B\n");
+                // the block two steps away is a moving piston block piece,
+                // so replace it with the real data, since it's probably
+                // this piston which is changing too fast
+                shared_ptr<TileEntity> tileEntity = level->getTileEntity(twoX, twoY, twoZ);
+                if (tileEntity != NULL && dynamic_pointer_cast<PistonPieceEntity>(tileEntity) != NULL )
+				{
+                    shared_ptr<PistonPieceEntity> ppe = dynamic_pointer_cast<PistonPieceEntity>(tileEntity);
+
+                    if (ppe->getFacing() == facing && ppe->isExtending())
+					{
+                        // force the tile to air before pushing
+                        ppe->finalTick();
+                        block = ppe->getId();
+                        blockData = ppe->getData();
+                        pistonPiece = true;
+                    }
+                }
+				PIXEndNamedEvent();
+            }
+
+			PIXBeginNamedEvent(0,"Contract sticky phase C\n");
+            if (!pistonPiece && block > 0 && (isPushable(block, level, twoX, twoY, twoZ, false))
+                    && (Tile::tiles[block]->getPistonPushReaction() == Material::PUSH_NORMAL || block == Tile::pistonBase_Id || block == Tile::pistonStickyBase_Id))
+			{
+				stopSharingIfServer(level, twoX, twoY, twoZ);	// 4J added
+
+                x += Facing::STEP_X[facing];
+                y += Facing::STEP_Y[facing];
+                z += Facing::STEP_Z[facing];
+
+                level->setTileAndDataNoUpdate(x, y, z, Tile::pistonMovingPiece_Id, blockData);
+                level->setTileEntity(x, y, z, PistonMovingPiece::newMovingPieceEntity(block, blockData, facing, false, false));
+
+				ignoreUpdate(false);
+                level->setTile(twoX, twoY, twoZ, 0);
+				ignoreUpdate(true);
+			}
+			else if (!pistonPiece)
+			{
+				stopSharingIfServer(level, x + Facing::STEP_X[facing], y + Facing::STEP_Y[facing], z + Facing::STEP_Z[facing]);	// 4J added
+				ignoreUpdate(false);
+                level->setTile(x + Facing::STEP_X[facing], y + Facing::STEP_Y[facing], z + Facing::STEP_Z[facing], 0);
+				ignoreUpdate(true);
+            }
+			PIXEndNamedEvent();
+        }
+		else
+		{
+			stopSharingIfServer(level, x + Facing::STEP_X[facing], y + Facing::STEP_Y[facing], z + Facing::STEP_Z[facing]);	// 4J added
+			ignoreUpdate(false);
+            level->setTile(x + Facing::STEP_X[facing], y + Facing::STEP_Y[facing], z + Facing::STEP_Z[facing], 0);
+			ignoreUpdate(true);
+        }
+
+        level->playSound(x + 0.5, y + 0.5, z + 0.5, eSoundType_TILE_PISTON_IN, 0.5f, level->random->nextFloat() * 0.15f + 0.6f);
+    }
+
+	ignoreUpdate(false);
+}
+
+// PistonBaseTile.cpp
+void PistonBaseTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+    int data = (forceData == -1 ) ? level->getData(x, y, z) : forceData;
+
+    if (isExtended(data))
+	{
+        const float thickness = PLATFORM_THICKNESS / 16.0f;
+        switch (getFacing(data))
+		{
+		case Facing::DOWN:
+            setShape(0, thickness, 0, 1, 1, 1);
+            break;
+		case Facing::UP:
+            setShape(0, 0, 0, 1, 1 - thickness, 1);
+            break;
+		case Facing::NORTH:
+            setShape(0, 0, thickness, 1, 1, 1);
+            break;
+		case Facing::SOUTH:
+            setShape(0, 0, 0, 1, 1, 1 - thickness);
+            break;
+		case Facing::WEST:
+            setShape(thickness, 0, 0, 1, 1, 1);
+            break;
+		case Facing::EAST:
+            setShape(0, 0, 0, 1 - thickness, 1, 1);
+            break;
+        }
+    }
+	else
+	{
+        setShape(0, 0, 0, 1, 1, 1);
+    }
+}
+
+// PistonBaseTile.cpp
+int PistonBaseTile::getFacing(int data)
+{
+	return data & 0x7;
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::isExtended(int data)
+{
+	return (data & EXTENDED_BIT) != 0;
+}
+
+// PistonBaseTile.cpp
+int PistonBaseTile::getNewFacing(Level *level, int x, int y, int z, shared_ptr<Player> player)
+{
+    if (Mth::abs((float) player->x - x) < 2 && Mth::abs((float) player->z - z) < 2) 
+	{
+        // If the player is above the block, the slot is on the top
+        double py = player->y + 1.82 - player->heightOffset;
+        if (py - y > 2)
+		{
+            return Facing::UP;
+        }
+        // If the player is below the block, the slot is on the bottom
+        if (y - py > 0)
+		{
+            return Facing::DOWN;
+        }
+    }
+    // The slot is on the side
+    int i = Mth::floor(player->yRot * 4.0f / 360.0f + 0.5) & 0x3;
+    if (i == 0) return Facing::NORTH;
+    if (i == 1) return Facing::EAST;
+    if (i == 2) return Facing::SOUTH;
+    if (i == 3) return Facing::WEST;
+    return 0;
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::isPushable(int block, Level *level, int cx, int cy, int cz, bool allowDestroyable)
+{
+    // special case for obsidian
+    if (block == Tile::obsidian_Id)
+	{
+        return false;
+    }
+
+    if (block == Tile::pistonBase_Id || block == Tile::pistonStickyBase_Id)
+	{
+        // special case for piston bases
+        if (isExtended(level->getData(cx, cy, cz)))
+		{
+            return false;
+        }
+    }
+	else
+	{
+        if (Tile::tiles[block]->getDestroySpeed(level, cx, cy, cz) == Tile::INDESTRUCTIBLE_DESTROY_TIME)
+		{
+            return false;
+        }
+
+        if (Tile::tiles[block]->getPistonPushReaction() == Material::PUSH_BLOCK)
+		{
+            return false;
+        }
+            
+        if (!allowDestroyable && Tile::tiles[block]->getPistonPushReaction() == Material::PUSH_DESTROY)
+		{
+            return false;
+        }
+    }
+
+	if( Tile::tiles[block]->isEntityTile() )	// 4J - java uses instanceof EntityTile here
+	{
+		// may not push tile entities
+		return false;
+	}
+
+	return true;
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::canPush(Level *level, int sx, int sy, int sz, int facing)
+{
+    int cx = sx + Facing::STEP_X[facing];
+    int cy = sy + Facing::STEP_Y[facing];
+    int cz = sz + Facing::STEP_Z[facing];
+
+    for (int i = 0; i < MAX_PUSH_DEPTH + 1; i++)
+	{
+
+		if (cy <= 0 || cy >= (Level::maxBuildHeight - 1))
+		{
+            // out of bounds
+            return false;
+        }
+		
+		// 4J - added to also check for out of bounds in x/z for our finite world
+		int minXZ = - (level->dimension->getXZSize() * 16 ) / 2;
+		int maxXZ = (level->dimension->getXZSize() * 16 ) / 2 - 1;
+		if( ( cx <= minXZ ) || ( cx >= maxXZ ) || ( cz <= minXZ ) || ( cz >= maxXZ ) )
+		{
+			return false;
+		}
+        int block = level->getTile(cx, cy, cz);
+        if (block == 0)
+		{
+            break;
+        }
+
+        if (!isPushable(block, level, cx, cy, cz, true))
+		{
+            return false;
+        }
+
+        if (Tile::tiles[block]->getPistonPushReaction() == Material::PUSH_DESTROY)
+		{
+            break;
+        }
+
+        if (i == MAX_PUSH_DEPTH)
+		{
+            // we've reached the maximum push depth
+            // without finding air or a breakable block
+            return false;
+        }
+
+        cx += Facing::STEP_X[facing];
+        cy += Facing::STEP_Y[facing];
+        cz += Facing::STEP_Z[facing];
+    }
+
+    return true;
+
+}
+
+// PistonBaseTile.cpp
+bool PistonBaseTile::createPush(Level *level, int sx, int sy, int sz, int facing)
+{
+    int cx = sx + Facing::STEP_X[facing];
+    int cy = sy + Facing::STEP_Y[facing];
+    int cz = sz + Facing::STEP_Z[facing];
+
+    for (int i = 0; i < MAX_PUSH_DEPTH + 1; i++)
+	{
+		if (cy <= 0 || cy >= (Level::maxBuildHeight - 1))
+		{
+            // out of bounds
+            return false;
+        }
+		
+		// 4J - added to also check for out of bounds in x/z for our finite world
+		int minXZ = - (level->dimension->getXZSize() * 16 ) / 2;
+		int maxXZ = (level->dimension->getXZSize() * 16 ) / 2 - 1;
+		if( ( cx <= minXZ ) || ( cx >= maxXZ ) || ( cz <= minXZ ) || ( cz >= maxXZ ) )
+		{
+			return false;
+		}
+
+        int block = level->getTile(cx, cy, cz);
+        if (block == 0)
+		{
+            break;
+        }
+
+        if (!isPushable(block, level, cx, cy, cz, true))
+		{
+            return false;
+        }
+
+        if (Tile::tiles[block]->getPistonPushReaction() == Material::PUSH_DESTROY)
+		{
+            // this block is destroyed when pushed
+            Tile::tiles[block]->spawnResources(level, cx, cy, cz, level->getData(cx, cy, cz), 0);
+            // setting the tile to air is actually superflous, but
+            // helps vs multiplayer problems
+			stopSharingIfServer(level, cx, cy, cz);	// 4J added
+            level->setTile(cx, cy, cz, 0);
+            break;
+        }
+
+        if (i == MAX_PUSH_DEPTH)
+		{
+            // we've reached the maximum push depth
+            // without finding air or a breakable block
+            return false;
+        }
+
+        cx += Facing::STEP_X[facing];
+        cy += Facing::STEP_Y[facing];
+        cz += Facing::STEP_Z[facing];
+    }
+
+    while (cx != sx || cy != sy || cz != sz)
+	{
+
+        int nx = cx - Facing::STEP_X[facing];
+        int ny = cy - Facing::STEP_Y[facing];
+        int nz = cz - Facing::STEP_Z[facing];
+
+        int block = level->getTile(nx, ny, nz);
+        int data = level->getData(nx, ny, nz);
+
+		stopSharingIfServer(level, cx, cy, cz);	// 4J added
+
+        if (block == id && nx == sx && ny == sy && nz == sz)
+		{
+            level->setTileAndDataNoUpdate(cx, cy, cz, Tile::pistonMovingPiece_Id, facing | (isSticky ? PistonExtensionTile::STICKY_BIT : 0), false);
+            level->setTileEntity(cx, cy, cz, PistonMovingPiece::newMovingPieceEntity(Tile::pistonExtensionPiece_Id, facing | (isSticky ? PistonExtensionTile::STICKY_BIT : 0), facing, true, false));
+        }
+		else
+		{
+            level->setTileAndDataNoUpdate(cx, cy, cz, Tile::pistonMovingPiece_Id, data, false);
+            level->setTileEntity(cx, cy, cz, PistonMovingPiece::newMovingPieceEntity(block, data, facing, true, false));
+        }
+
+        cx = nx;
+        cy = ny;
+        cz = nz;
+    }
+
+    return true;
+
+}
+
+// PistonExtensionTile.cpp
+void PistonExtensionTile::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    Tile::onRemove(level, x, y, z, id, data);
+    int facing = Facing::OPPOSITE_FACING[getFacing(data)];
+    x += Facing::STEP_X[facing];
+    y += Facing::STEP_Y[facing];
+    z += Facing::STEP_Z[facing];
+
+    int t = level->getTile(x, y, z);
+
+    if (t == Tile::pistonBase_Id || t == Tile::pistonStickyBase_Id)
+	{
+        data = level->getData(x, y, z);
+        if (PistonBaseTile::isExtended(data))
+		{
+            Tile::tiles[t]->spawnResources(level, x, y, z, data, 0);
+            level->setTile(x, y, z, 0);
+
+        }
+    }
+}
+
+// PistonExtensionTile.cpp
+bool PistonExtensionTile::mayPlace(Level *level, int x, int y, int z)
+{
+	return false;
+}
+
+// PistonExtensionTile.cpp
+bool PistonExtensionTile::mayPlace(Level *level, int x, int y, int z, int face)
+{
+	return false;
+}
+
+// PistonExtensionTile.cpp
+void PistonExtensionTile::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+    int data = (forceData == -1 ) ? level->getData(x, y, z) : forceData;
+
+    const float thickness = PistonBaseTile::PLATFORM_THICKNESS / 16.0f;
+
+    switch (getFacing(data))
+	{
+		case Facing::DOWN:
+			setShape(0, 0, 0, 1, thickness, 1);
+			break;
+		case Facing::UP:
+			setShape(0, 1 - thickness, 0, 1, 1, 1);
+			break;
+		case Facing::NORTH:
+			setShape(0, 0, 0, 1, 1, thickness);
+			break;
+		case Facing::SOUTH:
+			setShape(0, 0, 1 - thickness, 1, 1, 1);
+			break;
+		case Facing::WEST:
+			setShape(0, 0, 0, thickness, 1, 1);
+			break;
+		case Facing::EAST:
+			setShape(1 - thickness, 0, 0, 1, 1, 1);
+			break;
+    }
+}
+
+// PistonExtensionTile.cpp
+void PistonExtensionTile::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    int facing = getFacing(level->getData(x, y, z));
+    int tile = level->getTile(x - Facing::STEP_X[facing], y - Facing::STEP_Y[facing], z - Facing::STEP_Z[facing]);
+    if (tile != Tile::pistonBase_Id && tile != Tile::pistonStickyBase_Id)
+	{
+        level->setTile(x, y, z, 0);
+    }
+    else
+	{
+        Tile::tiles[tile]->neighborChanged(level, x - Facing::STEP_X[facing], y - Facing::STEP_Y[facing], z - Facing::STEP_Z[facing], type);
+    }
+}
+
+// PistonExtensionTile.cpp
+int PistonExtensionTile::getFacing(int data)
+{
+	return data & 0x7;
+}
+
+// PistonExtensionTile.cpp
+void PistonExtensionTile::addAABBs(Level *level, int x, int y, int z, AABB *box, AABBList *boxes, shared_ptr<Entity> source)
+{
+    int data = level->getData(x, y, z);
+
+    const float thickness = PistonBaseTile::PLATFORM_THICKNESS / 16.0f;
+    const float smallEdge1 = (8.0f - (PistonBaseTile::PLATFORM_THICKNESS / 2.0f)) / 16.0f;
+    const float smallEdge2 = (8.0f + (PistonBaseTile::PLATFORM_THICKNESS / 2.0f)) / 16.0f;
+    const float largeEdge1 = (8.0f - PistonBaseTile::PLATFORM_THICKNESS) / 16.0f;
+    const float largeEdge2 = (8.0f + PistonBaseTile::PLATFORM_THICKNESS) / 16.0f;
+
+    switch (getFacing(data))
+	{
+		case Facing::DOWN:
+			setShape(0, 0, 0, 1, thickness, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(smallEdge1, thickness, smallEdge1, smallEdge2, 1, smallEdge2);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+		case Facing::UP:
+			setShape(0, 1 - thickness, 0, 1, 1, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(smallEdge1, 0, smallEdge1, smallEdge2, 1 - thickness, smallEdge2);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+		case Facing::NORTH:
+			setShape(0, 0, 0, 1, 1, thickness);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(largeEdge1, smallEdge1, thickness, largeEdge2, smallEdge2, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+		case Facing::SOUTH:
+			setShape(0, 0, 1 - thickness, 1, 1, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(largeEdge1, smallEdge1, 0, largeEdge2, smallEdge2, 1 - thickness);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+		case Facing::WEST:
+			setShape(0, 0, 0, thickness, 1, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(smallEdge1, largeEdge1, thickness, smallEdge2, largeEdge2, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+		case Facing::EAST:
+			setShape(1 - thickness, 0, 0, 1, 1, 1);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			setShape(0, smallEdge1, largeEdge1, 1 - thickness, smallEdge2, largeEdge2);
+			Tile::addAABBs(level, x, y, z, box, boxes, source);
+			break;
+    }
+    setShape(0, 0, 0, 1, 1, 1);
+
+}
+
+// PistonMovingPiece.cpp
+void PistonMovingPiece::onPlace(Level *level, int x, int y, int z)
+{
+}
+
+// PistonMovingPiece.cpp
+void PistonMovingPiece::onRemove(Level *level, int x, int y, int z, int id, int data)
+{
+    shared_ptr<TileEntity> tileEntity = level->getTileEntity(x, y, z);
+    if (tileEntity != NULL && dynamic_pointer_cast<PistonPieceEntity>(tileEntity) != NULL)
+	{
+        dynamic_pointer_cast<PistonPieceEntity>(tileEntity)->finalTick();
+    }
+	else
+	{
+        EntityTile::onRemove(level, x, y, z, id, data);
+    }
+}
+
+// PistonMovingPiece.cpp
+bool PistonMovingPiece::mayPlace(Level *level, int x, int y, int z)
+{
+	return false;
+}
+
+// PistonMovingPiece.cpp
+bool PistonMovingPiece::mayPlace(Level *level, int x, int y, int z, int face)
+{
+	return false;
+}
+
+// PistonMovingPiece.cpp
+bool PistonMovingPiece::use(Level *level, int x, int y, int z, shared_ptr<Player> player, int clickedFace, float clickX, float clickY, float clickZ, bool soundOnly/*=false*/) // 4J added soundOnly param
+{
+	if( soundOnly) return false;
+   	// this is a special case in order to help removing invisible, unbreakable, blocks in the world
+    if (!level->isClientSide && level->getTileEntity(x, y, z) == NULL)
+	{
+        // this block is no longer valid
+        level->setTile(x, y, z, 0);
+        return true;
+    }
+    return false;
+}
+
+// PistonMovingPiece.cpp
+void PistonMovingPiece::spawnResources(Level *level, int x, int y, int z, int data, float odds, int playerBonus)
+{
+    if (level->isClientSide) return;
+
+    shared_ptr<PistonPieceEntity> entity = getEntity(level, x, y, z);
+    if (entity == NULL)
+	{
+        return;
+    }
+
+    Tile::tiles[entity->getId()]->spawnResources(level, x, y, z, entity->getData(), 0);
+}
+
+// PistonMovingPiece.cpp
+void PistonMovingPiece::neighborChanged(Level *level, int x, int y, int z, int type)
+{
+    if (!level->isClientSide && level->getTileEntity(x, y, z) == NULL)
+	{
+    }
+}
+
+// PistonMovingPiece.cpp
+shared_ptr<TileEntity> PistonMovingPiece::newMovingPieceEntity(int block, int data, int facing, bool extending, bool isSourcePiston)
+{
+	return shared_ptr<TileEntity>(new PistonPieceEntity(block, data, facing, extending, isSourcePiston));
+}
+
+// PistonMovingPiece.cpp
+AABB *PistonMovingPiece::getAABB(Level *level, int x, int y, int z)
+{
+    shared_ptr<PistonPieceEntity> entity = getEntity(level, x, y, z);
+    if (entity == NULL)
+	{
+        return NULL;
+    }
+
+    // move the aabb depending on the animation
+    float progress = entity->getProgress(0);
+    if (entity->isExtending())
+	{
+        progress = 1.0f - progress;
+    }
+    return getAABB(level, x, y, z, entity->getId(), progress, entity->getFacing());
+}
+
+// PistonMovingPiece.cpp
+AABB *PistonMovingPiece::getAABB(Level *level, int x, int y, int z, int tile, float progress, int facing)
+{
+    if (tile == 0 || tile == id)
+	{
+    	return NULL;
+    }
+    AABB *aabb = Tile::tiles[tile]->getAABB(level, x, y, z);
+
+    if (aabb == NULL)
+	{
+        return NULL;
+    }
+
+    // move the aabb depending on the animation
+	if (Facing::STEP_X[facing] < 0)
+	{
+		aabb->x0 -= Facing::STEP_X[facing] * progress;
+	}
+	else
+	{
+		aabb->x1 -= Facing::STEP_X[facing] * progress;
+	}
+	if (Facing::STEP_Y[facing] < 0)
+	{
+		aabb->y0 -= Facing::STEP_Y[facing] * progress;
+	}
+	else
+	{
+		aabb->y1 -= Facing::STEP_Y[facing] * progress;
+	}
+	if (Facing::STEP_Z[facing] < 0)
+	{
+		aabb->z0 -= Facing::STEP_Z[facing] * progress;
+	}
+	else
+	{
+		aabb->z1 -= Facing::STEP_Z[facing] * progress;
+	}
+    return aabb;
+}
+
+// PistonMovingPiece.cpp
+void PistonMovingPiece::updateShape(LevelSource *level, int x, int y, int z, int forceData, shared_ptr<TileEntity> forceEntity) // 4J added forceData, forceEntity param
+{
+    shared_ptr<PistonPieceEntity> entity = dynamic_pointer_cast<PistonPieceEntity>(forceEntity);
+	if( entity == NULL ) entity = getEntity(level, x, y, z);
+    if (entity != NULL)
+	{
+        Tile *tile = Tile::tiles[entity->getId()];
+        if (tile == NULL || tile == this)
+		{
+            return;
+        }
+        tile->updateShape(level, x, y, z);
+
+        float progress = entity->getProgress(0);
+        if (entity->isExtending())
+		{
+            progress = 1.0f - progress;
+        }
+        int facing = entity->getFacing();
+		ThreadStorage *tls = (ThreadStorage *)TlsGetValue(Tile::tlsIdxShape);
+        tls->xx0 = tile->getShapeX0() - Facing::STEP_X[facing] * progress;
+        tls->yy0 = tile->getShapeY0() - Facing::STEP_Y[facing] * progress;
+        tls->zz0 = tile->getShapeZ0() - Facing::STEP_Z[facing] * progress;
+        tls->xx1 = tile->getShapeX1() - Facing::STEP_X[facing] * progress;
+        tls->yy1 = tile->getShapeY1() - Facing::STEP_Y[facing] * progress;
+        tls->zz1 = tile->getShapeZ1() - Facing::STEP_Z[facing] * progress;
+    }
+}
+
+// PistonMovingPiece.cpp
+shared_ptr<PistonPieceEntity> PistonMovingPiece::getEntity(LevelSource *level, int x, int y, int z)
+{
+    shared_ptr<TileEntity> tileEntity = level->getTileEntity(x, y, z);
+    if (tileEntity != NULL && dynamic_pointer_cast<PistonPieceEntity>(tileEntity) != NULL)
+	{
+    	return  dynamic_pointer_cast<PistonPieceEntity>(tileEntity);
+    }
+    return nullptr;
+}
+
+// PistonPieceEntity.cpp
+PistonPieceEntity::PistonPieceEntity()
+{
+	// for the tile entity loader
+
+	// 4J - added initialisers
+	this->id = 0;
+	this->data = 0;
+	this->facing = 0;
+	this->extending = 0;
+	this->_isSourcePiston = 0;
+	progress = 0.0f;
+	progressO = 0.0f;
+}
+
+// PistonPieceEntity.cpp
+PistonPieceEntity::PistonPieceEntity(int id, int data, int facing, bool extending, bool isSourcePiston) : TileEntity()
+{
+	// 4J - added initialisers
+	progress = 0.0f;
+	progressO = 0.0f;
+
+	this->id = id;
+	this->data = data;
+	this->facing = facing;
+	this->extending = extending;
+	this->_isSourcePiston = isSourcePiston;
+}
+
+// PistonPieceEntity.cpp
+int PistonPieceEntity::getId()
+{
+	return id;
+}
+
+// PistonPieceEntity.cpp
+int PistonPieceEntity::getData()
+{
+	return data;
+}
+
+// PistonPieceEntity.cpp
+bool PistonPieceEntity::isExtending()
+{
+	return extending;
+}
+
+// PistonPieceEntity.cpp
+int PistonPieceEntity::getFacing()
+{
+	return facing;
+}
+
+// PistonPieceEntity.cpp
+bool PistonPieceEntity::isSourcePiston()
+{
+	return _isSourcePiston;
+}
+
+// PistonPieceEntity.cpp
+float PistonPieceEntity::getProgress(float a)
+{
+	if (a > 1)
+	{
+		a = 1;
+	}
+	return progressO + (progress - progressO) * a;
+}
+
+// PistonPieceEntity.cpp
+float PistonPieceEntity::getXOff(float a)
+{
+	if (extending)
+	{
+		return (getProgress(a) - 1.0f) * Facing::STEP_X[facing];
+	}
+	else
+	{
+		return (1.0f - getProgress(a)) * Facing::STEP_X[facing];
+	}
+}
+
+// PistonPieceEntity.cpp
+float PistonPieceEntity::getYOff(float a)
+{
+	if (extending)
+	{
+		return (getProgress(a) - 1.0f) * Facing::STEP_Y[facing];
+	}
+	else
+	{
+		return (1.0f - getProgress(a)) * Facing::STEP_Y[facing];
+	}
+}
+
+// PistonPieceEntity.cpp
+float PistonPieceEntity::getZOff(float a)
+{
+	if (extending)
+	{
+		return (getProgress(a) - 1.0f) * Facing::STEP_Z[facing];
+	}
+	else
+	{
+		return (1.0f - getProgress(a)) * Facing::STEP_Z[facing];
+	}
+}
+
+// PistonPieceEntity.cpp
+void PistonPieceEntity::moveCollidedEntities(float progress, float amount)
+{
+	if (extending)
+	{
+		progress = 1.0f - progress;
+	}
+	else
+	{
+		progress = progress - 1.0f;
+	}
+
+	AABB *aabb = Tile::pistonMovingPiece->getAABB(level, x, y, z, id, progress, facing);
+	if (aabb != NULL)
+	{
+		vector<shared_ptr<Entity> > *entities = level->getEntities(nullptr, aabb);
+		if (!entities->empty())
+		{
+			vector< shared_ptr<Entity> > collisionHolder;
+			for( AUTO_VAR(it, entities->begin()); it != entities->end(); it++ )
+			{
+				collisionHolder.push_back(*it);
+			}
+
+			for( AUTO_VAR(it, collisionHolder.begin()); it != collisionHolder.end(); it++ )
+			{
+				(*it)->move(amount * Facing::STEP_X[facing],
+							amount * Facing::STEP_Y[facing],
+							amount * Facing::STEP_Z[facing]);
+			}
+		}
+	}
+}
+
+// PistonPieceEntity.cpp
+void PistonPieceEntity::finalTick()
+{
+	if (progressO < 1 && level != NULL)
+	{
+		progressO = progress = 1;
+		level->removeTileEntity(x, y, z);
+		setRemoved();
+		if (level->getTile(x, y, z) == Tile::pistonMovingPiece_Id)
+			level->setTileAndData(x, y, z, id, data);
+	}
+}
+
+// PistonPieceEntity.cpp
+void PistonPieceEntity::tick()
+{
+	progressO = progress;
+
+	if (progressO >= 1)
+	{
+		moveCollidedEntities(1, 4 / 16.f);
+		level->removeTileEntity(x, y, z);
+		setRemoved();
+		if (level->getTile(x, y, z) == Tile::pistonMovingPiece_Id)
+			level->setTileAndData(x, y, z, id, data);
+		return;
+	}
+
+	progress += .5f;
+	if (progress >= 1)
+	{
+		progress = 1;
+	}
+
+	if (extending)
+	{
+		moveCollidedEntities(progress, (progress - progressO) + 1.0f / 16.0f);
+	}
+}
+
 }

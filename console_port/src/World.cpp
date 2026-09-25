@@ -139,6 +139,23 @@ int textureTile(Block b,int face,int data) {
     case 72:case 143:return 4;
     case 96:return 84;
     case 93:case 94:return face==0?(b==94?147:131):face==1?(b==94?99:115):6;
+    // PistonBaseTile::getTexture and PistonExtensionTile::getTexture over
+    // piston_top_sticky (10,6), piston_top, piston_side, piston_bottom and
+    // piston_inner_top (14,6); the facing is data & 7, the extended bit 8.
+    case 29:case 33:case 34:{
+        static constexpr int facingOf[6]{1,0,4,5,2,3}; // these faces as Facing
+        const int side=facingOf[face],facing=data&7;
+        const int platform=b==29?106:107;
+        if(b==34){
+            if(side==facing)return (data&8)?106:107;
+            if(facing<6 && side==(facing^1))return 107;
+            return 108;
+        }
+        if(facing>5)return platform;
+        if(side==facing)return (data&8)?110:platform;
+        if(side==(facing^1))return 109;
+        return 108;
+    }
     case 123:return 211; // redstoneLight
     case 124:return 212; // redstoneLight_lit
     default:return 1;
@@ -152,7 +169,7 @@ bool solid(Block b) {
     case 6:case 27:case 28:case 30:case 31:case 32:case 37:case 38:case 39:case 40:
     case 50:case 51:case 55:case 59:case 63:case 66:case 68:case 69:case 70:case 72:case 75:case 76:case 77:
     case 78:case 83:case 90:case 104:case 105:case 106:case 111:case 115:case 127:
-    case 131:case 132:case 141:case 142:case 143:return false;
+    case 131:case 132:case 141:case 142:case 143:case 36:return false;
     default:return true;
     }
 }
@@ -168,6 +185,8 @@ bool validBlock(std::uint8_t b) {
     // Fire (flint and steel, lava, spreading), torches and redstone.
     case 50:case 51:case 55:case 69:case 70:case 72:case 75:case 76:case 77:
     case 93:case 94:case 96:case 123:case 124:case 143:return true;
+    // Pistons, their heads and moving pieces.
+    case 29:case 33:case 34:case 36:return true;
     default:break;
     }
     return consoleIsStair(b) || b==43 || b==44 || b==64 || b==71 || b==65 || b==85 || b==107 || b==113 || b==98 || b==52 || b==54 || b==Air || b==Stone || b==Grass || b==Dirt || b==Cobble || b==Planks ||
@@ -226,7 +245,7 @@ bool World::placeBlock(int x,int y,int z,Block block,int data,Vec3 feet,double y
     // TileItem::useOn places with Level::setTileAndData, then Tile::setPlacedBy.
     tileStored(x,y,z,old,oldData);
     if(get(x,y,z)!=block)return true;
-    if(block==static_cast<Block>(93))tilePlacedBy(x,y,z,yaw);
+    if(block==static_cast<Block>(93) || block==static_cast<Block>(29) || block==static_cast<Block>(33))tilePlacedBy(x,y,z,yaw,feet);
     if(block==static_cast<Block>(130))ensureEnderChestData(x,y,z);
     if(block==static_cast<Block>(61))ensureFurnaceData(x,y,z);
     if(block==static_cast<Block>(117))ensureBrewingData(x,y,z);

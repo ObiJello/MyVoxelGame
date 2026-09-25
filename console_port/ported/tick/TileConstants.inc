@@ -43,3 +43,11 @@
     static const int TOP_MASK = 0x8;
 #define TILE_CONSTANTS_FenceGateTile \
     static const int OPEN_BIT = 4;
+#define TILE_CONSTANTS_PistonBaseTile \
+    static const int EXTENDED_BIT = 8; \
+    static const int UNDEFINED_FACING = 7; \
+    static const int MAX_PUSH_DEPTH = 12; \
+    static const int TRIGGER_EXTEND = 0; \
+    static const int TRIGGER_CONTRACT = 1;
+#define TILE_CONSTANTS_PistonExtensionTile \
+    static const int STICKY_BIT = 8;

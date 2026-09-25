@@ -131,6 +131,31 @@ require(dust.size()==12,"Lone dust is the cross and its overlay");
  require(trapdoor.size()==36,"A trapdoor is a slab");
  for(const auto& v:trapdoor)require(v.y<=180+3.f/16+.001f,"A closed trapdoor lies at the bottom");
  require(redstone.collides({24.5,180.05,40.5},.6,1.8) && !redstone.collides({24.5,180.2,40.5},.6,1.8),"A repeater collides as a slab");
+ // Pistons: tesselatePistonBaseInWorld (a full block; extended, the base
+ // is 12/16 deep) and tesselatePistonExtensionInWorld (the head plate and
+ // four arm faces); the head collides as its plate and arm.
+ const auto piston=meshOf(32,33,1);
+ require(piston.size()==36,"A piston is a block");
+ // piston_side's top row is the wooden head: a piston facing north (data 2)
+ // turns it to the north edge of its east face (eastFlip = FLIP_CW).
+ const auto north=meshOf(42,33,2);
+ int eastFaces=0;
+ for(std::size_t f=0;f+5<north.size();f+=6){
+  bool east=true;for(std::size_t i=f;i<f+6;++i)east=east && std::abs(north[i].x-43)<.001f;
+  if(!east)continue;++eastFaces;
+  for(std::size_t i=f;i<f+6;++i)
+   require((std::abs(north[i].z-40)<.001f)==(north[i].v*16<6.5f),"The wooden edge of a piston's side faces its front");
+ }
+ require(eastFaces==1,"A piston has one east face");
+ const auto extended=meshOf(34,33,1|8);
+ for(const auto& v:extended)require(v.y<=180+12.f/16+.001f,"An extended piston's base is shorter");
+ const auto head=meshOf(36,34,1);
+ require(head.size()==(6+4)*6,"A piston head is its plate and arm");
+ require(redstone.collides({36.5,180.2,40.5},.2,.2) && !redstone.collides({36.1,180.2,40.1},.1,.1),"The head's arm collides, the space beside it does not");
+ MovingPiece moving;moving.x=38;moving.y=180;moving.z=40;moving.tile=1;moving.extending=true;moving.progress=.5f;moving.xOff=-.5f;
+ const auto movingMesh=buildMovingPieceMesh(redstone,moving);
+ require(movingMesh.size()==36,"A moving block is drawn");
+ for(const auto& v:movingMesh)require(v.x>=37.5f-.001f && v.x<=38.5f+.001f,"A moving block is drawn where it has got to");
  FallingBlock sand;sand.position={30.5,185.49,30.5};sand.tile=12;
  const auto falling=buildFallingBlockMesh(sand,0);
  require(falling.size()==36,"A falling block is a full cube");

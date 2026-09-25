@@ -14,6 +14,8 @@ struct TerrainMesh {
 // CPU mesh construction is shared by the actual renderer and nonvisual tests.
 // Shapes/textures remain the limited host mesh until the full TileRenderer port.
 TerrainMesh buildTerrainMesh(const World& world);
+// PistonPieceRenderer: the moved block drawn at its offset.
+std::vector<Vertex> buildMovingPieceMesh(const World& world,const MovingPiece& piece);
 // Mesh a horizontal subregion against a snapshot of the full visible window.
 // Neighbor reads still use the full window, so stitching sections is seamless.
 TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uint8_t>& blocks,

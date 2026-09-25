@@ -359,6 +359,51 @@ static void redstone(){
     require(world.useBlock(24,180,40) && !(world.getData(24,180,40)&4),"and close it from below");
 }
 
+// Pistons through the World: tile events, moving pieces and pushing.
+static void pistons(){
+    World world;world.generate(47,true);
+    for(int x=20;x<=44;++x)for(int z=20;z<=44;++z)world.set(x,179,z,Stone);
+    auto B=[](int id){return static_cast<Block>(id);};
+    const Vec3 feet{22.5,180,40.5};
+    auto run=[&](int ticks){for(int i=0;i<ticks;++i)world.tickTime();};
+    // A piston facing east (Facing 5) with a lever behind it and stone in front.
+    require(world.set(30,180,30,B(33)),"place a piston");world.setData(30,180,30,5);
+    world.set(31,180,30,Stone);
+    require(world.placeBlock(29,180,30,B(69),0,feet,0,1),"a lever behind the piston");
+    world.useBlock(29,180,30);
+    run(4);
+    require(world.get(30,180,30)==B(33) && world.getData(30,180,30)==13,"the piston extends");
+    require(world.get(31,180,30)==B(34) && world.get(32,180,30)==Stone,"the head pushes the stone along");
+    world.useBlock(29,180,30);
+    run(4);
+    require(world.get(30,180,30)==B(33) && world.getData(30,180,30)==5 && world.get(31,180,30)==Air &&
+            world.get(32,180,30)==Stone,"a plain piston retracts and leaves the stone");
+    // A sticky piston pulls it back.
+    require(world.set(30,180,34,B(29)),"place a sticky piston");world.setData(30,180,34,5);
+    world.set(31,180,34,Stone);
+    world.placeBlock(29,180,34,B(69),0,feet,0,1);
+    world.useBlock(29,180,34);run(4);
+    require(world.get(32,180,34)==Stone,"the sticky piston pushes");
+    world.useBlock(29,180,34);run(4);
+    require(world.get(31,180,34)==Stone && world.get(32,180,34)==Air,"and pulls the stone back");
+    // Obsidian does not move (PistonBaseTile::isPushable).
+    require(world.set(30,180,38,B(33)),"another piston");world.setData(30,180,38,5);
+    world.set(31,180,38,Obsidian);
+    world.placeBlock(29,180,38,B(69),0,feet,0,1);
+    world.useBlock(29,180,38);run(4);
+    require(world.getData(30,180,38)==5 && world.get(31,180,38)==Obsidian,"obsidian stops a piston");
+    // The head pushes the player standing in front of it.
+    require(world.set(34,180,42,B(33)),"a piston by the player");world.setData(34,180,42,5);
+    world.placeBlock(33,180,42,B(69),0,feet,0,1);
+    world.setPlayerPosition({35.5,180,42.5});
+    world.takePlayerPush();
+    world.useBlock(33,180,42);run(4);
+    require(world.get(35,180,42)==B(34) && world.takePlayerPush().x>.5,"the piston pushes the player");
+    // Placing a piston faces it from the player (PistonBaseTile::getNewFacing).
+    require(world.placeBlock(40,180,26,B(33),0,{40.5,180,20.5},0,1),"place a piston by hand");
+    require(world.getData(40,180,26)<6,"a placed piston faces a direction");
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
@@ -395,6 +440,7 @@ int main(int argc,char** argv){try{
     items();
     updates();
     redstone();
+    pistons();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";

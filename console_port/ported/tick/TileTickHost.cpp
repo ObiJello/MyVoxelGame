@@ -19,6 +19,8 @@ TntTile* Tile::tnt;
 PortalTile* Tile::portalTile;
 Tile *Tile::lightGem,*Tile::wood,*Tile::rock,*Tile::stoneSlab,*Tile::redStoneDust,*Tile::notGate_on,*Tile::notGate_off;
 NotGateTile::ToggleMap NotGateTile::recentToggles;
+PistonMovingPiece* Tile::pistonMovingPiece;
+DWORD PistonBaseTile::tlsIdx = TlsAlloc();
 bool HeavyTile::instaFall=false;
 Random* Item::random=new Random();
 
@@ -97,6 +99,11 @@ std::unique_ptr<Tile> make(std::string_view cls){
     if(cls=="RedlightTile")return std::make_unique<RedlightTile>();
     if(cls=="TrapDoorTile")return std::make_unique<TrapDoorTile>();
     if(cls=="FenceGateTile")return std::make_unique<FenceGateTile>();
+    if(cls=="PistonBaseTile")return std::make_unique<PistonBaseTile>();
+    if(cls=="PistonExtensionTile")return std::make_unique<PistonExtensionTile>();
+    if(cls=="PistonMovingPiece")return std::make_unique<PistonMovingPiece>();
+    if(cls=="BedTile")return std::make_unique<BedTile>();
+    if(cls=="RailTile" || cls=="DetectorRailTile")return std::make_unique<RailTile>();
     if(cls=="StoneSlabTile" || cls=="WoodSlabTile")return std::make_unique<HalfSlabTile>();
     return std::make_unique<Tile>();
 }
@@ -112,6 +119,11 @@ void initializeTiles(){
             owned[id]=make(properties->className);
             Tile& tile=*owned[id];
             tile.ported=typeid(tile)!=typeid(Tile);
+            // The EntityTile classes (pistons may not push them).
+            for(const char* entityClass:{"BrewingStandTile","ChestTile","DispenserTile","EnchantmentTableTile",
+                "EnderChestTile","FurnaceTile","MobSpawnerTile","MusicTile","PistonMovingPiece","RecordPlayerTile",
+                "SignTile","SkullTile","TheEndPortal"})
+                if(properties->className==std::string_view(entityClass))tile.entityTile=true;
             tile.id=id;
             tile.material=materialOf(properties->material);
             tile.ticking=properties->ticking;
@@ -135,6 +147,11 @@ void initializeTiles(){
         Tile::rock=Tile::tiles[Tile::rock_Id];Tile::stoneSlab=Tile::tiles[Tile::stoneSlabHalf_Id];
         Tile::redStoneDust=Tile::tiles[Tile::redStoneDust_Id];
         Tile::notGate_on=Tile::tiles[Tile::notGate_on_Id];Tile::notGate_off=Tile::tiles[Tile::notGate_off_Id];
+        // Tile::staticCtor: bedrock is setIndestructible, the portal setDestroyTime(-1).
+        Tile::tiles[Tile::unbreakable_Id]->destroyTime=Tile::INDESTRUCTIBLE_DESTROY_TIME;
+        Tile::tiles[Tile::portalTile_Id]->destroyTime=Tile::INDESTRUCTIBLE_DESTROY_TIME;
+        static_cast<PistonBaseTile*>(Tile::tiles[Tile::pistonStickyBase_Id])->isSticky=true;
+        Tile::pistonMovingPiece=static_cast<PistonMovingPiece*>(Tile::tiles[Tile::pistonMovingPiece_Id]);
         // The constructor arguments of Tile::staticCtor's redstone tiles.
         static_cast<NotGateTile*>(Tile::notGate_on)->on=true;
         static_cast<DiodeTile*>(Tile::tiles[Tile::diode_on_Id])->on=true;
@@ -222,6 +239,17 @@ std::array<float,6> tileShape(int tile,int data){
     default:break;
     }
     return {float(storage->xx0),float(storage->yy0),float(storage->zz0),float(storage->xx1),float(storage->yy1),float(storage->zz1)};
+}
+
+std::vector<std::array<float,6>> tileCollisionBoxes(int tile,int data){
+    initializeTiles();
+    CellLevel level;level.tile=tile&255;level.data=data;
+    std::vector<AABB*> boxes;
+    *Tile::shapeStorage()=Tile::ThreadStorage{};
+    if(auto* t=Tile::tiles[tile&255])t->addAABBs(&level,0,0,0,nullptr,&boxes,nullptr);
+    std::vector<std::array<float,6>> result;
+    for(auto* b:boxes)result.push_back({float(b->x0),float(b->y0),float(b->z0),float(b->x1),float(b->y1),float(b->z1)});
+    return result;
 }
 
 bool isTopSolidBlocking(int tile,int data){

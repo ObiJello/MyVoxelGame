@@ -937,4 +937,314 @@ bool TileRenderer::tesselateDustInWorld( Tile* tt, int x, int y, int z )
 
 }
 
+bool TileRenderer::tesselatePistonBaseInWorld( Tile* tt, int x, int y, int z, bool forceExtended, int forceData ) // 4J added forceData param
+{
+	int			data = ( forceData == -1 ) ? level->getData( x, y, z ) : forceData;
+	bool		extended = forceExtended || ( data & PistonBaseTile::EXTENDED_BIT ) != 0;
+	int			facing = PistonBaseTile::getFacing( data );
+
+	const float thickness = PistonBaseTile::PLATFORM_THICKNESS / 16.0f;
+
+	if ( extended )
+	{
+		switch ( facing )
+		{
+			case Facing::DOWN:
+				northFlip = FLIP_180;
+				southFlip = FLIP_180;
+				eastFlip = FLIP_180;
+				westFlip = FLIP_180;
+				setShape( 0.0f, thickness, 0.0f, 1.0f, 1.0f, 1.0f );
+				break;
+			case Facing::UP:
+				setShape( 0.0f, 0.0f, 0.0f, 1.0f, 1.0f - thickness, 1.0f );
+				break;
+			case Facing::NORTH:
+				eastFlip = FLIP_CW;
+				westFlip = FLIP_CCW;
+				setShape( 0.0f, 0.0f, thickness, 1.0f, 1.0f, 1.0f );
+				break;
+			case Facing::SOUTH:
+				eastFlip = FLIP_CCW;
+				westFlip = FLIP_CW;
+				upFlip = FLIP_180;
+				downFlip = FLIP_180;
+				setShape( 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f - thickness );
+				break;
+			case Facing::WEST:
+				northFlip = FLIP_CW;
+				southFlip = FLIP_CCW;
+				upFlip = FLIP_CCW;
+				downFlip = FLIP_CW;
+				setShape( thickness, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f );
+				break;
+			case Facing::EAST:
+				northFlip = FLIP_CCW;
+				southFlip = FLIP_CW;
+				upFlip = FLIP_CW;
+				downFlip = FLIP_CCW;
+				setShape( 0.0f, 0.0f, 0.0f, 1.0f - thickness, 1.0f, 1.0f );
+				break;
+		}
+		// weird way of telling the piston to use the
+		// "inside" texture for the forward-facing edge
+		((PistonBaseTile *) tt)->updateShape((float) tileShapeX0, (float) tileShapeY0, (float) tileShapeZ0, (float) tileShapeX1, (float) tileShapeY1, (float) tileShapeZ1);
+		tesselateBlockInWorld( tt, x, y, z );
+		northFlip = FLIP_NONE;
+		southFlip = FLIP_NONE;
+		eastFlip = FLIP_NONE;
+		westFlip = FLIP_NONE;
+		upFlip = FLIP_NONE;
+		downFlip = FLIP_NONE;
+		((PistonBaseTile *) tt)->updateShape((float) tileShapeX0, (float) tileShapeY0, (float) tileShapeZ0, (float) tileShapeX1, (float) tileShapeY1, (float) tileShapeZ1);
+	}
+	else
+	{
+		switch ( facing )
+		{
+			case Facing::DOWN:
+				northFlip = FLIP_180;
+				southFlip = FLIP_180;
+				eastFlip = FLIP_180;
+				westFlip = FLIP_180;
+				break;
+			case Facing::UP:
+				break;
+			case Facing::NORTH:
+				eastFlip = FLIP_CW;
+				westFlip = FLIP_CCW;
+				break;
+			case Facing::SOUTH:
+				eastFlip = FLIP_CCW;
+				westFlip = FLIP_CW;
+				upFlip = FLIP_180;
+				downFlip = FLIP_180;
+				break;
+			case Facing::WEST:
+				northFlip = FLIP_CW;
+				southFlip = FLIP_CCW;
+				upFlip = FLIP_CCW;
+				downFlip = FLIP_CW;
+				break;
+			case Facing::EAST:
+				northFlip = FLIP_CCW;
+				southFlip = FLIP_CW;
+				upFlip = FLIP_CW;
+				downFlip = FLIP_CCW;
+				break;
+		}
+		tesselateBlockInWorld( tt, x, y, z );
+		northFlip = FLIP_NONE;
+		southFlip = FLIP_NONE;
+		eastFlip = FLIP_NONE;
+		westFlip = FLIP_NONE;
+		upFlip = FLIP_NONE;
+		downFlip = FLIP_NONE;
+	}
+
+	return true;
+
+}
+
+void TileRenderer::renderPistonArmUpDown( float x0, float x1, float y0, float y1, float z0, float z1, float br,
+										  float armLengthPixels )
+{
+	Icon *armTex = PistonBaseTile::getTexture(PistonBaseTile::EDGE_TEX);
+	if (hasFixedTexture()) armTex = fixedTexture;
+
+	Tesselator*		t = Tesselator::getInstance();
+
+	// upwards arm
+	float u00 = armTex->getU0(true);
+	float v00 = armTex->getV0(true);
+	float u11 = armTex->getU(armLengthPixels, true);
+	float v11 = armTex->getV(PistonBaseTile::PLATFORM_THICKNESS, true);
+
+	t->color( br, br, br );
+
+	t->vertexUV( x0, y1, z0, u11, v00 );
+	t->vertexUV( x0, y0, z0, u00, v00 );
+	t->vertexUV( x1, y0, z1, u00, v11 );
+	t->vertexUV( x1, y1, z1, u11, v11 );
+
+}
+
+void TileRenderer::renderPistonArmNorthSouth( float x0, float x1, float y0, float y1, float z0, float z1,
+											  float br, float armLengthPixels )
+{
+	Icon *armTex = PistonBaseTile::getTexture(PistonBaseTile::EDGE_TEX);
+	if (hasFixedTexture()) armTex = fixedTexture;
+
+	Tesselator*		t = Tesselator::getInstance();
+
+	// upwards arm
+	float u00 = armTex->getU0(true);
+	float v00 = armTex->getV0(true);
+	float u11 = armTex->getU(armLengthPixels, true);
+	float v11 = armTex->getV(PistonBaseTile::PLATFORM_THICKNESS, true);
+
+	t->color( br, br, br );
+
+	t->vertexUV( x0, y0, z1, u11, v00 );
+	t->vertexUV( x0, y0, z0, u00, v00 );
+	t->vertexUV( x1, y1, z0, u00, v11 );
+	t->vertexUV( x1, y1, z1, u11, v11 );
+}
+
+void TileRenderer::renderPistonArmEastWest( float x0, float x1, float y0, float y1, float z0, float z1, float br,
+											float armLengthPixels )
+{
+	Icon *armTex = PistonBaseTile::getTexture(PistonBaseTile::EDGE_TEX);
+	if (hasFixedTexture()) armTex = fixedTexture;
+
+	Tesselator*		t = Tesselator::getInstance();
+
+	// upwards arm
+	float u00 = armTex->getU0(true);
+	float v00 = armTex->getV0(true);
+	float u11 = armTex->getU(armLengthPixels, true);
+	float v11 = armTex->getV(PistonBaseTile::PLATFORM_THICKNESS, true);
+
+	t->color( br, br, br );
+
+	t->vertexUV( x1, y0, z0, u11, v00 );
+	t->vertexUV( x0, y0, z0, u00, v00 );
+	t->vertexUV( x0, y1, z1, u00, v11 );
+	t->vertexUV( x1, y1, z1, u11, v11 );
+}
+
+bool TileRenderer::tesselatePistonExtensionInWorld( Tile* tt, int x, int y, int z, bool fullArm, int forceData )	// 4J added forceData param
+{
+	int				data = ( forceData == -1 ) ? level->getData( x, y, z ) : forceData;
+	int				facing = PistonExtensionTile::getFacing( data );
+
+	const float		thickness = PistonBaseTile::PLATFORM_THICKNESS / 16.0f;
+	const float		leftEdge = ( 8.0f - ( PistonBaseTile::PLATFORM_THICKNESS / 2.0f ) ) / 16.0f;
+	const float		rightEdge = ( 8.0f + ( PistonBaseTile::PLATFORM_THICKNESS / 2.0f ) ) / 16.0f;
+	const float		br = tt->getBrightness( level, x, y, z );
+	const float		armLength = fullArm ? 1.0f : 0.5f;
+	const float		armLengthPixels = fullArm ? 16.0f : 8.0f;
+
+	Tesselator*		t = Tesselator::getInstance();
+	switch ( facing )
+	{
+		case Facing::DOWN:
+			northFlip = FLIP_180;
+			southFlip = FLIP_180;
+			eastFlip = FLIP_180;
+			westFlip = FLIP_180;
+			setShape( 0.0f, 0.0f, 0.0f, 1.0f, thickness, 1.0f );
+			tesselateBlockInWorld( tt, x, y, z );
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );		// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+			renderPistonArmUpDown( x + leftEdge, x + rightEdge, y + thickness, y + thickness + armLength,
+								   z + rightEdge, z + rightEdge, br * 0.8f, armLengthPixels );
+			renderPistonArmUpDown( x + rightEdge, x + leftEdge, y + thickness, y + thickness + armLength, z + leftEdge,
+								   z + leftEdge, br * 0.8f, armLengthPixels );
+			renderPistonArmUpDown( x + leftEdge, x + leftEdge, y + thickness, y + thickness + armLength, z + leftEdge,
+								   z + rightEdge, br * 0.6f, armLengthPixels );
+			renderPistonArmUpDown( x + rightEdge, x + rightEdge, y + thickness, y + thickness + armLength,
+								   z + rightEdge, z + leftEdge, br * 0.6f, armLengthPixels );
+
+			break;
+		case Facing::UP:
+			setShape( 0.0f, 1.0f - thickness, 0.0f, 1.0f, 1.0f, 1.0f );
+			tesselateBlockInWorld( tt, x, y, z );
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );		// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+			renderPistonArmUpDown( x + leftEdge, x + rightEdge, y - thickness + 1.0f - armLength, y - thickness + 1.0f,
+								   z + rightEdge, z + rightEdge, br * 0.8f, armLengthPixels );
+			renderPistonArmUpDown( x + rightEdge, x + leftEdge, y - thickness + 1.0f - armLength, y - thickness + 1.0f,
+								   z + leftEdge, z + leftEdge, br * 0.8f, armLengthPixels );
+			renderPistonArmUpDown( x + leftEdge, x + leftEdge, y - thickness + 1.0f - armLength, y - thickness + 1.0f,
+								   z + leftEdge, z + rightEdge, br * 0.6f, armLengthPixels );
+			renderPistonArmUpDown( x + rightEdge, x + rightEdge, y - thickness + 1.0f - armLength,
+								   y - thickness + 1.0f, z + rightEdge, z + leftEdge, br * 0.6f, armLengthPixels );
+			break;
+		case Facing::NORTH:
+			eastFlip = FLIP_CW;
+			westFlip = FLIP_CCW;
+			setShape( 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, thickness );
+			tesselateBlockInWorld( tt, x, y, z );
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );		// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+			renderPistonArmNorthSouth( x + leftEdge, x + leftEdge, y + rightEdge, y + leftEdge, z + thickness,
+									   z + thickness + armLength, br * 0.6f, armLengthPixels );
+			renderPistonArmNorthSouth( x + rightEdge, x + rightEdge, y + leftEdge, y + rightEdge, z + thickness,
+									   z + thickness + armLength, br * 0.6f, armLengthPixels );
+			renderPistonArmNorthSouth( x + leftEdge, x + rightEdge, y + leftEdge, y + leftEdge, z + thickness,
+									   z + thickness + armLength, br * 0.5f, armLengthPixels );
+			renderPistonArmNorthSouth( x + rightEdge, x + leftEdge, y + rightEdge, y + rightEdge, z + thickness,
+									   z + thickness + armLength, br, armLengthPixels );
+			break;
+		case Facing::SOUTH:
+			eastFlip = FLIP_CCW;
+			westFlip = FLIP_CW;
+			upFlip = FLIP_180;
+			downFlip = FLIP_180;
+			setShape( 0.0f, 0.0f, 1.0f - thickness, 1.0f, 1.0f, 1.0f );
+			tesselateBlockInWorld( tt, x, y, z );
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );		// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+			renderPistonArmNorthSouth( x + leftEdge, x + leftEdge, y + rightEdge, y + leftEdge,
+									   z - thickness + 1.0f - armLength, z - thickness + 1.0f, br * 0.6f,
+									   armLengthPixels );
+			renderPistonArmNorthSouth( x + rightEdge, x + rightEdge, y + leftEdge, y + rightEdge,
+									   z - thickness + 1.0f - armLength, z - thickness + 1.0f, br * 0.6f,
+									   armLengthPixels );
+			renderPistonArmNorthSouth( x + leftEdge, x + rightEdge, y + leftEdge, y + leftEdge,
+									   z - thickness + 1.0f - armLength, z - thickness + 1.0f, br * 0.5f,
+									   armLengthPixels );
+			renderPistonArmNorthSouth( x + rightEdge, x + leftEdge, y + rightEdge, y + rightEdge,
+									   z - thickness + 1.0f - armLength, z - thickness + 1.0f, br, armLengthPixels );
+			break;
+		case Facing::WEST:
+			northFlip = FLIP_CW;
+			southFlip = FLIP_CCW;
+			upFlip = FLIP_CCW;
+			downFlip = FLIP_CW;
+			setShape( 0.0f, 0.0f, 0.0f, thickness, 1.0f, 1.0f );
+			tesselateBlockInWorld( tt, x, y, z );					// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );
+			renderPistonArmEastWest( x + thickness, x + thickness + armLength, y + leftEdge, y + leftEdge,
+									 z + rightEdge, z + leftEdge, br * 0.5f, armLengthPixels );
+			renderPistonArmEastWest( x + thickness, x + thickness + armLength, y + rightEdge, y + rightEdge,
+									 z + leftEdge, z + rightEdge, br, armLengthPixels );
+			renderPistonArmEastWest( x + thickness, x + thickness + armLength, y + leftEdge, y + rightEdge,
+									 z + leftEdge, z + leftEdge, br * 0.6f, armLengthPixels );
+			renderPistonArmEastWest( x + thickness, x + thickness + armLength, y + rightEdge, y + leftEdge,
+									 z + rightEdge, z + rightEdge, br * 0.6f, armLengthPixels );
+			break;
+		case Facing::EAST:
+			northFlip = FLIP_CCW;
+			southFlip = FLIP_CW;
+			upFlip = FLIP_CW;
+			downFlip = FLIP_CCW;
+			setShape( 1.0f - thickness, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f );
+			tesselateBlockInWorld( tt, x, y, z );
+
+			t->tex2( getLightColor(tt,  level, x, y , z ) );			// 4J added - renderPistonArmDown doesn't set its own tex2 so just inherited from previous tesselateBlockInWorld
+			renderPistonArmEastWest( x - thickness + 1.0f - armLength, x - thickness + 1.0f, y + leftEdge,
+									 y + leftEdge, z + rightEdge, z + leftEdge, br * 0.5f, armLengthPixels );
+			renderPistonArmEastWest( x - thickness + 1.0f - armLength, x - thickness + 1.0f, y + rightEdge,
+									 y + rightEdge, z + leftEdge, z + rightEdge, br, armLengthPixels );
+			renderPistonArmEastWest( x - thickness + 1.0f - armLength, x - thickness + 1.0f, y + leftEdge,
+									 y + rightEdge, z + leftEdge, z + leftEdge, br * 0.6f, armLengthPixels );
+			renderPistonArmEastWest( x - thickness + 1.0f - armLength, x - thickness + 1.0f, y + rightEdge,
+									 y + leftEdge, z + rightEdge, z + rightEdge, br * 0.6f, armLengthPixels );
+			break;
+	}
+	northFlip = FLIP_NONE;
+	southFlip = FLIP_NONE;
+	eastFlip = FLIP_NONE;
+	westFlip = FLIP_NONE;
+	upFlip = FLIP_NONE;
+	downFlip = FLIP_NONE;
+	setShape( 0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f );
+
+	return true;
+
+}
+
 }

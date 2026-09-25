@@ -161,3 +161,11 @@ the torch should go out. Try a repeater (right click changes its delay, and the 
 on it move), stone and wooden buttons, wooden and stone pressure plates (stand on
 them), and doors, trapdoors and fence gates opened by a signal. Note anything that
 powers, delays or looks different from how you remember it.
+
+## Pistons
+
+Build a piston and a sticky piston with a lever behind each and a block in front.
+Flip the levers: the pistons should push the blocks out one cell and the sticky piston
+should pull its block back when switched off. Try pushing a row of blocks, standing in
+front of a piston (it should shove you), and pushing obsidian or a chest (neither
+moves). Note anything that moves too far, too fast, or looks wrong while moving.

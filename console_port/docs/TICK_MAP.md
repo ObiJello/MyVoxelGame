@@ -16,7 +16,7 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | `MobSpawner::tick` | partial | four hostile and four passive types in the visible region; no `MobCategory` caps, pack spawning or biome spawn lists |
 | `chunkSource->tick` (unload/save) | own | chunk streaming, `WorldStorage` |
 | sky darkening (`getOldSkyDarken`) | ported | `consoleSkyDarken` |
-| `runTileEvents` (pistons, note blocks, chest lids) | missing | |
+| `runTileEvents` (pistons, note blocks, chest lids) | partial | the queue and pistons; note blocks and chest lids need sound and the chest renderer |
 | incremental save every `saveInterval` | own | the Autosave setting |
 | `setTime(time + 1)` | ported | `World::tickTime` |
 | `tickPendingTicks` (scheduled tile ticks) | ported | `ScheduledTickQueue` for every tile whose class the port has; ticks in the streaming halo wait for the window; saved ticks of other tiles (redstone, pistons) stay in the chunk untouched |
@@ -87,15 +87,16 @@ Redstone is the source's: dust, redstone torches, levers, buttons, pressure plat
 repeaters and lamps, and the doors, trapdoors and gates they open (see
 `docs/PORT_STATUS.md`, Redstone).
 
-Not yet: pistons and `runTileEvents`, TNT (burnt TNT simply goes; explosions are
+Pistons are the source's too (tile events, moving pieces, sticky pistons).
+
+Not yet: note blocks and chest lids (tile events that only make sound and animation), TNT (burnt TNT simply goes; explosions are
 unported), nether portals (fire on obsidian lights
 normally), the Fire Spreads host option (always on), and saving a block that is
 mid-fall.
 
 ## Order of work
 
-1. **Tile updates**: pistons and `runTileEvents` (note blocks, chest lids),
-   dispensers and TNT with explosions.
+1. **Tile updates**: dispensers, TNT with explosions, note blocks (with sound).
 2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
 3. **More tiles**: rails and minecarts, beds and sleeping, TNT and explosions,
    dispensers, boats.

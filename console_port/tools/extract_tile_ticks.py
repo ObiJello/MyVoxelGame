@@ -122,11 +122,40 @@ METHODS = [
     ('FenceGateTile', 'mayPlace'), ('FenceGateTile', 'setPlacedBy'), ('FenceGateTile', 'use'),
     ('FenceGateTile', 'neighborChanged'), ('FenceGateTile', 'isOpen'),
     ('DoorTile', 'TestUse'), ('DoorTile', 'use'),
+    # Pistons: the base, the head and the moving piece with its tile entity,
+    # and the push reactions pistons consult.
+    ('Tile', 'getPistonPushReaction'), ('EntityTile', 'onRemove'),
+    ('DoorTile', 'getPistonPushReaction'), ('IceTile', 'getPistonPushReaction'),
+    ('PressurePlateTile', 'getPistonPushReaction'), ('BedTile', 'getPistonPushReaction'),
+    ('RailTile', 'getPistonPushReaction'),
+    ('PistonBaseTile', 'ignoreUpdate()'), ('PistonBaseTile', 'ignoreUpdate(bool set)'), ('PistonBaseTile', 'use'),
+    ('PistonBaseTile', 'setPlacedBy'), ('PistonBaseTile', 'neighborChanged'), ('PistonBaseTile', 'onPlace'),
+    ('PistonBaseTile', 'checkIfExtend'), ('PistonBaseTile', 'getNeighborSignal'), ('PistonBaseTile', 'triggerEvent'),
+    ('PistonBaseTile', 'updateShape(LevelSource'), ('PistonBaseTile', 'getFacing'), ('PistonBaseTile', 'isExtended'),
+    ('PistonBaseTile', 'getNewFacing'), ('PistonBaseTile', 'isPushable'), ('PistonBaseTile', 'canPush'),
+    ('PistonBaseTile', 'createPush'),
+    ('PistonExtensionTile', 'onRemove'), ('PistonExtensionTile', 'mayPlace(Level *level, int x, int y, int z)'),
+    ('PistonExtensionTile', 'mayPlace(Level *level, int x, int y, int z, int face)'), ('PistonExtensionTile', 'updateShape'),
+    ('PistonExtensionTile', 'neighborChanged'), ('PistonExtensionTile', 'getFacing'),
+    ('PistonExtensionTile', 'addAABBs'),
+    ('PistonMovingPiece', 'onPlace'), ('PistonMovingPiece', 'onRemove'),
+    ('PistonMovingPiece', 'mayPlace(Level *level, int x, int y, int z)'),
+    ('PistonMovingPiece', 'mayPlace(Level *level, int x, int y, int z, int face)'), ('PistonMovingPiece', 'use'),
+    ('PistonMovingPiece', 'spawnResources'), ('PistonMovingPiece', 'neighborChanged'),
+    ('PistonMovingPiece', 'newMovingPieceEntity'), ('PistonMovingPiece', 'getAABB(Level *level, int x, int y, int z)'),
+    ('PistonMovingPiece', 'getAABB(Level *level, int x, int y, int z, int tile'), ('PistonMovingPiece', 'updateShape'),
+    ('PistonMovingPiece', 'getEntity'),
+    ('PistonPieceEntity', 'PistonPieceEntity()'), ('PistonPieceEntity', 'PistonPieceEntity(int id'),
+    ('PistonPieceEntity', 'getId'), ('PistonPieceEntity', 'getData'), ('PistonPieceEntity', 'isExtending'),
+    ('PistonPieceEntity', 'getFacing'), ('PistonPieceEntity', 'isSourcePiston'), ('PistonPieceEntity', 'getProgress'),
+    ('PistonPieceEntity', 'getXOff'), ('PistonPieceEntity', 'getYOff'), ('PistonPieceEntity', 'getZOff'),
+    ('PistonPieceEntity', 'moveCollidedEntities'), ('PistonPieceEntity', 'finalTick'), ('PistonPieceEntity', 'tick'),
 ]
 # Classes whose header constants (static const int / static bool) are written
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
 CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
-                    'NotGateTile', 'DiodeTile', 'TrapDoorTile', 'FenceGateTile']
+                    'NotGateTile', 'DiodeTile', 'TrapDoorTile', 'FenceGateTile', 'PistonBaseTile',
+                    'PistonExtensionTile']
 # The class's source file where it differs from the class name.
 SOURCE_FILE = {'WaterlilyTile': 'WaterLilyTile.cpp'}
 
@@ -139,7 +168,7 @@ def source(cls):
 def method(cls, name):
     text = source(cls)
     # Definitions start a line; qualified calls inside bodies are indented.
-    pattern = r'^\S[^\n]*?\b' + re.escape(f'{cls}::{name}') + ('' if '(' in name else r'\s*\(')
+    pattern = r'^(?:\S[^\n]*?\b)?' + re.escape(f'{cls}::{name}') + ('' if '(' in name else r'\s*\(')
     matches = [m for m in re.finditer(pattern, text, re.M)]
     if len(matches) != 1:
         raise SystemExit(f'{cls}::{name}: {len(matches)} definitions')

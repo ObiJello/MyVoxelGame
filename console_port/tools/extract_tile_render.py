@@ -18,7 +18,9 @@ OUT = ROOT / 'ported/TileRender.cpp'
 METHODS = ['TileRenderer::tesselateFireInWorld', 'TileRenderer::tesselateTorchInWorld',
            'TileRenderer::tesselateTorch', 'TileRenderer::tesselateDiodeInWorld(DiodeTile *tt',
            'TileRenderer::tesselateDiodeInWorld( DiodeTile* tt', 'TileRenderer::tesselateLeverInWorld',
-           'TileRenderer::tesselateDustInWorld']
+           'TileRenderer::tesselateDustInWorld', 'TileRenderer::tesselatePistonBaseInWorld',
+           'TileRenderer::renderPistonArmUpDown', 'TileRenderer::renderPistonArmNorthSouth',
+           'TileRenderer::renderPistonArmEastWest', 'TileRenderer::tesselatePistonExtensionInWorld']
 
 
 def method(text, name):

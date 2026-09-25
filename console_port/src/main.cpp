@@ -1124,6 +1124,16 @@ struct App {
         const auto beforeWorldTick=world.revision;
         int elapsedWorldTicks=0;
         while(worldTickSeconds>=.05){world.tickTime();worldTickSeconds-=.05;++elapsedWorldTicks;}
+        // Pistons move the player (PistonPieceEntity::moveCollidedEntities ->
+        // Entity::move): each axis as far as nothing blocks it.
+        if(const auto push=world.takePlayerPush();push.x!=0 || push.y!=0 || push.z!=0){
+            for(int axis=0;axis<3;++axis){
+                Vec3 next=position;
+                (axis==0?next.x:axis==1?next.y:next.z)+=axis==0?push.x:axis==1?push.y:push.z;
+                if(!world.collides(next))position=next;
+            }
+            world.setPlayerPosition(position);
+        }
         if(tutorial && elapsedWorldTicks>0){
             // TutorialMode::tick, once per game tick.
             for(int i=0;i<elapsedWorldTicks;++i){tutorialEvents();tutorial->tick();}

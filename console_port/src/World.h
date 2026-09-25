@@ -59,6 +59,13 @@ struct DroppedItem {
     float bobOffset=0;
     std::shared_ptr<class CompoundTag> stack;
 };
+// PistonPieceEntity: a block a piston is moving (client coordinates) and its
+// draw offset (getXOff/getYOff/getZOff at the end of the tick).
+struct MovingPiece {
+    int x=0,y=0,z=0,tile=0,data=0;
+    bool extending=false,sourcePiston=false;
+    float progress=0,xOff=0,yOff=0,zOff=0;
+};
 // FallingTile: a sand, gravel or anvil tile falling (HeavyTile::checkSlide).
 // The position is the entity's (the block's centre) in client coordinates.
 struct FallingBlock {
@@ -100,11 +107,17 @@ class World {
     int placementData(int x,int y,int z,int tile,int face,int data);
     // Tile::setPlacedBy with the player's heading, and Tile::destroy after the
     // player removed a tile.
-    void tilePlacedBy(int x,int y,int z,double yaw);
+    void tilePlacedBy(int x,int y,int z,double yaw,Vec3 feet={});
     void tileDestroyed(int x,int y,int z,int tile,int data);
     // Entity::checkInsideTiles: Tile::entityInside for the tiles each entity's
     // box is in (pressure plates, wooden buttons).
     void tickInsideTiles();
+    // ServerLevel::runTileEvents and Level::tickEntities' tile entities.
+    void runTileEvents();
+    void tickTileEntities();
+    // PistonPieceEntity::finalTick for every moving piece (before the chunk
+    // leaves memory or the world is saved: the pieces are not saved).
+    void finishPistons();
     friend class WorldTickLevel;
     // OldChunkStorage TileTicks: the queue's ticks for the chunk join the
     // ones the port does not run, which stay as saved.
@@ -214,6 +227,10 @@ public:
     bool setTileAndUpdate(int x,int y,int z,Block tile,int data=0);
     bool setDataAndUpdate(int x,int y,int z,int data);
     const std::vector<FallingBlock>& fallingBlocks()const;
+    // How far pistons pushed the player since the last call (the client owns
+    // the player's position and applies it).
+    Vec3 takePlayerPush();
+    std::vector<MovingPiece> movingPieces()const;
     int skyLight(int x,int y,int z)const;
     int blockLight(int x,int y,int z)const;
     int renderLight(int x,int y,int z,bool liquid=false)const;
