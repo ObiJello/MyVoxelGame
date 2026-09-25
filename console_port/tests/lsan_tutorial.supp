@@ -8,6 +8,3 @@ leak:LookAtTileHint::onLookAt
 # The popup message Tutorial keeps as m_lastMessage; its destructor never
 # frees the final one.
 leak:Tutorial::tick
-# Headless sanitizer runs of the client (Xvfb + Mesa): the software GL
-# driver's own allocations, reached only through libz.
-leak:libz.so
