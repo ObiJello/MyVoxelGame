@@ -167,6 +167,66 @@ METHODS = [
     ('BucketItem', 'emptyBucket'), ('PotionItem', 'isThrowable'),
     ('RailTile', 'isRail(Level *level, int x, int y, int z)'), ('RailTile', 'isRail(int id)'),
 ]
+# Entity and mob methods, written to EntityRules.cpp (same host header).
+ENTITY_METHODS = [
+    # Damage sources.
+    ('DamageSource', 'mobAttack'), ('DamageSource', 'playerAttack'), ('DamageSource', 'arrow'),
+    ('DamageSource', 'thrown'), ('DamageSource', 'indirectMagic'), ('DamageSource', 'thorns'),
+    ('DamageSource', 'isProjectile'), ('DamageSource', 'setProjectile'), ('DamageSource', 'isBypassArmor'),
+    ('DamageSource', 'getFoodExhaustion'), ('DamageSource', 'isBypassInvul'),
+    ('DamageSource', 'DamageSource(ChatPacket'), ('DamageSource', 'getDirectEntity'), ('DamageSource', 'getEntity'),
+    ('DamageSource', 'bypassArmor'), ('DamageSource', 'bypassInvul'), ('DamageSource', 'setIsFire'),
+    ('DamageSource', 'setScalesWithDifficulty'), ('DamageSource', 'scalesWithDifficulty'), ('DamageSource', 'isMagic'),
+    ('DamageSource', 'setMagic'), ('DamageSource', 'isFire'), ('DamageSource', 'getMsgId'),
+    ('EntityDamageSource', 'EntityDamageSource(ChatPacket'), ('EntityDamageSource', 'getEntity'),
+    ('EntityDamageSource', 'scalesWithDifficulty'),
+    ('IndirectEntityDamageSource', 'IndirectEntityDamageSource(ChatPacket'),
+    ('IndirectEntityDamageSource', 'getDirectEntity'), ('IndirectEntityDamageSource', 'getEntity'),
+    # The Level queries entity movement makes, liquids' flow and the light ramp.
+    ('Level', 'getCubes'), ('Level', 'containsAnyLiquid'), ('Level', 'containsFireTile'),
+    ('Level', 'checkAndHandleWater'), ('Level', 'containsMaterial'), ('Level', 'containsLiquid'),
+    ('Level', 'getBrightness(int x, int y, int z)'), ('Level', 'hasChunkAt'), ('Level', 'getTileRenderShape'),
+    ('Tile', 'isSolidFace'), ('LiquidTile', 'getHeight'), ('LiquidTile', 'getRenderedDepth'), ('LiquidTile', 'isSolidFace'),
+    ('LiquidTile', 'getFlow'), ('LiquidTile', 'handleEntityInside'),
+    ('Dimension', 'updateLightRamp'),
+    # Entity.
+    ('Entity', '_init'), ('Entity', 'Entity(Level'), ('Entity', '~Entity'), ('Entity', 'getEntityData'),
+    ('Entity', 'resetPos'), ('Entity', 'remove'), ('Entity', 'setSize'), ('Entity', 'setRot'),
+    ('Entity', 'setPos(double'), ('Entity', 'turn'), ('Entity', 'tick'), ('Entity', 'baseTick'),
+    ('Entity', 'lavaHurt'), ('Entity', 'setOnFire'), ('Entity', 'clearFire'), ('Entity', 'outOfWorld'),
+    ('Entity', 'isFree(float'), ('Entity', 'isFree(double'), ('Entity', 'move'), ('Entity', 'checkInsideTiles'),
+    ('Entity', 'playSound'), ('Entity', 'makeStepSound'), ('Entity', 'checkFallDamage'), ('Entity', 'getCollideBox'),
+    ('Entity', 'burn'), ('Entity', 'isFireImmune'), ('Entity', 'causeFallDamage'), ('Entity', 'isInWaterOrRain'),
+    ('Entity', 'isInWater'), ('Entity', 'updateInWaterState'), ('Entity', 'isUnderLiquid'), ('Entity', 'getHeadHeight'),
+    ('Entity', 'isInLava'), ('Entity', 'moveRelative'), ('Entity', 'getBrightness'), ('Entity', 'setLevel'),
+    ('Entity', 'absMoveTo'), ('Entity', 'moveTo'), ('Entity', 'distanceTo(shared_ptr'),
+    ('Entity', 'distanceToSqr(double'), ('Entity', 'distanceTo(double'), ('Entity', 'distanceToSqr(shared_ptr'),
+    ('Entity', 'playerTouch'), ('Entity', 'push(shared_ptr'), ('Entity', 'push(double'), ('Entity', 'markHurt'),
+    ('Entity', 'hurt'), ('Entity', 'intersects'), ('Entity', 'isPickable'), ('Entity', 'isPushable'),
+    ('Entity', 'isShootable'), ('Entity', 'awardKillScore'), ('Entity', 'spawnAtLocation(int resource, int count)'),
+    ('Entity', 'spawnAtLocation(int resource, int count, float'), ('Entity', 'spawnAtLocation(shared_ptr'),
+    ('Entity', 'isAlive'), ('Entity', 'isInWall'), ('Entity', 'interact'), ('Entity', 'getCollideAgainstBox'),
+    ('Entity', 'handleEntityEvent'), ('Entity', 'animateHurt'), ('Entity', 'isOnFire'), ('Entity', 'isRiding'),
+    ('Entity', 'isSneaking'), ('Entity', 'setSneaking'), ('Entity', 'isSprinting'), ('Entity', 'setSprinting'),
+    ('Entity', 'isInvisible'), ('Entity', 'setInvisible'), ('Entity', 'getSharedFlag'), ('Entity', 'setSharedFlag'),
+    ('Entity', 'getAirSupply'), ('Entity', 'setAirSupply'), ('Entity', 'killed'), ('Entity', 'checkInTile'),
+    ('Entity', 'makeStuckInWeb'), ('Entity', 'is'), ('Entity', 'getYHeadRot'), ('Entity', 'setYHeadRot'),
+    ('Entity', 'isAttackable'), ('Entity', 'isInvulnerable'), ('Entity', 'copyPosition'),
+]
+# Static member definitions (one statement each), written before the methods
+# of the same output: (class, member, output).
+STATICS = [(
+    'DamageSource', name, 'EntityRules.cpp') for name in (
+    'inFire', 'onFire', 'lava', 'inWall', 'drown', 'starve', 'cactus', 'fall', 'outOfWorld', 'genericSource',
+    'explosion', 'controlledExplosion', 'magic', 'dragonbreath', 'wither', 'anvil', 'fallingBlock')]
+# Enums copied whole from their headers into .inc files the host includes:
+# (header, enum name or None for the whole header, output).
+ENUMS = [
+    ('Class.h', 'eINSTANCEOF', 'ClassTypes.inc'),
+    ('SoundTypes.h', 'eSOUND_TYPE', 'SoundTypes.inc'),
+    ('ParticleTypes.h', None, 'ParticleTypes.inc'),
+    ('ChatPacket.h', 'EChatPacketMessage', 'ChatMessages.inc'),
+]
 # Classes whose header constants (static const int / static bool) are written
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
 CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
@@ -204,19 +264,76 @@ def method(cls, name):
             return text[start:end]
 
 
-def expected():
-    out = ['// Generated by tools/extract_tile_ticks.py: original tile tick methods,',
+def static(cls, member):
+    text = source(cls)
+    matches = list(re.finditer(r'^[^\n]*\b' + re.escape(f'{cls}::{member}') + r'\s*=[^;]*;', text, re.M))
+    if len(matches) != 1:
+        raise SystemExit(f'{cls}::{member}: {len(matches)} static definitions')
+    return matches[0][0]
+
+
+def header_enum(header, name):
+    text = FILES[header.lower()].read_text(encoding='utf-8-sig').replace('\r\n', '\n')
+    if name is None:
+        return text.replace('#pragma once\n', '')
+    start = re.search(r'enum ' + re.escape(name) + r'\b', text)
+    if not start:
+        raise SystemExit(f'{header}: no enum {name}')
+    end = text.index('};', start.start()) + 2
+    return text[start.start():end] + '\n'
+
+
+def parent_class(cls):
+    header = FILES.get((cls + '.h').lower())
+    if not header:
+        return None
+    m = re.search(r'class\s+' + re.escape(cls) + r'\s*:\s*public\s+(\w+)', header.read_text(encoding='utf-8-sig', errors='replace'))
+    return m[1] if m else None
+
+
+def render_shapes():
+    """Tile::getRenderShape for each registered tile class: the class's own
+    constant, or its nearest ancestor's (ported/TileProperties.cpp names them)."""
+    names = sorted(set(re.findall(r'\{\d+,"(\w+)"', (ROOT / 'ported/TileProperties.cpp').read_text())))
+    rows = []
+    for name in names:
+        cls, shape = name, None
+        while cls and shape is None:
+            path = FILES.get((cls + '.cpp').lower())
+            if path:
+                m = re.search(re.escape(cls) + r'::getRenderShape\(\)\s*\{\s*return\s+(?:Tile::)?(SHAPE_\w+)\s*;', source(cls))
+                if m:
+                    shape = m[1]
+            cls = parent_class(cls)
+        rows.append(f'CONSOLE_RENDER_SHAPE("{name}", {shape or "SHAPE_BLOCK"})\n')
+    return '// Generated by tools/extract_tile_ticks.py: Tile::getRenderShape by class.\n' + ''.join(rows)
+
+
+def rules_file(methods, output):
+    out = ['// Generated by tools/extract_tile_ticks.py: original methods,',
            '// copied unchanged from source_full/Minecraft.World. Do not edit by hand.',
            '#include "TileTickHost.h"', '', 'namespace console::sim {', '']
-    for cls, name in METHODS:
+    for cls, member, target in STATICS:
+        if target == output:
+            out.append(f'// {SOURCE_FILE.get(cls, cls + ".cpp")}')
+            out.append(static(cls, member))
+    if any(target == output for _, _, target in STATICS):
+        out.append('')
+    for cls, name in methods:
         out.append(f'// {SOURCE_FILE.get(cls, cls + ".cpp")}')
         out.append(method(cls, name))
         out.append('')
     out.append('}')
-    rules = '\n'.join(out) + '\n'
+    return '\n'.join(out) + '\n'
+
+
+def expected():
+    rules = rules_file(METHODS, 'TileTickRules.cpp')
     tile_h = re.sub(r'//[^\n]*', '', FILES['tile.h'].read_text(encoding='utf-8-sig'))
     ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
                   for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', tile_h))
+    ids += ''.join(f'static const int SHAPE_{m[1]} = {m[2]};\n'
+                   for m in re.finditer(r'static const int SHAPE_(\w+)\s*=\s*(-?\d+)', tile_h))
     item_h = re.sub(r'//[^\n]*', '', FILES['item.h'].read_text(encoding='utf-8-sig'))
     item_ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
                        for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', item_h))
@@ -234,8 +351,11 @@ def expected():
                 value = d[1]
             lines.append(f'static const int {m[1]} = {value.strip()};')
         constants.append(f'#define TILE_CONSTANTS_{cls} \\\n    ' + ' \\\n    '.join(lines) + '\n')
-    return {'TileTickRules.cpp': rules, 'TileIds.inc': ids, 'ItemIds.inc': item_ids,
-            'TileConstants.inc': ''.join(constants)}
+    files = {'RenderShapes.inc': render_shapes(), 'TileTickRules.cpp': rules, 'EntityRules.cpp': rules_file(ENTITY_METHODS, 'EntityRules.cpp'),
+             'TileIds.inc': ids, 'ItemIds.inc': item_ids, 'TileConstants.inc': ''.join(constants)}
+    for header, name, output in ENUMS:
+        files[output] = f'// Generated by tools/extract_tile_ticks.py from {header}.\n' + header_enum(header, name)
+    return files
 
 
 def main():

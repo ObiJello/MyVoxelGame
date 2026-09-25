@@ -2,6 +2,7 @@
 // runUpdate) and Level::tickWeather over the client world. The tile rules
 // themselves are the original methods in ported/tick/TileTickRules.cpp.
 #include "WorldState.h"
+#include "BlockShape.h"
 #include "TileTickHost.h"
 #include "ConsoleLightmap.h"
 #include "SurvivalRules.h"
@@ -173,8 +174,7 @@ public:
             std::function<void(double,double,double)> moveFn,pushFn;
             std::function<bool(int)> hurtFn;
             float head=0;
-            sim::AABB box;
-            void move(double dx,double dy,double dz)override{moveFn(dx,dy,dz);}
+            void move(double dx,double dy,double dz,bool)override{moveFn(dx,dy,dz);}
             bool hurt(sim::DamageSource*,int damage)override{return hurtFn && hurtFn(damage);}
             float getHeadHeight()override{return head;}
             ~Proxy()override{if(pushFn && (xd!=0 || yd!=0 || zd!=0))pushFn(xd,yd,zd);}
@@ -185,8 +185,8 @@ public:
                      std::function<void(double,double,double)> pushFn){
             auto entity=std::make_shared<Proxy>();
             entity->x=feet.x-half;entity->y=feet.y+yOffset;entity->z=feet.z-half;entity->heightOffset=yOffset;
-            entity->box={entity->x-width/2,feet.y,entity->z-width/2,entity->x+width/2,feet.y+height,entity->z+width/2};
-            entity->bb=&entity->box;entity->head=head;
+            entity->bb->set(entity->x-width/2,feet.y,entity->z-width/2,entity->x+width/2,feet.y+height,entity->z+width/2);
+            entity->head=head;
             entity->moveFn=std::move(moveFn);entity->hurtFn=std::move(hurtFn);entity->pushFn=std::move(pushFn);
             found.push_back(entity);
         };
@@ -275,6 +275,32 @@ public:
         (axis==0?feet.x:axis==1?feet.y:feet.z)+=free;
         return free;
     }
+    // Tile::addAABBs for the tiles whose collision is not ported: the World's
+    // collision shapes (World::collides: solid tiles are cubes, partial
+    // tiles their shape, top snow half a block from three layers). Piston
+    // heads and moving pieces use the shape their extracted code set.
+    void addTileAABBs(sim::Tile* tile,int x,int y,int z,AABB* box,sim::AABBList* boxes,std::shared_ptr<sim::Entity> source)override{
+        if(tile->id==sim::Tile::pistonExtensionPiece_Id || tile->id==sim::Tile::pistonMovingPiece_Id){
+            sim::Level::addTileAABBs(tile,x,y,z,box,boxes,source);
+            return;
+        }
+        const auto add=[&](double x0,double y0,double z0,double x1,double y1,double z1){
+            AABB* shape=AABB::newTemp(x+x0,y+y0,z+z0,x+x1,y+y1,z+z1);
+            if(!box || shape->intersects(box))boxes->push_back(shape);
+        };
+        const int id=tile->id;
+        if(id==78){if((getData(x,y,z)&7)>=3)add(0,0,0,1,.5,1);return;}
+        if(!solid(static_cast<Block>(id)))return;
+        if(!consoleIsPartialBlock(id)){add(0,0,0,1,1,1);return;}
+        struct Access final:BlockShapeAccess {
+            WorldTickLevel& level;
+            explicit Access(WorldTickLevel& l):level(l){}
+            int getTile(int x,int y,int z)const override{return level.getTile(x-half,y,z-half);}
+            int getData(int x,int y,int z)const override{return level.getData(x-half,y,z-half);}
+        } access(*this);
+        const auto shape=consoleCollisionShape(access,x+half,y,z+half);
+        for(int i=0;i<shape.count;++i){const auto& b=shape.boxes[i];add(b.x0,b.y0,b.z0,b.x1,b.y1,b.z1);}
+    }
     // Level::getTileEntity / setTileEntity / removeTileEntity for the tile
     // entities the port keeps here (piston pieces), with LevelChunk's rule
     // that only an EntityTile holds one.
@@ -305,8 +331,7 @@ public:
     }
     // DispenserTileEntity for the extracted DispenserTile: loaded from the
     // chunk's "Trap" tag when first asked for, saved back (as
-    // DispenserTileEntity::save) when this Level goes. Item tags are carried
-    // whole.
+    // DispenserTileEntity::save) when this Level goes.
     std::map<std::array<int,3>,std::shared_ptr<sim::DispenserTileEntity>> traps_;
     std::shared_ptr<sim::DispenserTileEntity> trap(int x,int y,int z){
         const std::array<int,3> key{x,y,z};
@@ -320,10 +345,8 @@ public:
                     const int id=stack->getShort(L"id"),count=static_cast<unsigned char>(stack->getByte(L"Count"));
                     if(slot>=9 || id<=0 || count<=0)continue;
                     auto item=std::make_shared<sim::ItemInstance>(id,count,stack->getShort(L"Damage"));
-                    if(auto* extra=dynamic_cast<CompoundTag*>(stack->get(L"tag"))){
-                        item->tag=std::make_shared<sim::CompoundTag>();
-                        item->tag->saved=std::shared_ptr<CompoundTag>(static_cast<CompoundTag*>(extra->copy()));
-                    }
+                    if(auto* extra=dynamic_cast<CompoundTag*>(stack->get(L"tag")))
+                        item->tag.reset(static_cast<CompoundTag*>(extra->copy()));
                     (*te->items)[slot]=item;
                 }
         traps_[key]=te;
@@ -331,8 +354,7 @@ public:
     }
     static std::unique_ptr<CompoundTag> stackOf(const sim::ItemInstance& item){
         auto stack=dropStack(item.id,item.count,item.auxValue);
-        if(item.tag && item.tag->saved)
-            stack->put(L"tag",const_cast<CompoundTag*>(static_cast<const CompoundTag*>(item.tag->saved.get()))->copy());
+        if(item.tag)stack->put(L"tag",item.tag->copy());
         return stack;
     }
     void saveTrap(const std::array<int,3>& at,sim::DispenserTileEntity& te){

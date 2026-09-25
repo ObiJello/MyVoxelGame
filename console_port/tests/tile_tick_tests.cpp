@@ -409,6 +409,63 @@ static void pistons(){
     require(world.getData(40,180,26)<6,"a placed piston faces a direction");
 }
 
+// Entity::move over MapLevel: full cubes for solid tiles, half slabs.
+struct BoxLevel final:sim::Level {
+    MapLevel& map;
+    explicit BoxLevel(MapLevel& m):map(m){random=m.random;dimension=m.dimension;}
+    int getTile(int x,int y,int z)override{return map.getTile(x,y,z);}
+    int getData(int x,int y,int z)override{return map.getData(x,y,z);}
+    bool setTileAndDataNoUpdate(int x,int y,int z,int t,int d)override{return map.setTileAndDataNoUpdate(x,y,z,t,d);}
+    bool setDataNoUpdate(int x,int y,int z,int d)override{return map.setDataNoUpdate(x,y,z,d);}
+    bool hasChunk(int,int)override{return true;}
+    int getRawBrightness(int x,int y,int z)override{return map.getRawBrightness(x,y,z);}
+    int getDaytimeRawBrightness(int x,int y,int z)override{return map.getDaytimeRawBrightness(x,y,z);}
+    int getBrightness(LightLayer::variety l,int x,int y,int z)override{return map.getBrightness(l,x,y,z);}
+    bool canSeeSky(int x,int y,int z)override{return map.canSeeSky(x,y,z);}
+    bool isRainingAt(int,int,int)override{return false;}
+    bool hasChunksAt(int,int,int,int,int,int)override{return true;}
+    void spawnResources(int,int,int,int,int,float)override{}
+    bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
+    void addTileAABBs(Tile* tile,int x,int y,int z,AABB* box,sim::AABBList* boxes,std::shared_ptr<sim::Entity>)override{
+        const double top=tile->id==Tile::stoneSlabHalf_Id?.5:1;
+        if(!Tile::solid[tile->id] && tile->id!=Tile::stoneSlabHalf_Id)return;
+        AABB* shape=AABB::newTemp(x,y,z,x+1,y+top,z+1);
+        if(!box || shape->intersects(box))boxes->push_back(shape);
+    }
+};
+struct TestEntity final:sim::Entity { using Entity::Entity; };
+
+static void entities(){
+    MapLevel map;BoxLevel level(map);
+    for(int x=-4;x<=6;++x)for(int z=-4;z<=4;++z)map.put(x,0,z,Tile::rock_Id);
+    // A falling box lands on the floor (Entity::move's y clip, onGround).
+    auto e=std::make_shared<TestEntity>(&level);
+    e->setPos(0.5,5,0.5);
+    for(int i=0;i<60;++i){e->yd-=0.08;e->move(e->xd,e->yd,e->zd);e->yd*=0.98;}
+    require(e->onGround && std::abs(e->y-1)<1e-9 && e->fallDistance==0,"an entity falls onto the floor");
+    // It stops against a wall (the x clip).
+    map.put(2,1,0,Tile::rock_Id);map.put(2,2,0,Tile::rock_Id);
+    e->move(2,0,0);
+    require(e->horizontalCollision && std::abs(e->x-(2-0.3))<1e-6,"a wall stops it at its half width");
+    // With a foot size of half a block it steps up onto a slab.
+    map.put(2,1,0,0);map.put(2,2,0,0);map.put(2,1,0,Tile::stoneSlabHalf_Id);
+    e->setPos(1.2,1,0.5);e->onGround=true;e->footSize=0.5f;
+    e->move(1,0,0);
+    // The box is on the slab; y lags by ySlideOffset (the smooth step).
+    require(std::abs(e->bb->y0-1.5)<1e-6 && e->x>2 && e->ySlideOffset>0.5f,"it steps up half a block");
+    // In water, Entity::baseTick notices (updateInWaterState -> checkAndHandleWater).
+    map.put(-2,1,0,Tile::water_Id);map.put(-2,2,0,Tile::water_Id);
+    e->setPos(-1.5,1,0.5);e->fallDistance=3;
+    e->baseTick();
+    require(e->isInWater() && !e->isInLava() && e->fallDistance==0,"it is in water, which stops a fall");
+    e->setPos(4.5,1,0.5);
+    require(!e->updateInWaterState(),"and out of it");
+    // Entity::isFree and isInWall.
+    require(e->isFree(0.0,0.0,0.0) && !e->isFree(0.0,-1.0,0.0),"standing in the open is free, the floor is not");
+    e->setPos(0.5,0.2,0.5);
+    require(e->isInWall(),"inside the floor is in a wall");
+}
+
 static void tnt(){
     World world;world.generate(53,true);
     for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
@@ -580,6 +637,7 @@ int main(int argc,char** argv){try{
     updates();
     redstone();
     pistons();
+    entities();
     tnt();
     dispensers();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());

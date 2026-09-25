@@ -27,13 +27,13 @@ add_library(console_world STATIC src/World.cpp src/WorldTiles.cpp src/WorldConta
 target_link_libraries(console_world PUBLIC console_original)
 # Original random tile tick rules (tools/extract_tile_ticks.py) over the
 # console::sim stand-ins; World supplies the live Level.
-add_library(console_tile_ticks STATIC ported/tick/TileTickRules.cpp ported/tick/TileTickHost.cpp ported/TileProperties.cpp)
+add_library(console_tile_ticks STATIC ported/tick/TileTickRules.cpp ported/tick/EntityRules.cpp ported/tick/TileTickHost.cpp ported/TileProperties.cpp)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   # The extracted PistonBaseTile::ignoreUpdate stores a flag as a pointer.
   set_source_files_properties(ported/tick/TileTickRules.cpp PROPERTIES COMPILE_OPTIONS "-Wno-int-to-void-pointer-cast")
 endif()
 target_include_directories(console_tile_ticks PUBLIC ported/tick src PRIVATE ported)
-target_link_libraries(console_tile_ticks PUBLIC console_materials console_original console_geometry)
+target_link_libraries(console_tile_ticks PUBLIC console_materials console_original console_geometry console_nbt)
 target_include_directories(console_world PUBLIC src)
 include(cmake/BiomeSources.cmake)
 set(CONSOLE_BIOME_SOURCES)

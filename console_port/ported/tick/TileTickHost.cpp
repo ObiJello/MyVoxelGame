@@ -133,6 +133,8 @@ std::unique_ptr<Tile> make(std::string_view cls){
 void initializeTiles(){
     static std::once_flag once;
     std::call_once(once,[]{
+        // Mth::sin/cos read the table Mth::init builds.
+        Mth::init();
         static std::unique_ptr<Tile> owned[256];
         for(int id=0;id<256;++id){
             const auto* properties=consoleTileProperties(id);
@@ -146,6 +148,9 @@ void initializeTiles(){
                 "SignTile","SkullTile","TheEndPortal"})
                 if(properties->className==std::string_view(entityClass))tile.entityTile=true;
             tile.id=id;
+#define CONSOLE_RENDER_SHAPE(name,shape) if(properties->className==std::string_view(name))tile.renderShape=Tile::shape;
+#include "RenderShapes.inc"
+#undef CONSOLE_RENDER_SHAPE
             tile.material=materialOf(properties->material);
             tile.ticking=properties->ticking;
             tile.cubeShaped=properties->cubeShaped;

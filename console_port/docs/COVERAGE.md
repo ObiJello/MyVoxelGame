@@ -8,7 +8,7 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 | Subsystem | Classes | Ported | Partial | Missing |
 |---|---:|---:|---:|---:|
-| Main loop and levels | 53 | 7 | 22 | 24 |
+| Main loop and levels | 53 | 7 | 23 | 23 |
 | Player and game modes | 12 | 3 | 4 | 5 |
 | Entities | 67 | 0 | 48 | 19 |
 | Mob AI | 58 | 0 | 1 | 57 |
@@ -17,28 +17,28 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | Items | 63 | 0 | 29 | 34 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
-| Enchanting | 24 | 0 | 1 | 23 |
+| Enchanting | 24 | 0 | 2 | 22 |
 | Effects | 5 | 0 | 2 | 3 |
 | World generation | 118 | 57 | 11 | 50 |
 | Dimensions | 4 | 0 | 2 | 2 |
-| Saves, NBT and IO | 47 | 12 | 6 | 29 |
+| Saves, NBT and IO | 47 | 12 | 7 | 28 |
 | Rendering | 156 | 0 | 30 | 126 |
 | Audio | 3 | 0 | 0 | 3 |
 | Screens and UI | 195 | 0 | 17 | 178 |
 | Tutorial | 29 | 26 | 2 | 1 |
 | Stats and achievements | 14 | 2 | 2 | 10 |
 | Commands | 9 | 0 | 0 | 9 |
-| Networking | 96 | 0 | 4 | 92 |
-| Other | 102 | 11 | 26 | 65 |
-| **All** | **1247** | **119** | **345** | **783** |
+| Networking | 96 | 0 | 5 | 91 |
+| Other | 102 | 11 | 29 | 62 |
+| **All** | **1247** | **119** | **352** | **776** |
 
 ## Main loop and levels
 
 **Ported (7):** HellRandomLevelSource, LevelData, LevelSettings, LevelType, RandomLevelSource, TheEndLevelRandomLevelSource, TickNextTickData
 
-**Partial (22):** ChunkPos, DerivedLevelData, EmptyLevelChunk, Explosion, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobSpawner, MultiPlayerChunkCache, Options, ServerLevel, TileEventData, TilePos
+**Partial (23):** ChunkPos, DerivedLevelData, EmptyLevelChunk, Explosion, FlatLevelSource, GameRenderer, Level, LevelChunk, LevelGenerationOptions, LevelRenderer, LevelRules, LevelRuleset, LevelStorage, McRegionLevelStorage, Minecraft, MinecraftServer, MobSpawner, MultiPlayerChunkCache, Options, ServerLevel, TileEventData, TilePos, Timer
 
-**Missing (24):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MobCategory, MockedLevelStorage, MultiPlayerLevel, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, Timer, WaterLevelChunk
+**Missing (23):** CustomLevelSource, DemoLevel, DerivedServerLevel, DirectoryLevelStorage, DirectoryLevelStorageSource, DistanceChunkSorter, HellFlatLevelSource, LevelConflictException, LevelGenerators, LevelStorageProfilerDecorator, LevelSummary, McRegionLevelStorageSource, MemoryLevelStorage, MemoryLevelStorageSource, MobCategory, MockedLevelStorage, MultiPlayerLevel, PlayerChunkMap, PortalForcer, ReadOnlyChunkCache, ServerChunkCache, ServerLevelListener, WaterLevelChunk
 
 ## Player and game modes
 
@@ -94,9 +94,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Enchanting
 
-**Partial (1):** Enchantment
+**Partial (2):** Enchantment, ProtectionEnchantment
 
-**Missing (23):** AddEnchantmentRuleDefinition, ArrowDamageEnchantment, ArrowFireEnchantment, ArrowInfiniteEnchantment, ArrowKnockbackEnchantment, DamageEnchantment, DigDurabilityEnchantment, DiggingEnchantment, EnchantmentCategory, EnchantmentHelper, EnchantmentInstance, FireAspectEnchantment, KnockbackEnchantment, LootBonusEnchantment, OxygenEnchantment, ProtectionEnchantment, ThornsEnchantment, UntouchingEnchantment, WaterWorkerEnchantment, XUI_Ctrl_EnchantButton, XUI_Ctrl_EnchantmentBook, XUI_Ctrl_EnchantmentButtonText, XUI_Scene_Enchant
+**Missing (22):** AddEnchantmentRuleDefinition, ArrowDamageEnchantment, ArrowFireEnchantment, ArrowInfiniteEnchantment, ArrowKnockbackEnchantment, DamageEnchantment, DigDurabilityEnchantment, DiggingEnchantment, EnchantmentCategory, EnchantmentHelper, EnchantmentInstance, FireAspectEnchantment, KnockbackEnchantment, LootBonusEnchantment, OxygenEnchantment, ThornsEnchantment, UntouchingEnchantment, WaterWorkerEnchantment, XUI_Ctrl_EnchantButton, XUI_Ctrl_EnchantmentBook, XUI_Ctrl_EnchantmentButtonText, XUI_Scene_Enchant
 
 ## Effects
 
@@ -122,9 +122,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (12):** BufferedOutputStream, ByteArrayInputStream, ByteArrayOutputStream, CompressedTileStorage, DataInputStream, DataOutputStream, FileHeader, InputStream, NbtIo, SparseDataStorage, SparseLightStorage, Tag
 
-**Partial (6):** ConsoleSaveFileOriginal, File, McRegionChunkStorage, OldChunkStorage, Region, RegionFile
+**Partial (7):** ConsoleSaveFileOriginal, ConsoleSchematicFile, File, McRegionChunkStorage, OldChunkStorage, Region, RegionFile
 
-**Missing (29):** ArchiveFile, ConsoleSaveFileConverter, ConsoleSaveFileInputStream, ConsoleSaveFileOutputStream, ConsoleSaveFileSplit, ConsoleSchematicFile, DLCAudioFile, DLCCapeFile, DLCColourTableFile, DLCFile, DLCGameRulesFile, DLCGameRulesHeader, DLCLocalisationFile, DLCSkinFile, DLCUIDataFile, FileInputStream, FileOutputStream, InputStreamReader, MapItemSavedData, MemoryChunkStorage, RegionFileCache, SavedData, SavedDataStorage, SonyRemoteStorage, XUI_SaveMessage, ZoneFile, ZoneIo, ZonedChunkStorage, compression
+**Missing (28):** ArchiveFile, ConsoleSaveFileConverter, ConsoleSaveFileInputStream, ConsoleSaveFileOutputStream, ConsoleSaveFileSplit, DLCAudioFile, DLCCapeFile, DLCColourTableFile, DLCFile, DLCGameRulesFile, DLCGameRulesHeader, DLCLocalisationFile, DLCSkinFile, DLCUIDataFile, FileInputStream, FileOutputStream, InputStreamReader, MapItemSavedData, MemoryChunkStorage, RegionFileCache, SavedData, SavedDataStorage, SonyRemoteStorage, XUI_SaveMessage, ZoneFile, ZoneIo, ZonedChunkStorage, compression
 
 ## Rendering
 
@@ -164,14 +164,14 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Networking
 
-**Partial (4):** ClientConnection, Connection, PlayerInfoPacket, ServerPlayerGameMode
+**Partial (5):** ChatPacket, ClientConnection, Connection, PlayerInfoPacket, ServerPlayerGameMode
 
-**Missing (92):** AddEntityPacket, AddExperienceOrbPacket, AddGlobalEntityPacket, AddMobPacket, AddPaintingPacket, AddPlayerPacket, AnimatePacket, AwardStatPacket, BlockRegionUpdatePacket, ChatPacket, ChunkTilesUpdatePacket, ChunkVisibilityAreaPacket, ChunkVisibilityPacket, ClientCommandPacket, ComplexItemDataPacket, ContainerAckPacket, ContainerButtonClickPacket, ContainerClickPacket, ContainerClosePacket, ContainerOpenPacket, ContainerSetContentPacket, ContainerSetDataPacket, ContainerSetSlotPacket, CraftItemPacket, CustomPayloadPacket, DebugOptionsPacket, DisconnectPacket, EntityActionAtPositionPacket, EntityEventPacket, ExplodePacket, GameCommandPacket, GameEventPacket, GameNetworkManager, GetInfoPacket, InteractPacket, KeepAlivePacket, KickPlayerPacket, LevelEventPacket, LevelSoundPacket, LoginPacket, MoveEntityPacket, MoveEntityPacketSmall, MovePlayerPacket, NetworkPlayerSony, Packet, PacketListener, PendingConnection, PlatformNetworkManagerSony, PlatformNetworkManagerStub, PlayerAbilitiesPacket, PlayerActionPacket, PlayerCommandPacket, PlayerConnection, PlayerInputPacket, PreLoginPacket, RemoveEntitiesPacket, RemoveMobEffectPacket, RespawnPacket, RotateHeadPacket, SQRNetworkManager, SQRNetworkPlayer, ServerCommandDispatcher, ServerConnection, ServerSettingsChangedPacket, SetCarriedItemPacket, SetCreativeModeSlotPacket, SetEntityDataPacket, SetEntityMotionPacket, SetEquippedItemPacket, SetExperiencePacket, SetHealthPacket, SetRidingPacket, SetSpawnPositionPacket, SetTimePacket, SignUpdatePacket, Socket, TakeItemEntityPacket, TeleportEntityPacket, TextureAndGeometryChangePacket, TextureAndGeometryPacket, TextureChangePacket, TexturePacket, TileDestructionPacket, TileEntityDataPacket, TileEventPacket, TileUpdatePacket, TradeItemPacket, UpdateGameRuleProgressPacket, UpdateMobEffectPacket, UpdateProgressPacket, UseItemPacket, XZPacket
+**Missing (91):** AddEntityPacket, AddExperienceOrbPacket, AddGlobalEntityPacket, AddMobPacket, AddPaintingPacket, AddPlayerPacket, AnimatePacket, AwardStatPacket, BlockRegionUpdatePacket, ChunkTilesUpdatePacket, ChunkVisibilityAreaPacket, ChunkVisibilityPacket, ClientCommandPacket, ComplexItemDataPacket, ContainerAckPacket, ContainerButtonClickPacket, ContainerClickPacket, ContainerClosePacket, ContainerOpenPacket, ContainerSetContentPacket, ContainerSetDataPacket, ContainerSetSlotPacket, CraftItemPacket, CustomPayloadPacket, DebugOptionsPacket, DisconnectPacket, EntityActionAtPositionPacket, EntityEventPacket, ExplodePacket, GameCommandPacket, GameEventPacket, GameNetworkManager, GetInfoPacket, InteractPacket, KeepAlivePacket, KickPlayerPacket, LevelEventPacket, LevelSoundPacket, LoginPacket, MoveEntityPacket, MoveEntityPacketSmall, MovePlayerPacket, NetworkPlayerSony, Packet, PacketListener, PendingConnection, PlatformNetworkManagerSony, PlatformNetworkManagerStub, PlayerAbilitiesPacket, PlayerActionPacket, PlayerCommandPacket, PlayerConnection, PlayerInputPacket, PreLoginPacket, RemoveEntitiesPacket, RemoveMobEffectPacket, RespawnPacket, RotateHeadPacket, SQRNetworkManager, SQRNetworkPlayer, ServerCommandDispatcher, ServerConnection, ServerSettingsChangedPacket, SetCarriedItemPacket, SetCreativeModeSlotPacket, SetEntityDataPacket, SetEntityMotionPacket, SetEquippedItemPacket, SetExperiencePacket, SetHealthPacket, SetRidingPacket, SetSpawnPositionPacket, SetTimePacket, SignUpdatePacket, Socket, TakeItemEntityPacket, TeleportEntityPacket, TextureAndGeometryChangePacket, TextureAndGeometryPacket, TextureChangePacket, TexturePacket, TileDestructionPacket, TileEntityDataPacket, TileEventPacket, TileUpdatePacket, TradeItemPacket, UpdateGameRuleProgressPacket, UpdateMobEffectPacket, UpdateProgressPacket, UseItemPacket, XZPacket
 
 ## Other
 
 **Ported (11):** AABB, Direction, Facing, HitResult, IntCache, JavaMath, Material, MaterialColor, Mth, Random, Vec3
 
-**Partial (26):** AddItemRuleDefinition, ApplySchematicRuleDefinition, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityIO, EntityRenderDispatcher, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, TileEntity, User, Vertex
+**Partial (29):** AddItemRuleDefinition, ApplySchematicRuleDefinition, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityDamageSource, EntityIO, EntityRenderDispatcher, IndirectEntityDamageSource, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, SynchedEntityData, TileEntity, User, Vertex
 
-**Missing (65):** BinaryHeap, BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityDamageSource, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IndirectEntityDamageSource, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Node, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, SynchedEntityData, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs
+**Missing (62):** BinaryHeap, BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Node, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs

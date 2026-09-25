@@ -12,6 +12,9 @@
 #include "Mth.h"
 #include "Random.h"
 #include "Vec3.h"
+#include "AABB.h"
+#include "CompoundTag.h"
+#include "FoodConstants.h"
 #include <map>
 #include <cmath>
 #include <cstdint>
@@ -39,6 +42,9 @@ using ::LightLayer;
 using ::Material;
 using ::Random;
 using ::Vec3;
+using ::AABB;
+using ::CompoundTag;
+using ::FoodConstants;
 using std::shared_ptr;
 
 #include "TileConstants.inc"
@@ -49,34 +55,320 @@ struct SoundType {
     float getVolume()const{return 1;}
     float getPitch()const{return 1;}
 };
+// The Win32 thread-local slots the source uses (TlsAlloc/TlsGetValue/TlsSetValue);
+// slot 0 is Tile's shape storage.
+using DWORD=unsigned;
+using LPVOID=void*;
+inline DWORD TlsAlloc(){static DWORD next=1;return next++;}
+inline void*& tlsSlot(DWORD index){static thread_local void* slots[16]{};return slots[index%16];}
+inline void TlsSetValue(DWORD index,void* value){tlsSlot(index)=value;}
 struct Abilities { bool instabuild=false; };
-struct AABB;
+using AABBList=std::vector<AABB*>;
+typedef unsigned char byte;
+#define PI (3.141592654f)
+#include "ClassTypes.inc"
+#include "SoundTypes.inc"
+#include "ParticleTypes.inc"
+// SharedConstants.h.
+struct SharedConstants { static const int TICKS_PER_SECOND=20; static const bool TEXTURE_LIGHTING=true; };
+// ChatPacket's death-message ids (DamageSource keeps one; chat is not ported).
+struct ChatPacket {
+#include "ChatMessages.inc"
+};
+class Entity;
+class Mob;
+class Player;
+class Arrow;
+class Fireball;
+class Level;
+class ItemEntity;
+class ItemInstance;
+// DamageSource.h, EntityDamageSource.h, IndirectEntityDamageSource.h (the
+// methods are the source's, in EntityRules.cpp; death messages are not ported).
 class DamageSource {
 public:
-    static inline DamageSource* explosion=nullptr;
-};
-// Entity: position, motion, box and the calls pistons and explosions make;
-// the host's stand-ins pass move() and hurt() on to the real entity.
-class Entity {
+    static DamageSource *inFire,*onFire,*lava,*inWall,*drown,*starve,*cactus,*fall,*outOfWorld,*genericSource,
+        *explosion,*controlledExplosion,*magic,*dragonbreath,*wither,*anvil,*fallingBlock;
+    static DamageSource *mobAttack(shared_ptr<Mob> mob);
+    static DamageSource *playerAttack(shared_ptr<Player> player);
+    static DamageSource *arrow(shared_ptr<Arrow> arrow,shared_ptr<Entity> owner);
+    static DamageSource *thrown(shared_ptr<Entity> entity,shared_ptr<Entity> owner);
+    static DamageSource *indirectMagic(shared_ptr<Entity> entity,shared_ptr<Entity> owner);
+    static DamageSource *thorns(shared_ptr<Entity> source);
+private:
+    // The constructor leaves _scalesWithDifficulty unset; false here.
+    bool _bypassArmor=false,_bypassInvul=false;
+    float exhaustion=0;
+    bool isFireSource=false,_isProjectile=false,_scalesWithDifficulty=false,_isMagic=false;
 public:
-    double x=0,y=0,z=0,xd=0,yd=0,zd=0;
-    float heightOffset=0;
-    AABB* bb=nullptr;
-    virtual ~Entity()=default;
-    virtual void move(double,double,double){}
-    virtual bool hurt(DamageSource*,int){return false;}
-    virtual float getHeadHeight(){return 0;}
-    double distanceTo(double xp,double yp,double zp){
-        const double dx=x-xp,dy=y-yp,dz=z-zp;
-        return std::sqrt(dx*dx+dy*dy+dz*dz);
-    }
+    bool isProjectile();
+    DamageSource *setProjectile();
+    bool isBypassArmor();
+    float getFoodExhaustion();
+    bool isBypassInvul();
+    ChatPacket::EChatPacketMessage m_msgId;
+protected:
+    DamageSource(ChatPacket::EChatPacketMessage msgId);
+public:
+    virtual ~DamageSource(){}
+    virtual shared_ptr<Entity> getDirectEntity();
+    virtual shared_ptr<Entity> getEntity();
+protected:
+    DamageSource *bypassArmor();
+    DamageSource *bypassInvul();
+    DamageSource *setIsFire();
+    DamageSource *setScalesWithDifficulty();
+public:
+    virtual bool scalesWithDifficulty();
+    bool isMagic();
+    DamageSource *setMagic();
+    bool isFire();
+    ChatPacket::EChatPacketMessage getMsgId();
 };
-// Mob (a player's or a mob's facing, in the source's degrees) and Arrow: the
-// classes pressure plates and wooden buttons look for.
+class EntityDamageSource:public DamageSource {
+protected:
+    shared_ptr<Entity> entity;
+public:
+    EntityDamageSource(ChatPacket::EChatPacketMessage msgId,shared_ptr<Entity> entity);
+    virtual ~EntityDamageSource(){}
+    shared_ptr<Entity> getEntity()override;
+    virtual bool scalesWithDifficulty()override;
+};
+class IndirectEntityDamageSource:public EntityDamageSource {
+    shared_ptr<Entity> owner;
+public:
+    IndirectEntityDamageSource(ChatPacket::EChatPacketMessage msgId,shared_ptr<Entity> entity,shared_ptr<Entity> owner);
+    virtual ~IndirectEntityDamageSource(){}
+    shared_ptr<Entity> getDirectEntity()override;
+    shared_ptr<Entity> getEntity()override;
+};
+// SynchedEntityData: the values an entity keeps in step with clients. One
+// process here, so a typed map.
+class SynchedEntityData {
+    std::map<int,int> ints;
+    std::map<int,std::wstring> strings;
+    std::map<int,shared_ptr<ItemInstance>> items;
+public:
+    void define(int id,int value){ints[id]=value;}
+    void define(int id,byte value){ints[id]=value;}
+    void define(int id,short value){ints[id]=value;}
+    void define(int id,const std::wstring& value){strings[id]=value;}
+    void defineNULL(int id,void*){items[id]=nullptr;}
+    byte getByte(int id){return static_cast<byte>(ints[id]);}
+    short getShort(int id){return static_cast<short>(ints[id]);}
+    int getInteger(int id){return ints[id];}
+    std::wstring getString(int id){return strings[id];}
+    shared_ptr<ItemInstance> getItemInstance(int id){return items[id];}
+    void set(int id,int value){ints[id]=value;}
+    void set(int id,byte value){ints[id]=value;}
+    void set(int id,short value){ints[id]=value;}
+    void set(int id,const std::wstring& value){strings[id]=value;}
+    void set(int id,shared_ptr<ItemInstance> value){items[id]=value;}
+    void markDirty(int){}
+};
+// ProtectionEnchantment::getFireAfterDampener: armour enchantments are not
+// ported, so the fire time is unchanged.
+struct ProtectionEnchantment { static int getFireAfterDampener(shared_ptr<Entity>,int value){return value;} };
+// Entity.h: the fields and methods of the source's Entity (EntityRules.cpp
+// has the methods). The pure virtuals have neutral defaults so the host's
+// small stand-ins (falling tiles, primed TNT, items) can be made directly.
+class Entity:public std::enable_shared_from_this<Entity> {
+public:
+    virtual eINSTANCEOF GetType(){return eTYPE_ENTITY;}
+    static const short TOTAL_AIR_SUPPLY=20*15;
+    static inline int entityCounter=2048;
+    // Entity::tlsIdx: the server thread's small-id flag (not set: plain ids).
+    static inline DWORD tlsIdx=TlsAlloc();
+    int entityId=0;
+    double viewScale=1;
+    bool blocksBuilding=false;
+    std::weak_ptr<Entity> rider;
+    shared_ptr<Entity> riding;
+    Level* level=nullptr;
+    double xo=0,yo=0,zo=0;
+    double x=0,y=0,z=0;
+    double xd=0,yd=0,zd=0;
+    float yRot=0,xRot=0;
+    float yRotO=0,xRotO=0;
+    AABB* bb=nullptr;
+    bool onGround=false;
+    bool horizontalCollision=false,verticalCollision=false;
+    bool collision=false;
+    bool hurtMarked=false;
+protected:
+    bool isStuckInWeb=false;
+public:
+    bool slide=true;
+    bool removed=false;
+    float heightOffset=0;
+    float bbWidth=0.6f;
+    float bbHeight=1.8f;
+    float walkDistO=0;
+    float walkDist=0;
+    float fallDistance=0;
+private:
+    int nextStep=1;
+public:
+    double xOld=0,yOld=0,zOld=0;
+    float ySlideOffset=0;
+    float footSize=0;
+    bool noPhysics=false;
+    float pushthrough=0;
+protected:
+    Random* random=nullptr;
+public:
+    int tickCount=0;
+    int flameTime=1;
+private:
+    int onFire=0;
+protected:
+    bool wasInWater=false;
+public:
+    int invulnerableTime=0;
+private:
+    bool firstTick=true;
+public:
+    std::wstring customTextureUrl,customTextureUrl2;
+protected:
+    bool fireImmune=false;
+    shared_ptr<SynchedEntityData> entityData;
+private:
+    static const int DATA_SHARED_FLAGS_ID=0;
+    static const int FLAG_ONFIRE=0,FLAG_SNEAKING=1,FLAG_RIDING=2,FLAG_SPRINTING=3,FLAG_USING_ITEM=4,
+        FLAG_INVISIBLE=5,FLAG_IDLEANIM=6,FLAG_EFFECT_WEAKENED=7;
+    static const int DATA_AIR_SUPPLY_ID=1;
+    double xRideRotA=0,yRideRotA=0;
+public:
+    bool inChunk=false;
+    int xChunk=0,yChunk=0,zChunk=0;
+    int xp=0,yp=0,zp=0,xRotp=0,yRotp=0;
+    bool noCulling=false;
+    bool hasImpulse=false;
+protected:
+    bool m_ignoreVerticalCollisions=false;
+    unsigned int m_uiAnimOverrideBitmask=0;
+public:
+    Entity(Level* level=nullptr,bool useSmallId=true);
+    virtual ~Entity();
+protected:
+    void _init(bool useSmallId);
+    virtual void defineSynchedData(){}
+    // Entity::getSmallId / freeSmallId: network ids, not used here.
+    int getSmallId(){return entityCounter++;}
+    void freeSmallId(int){}
+public:
+    shared_ptr<SynchedEntityData> getEntityData();
+protected:
+    virtual void resetPos();
+public:
+    virtual void remove();
+protected:
+    virtual void setSize(float w,float h);
+    void setRot(float yRot,float xRot);
+public:
+    void setPos(double x,double y,double z);
+    void turn(float xo,float yo);
+    virtual void tick();
+    virtual void baseTick();
+protected:
+    void lavaHurt();
+public:
+    virtual void setOnFire(int numberOfSeconds);
+    virtual void clearFire();
+protected:
+    virtual void outOfWorld();
+public:
+    bool isFree(float xa,float ya,float za,float grow);
+    bool isFree(double xa,double ya,double za);
+    virtual void move(double xa,double ya,double za,bool noEntityCubes=false);
+protected:
+    virtual void checkInsideTiles();
+    // Entity::playStepSound: sounds are not ported.
+    virtual void playStepSound(int,int,int,int){}
+public:
+    virtual void playSound(int iSound,float volume,float pitch);
+protected:
+    virtual bool makeStepSound();
+    virtual void checkFallDamage(double ya,bool onGround);
+public:
+    virtual AABB* getCollideBox();
+protected:
+    virtual void burn(int dmg);
+public:
+    bool isFireImmune();
+    virtual void causeFallDamage(float distance);
+    bool isInWaterOrRain();
+    virtual bool isInWater();
+    virtual bool updateInWaterState();
+    bool isUnderLiquid(Material* material);
+    virtual float getHeadHeight();
+    bool isInLava();
+    void moveRelative(float xa,float za,float speed);
+    virtual float getBrightness(float a);
+    virtual void setLevel(Level* level);
+    void absMoveTo(double x,double y,double z,float yRot,float xRot);
+    void moveTo(double x,double y,double z,float yRot,float xRot);
+    float distanceTo(shared_ptr<Entity> e);
+    double distanceToSqr(double x2,double y2,double z2);
+    double distanceTo(double x2,double y2,double z2);
+    double distanceToSqr(shared_ptr<Entity> e);
+    virtual void playerTouch(shared_ptr<Player> player);
+    virtual void push(shared_ptr<Entity> e);
+    virtual void push(double xa,double ya,double za);
+protected:
+    void markHurt();
+public:
+    virtual bool hurt(DamageSource* source,int damage);
+    bool intersects(double x0,double y0,double z0,double x1,double y1,double z1);
+    virtual bool isPickable();
+    virtual bool isPushable();
+    virtual bool isShootable();
+    virtual void awardKillScore(shared_ptr<Entity> victim,int score);
+    virtual void readAdditionalSaveData(CompoundTag*){}
+    virtual void addAdditonalSaveData(CompoundTag*){}
+    shared_ptr<ItemEntity> spawnAtLocation(int resource,int count);
+    shared_ptr<ItemEntity> spawnAtLocation(int resource,int count,float yOffs);
+    shared_ptr<ItemEntity> spawnAtLocation(shared_ptr<ItemInstance> itemInstance,float yOffs);
+    virtual bool isAlive();
+    virtual bool isInWall();
+    virtual bool interact(shared_ptr<Player> player);
+    virtual AABB* getCollideAgainstBox(shared_ptr<Entity> entity);
+    virtual void handleEntityEvent(byte eventId);
+    virtual void animateHurt();
+    virtual bool isOnFire();
+    virtual bool isRiding();
+    virtual bool isSneaking();
+    virtual void setSneaking(bool value);
+    virtual bool isSprinting();
+    virtual void setSprinting(bool value);
+    virtual bool isInvisible();
+    virtual void setInvisible(bool value);
+protected:
+    bool getSharedFlag(int flag);
+    void setSharedFlag(int flag,bool value);
+public:
+    int getAirSupply();
+    void setAirSupply(int supply);
+    virtual void killed(shared_ptr<Mob> mob);
+protected:
+    bool checkInTile(double x,double y,double z);
+public:
+    virtual void makeStuckInWeb();
+    virtual bool canCreateParticles(){return true;}
+    virtual bool is(shared_ptr<Entity> other);
+    virtual float getYHeadRot();
+    virtual void setYHeadRot(float yHeadRot);
+    virtual bool isAttackable();
+    virtual bool isInvulnerable();
+    virtual void copyPosition(shared_ptr<Entity> target);
+    unsigned int getAnimOverrideBitmask(){return m_uiAnimOverrideBitmask;}
+};
+// Mob: the facing (Entity::yRot) pressure plates and buttons look for;
+// the rest of the Mob port comes with the mob AI.
 class Mob:public Entity {
 public:
-    float yRot=0,xRot=0;
-    void moveTo(double x,double y,double z,float yRot,float xRot){this->x=x;this->y=y;this->z=z;this->yRot=yRot;this->xRot=xRot;}
+    using Entity::Entity;
+    eINSTANCEOF GetType()override{return eTYPE_MOB;}
     virtual void finalizeMobSpawn(){}
 };
 // Projectile::shoot's aim for the thrown entities the dispenser makes (they
@@ -104,8 +396,6 @@ public:
 };
 class Minecart:public Entity { public: Minecart(class Level*,double x,double y,double z,int){this->x=x;this->y=y;this->z=z;} };
 class Boat:public Entity { public: Boat(class Level*,double x,double y,double z){this->x=x;this->y=y;this->z=z;} };
-// The entity kinds Level::countInstanceOf is asked about.
-enum eINSTANCEOF { eTYPE_PROJECTILE,eTYPE_SMALL_FIREBALL,eTYPE_MINECART,eTYPE_BOAT };
 class Level;
 // TileEntity: the fields and removal flag the piston pieces use.
 class TileEntity {
@@ -119,13 +409,6 @@ public:
     void clearRemoved(){removed=false;}
     bool isRemoved()const{return removed;}
 };
-// The Win32 thread-local slots the source uses (TlsAlloc/TlsGetValue/TlsSetValue);
-// slot 0 is Tile's shape storage.
-using DWORD=unsigned;
-using LPVOID=void*;
-inline DWORD TlsAlloc(){static DWORD next=1;return next++;}
-inline void*& tlsSlot(DWORD index){static thread_local void* slots[16]{};return slots[index%16];}
-inline void TlsSetValue(DWORD index,void* value){tlsSlot(index)=value;}
 // Statistics and achievements are not ported.
 struct GenericStats {
     static int portalsCreated(){return 0;}
@@ -138,6 +421,7 @@ class DispenserTileEntity;
 class Player:public Mob {
 public:
     Player(){heightOffset=1.62f;}
+    eINSTANCEOF GetType()override{return eTYPE_PLAYER;}
     // The carried item (TntTile::use looks for flint and steel).
     shared_ptr<ItemInstance> selected;
     shared_ptr<ItemInstance> getSelectedItem(){return selected;}
@@ -147,12 +431,6 @@ public:
     // Player::openTrap: the dispenser the player opened (the client shows its menu).
     shared_ptr<DispenserTileEntity> openedTrap;
     bool openTrap(shared_ptr<DispenserTileEntity> container){openedTrap=container;return true;}
-};
-// CompoundTag: an item's tag, carried whole (the host keeps the saved tag).
-class CompoundTag {
-public:
-    std::shared_ptr<const void> saved;
-    CompoundTag* copy()const{return new CompoundTag(*this);}
 };
 class Item;
 class ItemInstance {
@@ -166,7 +444,7 @@ public:
     // ItemInstance::remove: a stack of count split off (with a copy of the tag).
     shared_ptr<ItemInstance> remove(int n){
         auto result=std::make_shared<ItemInstance>(id,n,auxValue);
-        if(tag)result->tag.reset(tag->copy());
+        if(tag)result->tag.reset(static_cast<CompoundTag*>(tag->copy()));
         count-=n;
         return result;
     }
@@ -179,23 +457,6 @@ public:
     int get4JData(){return data4J;}
     // ItemInstance::hurt: the host wears the tool (and breaks it) afterwards.
     void hurt(int amount,shared_ptr<Player>){damage+=amount;}
-};
-// AABB::newTemp: a box from a small per-thread pool, as the source's.
-struct AABB {
-    double x0=0,y0=0,z0=0,x1=0,y1=0,z1=0;
-    bool intersects(double x02,double y02,double z02,double x12,double y12,double z12)const{
-        if(x12<=x0 || x02>=x1)return false;
-        if(y12<=y0 || y02>=y1)return false;
-        if(z12<=z0 || z02>=z1)return false;
-        return true;
-    }
-    static AABB* newTemp(double x0,double y0,double z0,double x1,double y1,double z1){
-        static thread_local AABB pool[64];
-        static thread_local unsigned next=0;
-        AABB& box=pool[next++%64];
-        box={x0,y0,z0,x1,y1,z1};
-        return &box;
-    }
 };
 // TilePos with the source's hash (in unsigned arithmetic: the source's signed
 // multiply overflows).
@@ -214,10 +475,6 @@ struct LevelEvent {
     static const int SOUND_CLICK=1000,SOUND_CLICK_FAIL=1001,SOUND_LAUNCH=1002,SOUND_OPEN_DOOR=1003,
         SOUND_BLAZE_FIREBALL=1009,PARTICLES_SHOOT=2000;
 };
-// Sounds and particles are client effects; the ids are what the calls name.
-enum eSOUND_TYPE { eSoundType_RANDOM_FIZZ,eSoundType_FIRE_IGNITE,eSoundType_RANDOM_CLICK,
-    eSoundType_TILE_PISTON_OUT,eSoundType_TILE_PISTON_IN,eSoundType_RANDOM_FUSE,eSoundType_RANDOM_EXPLODE };
-enum ePARTICLE_TYPE { eParticleType_largesmoke,eParticleType_smoke,eParticleType_hugeexplosion,eParticleType_explode };
 // HitResult: only whether Level::clip hit something.
 class HitResult {};
 inline void MemSect(int){}
@@ -228,6 +485,10 @@ inline void PIXEndNamedEvent(){}
 struct Math { static double random(){static Random generator;return generator.nextDouble();} };
 
 struct Dimension {
+    // Dimension::brightnessRamp (updateLightRamp is the source's).
+    float brightnessRamp[16]{};
+    Dimension(){updateLightRamp();}
+    void updateLightRamp();
     int id=0;
     bool ultraWarm=false,hasCeiling=false;
     // Dimension::getXZSize: the world's width in chunks.
@@ -280,6 +541,9 @@ public:
     // object (the host makes a Level for each call).
     const void* identity=this;
     static const int MAX_LEVEL_SIZE=30000000;
+    static const int maxMovementHeight=512,minBuildHeight=0;
+    // Level::boxes: getCubes' result list.
+    AABBList boxes;
     // Level.h's 4J entity limits.
     static const int MAX_XBOX_BOATS=40,MAX_CONSOLE_MINECARTS=40,MAX_DISPENSABLE_FIREBALLS=200,
         MAX_DISPENSABLE_PROJECTILES=300;
@@ -324,6 +588,20 @@ public:
     virtual bool hasChunk(int chunkX,int chunkZ)=0;
 
     bool isEmptyTile(int x,int y,int z){return getTile(x,y,z)==0;}
+    // Entity movement: the collision boxes in a box, liquids, fire.
+    AABBList* getCubes(shared_ptr<Entity> source,AABB* box,bool noEntities=false,bool blockAtEdge=false);
+    bool containsAnyLiquid(AABB* box);
+    bool containsFireTile(AABB* box);
+    bool checkAndHandleWater(AABB* box,Material* material,shared_ptr<Entity> e);
+    bool containsMaterial(AABB* box,Material* material);
+    bool containsLiquid(AABB* box,Material* material);
+    float getBrightness(int x,int y,int z);
+    bool hasChunkAt(int x,int y,int z);
+    int getTileRenderShape(int x,int y,int z);
+    bool reallyHasChunk(int x,int z){return hasChunk(x,z);}
+    // Tile::addAABBs for a tile whose collision is not ported: the current
+    // shape here; the World uses its own collision shapes.
+    virtual void addTileAABBs(Tile* tile,int x,int y,int z,AABB* box,AABBList* boxes,shared_ptr<Entity>);
     Material* getMaterial(int x,int y,int z);
     // Level::isSolidBlockingTile.
     bool isSolidBlockingTile(int x,int y,int z);
@@ -411,6 +689,14 @@ public:
     static inline thread_local Level* current=nullptr;
 };
 using LevelSource=Level;
+// Minecraft::GetInstance()->levelRenderer->destroyedTileManager: the client's
+// removed-but-still-drawn tiles, which getCubes also blocks (none here).
+struct DestroyedTileManager { void addAABBs(Level*,AABB*,AABBList*){} };
+struct LevelRenderer { DestroyedTileManager ownManager;DestroyedTileManager* destroyedTileManager=&ownManager; };
+struct Minecraft {
+    LevelRenderer ownRenderer;LevelRenderer* levelRenderer=&ownRenderer;
+    static Minecraft* GetInstance(){static Minecraft instance;return &instance;}
+};
 // Sets Level::current for a scope.
 struct CurrentLevel {
     Level* previous;
@@ -505,7 +791,10 @@ public:
     virtual void wasExploded(Level*,int,int,int){}
     // Tile::addAABBs: the current shape's box when it meets `box` (the host
     // passes none to collect them all).
-    virtual void addAABBs(Level*,int x,int y,int z,AABB* box,std::vector<AABB*>* boxes,shared_ptr<Entity>){
+    // The host decides the boxes of the tiles whose addAABBs/getAABB are not
+    // ported (Level::addTileAABBs); by default the current shape.
+    virtual void addAABBs(Level* level,int x,int y,int z,AABB* box,std::vector<AABB*>* boxes,shared_ptr<Entity> source);
+    void addShapeAABB(int x,int y,int z,AABB* box,std::vector<AABB*>* boxes){
         auto* s=shapeStorage();
         AABB* shape=AABB::newTemp(x+s->xx0,y+s->yy0,z+s->zz0,x+s->xx1,y+s->yy1,z+s->zz1);
         if(!box || (shape->x1>box->x0 && shape->x0<box->x1 && shape->y1>box->y0 && shape->y0<box->y1 &&
@@ -518,6 +807,14 @@ public:
     double getShapeY1(){return shapeStorage()->yy1;}
     double getShapeZ1(){return shapeStorage()->zz1;}
     virtual int getTickDelay(){return 10;}
+    // Tile::getRenderShape (the class's own, from RenderShapes.inc).
+    int renderShape=SHAPE_BLOCK;
+    virtual int getRenderShape(){return renderShape;}
+    // Entities on and in tiles.
+    virtual void stepOn(Level*,int,int,int,shared_ptr<Entity>){}
+    virtual void fallOn(Level*,int,int,int,shared_ptr<Entity>,float){}
+    virtual void handleEntityInside(Level*,int,int,int,shared_ptr<Entity>,Vec3*){}
+    virtual bool isSolidFace(LevelSource* level,int x,int y,int z,int face);
     virtual void tick(Level*,int,int,int,Random*){}
     virtual bool shouldTileTick(Level*,int,int,int){return true;}
     virtual bool canSurvive(Level*,int,int,int){return true;}
@@ -545,6 +842,12 @@ public:
     void spawnResources(Level* level,int x,int y,int z,int data,int bonus){spawnResources(level,x,y,z,data,1.0f,bonus);}
 };
 
+inline void Tile::addAABBs(Level* level,int x,int y,int z,AABB* box,std::vector<AABB*>* boxes,shared_ptr<Entity> source){
+    level->addTileAABBs(this,x,y,z,box,boxes,source);
+}
+inline void Level::addTileAABBs(Tile* tile,int x,int y,int z,AABB* box,AABBList* boxes,shared_ptr<Entity>){
+    tile->addShapeAABB(x,y,z,box,boxes);
+}
 // TlsGetValue(Tile::tlsIdxShape) is this thread's shape storage.
 inline void* TlsGetValue(DWORD index){return index==0?static_cast<void*>(Tile::shapeStorage()):tlsSlot(index);}
 
@@ -833,6 +1136,11 @@ public:
 class LiquidTile:public Tile {
 public:
     int getDepth(Level* level,int x,int y,int z);
+    static float getHeight(int d);
+    int getRenderedDepth(LevelSource* level,int x,int y,int z);
+    bool isSolidFace(LevelSource* level,int x,int y,int z,int face)override;
+    Vec3* getFlow(LevelSource* level,int x,int y,int z);
+    void handleEntityInside(Level* level,int x,int y,int z,shared_ptr<Entity> e,Vec3* current)override;
     int getTickDelay()override;
     void onPlace(Level* level,int x,int y,int z)override;
     void neighborChanged(Level* level,int x,int y,int z,int type)override;
@@ -1125,7 +1433,6 @@ public:
     static void stopSharingIfServer(Level*,int,int,int){}
     bool createPush(Level* level,int sx,int sy,int sz,int facing);
 };
-using AABBList=std::vector<AABB*>;
 class PistonExtensionTile:public Tile {
 public:
     TILE_CONSTANTS_PistonExtensionTile
