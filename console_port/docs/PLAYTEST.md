@@ -186,3 +186,16 @@ new signal should throw one random item out of the front (it picks a random fill
 slot), empty a bucket into the space in front, pick a source back up with an empty
 bucket, or spawn the egg's mob. Arrows, snowballs, eggs and potions stay inside for now
 (their projectiles are not ported). Break it and check its contents drop.
+
+## Animals
+
+Find (or hatch with spawn eggs) pigs, cows, sheep and chickens. They should wander
+while you are near, bolt about when hit, follow you when you hold their food (wheat for
+cows and sheep, carrots for pigs, seeds for chickens), and fall in love (hearts are not
+drawn yet) when fed it: two in love nearby make a baby, which follows its parents and
+grows up after about twenty minutes. Shear a sheep (the wool drops and grows back when it
+eats grass, which turns the grass to dirt), milk a cow with an empty bucket, and watch a
+chicken for eggs. A saddle goes on a pig (you cannot ride it yet) and dye colours a
+sheep. Note anything that moves oddly, gets stuck, or breeds when it
+should not.
+

@@ -505,6 +505,82 @@ static void mobs(){
     require(mob->removed,"a dead mob is removed after its death animation");
 }
 
+// Level::tickEntities for a BoxLevel: each entity's tick, then the removed go.
+static void tickAll(BoxLevel& level,int ticks){
+    for(int i=0;i<ticks;++i){
+        const auto current=level.entities;
+        for(const auto& e:current)if(!e->removed)e->tick();
+        std::erase_if(level.entities,[](const auto& e){return e->removed;});
+    }
+}
+template<class T> static std::shared_ptr<T> spawn(BoxLevel& level,double x,double y,double z){
+    auto mob=std::make_shared<T>(&level);
+    mob->moveTo(x,y,z,0,0);
+    level.entities.push_back(mob);
+    return mob;
+}
+template<class T> static int countOf(BoxLevel& level){
+    int n=0;for(const auto& e:level.entities)if(std::dynamic_pointer_cast<T>(e) && !e->removed)++n;
+    return n;
+}
+
+static void animals(){
+    MapLevel map;BoxLevel level(map);
+    for(int x=-16;x<=16;++x)for(int z=-16;z<=16;++z)map.put(x,0,z,Tile::grass_Id);
+    // Pigs wander (RandomStrollGoal) while a player is within 32 blocks
+    // (Mob::checkDespawn keeps their idle time down).
+    auto player=std::make_shared<sim::Player>();player->level=&level;
+    player->moveTo(10.5,1,10.5,0,0);
+    level.players.push_back(player);
+    // RandomStrollGoal rolls 1 in 120 each time the goals are chosen.
+    auto pig=spawn<sim::Pig>(level,0.5,1,0.5);
+    for(int i=0;i<3000 && pig->distanceTo(0.5,1,0.5)<=1;++i)tickAll(level,1);
+    require(pig->distanceTo(0.5,1,0.5)>1 && pig->onGround,"a pig wanders off");
+    // Hit, it panics (PanicGoal): it runs to random spots nearby for as
+    // long as it remembers the hit (Mob::lastHurtByMobTime, 60 ticks).
+    player->moveTo(pig->x-1,1,pig->z,0,0);
+    const double hitX=pig->x,hitZ=pig->z;
+    require(pig->hurt(sim::DamageSource::playerAttack(player),1),"the pig is hit");
+    double furthest=0;
+    for(int i=0;i<60;++i){tickAll(level,1);furthest=std::max(furthest,std::hypot(pig->x-hitX,pig->z-hitZ));}
+    require(furthest>2.5,"it panics and runs");
+    // A cow follows wheat (TemptGoal).
+    level.entities.clear();
+    auto cow=spawn<sim::Cow>(level,-6.5,1,0.5);
+    player->moveTo(0.5,1,0.5,0,0);
+    player->inventory->items[0]=std::make_shared<sim::ItemInstance>(sim::Item::wheat_Id,5,0);
+    tickAll(level,200);
+    require(cow->distanceTo(player->x,player->y,player->z)<3.5,"a cow follows wheat");
+    // Fed wheat, two cows fall in love (Animal::interact) and breed a calf
+    // (BreedGoal); the parents' age is set and the calf is a baby.
+    auto mate=spawn<sim::Cow>(level,cow->x+1,1,cow->z);
+    tickAll(level,5);
+    require(cow->interact(player) && mate->interact(player),"feeding wheat puts cows in love");
+    require(player->inventory->items[0]->count==3,"feeding uses the wheat");
+    player->inventory->items[0]=nullptr;
+    tickAll(level,200);
+    require(countOf<sim::Cow>(level)==3,"two cows in love breed a calf");
+    std::shared_ptr<sim::Cow> calf;
+    for(const auto& e:level.entities)if(auto c=std::dynamic_pointer_cast<sim::Cow>(e);c && c!=cow && c!=mate)calf=c;
+    require(calf && calf->isBaby() && cow->getAge()>0,"the calf is a baby and the parents wait");
+    // A sheared lamb eats grass (EatTileGoal): the grass turns to dirt and
+    // the wool grows back (Sheep::ate).
+    level.entities.clear();level.players.clear();
+    auto lamb=spawn<sim::Sheep>(level,4.5,1,4.5);
+    lamb->setAge(-24000);lamb->setSheared(true);
+    bool ate=false;
+    for(int i=0;i<4000 && !ate;++i){tickAll(level,1);ate=!lamb->isSheared();}
+    int dirt=0;for(int x=-16;x<=16;++x)for(int z=-16;z<=16;++z)dirt+=map.getTile(x,0,z)==Tile::dirt_Id;
+    require(ate && dirt>=1,"a lamb eats grass, which turns to dirt, and grows its wool back");
+    // A chicken lays an egg within its egg time (Chicken::aiStep).
+    level.entities.clear();
+    auto chicken=spawn<sim::Chicken>(level,-4.5,1,-4.5);
+    tickAll(level,12500);
+    bool egg=false;
+    for(const auto& e:level.entities)if(auto item=std::dynamic_pointer_cast<sim::ItemEntity>(e))egg|=item->getItem()->id==sim::Item::egg_Id;
+    require(egg,"a chicken lays an egg");
+}
+
 static void tnt(){
     World world;world.generate(53,true);
     for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
@@ -639,6 +715,87 @@ static void dispensers(){
     require(world.set(24,180,24,B(23)) && countIn(24,180,24,4)==0,"a new dispenser there is empty");
 }
 
+// The source's animals in the World: breeding, shearing, milking, a hit,
+// and a calf surviving a save.
+static void worldAnimals(const std::filesystem::path& scratch){
+    World world;world.generate(61,true);
+    for(int x=16;x<=48;++x)for(int z=16;z<=48;++z){
+        world.set(x,179,z,Grass);
+        for(int y=180;y<186;++y)world.set(x,y,z,Air);
+    }
+    world.setSurvival(true);
+    world.setPlayerPosition({32.5,180,20.5});
+    auto aimAt=[&](const SimulatedEntity& e){return console::Vec3{e.position.x,e.position.y+.5,e.position.z-2};};
+    auto find=[&](const wchar_t* id,int nth=0)->const SimulatedEntity*{
+        int n=0;for(const auto& e:world.entities())if(e.id==id && e.health>0 && n++==nth)return &e;
+        return nullptr;
+    };
+    auto carry=[&](int id,int count){
+        world.addCarriedItem(id,count);
+        for(int i=0;i<36;++i)if(world.carriedItems()[i].id==id){
+            if(i>=9)world.swapCarriedSlots(i,0);
+            return i<9?i:0;
+        }
+        return -1;
+    };
+    require(world.spawnCreativeEgg(92,{30.5,180,30.5}) && world.spawnCreativeEgg(92,{31.5,180,30.5}),"two cows");
+    for(int i=0;i<3;++i)world.tickTime();
+    require(find(L"Cow") && find(L"Cow")->ai,"a cow runs the source's mob");
+    // Wheat puts both in love (Animal::interact) and they breed.
+    int wheat=carry(296,4);
+    for(int n=0;n<2;++n){
+        const auto* cow=find(L"Cow",n);
+        require(world.useEntity(aimAt(*cow),{0,0,1},wheat),"feed a cow");
+    }
+    require(world.carriedItems()[wheat].count==2,"feeding uses wheat");
+    int calves=0;
+    for(int i=0;i<300 && !calves;++i){world.tickTime();for(const auto& e:world.entities())calves+=e.id==L"Cow" && e.baby;}
+    require(calves==1,"the cows breed a calf");
+    // Milk: an empty bucket becomes a milk bucket (Cow::interact).
+    world.consumeCarried(wheat,2);
+    int bucket=carry(325,1);
+    require(world.useEntity(aimAt(*find(L"Cow")),{0,0,1},bucket),"milk a cow");
+    bool milk=false;for(const auto& item:world.carriedItems())milk|=item.id==335;
+    require(milk,"the bucket fills with milk");
+    // Shears: wool drops and the sheep is bare (Sheep::interact).
+    require(world.spawnCreativeEgg(91,{36.5,180,36.5}),"a sheep");
+    world.tickTime();
+    const auto dropsBefore=world.droppedItems().size();
+    int shears=carry(359,1);
+    const auto* sheep=find(L"Sheep");
+    require(sheep && !sheep->baby,"an adult sheep");
+    require(world.useEntity(aimAt(*sheep),{0,0,1},shears),"shear a sheep");
+    bool wool=false;for(std::size_t i=dropsBefore;i<world.droppedItems().size();++i)wool|=world.droppedItems()[i].id==35;
+    require(wool && find(L"Sheep")->sheared && world.carriedItems()[shears].damage==1,"the sheep drops wool and the shears wear");
+    // A saddle goes on a pig and red dye on a sheep (Player::interact ->
+    // SaddleItem/DyePowderItem::interactEnemy).
+    require(world.spawnCreativeEgg(90,{40.5,180,30.5}) && world.spawnCreativeEgg(91,{44.5,180,30.5}),"a pig and a sheep");
+    world.tickTime();
+    int saddle=carry(329,1);
+    require(world.useEntity(aimAt(*find(L"Pig")),{0,0,1},saddle) && find(L"Pig")->saddled,"a saddle on a pig");
+    world.addCarriedItem(351,1,1);
+    int dye=-1;for(int i=0;i<36;++i)if(world.carriedItems()[i].id==351){if(i>=9)world.swapCarriedSlots(i,1);dye=i<9?i:1;break;}
+    const SimulatedEntity* woolly=nullptr;
+    for(const auto& e:world.entities())if(e.id==L"Sheep" && !e.sheared)woolly=&e;
+    require(woolly && world.useEntity(aimAt(*woolly),{0,0,1},dye),"dye a sheep");
+    bool red=false;for(const auto& e:world.entities())red|=e.id==L"Sheep" && e.woolColor==14;
+    require(red,"the sheep's wool is red");
+    // A hit knocks a cow back (Mob::hurt).
+    auto cowHealth=[&]{int total=0;for(const auto& e:world.entities())if(e.id==L"Cow")total+=e.health;return total;};
+    const int health=cowHealth();
+    require(world.attackEntity(aimAt(*find(L"Cow")),{0,0,1},0),"hit a cow");
+    require(cowHealth()<health,"the hit hurts it");
+    // A save keeps the calf a calf.
+    const auto path=scratch/"console_animals_test.pck";
+    world.save(path);
+    World reload;require(reload.load(path),"reload the animals");
+    reload.setPlayerPosition({32.5,180,20.5});
+    reload.tickTime();
+    int babies=0;for(const auto& e:reload.entities())babies+=e.id==L"Cow" && e.baby && e.ai;
+    require(babies==1,"the calf is still a calf after a reload");
+    std::filesystem::remove(path);
+}
+
 static void worldPass(const std::filesystem::path& scratch){
     // A generated world: random ticks run without errors, and report their cost.
     World world;
@@ -678,9 +835,11 @@ int main(int argc,char** argv){try{
     pistons();
     entities();
     mobs();
+    animals();
     tnt();
     dispensers();
     worldUpdates(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
+    worldAnimals(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     worldPass(argc>1?std::filesystem::path(argv[1]):std::filesystem::temp_directory_path());
     std::cout<<"tile tick tests passed\n";
     return 0;

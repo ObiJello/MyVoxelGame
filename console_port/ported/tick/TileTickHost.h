@@ -263,6 +263,8 @@ public:
     // 4J's extra wandering for protected mobs runs only for the server
     // thread's small ids, which the port does not use.
     virtual bool isDespawnProtected(){return false;}
+    virtual void setDespawnProtected(){}
+    virtual bool couldWander(){return false;}
     void considerForExtraWandering(bool){}
     bool isExtraWanderingEnabled(){return false;}
     int getWanderingQuadrant(){return 0;}
@@ -365,6 +367,9 @@ protected:
     bool checkInTile(double x,double y,double z);
 public:
     virtual void makeStuckInWeb();
+    virtual std::vector<shared_ptr<Entity>>* getSubEntities();
+    virtual void ride(shared_ptr<Entity> e);
+    virtual void findStandUpPosition(shared_ptr<Entity> vehicle);
     virtual void rideTick();
     virtual void positionRider();
     virtual double getRidingHeight();
@@ -446,7 +451,59 @@ struct System {
         std::copy(copy.begin(),copy.end(),dst->data+dstPos);
     }
 };
+using std::type_info;
+using std::weak_ptr;
+using ::Double;
+using ::Float;
+using ::Integer;
+#include "StringIds.inc"
+// AbstractContainerMenu, CraftingContainer and Recipes for Sheep's dye
+// mixing: the host answers Recipes::getItemFor with the console recipes.
+class AbstractContainerMenu {
+public:
+    virtual ~AbstractContainerMenu()=default;
+};
+class CraftingContainer {
+    std::vector<shared_ptr<ItemInstance>> items;
+public:
+    int width,height;
+    CraftingContainer(AbstractContainerMenu* menu,int width,int height):items(width*height),width(width),height(height){delete menu;}
+    unsigned int getContainerSize(){return static_cast<unsigned int>(items.size());}
+    shared_ptr<ItemInstance> getItem(unsigned int slot){return slot<items.size()?items[slot]:nullptr;}
+    void setItem(unsigned int slot,shared_ptr<ItemInstance> item){if(slot<items.size())items[slot]=item;}
+};
+class Recipes {
+public:
+    // The shapeless match of the container's items (ids and aux values) against
+    // the console recipes, which the host supplies.
+    static inline std::function<shared_ptr<ItemInstance>(CraftingContainer&)> host;
+    static Recipes* getInstance(){static Recipes instance;return &instance;}
+    shared_ptr<ItemInstance> getItemFor(shared_ptr<CraftingContainer> container,Level*){return host && container?host(*container):nullptr;}
+};
 #include "SourceClasses.inc"
+// Monster and Zombie: the classes LevelChunk::getEntitiesOfClass names
+// (monsters come with the next part of the mob port).
+class Monster:public PathfinderMob { public: using PathfinderMob::PathfinderMob; };
+class Zombie:public Monster { public: using Monster::Monster; };
+// PigZombie: what lightning makes of a pig (not ported yet).
+class PigZombie:public Zombie {
+public:
+    explicit PigZombie(Level* level):Zombie(level){}
+    int getMaxHealth()override{return 20;}
+};
+// MobCategory.h's 4J limits.
+struct MobCategory { TILE_CONSTANTS_MobCategory };
+// EntityIO::getClass: the class of a saved entity number (EntityIO::staticCtor).
+struct EntityIO {
+    static eINSTANCEOF getClass(int id){
+        switch(id){
+#define CONSOLE_ENTITY_IO(type,name,number) case number:return type;
+#include "EntityIoIds.inc"
+#undef CONSOLE_ENTITY_IO
+        default:return eTYPE_NOTSET;
+        }
+    }
+};
 // Wolf: only whether it is tame, for Mob::hurt (wolves are not ported yet).
 class Wolf:public Mob {
 public:
@@ -469,6 +526,7 @@ class Arrow:public Projectile {
 public:
     static const int PICKUP_ALLOWED=1;
     int pickup=0;
+    shared_ptr<Entity> owner;
     Arrow()=default;
     Arrow(class Level*,double x,double y,double z):Projectile(x,y,z){}
 };
@@ -502,28 +560,67 @@ struct GenericStats {
     static int param_noArgs(){return 0;}
     static int param_InToTheNether(){return 0;}
     static int killMob(){return 0;}
+    template<class... T>static int flyPig(T...){return 0;}
+    template<class... T>static int param_flyPig(T...){return 0;}
+    template<class... T>static int cowsMilked(T...){return 0;}
+    template<class... T>static int param_cowsMilked(T...){return 0;}
+    template<class... T>static int shearedEntity(T...){return 0;}
+    template<class... T>static int param_shearedEntity(T...){return 0;}
+    template<class... T>static int breedEntity(T...){return 0;}
+    template<class... T>static int param_breedEntity(T...){return 0;}
     template<class... T>static int param_mobKill(T...){return 0;}
     static int stayinFrosty(){return 0;}
     static int param_stayinFrosty(){return 0;}
 };
 class ItemInstance;
 class DispenserTileEntity;
+// Inventory: the carried items the animals' interact methods read and change
+// (the host copies the player's in and out around an interaction).
+class Inventory {
+public:
+    ItemInstanceArray items{36};
+    ItemInstanceArray armor{4};
+    int selected=0;
+    shared_ptr<ItemInstance> getSelected(){return items[selected];}
+    void setItem(unsigned int slot,shared_ptr<ItemInstance> item){if(slot<items.length)items[slot]=item;}
+    // Inventory::add: into a free slot (the host merges stacks afterwards).
+    bool add(shared_ptr<ItemInstance> item){
+        for(unsigned int i=0;i<items.length;++i)if(!items[i]){items[i]=item;return true;}
+        return false;
+    }
+};
 class Player:public Mob {
 public:
-    Player():Mob(nullptr){heightOffset=1.62f;}
+    Player():Mob(nullptr){heightOffset=1.62f;health=getMaxHealth();}
     eINSTANCEOF GetType()override{return eTYPE_PLAYER;}
     int getMaxHealth()override{return 20;}
-    Inventory* inventory=nullptr;
+    Inventory ownInventory;
+    Inventory* inventory=&ownInventory;
+    shared_ptr<ItemInstance> getCarriedItem()override{return inventory->getSelected();}
+    // Player::drop: the host drops these in front of the player.
+    std::vector<shared_ptr<ItemInstance>> dropped;
+    shared_ptr<ItemEntity> drop(shared_ptr<ItemInstance> item){dropped.push_back(item);return nullptr;}
+    // Player::displayClientMessage: the last message id (IDS_*), for the host.
+    int message=-1;
+    void displayClientMessage(int id){message=id;}
+    // Player::isAllowedToInteract: host privileges, all allowed here.
+    bool isAllowedToInteract(shared_ptr<Entity>){return true;}
     // Player::getArmorCoverPercentage (the worn armour pieces, which the
     // host sets) and hasInvisiblePrivilege (a host privilege, off).
     float armorCover=0;
     float getArmorCoverPercentage(){return armorCover;}
     bool hasInvisiblePrivilege(){return false;}
+    // Player::interact (the entity's own interact, then the item's
+    // interactEnemy) and removeSelectedItem.
+    bool interact(shared_ptr<Entity> entity);
+    void removeSelectedItem();
+    // Player::isAllowedToAttackAnimals: a host privilege, allowed.
+    bool isAllowedToAttackAnimals(){return true;}
     // Player::isLocalPlayer: the server's players are not.
     virtual bool isLocalPlayer(){return false;}
-    // The carried item (TntTile::use looks for flint and steel).
-    shared_ptr<ItemInstance> selected;
-    shared_ptr<ItemInstance> getSelectedItem(){return selected;}
+    // Player::getSelectedItem: the carried item (TntTile::use looks for flint
+    // and steel, the animals for their food).
+    shared_ptr<ItemInstance> getSelectedItem(){return inventory->getSelected();}
     Abilities abilities;
     bool mayBuild(int,int,int){return true;}
     void awardStat(int,int){}
@@ -532,12 +629,13 @@ public:
     bool openTrap(shared_ptr<DispenserTileEntity> container){openedTrap=container;return true;}
 };
 class Item;
-class ItemInstance {
+class ItemInstance:public std::enable_shared_from_this<ItemInstance> {
 public:
     int id=0,count=0,auxValue=0,damage=0;
     ItemInstance()=default;
     ItemInstance(int id,int count,int auxValue):id(id),count(count),auxValue(auxValue){}
     explicit ItemInstance(Item* item);
+    ItemInstance(Item* item,int count,int auxValue);
     int getAuxValue()const{return auxValue;}
     Item* getItem();
     // ItemInstance::remove: a stack of count split off (with a copy of the tag).
@@ -551,6 +649,15 @@ public:
     bool hasTag(){return tag!=nullptr;}
     CompoundTag* getTag(){return tag.get();}
     void setTag(CompoundTag* t){tag.reset(t);}
+    void setTag(shared_ptr<CompoundTag> t){tag=t;}
+    void setAuxValue(int value){auxValue=value;}
+    // ItemInstance::interactEnemy (Item::items[id]->interactEnemy) and copy.
+    bool interactEnemy(shared_ptr<Mob> mob);
+    shared_ptr<ItemInstance> copy()const{
+        auto result=std::make_shared<ItemInstance>(id,count,auxValue);
+        if(tag)result->tag.reset(static_cast<CompoundTag*>(tag->copy()));
+        return result;
+    }
     int data4J=0;
     void set4JData(int data){data4J=data;}
     int get4JData(){return data4J;}
@@ -570,10 +677,6 @@ public:
 };
 struct TilePosKeyHash { int operator()(const TilePos& k)const{return TilePos::hash_fnct(k);} };
 struct TilePosKeyEq { bool operator()(const TilePos& a,const TilePos& b)const{return TilePos::eq_test(a,b);} };
-struct LevelEvent {
-    static const int SOUND_CLICK=1000,SOUND_CLICK_FAIL=1001,SOUND_LAUNCH=1002,SOUND_OPEN_DOOR=1003,
-        SOUND_BLAZE_FIREBALL=1009,PARTICLES_SHOOT=2000;
-};
 // HitResult: only whether Level::clip hit something.
 class HitResult {};
 inline void MemSect(int){}
@@ -598,10 +701,23 @@ struct Dimension {
 
 class Level;
 class Tile;
-// LevelChunk / ChunkSource: only whether a chunk is loaded.
+// LevelChunk: whether it is loaded, and its entities by 16-high block
+// (LevelChunk::getEntities / getEntitiesOfClass are the source's).
+inline void EnterCriticalSection(void*){}
+inline void LeaveCriticalSection(void*){}
 struct LevelChunk {
     bool empty=true;
+    explicit LevelChunk(bool empty=true):empty(empty){for(int i=0;i<16;++i)entityBlocks[i]=&blocks[i];}
+    LevelChunk(const LevelChunk&)=delete;
+    LevelChunk& operator=(const LevelChunk&)=delete;
     bool isEmpty()const{return empty;}
+    // Level::maxBuildHeight / 16.
+    const int ENTITY_BLOCKS_LENGTH=256/16;
+    std::vector<shared_ptr<Entity>> blocks[16];
+    std::vector<shared_ptr<Entity>>* entityBlocks[16];
+    static inline int m_csEntities=0;
+    void getEntities(shared_ptr<Entity> except,AABB* bb,std::vector<shared_ptr<Entity>>& es);
+    void getEntitiesOfClass(const std::type_info& ec,AABB* bb,std::vector<shared_ptr<Entity>>& es);
 };
 struct ChunkSource {
     Level* level=nullptr;
@@ -613,7 +729,7 @@ class ItemEntity:public Entity {
 public:
     shared_ptr<ItemInstance> item;
     int throwTime=0;
-    ItemEntity(Level*,double x,double y,double z,shared_ptr<ItemInstance> item):item(item){
+    ItemEntity(Level* level,double x,double y,double z,shared_ptr<ItemInstance> item):Entity(level),item(item){
         this->x=x;this->y=y;this->z=z;
         xd=(float)(Math::random()*0.2f-0.1f);
         yd=+0.2f;
@@ -626,7 +742,7 @@ public:
 class ExperienceOrb:public Entity {
 public:
     int value;
-    ExperienceOrb(Level*,double x,double y,double z,int count):value(count){this->x=x;this->y=y;this->z=z;}
+    ExperienceOrb(Level* level,double x,double y,double z,int count):Entity(level),value(count){this->x=x;this->y=y;this->z=z;}
     static int getExperienceValue(int maxValue);
 };
 // FallingTile: the entity HeavyTile::checkSlide hands to Level::addEntity.
@@ -747,8 +863,23 @@ public:
     // Level::countInstanceOf and addEntity for the entities the dispenser
     // makes: items and mobs (spawn eggs) are the host's; thrown entities,
     // minecarts and boats are not ported, so the host counts them at the limit.
-    virtual int countInstanceOf(eINSTANCEOF,bool){return 1<<30;}
-    virtual void addEntity(shared_ptr<Entity>){}
+    // Level::countInstanceOf over `entities` (the host counts the kinds it
+    // does not run as at their limit).
+    virtual int countInstanceOf(eINSTANCEOF clas,bool singleType){
+        int count=0;
+        for(const auto& e:entities){
+            if(e->removed)continue;
+            if(singleType?e->GetType()==clas:(e->GetType()&clas)!=0)++count;
+        }
+        return count;
+    }
+    // Level::canCreateMore (the 4J caps on spawn eggs and breeding).
+    enum ESPAWN_TYPE { eSpawnType_Egg,eSpawnType_Breed };
+    bool canCreateMore(eINSTANCEOF type,ESPAWN_TYPE spawnType);
+    AABBList* getTileCubes(AABB* box,bool blockAtEdge=false);
+    // Level::addEntity: into `entities` (the host also files items, orbs and
+    // the mobs it keeps elsewhere).
+    virtual void addEntity(shared_ptr<Entity> e){if(e)entities.push_back(e);}
     // EntityIO::newById and Level::canCreateMore for MonsterPlacerItem::canSpawn.
     virtual bool canSpawnEgg(int){return false;}
     void playSound(double,double,double,int,float,float){}
@@ -766,20 +897,20 @@ public:
     Path* findPath(shared_ptr<Entity> from,int xBest,int yBest,int zBest,float maxDist,bool canPassDoors,bool canOpenDoors,bool avoidWater,bool canFloat);
     // Level::broadcastEntityEvent: client animations (hurt, death), not ported.
     void broadcastEntityEvent(shared_ptr<Entity>,byte){}
-    enum class EntityClass { Any,Mob,Player,Arrow };
-    // The entities in a box, as stand-ins whose move() moves the real one.
-    virtual std::vector<shared_ptr<Entity>> entitiesIn(const AABB&,EntityClass){return {};}
-    // Level::getEntities (the level's own list) and getEntitiesOfClass (a new
-    // list the caller deletes).
-    std::vector<shared_ptr<Entity>>* getEntities(shared_ptr<Entity>,AABB* box){
-        found=box?entitiesIn(*box,EntityClass::Any):std::vector<shared_ptr<Entity>>{};
-        return &found;
-    }
-    std::vector<shared_ptr<Entity>>* getEntitiesOfClass(const std::type_info& type,AABB* box){
-        const auto kind=type==typeid(Player)?EntityClass::Player:type==typeid(Arrow)?EntityClass::Arrow:EntityClass::Mob;
-        return new std::vector<shared_ptr<Entity>>(box?entitiesIn(*box,kind):std::vector<shared_ptr<Entity>>{});
-    }
-    std::vector<shared_ptr<Entity>> found;
+    // Level::entities (the entities the extracted code runs, which the host
+    // keeps) and Level::es (getEntities' result list). getEntities,
+    // getEntitiesOfClass and getClosestEntityOfClass are the source's, over
+    // the chunks getChunk makes from the list and the host's other entities.
+    std::vector<shared_ptr<Entity>> entities;
+    std::vector<shared_ptr<Entity>> es;
+    std::vector<shared_ptr<Entity>>* getEntities(shared_ptr<Entity> except,AABB* bb);
+    std::vector<shared_ptr<Entity>>* getEntitiesOfClass(const std::type_info& baseClass,AABB* bb);
+    shared_ptr<Entity> getClosestEntityOfClass(const std::type_info& baseClass,AABB* bb,shared_ptr<Entity> source);
+    LevelChunk* getChunk(int xc,int zc);
+    // The host's entities that are not in `entities` (the World's items, orbs,
+    // player and unported mobs, as stand-ins).
+    virtual void hostEntities(std::vector<shared_ptr<Entity>>&){}
+    std::map<std::pair<int,int>,LevelChunk> entityChunks;
     void addParticle(int,double,double,double,double,double,double){}
     void playSound(shared_ptr<Entity>,int,float,float){}
     // Level::clip between two points: a result when a block is in the way
@@ -1647,10 +1778,23 @@ public:
     explicit Item(int id):id(id){}
     virtual ~Item()=default;
     static Item *bucket_empty,*bucket_water,*bucket_lava;
+    // Item::staticCtor's items the mobs name (as Items here; only ids matter).
+    static Item *dye_powder,*egg,*feather,*fishingRod,*leather,*milk,*porkChop_cooked,*shears;
     // Item::items[id] for the classes the dispenser casts to.
     static Item* byId(int id);
+    // Item::interactEnemy: nothing for most items.
+    virtual bool interactEnemy(shared_ptr<ItemInstance>,shared_ptr<Mob>){return false;}
 };
+inline bool ItemInstance::interactEnemy(shared_ptr<Mob> mob){return Item::byId(id)->interactEnemy(shared_from_this(),mob);}
+class SaddleItem:public Item {
+public:
+    using Item::Item;
+    bool interactEnemy(shared_ptr<ItemInstance> itemInstance,shared_ptr<Mob> mob)override;
+};
+// ClothTile::getTileDataForItemAuxValue (a dye's wool colour).
+struct ClothTile { static int getTileDataForItemAuxValue(int auxValue); };
 inline ItemInstance::ItemInstance(Item* item):id(item->id),count(1),auxValue(0){}
+inline ItemInstance::ItemInstance(Item* item,int count,int auxValue):id(item->id),count(count),auxValue(auxValue){}
 inline Item* ItemInstance::getItem(){return Item::byId(id);}
 class BucketItem:public Item {
 public:
@@ -1703,7 +1847,9 @@ public:
 };
 class DyePowderItem:public Item {
 public:
-    static const int BROWN=3,WHITE=15;
+    TILE_CONSTANTS_DyePowderItem
+    using Item::Item;
+    bool interactEnemy(shared_ptr<ItemInstance> itemInstance,shared_ptr<Mob> mob)override;
     bool useOn(shared_ptr<ItemInstance> itemInstance,shared_ptr<Player> player,Level* level,int x,int y,int z,int face,float clickX,float clickY,float clickZ,bool bTestUseOnOnly=false);
 };
 

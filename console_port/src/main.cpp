@@ -843,6 +843,9 @@ struct App {
         const auto heldItem=selectedItem();
         if(!place && world.attackEntity(eye(),direction(),heldItem.id,entityReach())){
             world.playerAttacked(slot);if(tutorial)tutorial->attack(heldItem.id,heldItem.damage,true);return;}
+        // Minecraft::useItem: an entity under the crosshair first (Mob::interact:
+        // feeding, shearing, milking, saddling).
+        if(place && !usedBlockHeld && world.useEntity(eye(),direction(),slot,entityReach())){usedBlockHeld=true;return;}
         auto h=world.raycast(eye(),direction(),blockReach());if(!h.hit)return;
         bool changed=false;
         if(place && tutorial)tutorial->useItemOnBefore(heldItem.id,heldItem.damage,heldItem.count,h.x-World::width/2,h.y,h.z-World::depth/2);
@@ -1145,6 +1148,7 @@ struct App {
         catch(const std::exception& error){openMenu(MenuScene::Pause);message(error.what());return;}
         renderer->tickLighting(dt);
         world.setPlayerPosition(position);
+        world.setHeldSlot(slot);
         worldTickSeconds+=dt;
         const auto beforeWorldTick=world.revision;
         int elapsedWorldTicks=0;

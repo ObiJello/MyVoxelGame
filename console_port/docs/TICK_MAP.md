@@ -27,7 +27,7 @@ way), **missing**, **n/a** (not needed for single-player desktop play).
 | `tickClientSideTiles`: cave ambience | partial | the timing and draws; no audio |
 | `chunkMap->tick`, `villages->tick`, `villageSiege->tick` | missing | |
 | `Level::updateLights` | own | light propagation on edit |
-| `Level::tickEntities` | partial | dropped items, XP orbs, falling sand and gravel (`FallingTile::tick`, at most 20), mob spawners, mobs with simple movement and attacks; no `Goal` AI, projectiles, riding, minecarts, boats |
+| `Level::tickEntities` | partial | pigs, cows, sheep and chickens are the source's (`Mob`, goals, path finding, breeding); dropped items, XP orbs, falling sand and gravel (`FallingTile::tick`, at most 20), mob spawners; the other mobs still move and attack simply; no projectiles, riding, minecarts, boats |
 | tile entities (`TileEntity::tick`) | partial | furnaces and brewing stands; the rest are not ticked |
 | player (`ServerPlayer`/`Player::tick`): food, effects, air, fall, experience | ported | `WorldSurvival` |
 
@@ -99,7 +99,9 @@ mid-fall.
 ## Order of work
 
 1. **Tile updates**: note blocks (with sound).
-2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
+2. **Mobs**: the monsters and the other animals on the source's `Mob` (zombies,
+   skeletons, creepers, spiders, wolves, ocelots, villagers...), `MobCategory`
+   spawning, armour, difficulty.
 3. **More tiles**: rails and minecarts, beds and sleeping, boats, projectiles
    (arrows, snowballs, eggs, fire charges) for players and dispensers.
 4. **Menus**: armour, enchanting, anvil, dispenser, villager trading.

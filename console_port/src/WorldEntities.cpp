@@ -8,6 +8,8 @@
 #include <utility>
 
 namespace console {
+// The kinds the source's mobs run (WorldTiles.cpp).
+bool sourceMobKind(const std::wstring& id);
 namespace {
 std::unique_ptr<TagList> triple(double x,double y,double z){
     auto values=std::make_unique<TagList>();
@@ -148,11 +150,11 @@ std::optional<std::wstring> World::pickEntity(Vec3 eye,Vec3 direction,double rea
     if(!target)return std::nullopt;
     return target->id;
 }
-bool World::attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach){
+SimulatedEntity* World::pickLiving(Vec3 eye,Vec3 direction,double reach){
     if(state->pending || !std::isfinite(reach) || reach<=0 || reach>64 ||
-       !std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))return false;
+       !std::isfinite(eye.x) || !std::isfinite(eye.y) || !std::isfinite(eye.z))return nullptr;
     const double length=std::hypot(direction.x,direction.y,direction.z);
-    if(!std::isfinite(length) || length<1e-12)return false;
+    if(!std::isfinite(length) || length<1e-12)return nullptr;
     direction={direction.x/length,direction.y/length,direction.z/length};
     const auto block=raycast(eye,direction,reach);
     const double blockDistance=block.hit?block.distance:reach;
@@ -167,6 +169,10 @@ bool World::attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach){
             {entity.position.x+radius,entity.position.y+height,entity.position.z+radius},reach);
         if(hit<=best){best=hit;target=&entity;}
     }
+    return target;
+}
+bool World::attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach){
+    SimulatedEntity* target=pickLiving(eye,direction,reach);
     if(!target)return false;
     int damage=sourceAttackDamage(heldItemId);
     for(const auto& effect:state->playerEffects){
@@ -174,6 +180,8 @@ bool World::attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach){
         if(effect.id==18)damage-=2<<std::clamp(effect.amplifier,0,8);
     }
     if(damage<=0)return true;
+    // The source's mobs take the hit themselves (Mob::hurt: knockback, panic).
+    if(target->ai || sourceMobKind(target->id)){hurtSourceMob(*target,damage);++revision;return true;}
     if(target->invulnerableTicks>10){
         if(damage<=target->lastHurt)return true;
         target->health-=damage-target->lastHurt;
@@ -413,7 +421,10 @@ void World::tickEntities(){
             if(id==L"Chicken")++chickens;else ++animals;
         }
     }
+    // The source's mobs (pigs, cows, sheep, chickens) run as the source's.
+    tickSourceMobs();
     for(auto& entity:state->entities){
+        if(entity.ai)continue;
         // Entities in the resident halo keep their state but do not tick,
         // like mobs in loaded chunks outside the original ticking range.
         if(!inside(int(std::floor(entity.position.x)),int(std::floor(entity.position.y)),
@@ -667,6 +678,7 @@ void World::saveEntities(ChunkRecord& record,bool remove){
                             rotation->add(axis.get());axis.release();
                         }
                         nativeCopy->put(L"Rotation",rotation.get());rotation.release();
+                        if(active.ai)active.ai->addAdditonalSaveData(nativeCopy);
                         break;
                     }
                 for(const auto& orb:state->experienceOrbs)
@@ -720,6 +732,9 @@ void World::saveEntities(ChunkRecord& record,bool remove){
                 tag->putShort(L"HurtTime",it->hurtTicks);
                 tag->putShort(L"DeathTime",it->deathTicks);
                 tag->putShort(L"AttackTime",it->attackTicks);
+                // A source mob saves its own fields (Mob, AgableMob, Animal,
+                // Sheep, Pig addAdditonalSaveData).
+                if(it->ai)it->ai->addAdditonalSaveData(tag.get());
                 tag->putInt(L"console_port.lastHurtByPlayerTicks",
                             it->lastHurtByPlayerTicks);
                 list->add(tag.get());tag.release();
@@ -874,6 +889,14 @@ void World::loadEntities(ChunkRecord& record){
             entity.woolColor=static_cast<unsigned char>(tag->getByte(L"Color"));
         }
         if(entity.id==L"Villager")entity.profession=tag->getInt(L"Profession");
+        // The source mob reads its own fields when it is made (Age, InLove,
+        // Saddle, Sheared, Color, Health...).
+        if(sourceMobKind(entity.id)){
+            entity.saved=std::shared_ptr<CompoundTag>(static_cast<CompoundTag*>(tag->copy()));
+            entity.animalAge=tag->getInt(L"Age");
+            entity.baby=entity.animalAge<0;
+            entity.saddled=tag->getBoolean(L"Saddle");
+        }
         if(entity.id==L"Slime" || entity.id==L"LavaSlime")
             entity.slimeSize=std::clamp(tag->getInt(L"Size")+1,1,4);
         if(entity.id==L"Ozelot")entity.catType=tag->getInt(L"CatType");

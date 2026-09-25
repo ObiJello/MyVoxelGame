@@ -10,11 +10,11 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 |---|---:|---:|---:|---:|
 | Main loop and levels | 53 | 7 | 25 | 21 |
 | Player and game modes | 12 | 3 | 4 | 5 |
-| Entities | 67 | 0 | 48 | 19 |
-| Mob AI | 58 | 0 | 11 | 47 |
+| Entities | 67 | 0 | 53 | 14 |
+| Mob AI | 58 | 0 | 21 | 37 |
 | Blocks | 110 | 0 | 105 | 5 |
 | Block entities | 13 | 0 | 7 | 6 |
-| Items | 63 | 0 | 30 | 33 |
+| Items | 63 | 0 | 31 | 32 |
 | Crafting | 14 | 0 | 11 | 3 |
 | Menus and containers | 55 | 1 | 15 | 39 |
 | Enchanting | 24 | 0 | 3 | 21 |
@@ -22,15 +22,15 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | World generation | 118 | 57 | 11 | 50 |
 | Dimensions | 4 | 0 | 2 | 2 |
 | Saves, NBT and IO | 47 | 12 | 7 | 28 |
-| Rendering | 156 | 0 | 31 | 125 |
+| Rendering | 156 | 0 | 35 | 121 |
 | Audio | 3 | 0 | 0 | 3 |
 | Screens and UI | 195 | 0 | 17 | 178 |
 | Tutorial | 29 | 26 | 2 | 1 |
 | Stats and achievements | 14 | 2 | 3 | 9 |
 | Commands | 9 | 0 | 0 | 9 |
-| Networking | 96 | 0 | 5 | 91 |
-| Other | 102 | 11 | 31 | 60 |
-| **All** | **1247** | **119** | **371** | **757** |
+| Networking | 96 | 0 | 6 | 90 |
+| Other | 102 | 11 | 32 | 59 |
+| **All** | **1247** | **119** | **393** | **735** |
 
 ## Main loop and levels
 
@@ -50,15 +50,15 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Entities
 
-**Partial (48):** Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, EnderCrystal, EnderDragon, ExperienceOrb, FallingTile, Fireball, Ghast, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, PrimedTnt, Sheep, Silverfish, Skeleton, Slime, SmallFireball, SnowMan, Snowball, Spider, Squid, ThrownEgg, ThrownExpBottle, ThrownPotion, Villager, VillagerGolem, Wolf, Zombie
+**Partial (53):** AgableMob, Animal, Arrow, Blaze, Boat, CaveSpider, Chicken, Cow, Creeper, DragonFireball, EnderCrystal, EnderDragon, ExperienceOrb, EyeOfEnderSignal, FallingTile, Fireball, Ghast, Giant, Golem, HangingEntity, ItemEntity, ItemFrame, LavaSlime, LightningBolt, LocalPlayer, Minecart, Mob, Monster, MushroomCow, Ozelot, Painting, PathfinderMob, Pig, PigZombie, Player, PrimedTnt, Sheep, Silverfish, Skeleton, Slime, SmallFireball, SnowMan, Snowball, Spider, Squid, ThrownEgg, ThrownEnderpearl, ThrownExpBottle, ThrownPotion, Villager, VillagerGolem, Wolf, Zombie
 
-**Missing (19):** AgableMob, BossMob, BossMobPart, DelayedRelease, DragonFireball, EnderMan, EyeOfEnderSignal, FishingHook, FlyingMob, Giant, GlobalEntity, NetherSphere, Particle, RemotePlayer, ServerPlayer, TamableAnimal, Throwable, ThrownEnderpearl, WaterAnimal
+**Missing (14):** BossMob, BossMobPart, DelayedRelease, EnderMan, FishingHook, FlyingMob, GlobalEntity, NetherSphere, Particle, RemotePlayer, ServerPlayer, TamableAnimal, Throwable, WaterAnimal
 
 ## Mob AI
 
-**Partial (11):** BodyControl, Goal, GoalSelector, JumpControl, LookControl, MoveControl, Path, PathFinder, PathNavigation, RandomPos, Sensing
+**Partial (21):** BodyControl, BreedGoal, ControlledByPlayerGoal, EatTileGoal, FloatGoal, FollowParentGoal, Goal, GoalSelector, JumpControl, LookAtPlayerGoal, LookControl, MoveControl, PanicGoal, Path, PathFinder, PathNavigation, RandomLookAroundGoal, RandomPos, RandomStrollGoal, Sensing, TemptGoal
 
-**Missing (47):** ArrowAttackGoal, AvoidPlayerGoal, BegGoal, BreakDoorGoal, BreedGoal, ControlledByPlayerGoal, DefendVillageTargetGoal, DoorInteractGoal, EatTileGoal, FleeSunGoal, FloatGoal, FollowOwnerGoal, FollowParentGoal, HurtByTargetGoal, InteractGoal, LeapAtTargetGoal, LookAtPlayerGoal, LookAtTradingPlayerGoal, MakeLoveGoal, MeleeAttackGoal, MoveIndoorsGoal, MoveThroughVillageGoal, MoveTowardsRestrictionGoal, MoveTowardsTargetGoal, NearestAttackableTargetGoal, NonTameRandomTargetGoal, OcelotSitOnTileGoal, OfferFlowerGoal, OpenDoorGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, OzelotAttackGoal, PanicGoal, PlayGoal, RandomLookAroundGoal, RandomStrollGoal, RestrictOpenDoorGoal, RestrictSunGoal, SitGoal, SlotProgressControl, SwellGoal, TakeFlowerGoal, TargetGoal, TemptGoal, TradeWithPlayerGoal, UIControl, XUI_SettingsControl
+**Missing (37):** ArrowAttackGoal, AvoidPlayerGoal, BegGoal, BreakDoorGoal, DefendVillageTargetGoal, DoorInteractGoal, FleeSunGoal, FollowOwnerGoal, HurtByTargetGoal, InteractGoal, LeapAtTargetGoal, LookAtTradingPlayerGoal, MakeLoveGoal, MeleeAttackGoal, MoveIndoorsGoal, MoveThroughVillageGoal, MoveTowardsRestrictionGoal, MoveTowardsTargetGoal, NearestAttackableTargetGoal, NonTameRandomTargetGoal, OcelotSitOnTileGoal, OfferFlowerGoal, OpenDoorGoal, OwnerHurtByTargetGoal, OwnerHurtTargetGoal, OzelotAttackGoal, PlayGoal, RestrictOpenDoorGoal, RestrictSunGoal, SitGoal, SlotProgressControl, SwellGoal, TakeFlowerGoal, TargetGoal, TradeWithPlayerGoal, UIControl, XUI_SettingsControl
 
 ## Blocks
 
@@ -74,9 +74,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Items
 
-**Partial (30):** AnvilTileItem, BowlFoodItem, BucketItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MinecartItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem, WeighedTreasure
+**Partial (31):** AnvilTileItem, BowlFoodItem, BucketItem, ClothTileItem, CoalItem, DiggerItem, DyePowderItem, FlintAndSteelItem, FoodItem, GoldenAppleItem, HatchetItem, HoeItem, Item, MapItem, MinecartItem, MonsterPlacerItem, MultiTextureTileItem, PickaxeItem, PotionItem, RecordingItem, RedStoneItem, SaddleItem, SeedFoodItem, SeedItem, ShearsItem, ShovelItem, SkullItem, TileItem, TilePlanterItem, WeaponItem, WeighedTreasure
 
-**Missing (33):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, PistonTileItem, SaddleItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem
+**Missing (32):** ArmorItem, AuxDataTileItem, BedItem, BoatItem, BookItem, BottleItem, BowItem, CarrotOnAStickItem, ClockItem, ColoredTileItem, CompassItem, ComplexItem, DoorItem, EggItem, EnchantedBookItem, EnderEyeItem, EnderpearlItem, ExperienceItem, FireChargeItem, FishingRodItem, HangingEntityItem, LeafTileItem, MilkBucketItem, PistonTileItem, SaplingTileItem, SignItem, SmoothStoneBrickTileItem, SnowballItem, StoneMonsterTileItem, StoneSlabTileItem, TreeTileItem, WaterLilyTileItem
 
 ## Crafting
 
@@ -128,9 +128,9 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Rendering
 
-**Partial (31):** Camera, ChestModel, ChestRenderer, Chunk, EnchantTableRenderer, EndermanModel, FallingTileRenderer, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PistonPieceRenderer, PreStitchedTextureMap, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, Textures, TileRenderer, TntRenderer, VillagerModel, WolfModel
+**Partial (35):** Camera, ChestModel, ChestRenderer, ChickenModel, Chunk, CowModel, EnchantTableRenderer, EndermanModel, FallingTileRenderer, GhastModel, GhastRenderer, ItemFrameRenderer, ItemRenderer, Lighting, MobRenderer, MushroomCowRenderer, OzelotModel, PaintingRenderer, PigModel, PistonPieceRenderer, PreStitchedTextureMap, QuadrupedModel, SilverfishModel, SimpleIcon, SkeletonHeadModel, SkullTileRenderer, SlimeModel, StitchedTexture, Tesselator, Texture, Textures, TileRenderer, TntRenderer, VillagerModel, WolfModel
 
-**Missing (125):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenModel, ChickenRenderer, ClockTexture, CompassTexture, CowModel, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigModel, PigRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, QuadrupedModel, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, TheEndPortalRenderer, TileEntityRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
+**Missing (121):** AbstractTexturePack, AllowAllCuller, ArrowRenderer, BlazeModel, BlazeRenderer, BoatModel, BoatRenderer, BookModel, BreakingItemParticle, BubbleParticle, ChickenRenderer, ClockTexture, CompassTexture, CowRenderer, CreeperModel, CreeperRenderer, CritParticle, CritParticle2, DLCTextureFile, DLCTexturePack, DefaultRenderer, DefaultTexturePack, DirtyChunkSorter, DragonBreathParticle, DragonModel, DripParticle, EchantmentTableParticle, EnderChestRenderer, EnderCrystalModel, EnderCrystalRenderer, EnderDragonRenderer, EnderParticle, EndermanRenderer, EntityRenderer, EntityTileRenderer, ExperienceOrbRenderer, ExplodeParticle, FileTexturePack, FireballRenderer, FishingHookRenderer, FlameParticle, FolderTexturePack, Font, FootstepParticle, Frustum, FrustumCuller, FrustumData, GiantMobRenderer, GuiParticle, GuiParticles, HeartParticle, HttpTexture, HugeExplosionParticle, HugeExplosionSeedParticle, HumanoidMobRenderer, HumanoidModel, ItemInHandRenderer, ItemSpriteRenderer, LargeChestModel, LavaParticle, LavaSlimeModel, LavaSlimeRenderer, LightningBoltRenderer, MemTexture, MemoryTracker, MinecartModel, MinecartRenderer, MobSkinMemTextureProcessor, MobSkinTextureProcessor, MobSpawnerRenderer, NetherPortalParticle, NoteParticle, OzelotRenderer, ParticleEngine, PigRenderer, PlayerCloudParticle, PlayerRenderer, ProgressRenderer, RedDustParticle, SheepFurModel, SheepModel, SheepRenderer, SignModel, SignRenderer, SilverfishRenderer, SkeletonModel, SlimeRenderer, SmokeParticle, SnowManModel, SnowManRenderer, SnowShovelParticle, SpellParticle, SpiderModel, SpiderRenderer, SplashParticle, SquidModel, SquidRenderer, SuspendedParticle, SuspendedTownParticle, TakeAnimationParticle, TerrainParticle, TextureHolder, TextureManager, TextureMap, TexturePack, TexturePackRepository, TheEndPortalRenderer, TileEntityRenderer, UIBitmapFont, UIFontData, UITTFFont, ViewportCuller, VillagerGolemModel, VillagerGolemRenderer, VillagerRenderer, VillagerZombieModel, WaterDropParticle, WolfRenderer, XUI_DebugSetCamera, ZombieModel, ZombieRenderer
 
 ## Audio
 
@@ -164,14 +164,14 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 ## Networking
 
-**Partial (5):** ChatPacket, ClientConnection, Connection, PlayerInfoPacket, ServerPlayerGameMode
+**Partial (6):** ChatPacket, ClientConnection, Connection, PlayerInfoPacket, ServerPlayerGameMode, SetRidingPacket
 
-**Missing (91):** AddEntityPacket, AddExperienceOrbPacket, AddGlobalEntityPacket, AddMobPacket, AddPaintingPacket, AddPlayerPacket, AnimatePacket, AwardStatPacket, BlockRegionUpdatePacket, ChunkTilesUpdatePacket, ChunkVisibilityAreaPacket, ChunkVisibilityPacket, ClientCommandPacket, ComplexItemDataPacket, ContainerAckPacket, ContainerButtonClickPacket, ContainerClickPacket, ContainerClosePacket, ContainerOpenPacket, ContainerSetContentPacket, ContainerSetDataPacket, ContainerSetSlotPacket, CraftItemPacket, CustomPayloadPacket, DebugOptionsPacket, DisconnectPacket, EntityActionAtPositionPacket, EntityEventPacket, ExplodePacket, GameCommandPacket, GameEventPacket, GameNetworkManager, GetInfoPacket, InteractPacket, KeepAlivePacket, KickPlayerPacket, LevelEventPacket, LevelSoundPacket, LoginPacket, MoveEntityPacket, MoveEntityPacketSmall, MovePlayerPacket, NetworkPlayerSony, Packet, PacketListener, PendingConnection, PlatformNetworkManagerSony, PlatformNetworkManagerStub, PlayerAbilitiesPacket, PlayerActionPacket, PlayerCommandPacket, PlayerConnection, PlayerInputPacket, PreLoginPacket, RemoveEntitiesPacket, RemoveMobEffectPacket, RespawnPacket, RotateHeadPacket, SQRNetworkManager, SQRNetworkPlayer, ServerCommandDispatcher, ServerConnection, ServerSettingsChangedPacket, SetCarriedItemPacket, SetCreativeModeSlotPacket, SetEntityDataPacket, SetEntityMotionPacket, SetEquippedItemPacket, SetExperiencePacket, SetHealthPacket, SetRidingPacket, SetSpawnPositionPacket, SetTimePacket, SignUpdatePacket, Socket, TakeItemEntityPacket, TeleportEntityPacket, TextureAndGeometryChangePacket, TextureAndGeometryPacket, TextureChangePacket, TexturePacket, TileDestructionPacket, TileEntityDataPacket, TileEventPacket, TileUpdatePacket, TradeItemPacket, UpdateGameRuleProgressPacket, UpdateMobEffectPacket, UpdateProgressPacket, UseItemPacket, XZPacket
+**Missing (90):** AddEntityPacket, AddExperienceOrbPacket, AddGlobalEntityPacket, AddMobPacket, AddPaintingPacket, AddPlayerPacket, AnimatePacket, AwardStatPacket, BlockRegionUpdatePacket, ChunkTilesUpdatePacket, ChunkVisibilityAreaPacket, ChunkVisibilityPacket, ClientCommandPacket, ComplexItemDataPacket, ContainerAckPacket, ContainerButtonClickPacket, ContainerClickPacket, ContainerClosePacket, ContainerOpenPacket, ContainerSetContentPacket, ContainerSetDataPacket, ContainerSetSlotPacket, CraftItemPacket, CustomPayloadPacket, DebugOptionsPacket, DisconnectPacket, EntityActionAtPositionPacket, EntityEventPacket, ExplodePacket, GameCommandPacket, GameEventPacket, GameNetworkManager, GetInfoPacket, InteractPacket, KeepAlivePacket, KickPlayerPacket, LevelEventPacket, LevelSoundPacket, LoginPacket, MoveEntityPacket, MoveEntityPacketSmall, MovePlayerPacket, NetworkPlayerSony, Packet, PacketListener, PendingConnection, PlatformNetworkManagerSony, PlatformNetworkManagerStub, PlayerAbilitiesPacket, PlayerActionPacket, PlayerCommandPacket, PlayerConnection, PlayerInputPacket, PreLoginPacket, RemoveEntitiesPacket, RemoveMobEffectPacket, RespawnPacket, RotateHeadPacket, SQRNetworkManager, SQRNetworkPlayer, ServerCommandDispatcher, ServerConnection, ServerSettingsChangedPacket, SetCarriedItemPacket, SetCreativeModeSlotPacket, SetEntityDataPacket, SetEntityMotionPacket, SetEquippedItemPacket, SetExperiencePacket, SetHealthPacket, SetSpawnPositionPacket, SetTimePacket, SignUpdatePacket, Socket, TakeItemEntityPacket, TeleportEntityPacket, TextureAndGeometryChangePacket, TextureAndGeometryPacket, TextureChangePacket, TexturePacket, TileDestructionPacket, TileEntityDataPacket, TileEventPacket, TileUpdatePacket, TradeItemPacket, UpdateGameRuleProgressPacket, UpdateMobEffectPacket, UpdateProgressPacket, UseItemPacket, XZPacket
 
 ## Other
 
 **Ported (11):** AABB, Direction, Facing, HitResult, IntCache, JavaMath, Material, MaterialColor, Mth, Random, Vec3
 
-**Partial (31):** AddItemRuleDefinition, ApplySchematicRuleDefinition, BinaryHeap, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityDamageSource, EntityIO, EntityRenderDispatcher, IndirectEntityDamageSource, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Node, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, SynchedEntityData, TileEntity, User, Vertex
+**Partial (32):** AddItemRuleDefinition, ApplySchematicRuleDefinition, BinaryHeap, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Creature, Cube, DLCManager, DamageSource, EntityDamageSource, EntityIO, EntityRenderDispatcher, IndirectEntityDamageSource, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Node, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, SynchedEntityData, TileEntity, User, Vertex
 
-**Missing (60):** BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs
+**Missing (59):** BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, DLCPack, DemoUser, DoorInfo, Enemy, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs

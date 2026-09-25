@@ -2105,6 +2105,199 @@ int ExperienceOrb::getExperienceValue(int maxValue)
 	return 1;
 }
 
+// Level.cpp
+vector<shared_ptr<Entity> > *Level::getEntities(shared_ptr<Entity> except, AABB *bb)
+{
+	MemSect(40);
+	es.clear();
+	int xc0 = Mth::floor((bb->x0 - 2) / 16);
+	int xc1 = Mth::floor((bb->x1 + 2) / 16);
+	int zc0 = Mth::floor((bb->z0 - 2) / 16);
+	int zc1 = Mth::floor((bb->z1 + 2) / 16);
+
+#ifdef __PSVITA__
+#ifdef _ENTITIES_RW_SECTION
+	// AP - RW critical sections are expensive so enter it here so we only have to call it once instead of X times
+	EnterCriticalRWSection(&LevelChunk::m_csEntities, false);
+#else
+	EnterCriticalSection(&LevelChunk::m_csEntities);
+#endif
+#endif
+
+	for (int xc = xc0; xc <= xc1; xc++)
+		for (int zc = zc0; zc <= zc1; zc++)
+		{
+			if (hasChunk(xc, zc))
+			{
+				getChunk(xc, zc)->getEntities(except, bb, es);
+			}
+		}
+	MemSect(0);
+
+#ifdef __PSVITA__
+#ifdef _ENTITIES_RW_SECTION
+	LeaveCriticalRWSection(&LevelChunk::m_csEntities, false);
+#else
+	LeaveCriticalSection(&LevelChunk::m_csEntities);
+#endif
+#endif
+
+	return &es;
+}
+
+// Level.cpp
+vector<shared_ptr<Entity> > *Level::getEntitiesOfClass(const type_info& baseClass, AABB *bb)
+{
+	int xc0 = Mth::floor((bb->x0 - 2) / 16);
+	int xc1 = Mth::floor((bb->x1 + 2) / 16);
+	int zc0 = Mth::floor((bb->z0 - 2) / 16);
+	int zc1 = Mth::floor((bb->z1 + 2) / 16);
+	vector<shared_ptr<Entity> > *es = new vector<shared_ptr<Entity> >();
+
+#ifdef __PSVITA__
+#ifdef _ENTITIES_RW_SECTION
+	// AP - RW critical sections are expensive so enter it here so we only have to call it once instead of X times
+	EnterCriticalRWSection(&LevelChunk::m_csEntities, false);
+#else
+	EnterCriticalSection(&LevelChunk::m_csEntities);
+#endif
+#endif
+
+	for (int xc = xc0; xc <= xc1; xc++)
+		for (int zc = zc0; zc <= zc1; zc++)
+		{
+			if (hasChunk(xc, zc))
+			{
+				getChunk(xc, zc)->getEntitiesOfClass(baseClass, bb, *es);
+			}
+		}
+
+#ifdef __PSVITA__
+#ifdef _ENTITIES_RW_SECTION
+	LeaveCriticalRWSection(&LevelChunk::m_csEntities, false);
+#else
+	LeaveCriticalSection(&LevelChunk::m_csEntities);
+#endif
+#endif
+
+	return es;
+}
+
+// Level.cpp
+shared_ptr<Entity> Level::getClosestEntityOfClass(const type_info& baseClass, AABB *bb, shared_ptr<Entity> source)
+{
+	vector<shared_ptr<Entity> > *entities = getEntitiesOfClass(baseClass, bb);
+	shared_ptr<Entity> closest = nullptr;
+	double closestDistSqr = Double::MAX_VALUE;
+	//for (Entity entity : entities)
+	for(AUTO_VAR(it, entities->begin()); it != entities->end(); ++it)
+	{
+		shared_ptr<Entity> entity = *it;
+		if (entity == source) continue;
+		double distSqr = source->distanceToSqr(entity);
+		if (distSqr > closestDistSqr) continue;
+		closest = entity;
+		closestDistSqr = distSqr;
+	}
+	delete entities;
+	return closest;
+}
+
+// LevelChunk.cpp
+void LevelChunk::getEntities(shared_ptr<Entity> except, AABB *bb, vector<shared_ptr<Entity> > &es)
+{
+    int yc0 = Mth::floor((bb->y0 - 2) / 16);
+    int yc1 = Mth::floor((bb->y1 + 2) / 16);
+    if (yc0 < 0) yc0 = 0;
+    if (yc1 >= ENTITY_BLOCKS_LENGTH) yc1 = ENTITY_BLOCKS_LENGTH - 1;
+
+#ifndef __PSVITA__
+	// AP - RW critical sections are expensive so enter once in Level::getEntities
+	EnterCriticalSection(&m_csEntities);
+#endif
+    for (int yc = yc0; yc <= yc1; yc++)
+	{
+        vector<shared_ptr<Entity> > *entities = entityBlocks[yc];
+
+		AUTO_VAR(itEnd, entities->end());
+		for (AUTO_VAR(it, entities->begin()); it != itEnd; it++)
+		{
+            shared_ptr<Entity> e = *it; //entities->at(i);
+            if (e != except && e->bb->intersects(bb))
+			{
+				es.push_back(e);
+                vector<shared_ptr<Entity> > *subs = e->getSubEntities();
+                if (subs != NULL)
+				{
+                    for (int j = 0; j < subs->size(); j++)
+					{
+                        e = subs->at(j);
+                        if (e != except && e->bb->intersects(bb))
+						{
+                            es.push_back(e);
+                        }
+                    }
+                }
+			}
+        }
+    }
+#ifndef __PSVITA__
+	LeaveCriticalSection(&m_csEntities);
+#endif
+}
+
+// LevelChunk.cpp
+void LevelChunk::getEntitiesOfClass(const type_info& ec, AABB *bb, vector<shared_ptr<Entity> > &es)
+{
+    int yc0 = Mth::floor((bb->y0 - 2) / 16);
+    int yc1 = Mth::floor((bb->y1 + 2) / 16);
+
+    if (yc0 < 0)
+	{
+        yc0 = 0;
+    }
+	else if (yc0 >= ENTITY_BLOCKS_LENGTH)
+	{
+        yc0 = ENTITY_BLOCKS_LENGTH - 1;
+    }
+    if (yc1 >= ENTITY_BLOCKS_LENGTH)
+	{
+        yc1 = ENTITY_BLOCKS_LENGTH - 1;
+    }
+	else if (yc1 < 0)
+	{
+        yc1 = 0;
+    }
+
+#ifndef __PSVITA__
+	// AP - RW critical sections are expensive so enter once in Level::getEntitiesOfClass
+	EnterCriticalSection(&m_csEntities);
+#endif
+    for (int yc = yc0; yc <= yc1; yc++)
+	{
+        vector<shared_ptr<Entity> > *entities = entityBlocks[yc];
+		
+		AUTO_VAR(itEnd, entities->end());
+		for (AUTO_VAR(it, entities->begin()); it != itEnd; it++)
+		{
+            shared_ptr<Entity> e = *it; //entities->at(i);
+
+			bool isAssignableFrom = false;
+			// Some special cases where the base class is a general type that our class may be derived from, otherwise do a direct comparison of type_info
+			if( ec == typeid(Player) ) { if( dynamic_pointer_cast<Player>(e) != NULL )  isAssignableFrom = true; }
+			else if ( ec == typeid(Mob) )  { if( dynamic_pointer_cast<Mob>(e) != NULL )  isAssignableFrom = true; }
+			else if ( ec == typeid(Monster) )  { if( dynamic_pointer_cast<Monster>(e) != NULL )  isAssignableFrom = true; }
+			else if ( ec == typeid(Zombie) )  { if( dynamic_pointer_cast<Zombie>(e) != NULL )  isAssignableFrom = true; }
+			else if(e != NULL && ec == typeid(*(e.get())) ) isAssignableFrom = true;
+            if (isAssignableFrom && e->bb->intersects(bb)) es.push_back(e);
+			// 4J - note needs to be equivalent to baseClass.isAssignableFrom(e.getClass())
+        }
+    }
+#ifndef __PSVITA__
+	LeaveCriticalSection(&m_csEntities);
+#endif
+}
+
 // Entity.cpp
 void Entity::rideTick()
 {
@@ -2174,6 +2367,203 @@ double Entity::getRidingHeight()
 double Entity::getRideHeight()
 {
 	return bbHeight * .75;
+}
+
+// Entity.cpp
+void Entity::ride(shared_ptr<Entity> e)
+{
+	xRideRotA = 0;
+	yRideRotA = 0;
+
+	if (e == NULL)
+	{
+		if (riding != NULL)
+		{
+			// 4J Stu - Position should already be updated before the SetRidingPacket comes in
+			if(!level->isClientSide) moveTo(riding->x, riding->bb->y0 + riding->bbHeight, riding->z, yRot, xRot);
+			riding->rider = weak_ptr<Entity>();
+		}
+		riding = nullptr;
+		return;
+	}
+	if (riding != NULL)
+	{
+		riding->rider = weak_ptr<Entity>();
+	}
+	riding = e;
+	e->rider = shared_from_this();
+}
+
+// Entity.cpp
+void Entity::findStandUpPosition(shared_ptr<Entity> vehicle)
+{
+	AABB *boundingBox;
+	double fallbackX = vehicle->x;
+	double fallbackY = vehicle->bb->y0 + vehicle->bbHeight;
+	double fallbackZ = vehicle->z;
+
+	for (double xDiff = -1.5; xDiff < 2; xDiff += 1.5)
+	{
+		for (double zDiff = -1.5; zDiff < 2; zDiff += 1.5)
+		{
+			if (xDiff == 0 && zDiff == 0)
+			{
+				continue;
+			}
+
+			int xToInt = (int) (this->x + xDiff);
+			int zToInt = (int) (this->z + zDiff);
+
+			// 4J Stu - Added loop over y to restaring the bb into 2 block high spaces if required (eg the track block plus 1 air block above it for minecarts)
+			for(double yDiff = 1.0; yDiff >= 0; yDiff -= 0.5)
+			{
+				boundingBox = this->bb->cloneMove(xDiff, yDiff, zDiff);
+
+				if (level->getTileCubes(boundingBox,true)->size() == 0)
+				{
+					if (level->isTopSolidBlocking(xToInt, (int) (y - (1-yDiff)), zToInt))
+					{
+						this->moveTo(this->x + xDiff, this->y + yDiff, this->z + zDiff, yRot, xRot);
+						return;
+					}
+					else if (level->isTopSolidBlocking(xToInt, (int) (y - (1-yDiff)) - 1, zToInt) || level->getMaterial(xToInt, (int) (y - (1-yDiff)) - 1, zToInt) == Material::water)
+					{
+						fallbackX = x + xDiff;
+						fallbackY = y + yDiff;
+						fallbackZ = z + zDiff;
+					}
+				}
+			}
+		}
+	}
+
+	this->moveTo(fallbackX, fallbackY, fallbackZ, yRot, xRot);
+}
+
+// Entity.cpp
+vector<shared_ptr<Entity> > *Entity::getSubEntities()
+{
+	return NULL;
+}
+
+// Level.cpp
+bool Level::canCreateMore(eINSTANCEOF type, ESPAWN_TYPE spawnType)
+{
+	int count = 0;
+	int max = 0;
+	if(spawnType == eSpawnType_Egg)
+	{
+		switch(type)
+		{
+		case eTYPE_VILLAGER:
+			count = countInstanceOf( eTYPE_VILLAGER, true);
+			max = MobCategory::MAX_XBOX_VILLAGERS_WITH_SPAWN_EGG;
+			break;
+		case eTYPE_CHICKEN:
+			count = countInstanceOf( eTYPE_CHICKEN, true);
+			max = MobCategory::MAX_XBOX_CHICKENS_WITH_SPAWN_EGG;
+			break;
+		case eTYPE_WOLF:
+			count = countInstanceOf( eTYPE_WOLF, true);
+			max = MobCategory::MAX_XBOX_WOLVES_WITH_SPAWN_EGG;
+			break;
+		case eTYPE_MUSHROOMCOW:
+			count = countInstanceOf( eTYPE_MUSHROOMCOW, true);
+			max = MobCategory::MAX_XBOX_MUSHROOMCOWS_WITH_SPAWN_EGG;
+			break;
+		case eTYPE_SQUID:
+			count = countInstanceOf( eTYPE_SQUID, true);
+			max = MobCategory::MAX_XBOX_SQUIDS_WITH_SPAWN_EGG;
+			break;
+		case eTYPE_SNOWMAN:
+			count = countInstanceOf( eTYPE_SNOWMAN, true);
+			max = MobCategory::MAX_XBOX_SNOWMEN;
+			break;
+		case eTYPE_VILLAGERGOLEM:
+			count = countInstanceOf( eTYPE_VILLAGERGOLEM, true);
+			max = MobCategory::MAX_XBOX_IRONGOLEM;
+			break;
+		default:
+			if((type & eTYPE_ANIMALS_SPAWN_LIMIT_CHECK) == eTYPE_ANIMALS_SPAWN_LIMIT_CHECK)
+			{
+				count = countInstanceOf( eTYPE_ANIMALS_SPAWN_LIMIT_CHECK, false);
+				max = MobCategory::MAX_XBOX_ANIMALS_WITH_SPAWN_EGG;
+			}
+			else if( (type & eTYPE_MONSTER) == eTYPE_MONSTER)
+			{
+				count = countInstanceOf( eTYPE_MONSTER, false);
+				max = MobCategory::MAX_XBOX_MONSTERS_WITH_SPAWN_EGG;
+			}
+		};
+	}
+	else if(spawnType == eSpawnType_Breed)
+	{
+		switch(type)
+		{
+		case eTYPE_VILLAGER:
+			count = countInstanceOf( eTYPE_VILLAGER, true);
+			max = MobCategory::MAX_VILLAGERS_WITH_BREEDING;
+			break;
+		case eTYPE_CHICKEN:
+			count = countInstanceOf( eTYPE_CHICKEN, true);
+			max = MobCategory::MAX_XBOX_CHICKENS_WITH_BREEDING;
+			break;
+		case eTYPE_WOLF:
+			count = countInstanceOf( eTYPE_WOLF, true);
+			max = MobCategory::MAX_XBOX_WOLVES_WITH_BREEDING;
+			break;
+		case eTYPE_MUSHROOMCOW:
+			count = countInstanceOf( eTYPE_MUSHROOMCOW, true);
+			max = MobCategory::MAX_XBOX_MUSHROOMCOWS_WITH_BREEDING;
+			break;
+		default:
+			if((type & eTYPE_ANIMALS_SPAWN_LIMIT_CHECK) == eTYPE_ANIMALS_SPAWN_LIMIT_CHECK)
+			{
+				count = countInstanceOf( eTYPE_ANIMALS_SPAWN_LIMIT_CHECK, false);
+				max = MobCategory::MAX_XBOX_ANIMALS_WITH_BREEDING;
+			}
+			else if( (type & eTYPE_MONSTER) == eTYPE_MONSTER)
+			{
+
+			}
+			break;
+		}
+	}
+	return count < max;
+}
+
+// Level.cpp
+AABBList *Level::getTileCubes(AABB *box, bool blockAtEdge)
+{
+	return getCubes(nullptr, box, true, blockAtEdge);
+	//boxes.clear();
+	//int x0 = Mth::floor(box->x0);
+	//int x1 = Mth::floor(box->x1 + 1);
+	//int y0 = Mth::floor(box->y0);
+	//int y1 = Mth::floor(box->y1 + 1);
+	//int z0 = Mth::floor(box->z0);
+	//int z1 = Mth::floor(box->z1 + 1);
+
+	//for (int x = x0; x < x1; x++)
+	//{
+	//	for (int z = z0; z < z1; z++)
+	//	{
+	//		if (hasChunkAt(x, 64, z))
+	//		{
+	//			for (int y = y0 - 1; y < y1; y++)
+	//			{
+	//				Tile *tile = Tile::tiles[getTile(x, y, z)];
+
+	//				if (tile != NULL)
+	//				{
+	//					tile->addAABBs(this, x, y, z, box, &boxes);
+	//				}
+	//			}
+	//		}
+	//	}
+	//}
+
+	//return boxes;
 }
 
 // Tile.cpp
@@ -5907,6 +6297,2017 @@ Vec3 *RandomPos::generateRandomPos(shared_ptr<PathfinderMob> mob, int xzDist, in
 	}
 
 	return NULL;
+}
+
+// AgableMob.cpp
+AgableMob::AgableMob(Level *level) : PathfinderMob(level)
+{
+	registeredBBWidth = -1;
+	registeredBBHeight = 0;
+}
+
+bool AgableMob::interact(shared_ptr<Player> player)
+{
+	shared_ptr<ItemInstance> item = player->inventory->getSelected();
+
+	if (item != NULL && item->id == Item::monsterPlacer_Id)
+	{
+		if (!level->isClientSide)
+		{
+			eINSTANCEOF classToSpawn = EntityIO::getClass(item->getAuxValue());
+			if (classToSpawn != eTYPE_NOTSET && (classToSpawn & eTYPE_AGABLE_MOB) == eTYPE_AGABLE_MOB && classToSpawn == GetType() ) // 4J Added GetType() check to only spawn same type
+			{
+				shared_ptr<AgableMob> offspring = getBreedOffspring(dynamic_pointer_cast<AgableMob>(shared_from_this()));
+				if (offspring != NULL)
+				{
+					offspring->setAge(-20 * 60 * 20);
+					offspring->moveTo(x, y, z, 0, 0);
+
+					level->addEntity(offspring);
+
+					if (!player->abilities.instabuild)
+					{
+						item->count--;
+
+						if (item->count <= 0)
+						{
+							player->inventory->setItem(player->inventory->selected, nullptr);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return PathfinderMob::interact(player);
+}
+
+void AgableMob::defineSynchedData()
+{
+	PathfinderMob::defineSynchedData();
+	entityData->define(DATA_AGE_ID, 0);
+}
+
+int AgableMob::getAge()
+{
+	return entityData->getInteger(DATA_AGE_ID);
+}
+
+void AgableMob::setAge(int age)
+{
+	entityData->set(DATA_AGE_ID, age);
+	updateSize(isBaby());
+}
+
+void AgableMob::addAdditonalSaveData(CompoundTag *tag)
+{
+	PathfinderMob::addAdditonalSaveData(tag);
+	tag->putInt(L"Age", getAge());
+}
+
+void AgableMob::readAdditionalSaveData(CompoundTag *tag)
+{
+	PathfinderMob::readAdditionalSaveData(tag);
+	setAge(tag->getInt(L"Age"));
+}
+
+void AgableMob::aiStep()
+{
+	PathfinderMob::aiStep();
+
+	if(level->isClientSide)
+	{
+		updateSize(isBaby());
+	}
+	else
+	{
+		int age = getAge();
+		if (age < 0)
+		{
+			age++;
+			setAge(age);
+		}
+		else if (age > 0)
+		{
+			age--;
+			setAge(age);
+		}
+	}
+}
+
+bool AgableMob::isBaby()
+{
+	return getAge() < 0;
+}
+
+void AgableMob::updateSize(bool isBaby)
+{
+	internalSetSize(isBaby ? .5f : 1.0f);
+}
+
+void AgableMob::setSize(float w, float h)
+{
+	bool inited = registeredBBWidth > 0;
+
+	registeredBBWidth = w;
+	registeredBBHeight = h;
+
+	if (!inited)
+	{
+		internalSetSize(1.0f);
+	}
+}
+
+void AgableMob::internalSetSize(float scale)
+{
+	PathfinderMob::setSize(registeredBBWidth * scale, registeredBBHeight * scale);
+}
+
+// Animal.cpp
+Animal::Animal(Level *level) : AgableMob( level )
+{
+//	inLove = 0;										// 4J removed - now synched data
+	loveTime = 0;
+	loveCause = shared_ptr<Player>();
+
+	setDespawnProtected();
+}
+
+void Animal::defineSynchedData()
+{
+	AgableMob::defineSynchedData();
+
+	entityData->define(DATA_IN_LOVE, (int)0);		// 4J added
+}
+
+void Animal::serverAiMobStep()
+{
+	if (getAge() != 0) setInLoveValue(0);
+	AgableMob::serverAiMobStep();
+}
+
+void Animal::aiStep()
+{
+	AgableMob::aiStep();
+
+	if (getAge() != 0) setInLoveValue(0);
+
+	if (getInLoveValue() > 0)
+	{
+		setInLoveValue(getInLoveValue()-1);
+		if (getInLoveValue() % 10 == 0)
+		{
+			double xa = random->nextGaussian() * 0.02;
+			double ya = random->nextGaussian() * 0.02;
+			double za = random->nextGaussian() * 0.02;
+			level->addParticle(eParticleType_heart, x + random->nextFloat() * bbWidth * 2 - bbWidth, y + .5f + random->nextFloat() * bbHeight, z + random->nextFloat() * bbWidth * 2 - bbWidth, xa, ya, za);
+		}
+	}
+	else
+	{
+		loveTime = 0;
+	}
+
+	updateDespawnProtectedState();		// 4J added
+}
+
+void Animal::checkHurtTarget(shared_ptr<Entity> target, float d)
+{
+	if (dynamic_pointer_cast<Player>(target) != NULL)
+	{
+		if (d < 3)
+		{
+			double xd = target->x - x;
+			double zd = target->z - z;
+			yRot = (float) (atan2(zd, xd) * 180 / PI) - 90;
+
+			holdGround = true;
+		}
+
+		shared_ptr<Player> p = dynamic_pointer_cast<Player>(target);
+		if (p->getSelectedItem() != NULL && this->isFood(p->getSelectedItem()))
+		{
+		}
+		else
+		{
+			attackTarget = nullptr;
+		}
+
+	}
+	else if (dynamic_pointer_cast<Animal>(target) != NULL)
+	{
+		shared_ptr<Animal> a = dynamic_pointer_cast<Animal>(target);
+		if (getAge() > 0 && a->getAge() < 0)
+		{
+			if (d < 2.5)
+			{
+				holdGround = true;
+			}
+		}
+		else if (getInLoveValue() > 0 && a->getInLoveValue() > 0)
+		{
+			if (a->attackTarget == NULL) a->attackTarget = shared_from_this();
+
+			if (a->attackTarget == shared_from_this() && d < 3.5)
+			{
+				a->setInLoveValue(a->getInLoveValue()+1);
+				setInLoveValue(getInLoveValue()+1);
+				loveTime++;
+				if (loveTime % 4 == 0)
+				{
+					level->addParticle(eParticleType_heart, x + random->nextFloat() * bbWidth * 2 - bbWidth, y + .5f + random->nextFloat() * bbHeight, z + random->nextFloat() * bbWidth * 2 - bbWidth, 0, 0, 0);
+				}
+
+				if (loveTime == 20 * 3) breedWith(a);
+			}
+			else loveTime = 0;
+		}
+		else
+		{
+			loveTime = 0;
+			attackTarget = nullptr;
+		}
+
+	}
+}
+
+void Animal::breedWith(shared_ptr<Animal> target)
+{
+	shared_ptr<AgableMob> offspring = getBreedOffspring(target);
+
+	setInLoveValue(0);
+	loveTime = 0;
+	attackTarget = nullptr;
+	target->attackTarget = nullptr;
+	target->loveTime = 0;
+	target->setInLoveValue(0);
+
+	// 4J - we have offspring of NULL returned when we have hit our limits of spawning any particular type of animal. In these cases try and do everything we can apart from actually
+	// spawning the entity.
+	if (offspring != NULL)
+	{
+		// Only want to set the age to this +ve value if something is actually spawned, as during this period the animal will attempt to follow offspring and ignore players.
+		setAge(5 * 60 * 20);
+		target->setAge(5 * 60 * 20);
+
+		offspring->setAge(-20 * 60 * 20);
+		offspring->moveTo(x, y, z, yRot, xRot);
+		offspring->setDespawnProtected();
+		for (int i = 0; i < 7; i++)
+		{
+			double xa = random->nextGaussian() * 0.02;
+			double ya = random->nextGaussian() * 0.02;
+			double za = random->nextGaussian() * 0.02;
+			level->addParticle(eParticleType_heart, x + random->nextFloat() * bbWidth * 2 - bbWidth, y + .5f + random->nextFloat() * bbHeight, z + random->nextFloat() * bbWidth * 2 - bbWidth, xa, ya, za);
+		}
+		level->addEntity(offspring);
+
+		level->addEntity( shared_ptr<ExperienceOrb>( new ExperienceOrb(level, x, y, z, random->nextInt(4) + 1) ) );
+	}
+
+	setDespawnProtected();
+}
+
+float Animal::getWalkTargetValue(int x, int y, int z)
+{
+	if (level->getTile(x, y - 1, z) == Tile::grass_Id) return 10;
+	return level->getBrightness(x, y, z) - 0.5f;
+}
+
+bool Animal::hurt(DamageSource *dmgSource, int dmg)
+{
+	if (dynamic_cast<EntityDamageSource *>(dmgSource) != NULL)
+	{
+		shared_ptr<Entity> source = dmgSource->getDirectEntity();
+
+		if (dynamic_pointer_cast<Player>(source) != NULL &&	!dynamic_pointer_cast<Player>(source)->isAllowedToAttackAnimals() )
+		{
+			return false;
+		}
+
+		if (source != NULL && source->GetType() == eTYPE_ARROW)
+		{
+			shared_ptr<Arrow> arrow = dynamic_pointer_cast<Arrow>(source);
+			if (dynamic_pointer_cast<Player>(arrow->owner) != NULL && ! dynamic_pointer_cast<Player>(arrow->owner)->isAllowedToAttackAnimals() )
+			{
+				return false;
+			}
+		}
+	}
+
+	fleeTime = 20 * 3;
+	attackTarget = nullptr;
+	setInLoveValue(0);
+
+	return AgableMob::hurt(dmgSource, dmg);
+}
+
+void Animal::addAdditonalSaveData(CompoundTag *tag)
+{
+	AgableMob::addAdditonalSaveData(tag);
+	tag->putInt(L"InLove", getInLoveValue());
+}
+
+void Animal::readAdditionalSaveData(CompoundTag *tag)
+{
+	AgableMob::readAdditionalSaveData(tag);
+	setInLoveValue(tag->getInt(L"InLove"));
+	setDespawnProtected();
+}
+
+shared_ptr<Entity> Animal::findAttackTarget()
+{
+	if (fleeTime > 0) return nullptr;
+
+	float r = 8;
+	if (getInLoveValue() > 0)
+	{
+		vector<shared_ptr<Entity> > *others = level->getEntitiesOfClass(typeid(*this), bb->grow(r, r, r));
+		//for (int i = 0; i < others->size(); i++)
+		for(AUTO_VAR(it, others->begin()); it != others->end(); ++it)
+		{
+			shared_ptr<Animal> p = dynamic_pointer_cast<Animal>(*it);
+			if (p != shared_from_this() && p->getInLoveValue() > 0)
+			{
+				delete others;
+				return p;
+			}
+		}
+		delete others;
+	}
+	else
+	{
+		if (getAge() == 0)
+		{
+			vector<shared_ptr<Entity> > *players = level->getEntitiesOfClass(typeid(Player), bb->grow(r, r, r));
+			//for (int i = 0; i < players.size(); i++)
+			for(AUTO_VAR(it, players->begin()); it != players->end(); ++it)
+			{
+				setDespawnProtected();
+
+				shared_ptr<Player> p = dynamic_pointer_cast<Player>(*it);
+				if (p->getSelectedItem() != NULL && this->isFood(p->getSelectedItem()))
+				{
+					delete players;
+					return p;
+				}
+			}
+			delete players;
+		}
+		else if (getAge() > 0)
+		{
+			vector<shared_ptr<Entity> > *others = level->getEntitiesOfClass(typeid(*this), bb->grow(r, r, r));
+			//for (int i = 0; i < others.size(); i++)			
+			for(AUTO_VAR(it, others->begin()); it != others->end(); ++it)
+			{
+				shared_ptr<Animal> p = dynamic_pointer_cast<Animal>(*it);
+				if (p != shared_from_this() && p->getAge() < 0)
+				{
+					delete others;
+					return p;
+				}
+			}
+			delete others;
+		}
+	}
+	return nullptr;
+}
+
+bool Animal::canSpawn()
+{
+	int xt = Mth::floor(x);
+	int yt = Mth::floor(bb->y0);
+	int zt = Mth::floor(z);
+	return level->getTile(xt, yt - 1, zt) == Tile::grass_Id && level->getDaytimeRawBrightness(xt, yt, zt) > 8 && AgableMob::canSpawn();
+}
+
+int Animal::getAmbientSoundInterval()
+{
+	return 20 * 6;
+}
+
+bool Animal::removeWhenFarAway()
+{
+	return !isDespawnProtected();	// 4J changed - was false
+}
+
+int Animal::getExperienceReward(shared_ptr<Player> killedBy)
+{
+	return 1 + level->random->nextInt(3);
+}
+
+bool Animal::isFood(shared_ptr<ItemInstance> itemInstance)
+{
+	return itemInstance->id == Item::wheat_Id;
+}
+
+bool Animal::interact(shared_ptr<Player> player)
+{
+	shared_ptr<ItemInstance> item = player->inventory->getSelected();
+	if (item != NULL && isFood(item) && getAge() == 0)
+	{
+		if (!player->abilities.instabuild)
+		{
+			item->count--;
+			if (item->count <= 0)
+			{
+				player->inventory->setItem(player->inventory->selected, nullptr);
+			}
+		}
+		
+
+		// 4J-PB - If we can't produce another animal through breeding because of the spawn limits, display a message here
+		if(!level->isClientSide)
+		{
+			switch(GetType())
+			{
+			case eTYPE_CHICKEN:
+				if( !level->canCreateMore(eTYPE_CHICKEN, Level::eSpawnType_Breed) )
+				{
+					player->displayClientMessage(IDS_MAX_CHICKENS_BRED );
+					return false;
+				}					
+				break;
+			case eTYPE_WOLF:
+				if( !level->canCreateMore(eTYPE_WOLF, Level::eSpawnType_Breed) )
+				{
+					player->displayClientMessage(IDS_MAX_WOLVES_BRED );
+					return false;
+				}					
+				break;
+			case eTYPE_MUSHROOMCOW:
+				if( !level->canCreateMore(eTYPE_MUSHROOMCOW, Level::eSpawnType_Breed) )
+				{
+					player->displayClientMessage(IDS_MAX_MUSHROOMCOWS_BRED );
+					return false;
+				}					
+				break;
+			default:
+				if((GetType() & eTYPE_ANIMALS_SPAWN_LIMIT_CHECK) == eTYPE_ANIMALS_SPAWN_LIMIT_CHECK)
+				{
+					if( !level->canCreateMore(GetType(), Level::eSpawnType_Breed) )
+					{
+						player->displayClientMessage(IDS_MAX_PIGS_SHEEP_COWS_CATS_BRED );
+
+						return false;
+					}
+				}
+				else if( (GetType() & eTYPE_MONSTER) == eTYPE_MONSTER)
+				{
+
+				}
+				break;
+			}
+			setInLove(player);
+		}
+
+
+		attackTarget = nullptr;
+		for (int i = 0; i < 7; i++)
+		{
+			double xa = random->nextGaussian() * 0.02;
+			double ya = random->nextGaussian() * 0.02;
+			double za = random->nextGaussian() * 0.02;
+			level->addParticle(eParticleType_heart, x + random->nextFloat() * bbWidth * 2 - bbWidth, y + .5f + random->nextFloat() * bbHeight, z + random->nextFloat() * bbWidth * 2 - bbWidth, xa, ya, za);
+		}
+
+		return true;
+	}
+	return AgableMob::interact(player);
+}
+
+int Animal::getInLoveValue()
+{
+	return entityData->getInteger(DATA_IN_LOVE);
+}
+
+void Animal::setInLoveValue(int value)
+{
+	entityData->set(DATA_IN_LOVE, value);
+}
+
+void Animal::setInLove(shared_ptr<Player> player)
+{
+	loveCause = player;
+	setInLoveValue(20*30);
+}
+
+shared_ptr<Player> Animal::getLoveCause()
+{
+	return loveCause.lock();
+}
+
+bool Animal::isInLove()
+{
+	return entityData->getInteger(DATA_IN_LOVE) > 0;
+}
+
+void Animal::resetLove() {
+	entityData->set(DATA_IN_LOVE, 0);
+}
+
+bool Animal::canMate(shared_ptr<Animal> partner)
+{
+	if (partner == shared_from_this()) return false;
+	if (typeid(*partner) != typeid(*this)) return false;
+	return isInLove() && partner->isInLove();
+}
+
+void Animal::updateDespawnProtectedState()
+{
+	if( level->isClientSide ) return;
+
+	if( m_isDespawnProtected )
+	{
+		int xt = Mth::floor(x);
+		int zt = Mth::floor(z);
+
+		if ( xt > m_maxWanderX ) m_maxWanderX = xt;
+		if ( xt < m_minWanderX ) m_minWanderX = xt;
+		if ( zt > m_maxWanderZ ) m_maxWanderZ = zt;
+		if ( zt < m_minWanderZ ) m_minWanderZ = zt;
+
+		if( ( ( m_maxWanderX - m_minWanderX ) > MAX_WANDER_DISTANCE ) ||
+			( ( m_maxWanderZ - m_minWanderZ ) > MAX_WANDER_DISTANCE ) )
+		{
+//			printf("Unprotecting : %d to %d, %d to %d\n", m_minWanderX, m_maxWanderX, m_minWanderZ, m_maxWanderZ );
+			m_isDespawnProtected = false;
+		}
+
+/*
+		if( isExtraWanderingEnabled() )
+		{
+			printf("%d: %d %d, %d\n",entityId,m_maxWanderX - m_minWanderX, m_maxWanderZ - m_minWanderZ, getWanderingQuadrant());
+		}
+		*/
+	}
+}
+
+bool Animal::isDespawnProtected()
+{
+	return m_isDespawnProtected;
+}
+
+void Animal::setDespawnProtected()
+{
+	if( level && level->isClientSide ) return;
+
+	int xt = Mth::floor(x);
+	int zt = Mth::floor(z);
+
+	m_minWanderX = xt;
+	m_maxWanderX = xt;
+	m_minWanderZ = zt;
+	m_maxWanderZ = zt;
+
+	m_isDespawnProtected = true;
+}
+
+// Pig.cpp
+Pig::Pig(Level *level) : Animal( level )
+{
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that
+	// the derived version of the function is called
+	this->defineSynchedData();
+
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that the derived version of the function is called
+	health = getMaxHealth();
+
+	this->textureIdx = TN_MOB_PIG; // 4J - was L"/mob/pig.png";
+	this->setSize(0.9f, 0.9f);
+
+	getNavigation()->setAvoidWater(true);
+	float walkSpeed = 0.25f;
+	goalSelector.addGoal(0, new FloatGoal(this));
+	goalSelector.addGoal(1, new PanicGoal(this, 0.38f));
+	goalSelector.addGoal(2, controlGoal = new ControlledByPlayerGoal(this, 0.34f, walkSpeed));
+	goalSelector.addGoal(3, new BreedGoal(this, walkSpeed));
+	goalSelector.addGoal(4, new TemptGoal(this, 0.3f, Item::carrotOnAStick_Id, false));
+	goalSelector.addGoal(4, new TemptGoal(this, 0.25f, Item::carrots_Id, false));
+	goalSelector.addGoal(5, new FollowParentGoal(this, 0.28f));
+	goalSelector.addGoal(6, new RandomStrollGoal(this, walkSpeed));
+	goalSelector.addGoal(7, new LookAtPlayerGoal(this, typeid(Player), 6));
+	goalSelector.addGoal(8, new RandomLookAroundGoal(this));
+}
+
+bool Pig::useNewAi()
+{
+	return true;
+}
+
+int Pig::getMaxHealth()
+{
+	return 10;
+}
+
+bool Pig::canBeControlledByRider()
+{
+	shared_ptr<ItemInstance> item = dynamic_pointer_cast<Player>(rider.lock())->getCarriedItem();
+
+	return item != NULL && item->id == Item::carrotOnAStick_Id;
+}
+
+void Pig::defineSynchedData() 
+{
+	Animal::defineSynchedData();
+	entityData->define(DATA_SADDLE_ID, (byte) 0);
+}
+
+void Pig::addAdditonalSaveData(CompoundTag *tag) 
+{
+	Animal::addAdditonalSaveData(tag);
+	tag->putBoolean(L"Saddle", hasSaddle());
+}
+
+void Pig::readAdditionalSaveData(CompoundTag *tag) 
+{
+	Animal::readAdditionalSaveData(tag);
+	setSaddle(tag->getBoolean(L"Saddle"));
+}
+
+int Pig::getAmbientSound() 
+{
+	return eSoundType_MOB_PIG_AMBIENT;
+}
+
+int Pig::getHurtSound() 
+{
+	return eSoundType_MOB_PIG_AMBIENT;
+}
+
+int Pig::getDeathSound() 
+{
+	return eSoundType_MOB_PIG_DEATH;
+}
+
+bool Pig::interact(shared_ptr<Player> player)
+{
+	if(!Animal::interact(player))
+	{
+		if (hasSaddle() && !level->isClientSide && (rider.lock() == NULL || rider.lock() == player)) 
+		{
+			// 4J HEG - Fixed issue with player not being able to dismount pig (issue #4479)
+			player->ride( rider.lock() == player ? nullptr : shared_from_this() );
+			return true;
+		}
+		return false;
+	}
+	return true;
+}
+
+int Pig::getDeathLoot() 
+{
+	if (this->isOnFire() ) return Item::porkChop_cooked->id;
+	return Item::porkChop_raw_Id;
+}
+
+void Pig::dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel)
+{
+	int count = random->nextInt(3) + 1 + random->nextInt(1 + playerBonusLevel);
+
+	for (int i = 0; i < count; i++)
+	{
+		if (isOnFire())
+		{
+			spawnAtLocation(Item::porkChop_cooked_Id, 1);
+		}
+		else
+		{
+			spawnAtLocation(Item::porkChop_raw_Id, 1);
+		}
+	}
+	if (hasSaddle()) spawnAtLocation(Item::saddle_Id, 1);
+}
+
+bool Pig::hasSaddle() 
+{
+	return (entityData->getByte(DATA_SADDLE_ID) & 1) != 0;
+}
+
+void Pig::setSaddle(bool value) 
+{
+	if (value) 
+	{
+		entityData->set(DATA_SADDLE_ID, (byte) 1);
+	} 
+	else 
+	{
+		entityData->set(DATA_SADDLE_ID, (byte) 0);
+	}
+}
+
+void Pig::thunderHit(const LightningBolt *lightningBolt)
+{
+	if (level->isClientSide) return;
+	shared_ptr<PigZombie> pz = shared_ptr<PigZombie>( new PigZombie(level) );
+	pz->moveTo(x, y, z, yRot, xRot);
+	level->addEntity(pz);
+	remove();
+}
+
+void Pig::causeFallDamage(float distance) 
+{
+	Animal::causeFallDamage(distance);
+	if (distance > 5 && dynamic_pointer_cast<Player>( rider.lock() ) != NULL)
+	{
+		(dynamic_pointer_cast<Player>(rider.lock()))->awardStat(GenericStats::flyPig(),GenericStats::param_flyPig());
+	}
+}
+
+shared_ptr<AgableMob> Pig::getBreedOffspring(shared_ptr<AgableMob> target)
+{
+	// 4J - added limit to number of animals that can be bred
+	if( level->canCreateMore( GetType(), Level::eSpawnType_Breed) )
+	{
+		return shared_ptr<Pig>( new Pig(level) );
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+bool Pig::isFood(shared_ptr<ItemInstance> itemInstance)
+{
+	return itemInstance != NULL && itemInstance->id == Item::carrots_Id;
+}
+
+ControlledByPlayerGoal *Pig::getControlGoal()
+{
+	return controlGoal;
+}
+
+// Cow.cpp
+Cow::Cow(Level *level) : Animal( level )
+{
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that
+	// the derived version of the function is called
+	this->defineSynchedData();
+
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that the derived version of the function is called
+	health = getMaxHealth();
+
+	this->textureIdx = TN_MOB_COW;	// 4J was L"/mob/cow.png";
+	this->setSize(0.9f, 1.3f);
+
+	getNavigation()->setAvoidWater(true);
+	goalSelector.addGoal(0, new FloatGoal(this));
+	goalSelector.addGoal(1, new PanicGoal(this, 0.38f));
+	goalSelector.addGoal(2, new BreedGoal(this, 0.2f));
+	goalSelector.addGoal(3, new TemptGoal(this, 0.25f, Item::wheat_Id, false));
+	goalSelector.addGoal(4, new FollowParentGoal(this, 0.25f));
+	goalSelector.addGoal(5, new RandomStrollGoal(this, 0.2f));
+	goalSelector.addGoal(6, new LookAtPlayerGoal(this, typeid(Player), 6));
+	goalSelector.addGoal(7, new RandomLookAroundGoal(this));
+}
+
+bool Cow::useNewAi()
+{
+	return true;
+}
+
+int Cow::getMaxHealth()
+{
+	return 10;
+}
+
+int Cow::getAmbientSound() 
+{
+	return eSoundType_MOB_COW_AMBIENT;
+}
+
+int Cow::getHurtSound() 
+{
+	return eSoundType_MOB_COW_HURT;
+}
+
+int Cow::getDeathSound() 
+{
+	return eSoundType_MOB_COW_HURT;
+}
+
+float Cow::getSoundVolume() 
+{
+	return 0.4f;
+}
+
+int Cow::getDeathLoot() 
+{
+	return Item::leather->id;
+}
+
+void Cow::dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel)
+{
+	// drop some leather
+	int count = random->nextInt(3) + random->nextInt(1 + playerBonusLevel);
+	for (int i = 0; i < count; i++)
+	{
+		spawnAtLocation(Item::leather_Id, 1);
+	}
+	// and some meat
+	count = random->nextInt(3) + 1 + random->nextInt(1 + playerBonusLevel);
+	for (int i = 0; i < count; i++)
+	{
+		if (isOnFire())
+		{
+			spawnAtLocation(Item::beef_cooked_Id, 1);
+		}
+		else
+		{
+			spawnAtLocation(Item::beef_raw_Id, 1);
+		}
+	}
+}
+
+bool Cow::interact(shared_ptr<Player> player) 
+{
+	shared_ptr<ItemInstance> item = player->inventory->getSelected();
+	if (item != NULL && item->id == Item::bucket_empty->id) 
+	{
+		player->awardStat(GenericStats::cowsMilked(),GenericStats::param_cowsMilked());
+
+		if (--item->count <= 0) 
+		{
+			player->inventory->setItem(player->inventory->selected, shared_ptr<ItemInstance>( new ItemInstance(Item::milk) ) );
+		} 
+		else if (!player->inventory->add(shared_ptr<ItemInstance>( new ItemInstance(Item::milk) ))) 
+		{
+			player->drop(shared_ptr<ItemInstance>( new ItemInstance(Item::milk) ));
+		}
+		
+		return true;
+	}
+	return Animal::interact(player);
+}
+
+shared_ptr<AgableMob> Cow::getBreedOffspring(shared_ptr<AgableMob> target)
+{
+	// 4J - added limit to number of animals that can be bred
+	if( level->canCreateMore( GetType(), Level::eSpawnType_Breed) )
+	{
+		return shared_ptr<Cow>( new Cow(level) );
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+// Sheep.cpp
+Sheep::Sheep(Level *level) : Animal( level )
+{
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that
+	// the derived version of the function is called
+	this->defineSynchedData();
+
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that the derived version of the function is called
+	health = getMaxHealth();
+
+	this->textureIdx = TN_MOB_SHEEP; // 4J - was L"/mob/sheep.png";
+	this->setSize(0.9f, 1.3f);
+
+	eatAnimationTick = 0;
+
+	eatTileGoal = new EatTileGoal(this);
+
+	float walkSpeed = 0.23f;
+	getNavigation()->setAvoidWater(true);
+	goalSelector.addGoal(0, new FloatGoal(this));
+	goalSelector.addGoal(1, new PanicGoal(this, 0.38f));
+	goalSelector.addGoal(2, new BreedGoal(this, walkSpeed));
+	goalSelector.addGoal(3, new TemptGoal(this, 0.25f, Item::wheat_Id, false));
+	goalSelector.addGoal(4, new FollowParentGoal(this, 0.25f));
+	goalSelector.addGoal(5, eatTileGoal, false);
+	goalSelector.addGoal(6, new RandomStrollGoal(this, walkSpeed));
+	goalSelector.addGoal(7, new LookAtPlayerGoal(this, typeid(Player), 6));
+	goalSelector.addGoal(8, new RandomLookAroundGoal(this));
+
+	container = shared_ptr<CraftingContainer>(new CraftingContainer(new SheepContainer(), 2, 1));
+	container->setItem(0, shared_ptr<ItemInstance>( new ItemInstance(Item::dye_powder, 1, 0)));
+	container->setItem(1, shared_ptr<ItemInstance>( new ItemInstance(Item::dye_powder, 1, 0)));
+}
+
+bool Sheep::useNewAi()
+{
+	return true;
+}
+
+void Sheep::newServerAiStep()
+{
+	eatAnimationTick = eatTileGoal->getEatAnimationTick();
+	Animal::newServerAiStep();
+}
+
+void Sheep::aiStep()
+{
+	if (level->isClientSide) eatAnimationTick = max(0, eatAnimationTick - 1);
+	Animal::aiStep();
+}
+
+int Sheep::getMaxHealth()
+{
+	return 8;
+}
+
+void Sheep::defineSynchedData() 
+{
+	Animal::defineSynchedData();
+
+	// sheared and color share a byte
+	entityData->define(DATA_WOOL_ID, ((byte) 0)); //was new Byte((byte), 0)
+}
+
+void Sheep::dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel)
+{
+	if(!isSheared())
+	{
+		// killing a non-sheared sheep will drop a single block of cloth
+		spawnAtLocation(shared_ptr<ItemInstance>( new ItemInstance(Tile::cloth_Id, 1, getColor()) ), 0.0f);
+	}
+}
+
+int Sheep::getDeathLoot()
+{
+	return Tile::cloth_Id;
+}
+
+void Sheep::handleEntityEvent(byte id)
+{
+	if (id == EntityEvent::EAT_GRASS)
+	{
+		eatAnimationTick = EAT_ANIMATION_TICKS;
+	}
+	else
+	{
+		Animal::handleEntityEvent(id);
+	}
+}
+
+float Sheep::getHeadEatPositionScale(float a)
+{
+	if (eatAnimationTick <= 0)
+	{
+		return 0;
+	}
+	if (eatAnimationTick >= 4 && eatAnimationTick <= (EAT_ANIMATION_TICKS - 4))
+	{
+		return 1;
+	}
+	if (eatAnimationTick < 4)
+	{
+		return ((float) eatAnimationTick - a) / 4.0f;
+	}
+	return -((float) (eatAnimationTick - EAT_ANIMATION_TICKS) - a) / 4.0f;
+}
+
+float Sheep::getHeadEatAngleScale(float a)
+{
+	if (eatAnimationTick > 4 && eatAnimationTick <= (EAT_ANIMATION_TICKS - 4))
+	{
+		float scale = ((float) (eatAnimationTick - 4) - a) / (float) (EAT_ANIMATION_TICKS - 8);
+		return PI * .20f + PI * .07f * Mth::sin(scale * 28.7f);
+	}
+	if (eatAnimationTick > 0)
+	{
+		return PI * .20f;
+	}
+	return ((xRot / (180.0f / PI)));
+}
+
+bool Sheep::interact(shared_ptr<Player> player)
+{
+    shared_ptr<ItemInstance> item = player->inventory->getSelected();
+
+	// 4J-JEV: Fix for #88212,
+	// Untrusted players shouldn't be able to sheer sheep.
+	if (!player->isAllowedToInteract( shared_from_this() ))
+		return false; //Animal::interact(player);
+
+    if (item != NULL && item->id == Item::shears->id && !isSheared() && !isBaby())
+	{
+        if (!level->isClientSide)
+		{
+            setSheared(true);
+            int count = 1 + random->nextInt(3);
+            for (int i = 0; i < count; i++)
+			{
+                shared_ptr<ItemEntity> ie = spawnAtLocation(shared_ptr<ItemInstance>( new ItemInstance(Tile::cloth_Id, 1, getColor()) ), 1.0f);
+                ie->yd += random->nextFloat() * 0.05f;
+                ie->xd += (random->nextFloat() - random->nextFloat()) * 0.1f;
+                ie->zd += (random->nextFloat() - random->nextFloat()) * 0.1f;
+            }
+
+			player->awardStat( GenericStats::shearedEntity(eTYPE_SHEEP), GenericStats::param_shearedEntity(eTYPE_SHEEP) );
+        }
+        item->hurt(1, player);
+    }
+
+    return Animal::interact(player);
+}
+
+void Sheep::addAdditonalSaveData(CompoundTag *tag) 
+{
+	Animal::addAdditonalSaveData(tag);
+	tag->putBoolean(L"Sheared", isSheared());
+	tag->putByte(L"Color", (byte) getColor());
+}
+
+void Sheep::readAdditionalSaveData(CompoundTag *tag) 
+{
+	Animal::readAdditionalSaveData(tag);
+	setSheared(tag->getBoolean(L"Sheared"));
+	setColor((int) tag->getByte(L"Color"));
+}
+
+int Sheep::getAmbientSound() 
+{
+	return eSoundType_MOB_SHEEP_AMBIENT;
+}
+
+int Sheep::getHurtSound() 
+{
+	return eSoundType_MOB_SHEEP_AMBIENT;
+}
+
+int Sheep::getDeathSound() 
+{
+	return eSoundType_MOB_SHEEP_AMBIENT;
+}
+
+int Sheep::getColor() 
+{
+	return (entityData->getByte(DATA_WOOL_ID) & 0x0f);
+}
+
+void Sheep::setColor(int color) 
+{
+	byte current = entityData->getByte(DATA_WOOL_ID);
+	entityData->set(DATA_WOOL_ID, (byte) ((current & 0xf0) | (color & 0x0f)));
+}
+
+bool Sheep::isSheared() 
+{
+	return (entityData->getByte(DATA_WOOL_ID) & 0x10) != 0;
+}
+
+void Sheep::setSheared(bool value) 
+{
+	byte current = entityData->getByte(DATA_WOOL_ID);
+	if (value) 
+	{
+		entityData->set(DATA_WOOL_ID, (byte) (current | 0x10));
+	} 
+	else 
+	{
+		entityData->set(DATA_WOOL_ID, (byte) (current & ~0x10));
+	}
+}
+
+int Sheep::getSheepColor(Random *random) 
+{
+	int nextInt = random->nextInt(100);
+	if (nextInt < 5) 
+	{
+		return 15 - DyePowderItem::BLACK;
+	}
+	if (nextInt < 10) 
+	{
+		return 15 - DyePowderItem::GRAY;
+	}
+	if (nextInt < 15) 
+	{
+		return 15 - DyePowderItem::SILVER;
+	}
+	if (nextInt < 18) 
+	{
+		return 15 - DyePowderItem::BROWN;
+	}
+	if (random->nextInt(500) == 0) return 15 - DyePowderItem::PINK;
+	return 0; // white
+}
+
+shared_ptr<AgableMob> Sheep::getBreedOffspring(shared_ptr<AgableMob> target)
+{
+	// 4J - added limit to number of animals that can be bred
+	if( level->canCreateMore( GetType(), Level::eSpawnType_Breed) )
+	{
+		shared_ptr<Sheep> otherSheep = dynamic_pointer_cast<Sheep>( target );
+		shared_ptr<Sheep> sheep = shared_ptr<Sheep>( new Sheep(level) );
+		int color = getOffspringColor(dynamic_pointer_cast<Animal>(shared_from_this()), otherSheep);
+		sheep->setColor(15 - color);
+		return sheep;
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+void Sheep::ate()
+{
+	setSheared(false);
+	if (isBaby())
+	{
+		// remove a minute from aging
+		int age = getAge() + SharedConstants::TICKS_PER_SECOND * 60;
+		if (age > 0)
+		{
+			age = 0;
+		}
+		setAge(age);
+	}
+}
+
+void Sheep::finalizeMobSpawn()
+{
+	setColor(Sheep::getSheepColor(level->random));
+}
+
+int Sheep::getOffspringColor(shared_ptr<Animal> animal, shared_ptr<Animal> partner)
+{
+	int parent1DyeColor = getDyeColor(animal);
+	int parent2DyeColor = getDyeColor(partner);
+
+	container->getItem(0)->setAuxValue(parent1DyeColor);
+	container->getItem(1)->setAuxValue(parent2DyeColor);
+
+	shared_ptr<ItemInstance> instance = Recipes::getInstance()->getItemFor(container, animal->level);
+
+	int color = 0;
+	if (instance != NULL && instance->getItem()->id == Item::dye_powder_Id)
+	{
+		color = instance->getAuxValue();
+	}
+	else
+	{
+		color = level->random->nextBoolean() ? parent1DyeColor : parent2DyeColor;
+	}
+	return color;
+}
+
+int Sheep::getDyeColor(shared_ptr<Animal> animal)
+{
+	return 15 - dynamic_pointer_cast<Sheep>(animal)->getColor();
+}
+
+// Chicken.cpp
+void Chicken::_init()
+{
+	sheared = false;
+	flap = 0;
+	flapSpeed = 0;
+	flapping = 1;
+	oFlapSpeed = oFlap = 0.0f;
+	eggTime = 0;
+}
+
+Chicken::Chicken(Level *level) : Animal( level )
+{
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that the derived version of the function is called
+	this->defineSynchedData();
+
+	// 4J Stu - This function call had to be moved here from the Entity ctor to ensure that the derived version of the function is called
+	health = getMaxHealth();
+
+	_init();
+	this->textureIdx = TN_MOB_CHICKEN;	// 4J - was L"/mob/chicken.png";
+	this->setSize(0.3f, 0.7f); // 4J Changed from 0.4 to 0.7 in 1.8.2
+	eggTime = random->nextInt(20 * 60 * 5) + 20 * 60 * 5;
+
+	float walkSpeed = 0.25f;
+	goalSelector.addGoal(0, new FloatGoal(this));
+	goalSelector.addGoal(1, new PanicGoal(this, 0.38f));
+	goalSelector.addGoal(2, new BreedGoal(this, walkSpeed));
+	goalSelector.addGoal(3, new TemptGoal(this, 0.25f, Item::seeds_wheat_Id, false));
+	goalSelector.addGoal(4, new FollowParentGoal(this, 0.28f));
+	goalSelector.addGoal(5, new RandomStrollGoal(this, walkSpeed));
+	goalSelector.addGoal(6, new LookAtPlayerGoal(this, typeid(Player), 6));
+	goalSelector.addGoal(7, new RandomLookAroundGoal(this));
+}
+
+bool Chicken::useNewAi()
+{
+	return true;
+}
+
+int Chicken::getMaxHealth()
+{
+	return 4;
+}
+
+void Chicken::aiStep()
+{
+	Animal::aiStep();
+
+	oFlap = flap;
+	oFlapSpeed = flapSpeed;
+
+	flapSpeed += (onGround ? -1 : 4) * 0.3f;
+	if (flapSpeed < 0) flapSpeed = 0;
+	if (flapSpeed > 1) flapSpeed = 1;
+
+	if (!onGround && flapping < 1) flapping = 1;
+	flapping *= 0.9;
+
+	if (!onGround && yd < 0) 
+	{
+		yd *= 0.6;
+	}
+
+	flap += flapping * 2;
+
+	if (!isBaby())
+	{
+		if (!level->isClientSide && --eggTime <= 0) 
+		{
+			level->playSound(shared_from_this(), eSoundType_MOB_CHICKENPLOP, 1.0f, (random->nextFloat() - random->nextFloat()) * 0.2f + 1.0f);
+			spawnAtLocation(Item::egg->id, 1);
+			eggTime = random->nextInt(20 * 60 * 5) + 20 * 60 * 5;
+		}
+	}
+
+}
+
+void Chicken::causeFallDamage(float distance) 
+{
+}
+
+int Chicken::getAmbientSound() 
+{
+	return eSoundType_MOB_CHICKEN_AMBIENT;
+}
+
+int Chicken::getHurtSound() 
+{
+	return eSoundType_MOB_CHICKEN_HURT;
+}
+
+int Chicken::getDeathSound() 
+{
+	return eSoundType_MOB_CHICKEN_HURT;
+}
+
+int Chicken::getDeathLoot() 
+{
+	return Item::feather->id;
+}
+
+void Chicken::dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel)
+{
+	// drop some feathers
+	int count = random->nextInt(3) + random->nextInt(1 + playerBonusLevel);
+	for (int i = 0; i < count; i++)
+	{
+		spawnAtLocation(Item::feather_Id, 1);
+	}
+	// and some meat
+	if (this->isOnFire()) 
+	{
+		spawnAtLocation(Item::chicken_cooked_Id, 1);
+	}
+	else
+	{
+		spawnAtLocation(Item::chicken_raw_Id, 1);
+	}
+}
+
+shared_ptr<AgableMob> Chicken::getBreedOffspring(shared_ptr<AgableMob> target)
+{
+	// 4J - added limit to chickens that can be bred
+	if( level->canCreateMore( GetType(), Level::eSpawnType_Breed) )
+	{
+		return shared_ptr<Chicken>(new Chicken(level));
+	}
+	else
+	{
+		return nullptr;
+	}
+}
+
+bool Chicken::isFood(shared_ptr<ItemInstance> itemInstance)
+{
+	return (itemInstance->id == Item::seeds_wheat_Id) || (itemInstance->id == Item::netherStalkSeeds_Id) || (itemInstance->id == Item::seeds_melon_Id) || (itemInstance->id == Item::seeds_pumpkin_Id);
+}
+
+// FloatGoal.cpp
+FloatGoal::FloatGoal(Mob *mob)
+{
+	this->mob = mob;
+	setRequiredControlFlags(Control::JumpControlFlag);
+	mob->getNavigation()->setCanFloat(true);
+}
+
+bool FloatGoal::canUse()
+{
+	return (mob->isInWater() || mob->isInLava());
+}
+
+void FloatGoal::tick()
+{
+	if (mob->getRandom()->nextFloat() < 0.8f) mob->getJumpControl()->jump();
+}
+
+// PanicGoal.cpp
+PanicGoal::PanicGoal(PathfinderMob *mob, float speed)
+{
+	this->mob = mob;
+	this->speed = speed;
+	setRequiredControlFlags(Control::MoveControlFlag);
+}
+
+bool PanicGoal::canUse()
+{
+	if (mob->getLastHurtByMob() == NULL) return false;
+	Vec3 *pos = RandomPos::getPos(dynamic_pointer_cast<PathfinderMob>(mob->shared_from_this()), 5, 4);
+	if (pos == NULL) return false;
+	posX = pos->x;
+	posY = pos->y;
+	posZ = pos->z;
+	return true;
+}
+
+void PanicGoal::start()
+{
+	mob->getNavigation()->moveTo(posX, posY, posZ, speed);
+}
+
+bool PanicGoal::canContinueToUse()
+{
+	return !mob->getNavigation()->isDone();
+}
+
+// BreedGoal.cpp
+BreedGoal::BreedGoal(Animal *animal, float speed)
+{
+	partner = weak_ptr<Animal>();
+	loveTime = 0;
+
+	this->animal = animal;
+	this->level = animal->level;
+	this->speed = speed;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::LookControlFlag);
+}
+
+bool BreedGoal::canUse()
+{
+	if (!animal->isInLove()) return false;
+	partner = weak_ptr<Animal>(getFreePartner());
+	return partner.lock() != NULL;
+}
+
+bool BreedGoal::canContinueToUse()
+{
+	return partner.lock() != NULL && partner.lock()->isAlive() && partner.lock()->isInLove() && loveTime < 20 * 3;
+}
+
+void BreedGoal::stop()
+{
+	partner = weak_ptr<Animal>();
+	loveTime = 0;
+}
+
+void BreedGoal::tick()
+{
+	animal->getLookControl()->setLookAt(partner.lock(), 10, animal->getMaxHeadXRot());
+	animal->getNavigation()->moveTo(partner.lock(), speed);
+	++loveTime;
+	if (loveTime == 20 * 3) breed();
+}
+
+shared_ptr<Animal> BreedGoal::getFreePartner()
+{
+	float r = 8;
+	vector<shared_ptr<Entity> > *others = level->getEntitiesOfClass(typeid(*animal), animal->bb->grow(r, r, r));
+	for(AUTO_VAR(it, others->begin()); it != others->end(); ++it)
+	{
+		shared_ptr<Animal> p = dynamic_pointer_cast<Animal>(*it);
+		if (animal->canMate(p))
+		{
+			delete others;
+			return p;
+		}
+	}
+	delete others;
+	return nullptr;
+}
+
+void BreedGoal::breed()
+{
+	shared_ptr<AgableMob> offspring = animal->getBreedOffspring(partner.lock());
+	animal->setDespawnProtected();
+	partner.lock()->setDespawnProtected();
+	if (offspring == NULL)
+	{
+		// This will be NULL if we've hit our limits for spawning any particular type of animal... reset things as normally as we can, without actually producing any offspring
+		animal->resetLove();
+		partner.lock()->resetLove();
+		return;
+	}
+
+	shared_ptr<Player> loveCause = animal->getLoveCause();
+	if (loveCause == NULL && partner.lock()->getLoveCause() != NULL)
+	{
+		loveCause = partner.lock()->getLoveCause();
+	}
+
+	if (loveCause != NULL)
+	{
+		// Record mob bred stat.
+		loveCause->awardStat(GenericStats::breedEntity(offspring->GetType()),GenericStats::param_breedEntity(offspring->GetType()));
+
+		if (animal->GetType() == eTYPE_COW)
+		{
+			//loveCause->awardStat(Achievements.breedCow);
+		}
+	}
+
+	animal->setAge(5 * 60 * 20);
+	partner.lock()->setAge(5 * 60 * 20);
+	animal->resetLove();
+	partner.lock()->resetLove();
+	offspring->setAge(-20 * 60 * 20);
+	offspring->moveTo(animal->x, animal->y, animal->z, 0, 0);
+	offspring->setDespawnProtected();
+	level->addEntity(offspring);
+
+	Random *random = animal->getRandom();
+	for (int i = 0; i < 7; i++)
+	{
+		double xa = random->nextGaussian() * 0.02;
+		double ya = random->nextGaussian() * 0.02;
+		double za = random->nextGaussian() * 0.02;
+		level->addParticle(eParticleType_heart, animal->x + random->nextFloat() * animal->bbWidth * 2 - animal->bbWidth, animal->y + .5f + random->nextFloat() * animal->bbHeight, animal->z + random->nextFloat()
+			* animal->bbWidth * 2 - animal->bbWidth, xa, ya, za);
+	}
+	// 4J-PB - Fix for 106869- Customer Encountered: TU12: Content: Gameplay: Breeding animals does not give any Experience Orbs.
+	level->addEntity( shared_ptr<ExperienceOrb>( new ExperienceOrb(level, animal->x, animal->y, animal->z, random->nextInt(7) + 1) ) );
+}
+
+// TemptGoal.cpp
+TemptGoal::TemptGoal(PathfinderMob *mob, float speed, int itemId, bool canScare)
+{
+	px = py = pz = pRotX = pRotY = 0.0;
+	player = weak_ptr<Player>();
+	calmDown = 0;
+	_isRunning = false;
+	oldAvoidWater = false;
+
+	this->mob = mob;
+	this->speed = speed;
+	this->itemId = itemId;
+	this->canScare = canScare;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::LookControlFlag);
+}
+
+bool TemptGoal::canUse()
+{
+	if (calmDown > 0)
+	{
+		--calmDown;
+		return false;
+	}
+	player = weak_ptr<Player>(mob->level->getNearestPlayer(mob->shared_from_this(), 10));
+	if (player.lock() == NULL) return false;
+	mob->setDespawnProtected();		// If we've got a nearby player, then consider this mob as something we'd miss if it despawned
+	shared_ptr<ItemInstance> item = player.lock()->getSelectedItem();
+	if (item == NULL) return false;
+	if (item->id != itemId) return false;
+	return true;
+}
+
+bool TemptGoal::canContinueToUse()
+{
+	if (canScare)
+	{
+		if(player.lock() == NULL) return false;
+		if (mob->distanceToSqr(player.lock()) < 6 * 6)
+		{
+			if (player.lock()->distanceToSqr(px, py, pz) > 0.1 * 0.1) return false;
+			if (abs(player.lock()->xRot - pRotX) > 5 || abs(player.lock()->yRot - pRotY) > 5) return false;
+		}
+		else
+		{
+			px = player.lock()->x;
+			py = player.lock()->y;
+			pz = player.lock()->z;
+		}
+		pRotX = player.lock()->xRot;
+		pRotY = player.lock()->yRot;
+	}
+	return canUse();
+}
+
+void TemptGoal::start()
+{
+	px = player.lock()->x;
+	py = player.lock()->y;
+	pz = player.lock()->z;
+	_isRunning = true;
+	oldAvoidWater = mob->getNavigation()->getAvoidWater();
+	mob->getNavigation()->setAvoidWater(false);
+}
+
+void TemptGoal::stop()
+{
+	player = weak_ptr<Player>();
+	mob->getNavigation()->stop();
+	calmDown = 100;
+	_isRunning = false;
+	mob->getNavigation()->setAvoidWater(oldAvoidWater);
+}
+
+void TemptGoal::tick()
+{
+	mob->getLookControl()->setLookAt(player.lock(), 30, mob->getMaxHeadXRot());
+	if (mob->distanceToSqr(player.lock()) < 2.5 * 2.5) mob->getNavigation()->stop();
+	else mob->getNavigation()->moveTo(player.lock(), speed);
+}
+
+bool TemptGoal::isRunning()
+{
+	return _isRunning;
+}
+
+// FollowParentGoal.cpp
+FollowParentGoal::FollowParentGoal(Animal *animal, float speed)
+{
+	timeToRecalcPath = 0;
+
+	this->animal = animal;
+	this->speed = speed;
+}
+
+bool FollowParentGoal::canUse()
+{
+	if (animal->getAge() >= 0) return false;
+
+	vector<shared_ptr<Entity> > *parents = animal->level->getEntitiesOfClass(typeid(*animal), animal->bb->grow(8, 4, 8));
+
+	shared_ptr<Animal> closest = nullptr;
+	double closestDistSqr = Double::MAX_VALUE;
+	for(AUTO_VAR(it, parents->begin()); it != parents->end(); ++it)
+	{
+		shared_ptr<Animal> parent = dynamic_pointer_cast<Animal>(*it);
+		if (parent->getAge() < 0) continue;
+		double distSqr = animal->distanceToSqr(parent);
+		if (distSqr > closestDistSqr) continue;
+		closestDistSqr = distSqr;
+		closest = parent;
+	}
+	delete parents;
+
+	if (closest == NULL) return false;
+	if (closestDistSqr < 3 * 3) return false;
+	parent = weak_ptr<Animal>(closest);
+	return true;
+}
+
+bool FollowParentGoal::canContinueToUse()
+{
+	if (parent.lock() == NULL || !parent.lock()->isAlive()) return false;
+	double distSqr = animal->distanceToSqr(parent.lock());
+	if (distSqr < 3 * 3 || distSqr > 16 * 16) return false;
+	return true;
+}
+
+void FollowParentGoal::start()
+{
+	timeToRecalcPath = 0;
+}
+
+void FollowParentGoal::stop()
+{
+	parent = weak_ptr<Animal>();
+}
+
+void FollowParentGoal::tick()
+{
+	if (--timeToRecalcPath > 0) return;
+	timeToRecalcPath = 10;
+	animal->getNavigation()->moveTo(parent.lock(), speed);
+}
+
+// RandomStrollGoal.cpp
+RandomStrollGoal::RandomStrollGoal(PathfinderMob *mob, float speed)
+{
+	this->mob = mob;
+	this->speed = speed;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::LookControlFlag);
+}
+
+bool RandomStrollGoal::canUse()
+{
+	// 4J - altered a little so we can do some more random strolling when appropriate, to try and move any animals that aren't confined to a fenced-off region far enough to determine we can despawn them
+	if (mob->getNoActionTime() < SharedConstants::TICKS_PER_SECOND * 5)
+	{
+		if (mob->getRandom()->nextInt(120) == 0)
+		{
+			Vec3 *pos = RandomPos::getPos(dynamic_pointer_cast<PathfinderMob>(mob->shared_from_this()), 10, 7);
+			if (pos == NULL) return false;
+			wantedX = pos->x;
+			wantedY = pos->y;
+			wantedZ = pos->z;
+			return true;
+		}
+	}
+	else
+	{
+		// This entity wouldn't normally be randomly strolling. However, if our management system says that it should do, then do. Don't
+		// bother waiting for random conditions to be met before picking a direction though as the point here is to see if it is possible to
+		// stroll out of a given area and so waiting around is just wasting time
+
+		if( mob->isExtraWanderingEnabled() )
+		{
+			Vec3 *pos = RandomPos::getPos(dynamic_pointer_cast<PathfinderMob>(mob->shared_from_this()), 10, 7,mob->getWanderingQuadrant());
+			if (pos == NULL) return false;
+			wantedX = pos->x;
+			wantedY = pos->y;
+			wantedZ = pos->z;
+			return true;
+		}
+
+	}
+	return false;
+}
+
+bool RandomStrollGoal::canContinueToUse()
+{
+	return !mob->getNavigation()->isDone();
+}
+
+void RandomStrollGoal::start()
+{
+	mob->getNavigation()->moveTo(wantedX, wantedY, wantedZ, speed);
+}
+
+// LookAtPlayerGoal.cpp
+LookAtPlayerGoal::LookAtPlayerGoal(Mob *mob, const type_info& lookAtType, float lookDistance) : lookAtType(lookAtType)
+{
+	this->mob = mob;
+	this->lookDistance = lookDistance;
+	this->probability = 0.02f;
+	setRequiredControlFlags(Control::LookControlFlag);
+
+	lookTime = 0;
+}
+
+LookAtPlayerGoal::LookAtPlayerGoal(Mob *mob, const type_info& lookAtType, float lookDistance, float probability) : lookAtType(lookAtType)
+{
+	this->mob = mob;
+	this->lookDistance = lookDistance;
+	this->probability = probability;
+	setRequiredControlFlags(Control::LookControlFlag);
+
+	lookTime = 0;
+}
+
+bool LookAtPlayerGoal::canUse()
+{
+	if (mob->getRandom()->nextFloat() >= probability) return false;
+	if (lookAtType == typeid(Player)) lookAt = mob->level->getNearestPlayer(mob->shared_from_this(), lookDistance);
+	else lookAt = weak_ptr<Entity>(mob->level->getClosestEntityOfClass(lookAtType, mob->bb->grow(lookDistance, 3, lookDistance), mob->shared_from_this()));
+	return lookAt.lock() != NULL;
+}
+
+bool LookAtPlayerGoal::canContinueToUse()
+{
+	if (lookAt.lock() == NULL || !lookAt.lock()->isAlive()) return false;
+	if (mob->distanceToSqr(lookAt.lock()) > lookDistance * lookDistance) return false;
+	return lookTime > 0;
+}
+
+void LookAtPlayerGoal::start()
+{
+	lookTime = 40 + mob->getRandom()->nextInt(40);
+}
+
+void LookAtPlayerGoal::stop()
+{
+	lookAt = weak_ptr<Entity>();
+}
+
+void LookAtPlayerGoal::tick()
+{
+	mob->getLookControl()->setLookAt(lookAt.lock()->x, lookAt.lock()->y + lookAt.lock()->getHeadHeight(), lookAt.lock()->z, 10, mob->getMaxHeadXRot());
+	--lookTime;
+}
+
+// RandomLookAroundGoal.cpp
+RandomLookAroundGoal::RandomLookAroundGoal(Mob *mob)
+{
+	relX = relZ = 0.0;
+	lookTime = 0;
+
+	this->mob = mob;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::LookControlFlag);
+}
+
+bool RandomLookAroundGoal::canUse()
+{
+	return mob->getRandom()->nextFloat() < 0.02f;
+}
+
+bool RandomLookAroundGoal::canContinueToUse()
+{
+	return lookTime >= 0;
+}
+
+void RandomLookAroundGoal::start()
+{
+	double rnd = 2 * PI * mob->getRandom()->nextDouble();
+	relX = cos(rnd);
+	relZ = sin(rnd);
+	lookTime = 20 + mob->getRandom()->nextInt(20);
+}
+
+void RandomLookAroundGoal::tick()
+{
+	--lookTime;
+	mob->getLookControl()->setLookAt(mob->x + relX, mob->y + mob->getHeadHeight(), mob->z + relZ, 10, mob->getMaxHeadXRot());
+}
+
+// EatTileGoal.cpp
+EatTileGoal::EatTileGoal(Mob *mob)
+{
+	eatAnimationTick = 0;
+
+	this->mob = mob;
+	this->level = mob->level;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::LookControlFlag | Control::JumpControlFlag);
+}
+
+bool EatTileGoal::canUse()
+{
+	if (mob->getRandom()->nextInt(mob->isBaby() ? 50 : 1000) != 0) return false;
+
+	int xx = Mth::floor(mob->x);
+	int yy = Mth::floor(mob->y);
+	int zz = Mth::floor(mob->z);
+	if (level->getTile(xx, yy, zz) == Tile::tallgrass_Id && level->getData(xx, yy, zz) == TallGrass::TALL_GRASS) return true;
+	if (level->getTile(xx, yy - 1, zz) == Tile::grass_Id) return true;
+	return false;
+}
+
+void EatTileGoal::start()
+{
+	eatAnimationTick = EAT_ANIMATION_TICKS;
+	level->broadcastEntityEvent(mob->shared_from_this(), EntityEvent::EAT_GRASS);
+	mob->getNavigation()->stop();
+}
+
+void EatTileGoal::stop()
+{
+	eatAnimationTick = 0;
+}
+
+bool EatTileGoal::canContinueToUse()
+{
+	return eatAnimationTick > 0;
+}
+
+int EatTileGoal::getEatAnimationTick()
+{
+	return eatAnimationTick;
+}
+
+void EatTileGoal::tick()
+{
+	eatAnimationTick = max(0, eatAnimationTick - 1);
+	if (eatAnimationTick != 4) return;
+
+	int xx = Mth::floor(mob->x);
+	int yy = Mth::floor(mob->y);
+	int zz = Mth::floor(mob->z);
+
+	if (level->getTile(xx, yy, zz) == Tile::tallgrass_Id)
+	{
+		level->levelEvent(LevelEvent::PARTICLES_DESTROY_BLOCK, xx, yy, zz, Tile::tallgrass_Id + (TallGrass::TALL_GRASS << Tile::TILE_NUM_SHIFT));
+		level->setTile(xx, yy, zz, 0);
+		mob->ate();
+	}
+	else if (level->getTile(xx, yy - 1, zz) == Tile::grass_Id)
+	{
+		level->levelEvent(LevelEvent::PARTICLES_DESTROY_BLOCK, xx, yy - 1, zz, Tile::grass_Id);
+		level->setTile(xx, yy - 1, zz, Tile::dirt_Id);
+		mob->ate();
+	}
+}
+
+// ControlledByPlayerGoal.cpp
+ControlledByPlayerGoal::ControlledByPlayerGoal(Mob *mob, float maxSpeed, float walkSpeed)
+{
+	this->mob = mob;
+	this->maxSpeed = maxSpeed;
+	this->walkSpeed = walkSpeed;
+	speed = 0;
+	boosting = false;
+	boostTime = 0;
+	boostTimeTotal = 0;
+	setRequiredControlFlags(Control::MoveControlFlag | Control::JumpControlFlag | Control::LookControlFlag);
+}
+
+void ControlledByPlayerGoal::start()
+{
+	speed = 0;
+
+	// 4J Stu - Need to initialise this otherwise the pig will never move if you jump on before another goal has made it move and set the speed
+	if(mob->getSpeed() < walkSpeed) mob->setSpeed(walkSpeed);
+}
+
+void ControlledByPlayerGoal::stop()
+{
+	boosting = false;
+	speed = 0;
+}
+
+bool ControlledByPlayerGoal::canUse()
+{
+	shared_ptr<Player> player = dynamic_pointer_cast<Player>( mob->rider.lock() );
+	return mob->isAlive() && player && (boosting || mob->canBeControlledByRider());
+}
+
+void ControlledByPlayerGoal::tick()
+{
+	shared_ptr<Player> player = dynamic_pointer_cast<Player>(mob->rider.lock());
+	PathfinderMob *pig = (PathfinderMob *)mob;
+
+	float yrd = Mth::wrapDegrees(player->yRot - mob->yRot) * 0.5f;
+	if (yrd > 5) yrd = 5;
+	if (yrd < -5) yrd = -5;
+
+	mob->yRot = Mth::wrapDegrees(mob->yRot + yrd);
+	if (speed < maxSpeed) speed += (maxSpeed - speed) * 0.01f;
+	if (speed > maxSpeed) speed = maxSpeed;
+
+	int x = Mth::floor(mob->x);
+	int y = Mth::floor(mob->y);
+	int z = Mth::floor(mob->z);
+	float moveSpeed = speed;
+	if (boosting)
+	{
+		if (boostTime++ > boostTimeTotal)
+		{
+			boosting = false;
+		}
+		moveSpeed += moveSpeed * 1.15f * Mth::sin((float) boostTime / boostTimeTotal * PI);
+	}
+
+	float friction = 0.91f;
+	if (mob->onGround)
+	{
+		friction = 0.6f * 0.91f;
+		int t = mob->level->getTile(x,y,z);
+		if (t > 0)
+		{
+			friction = Tile::tiles[t]->friction * 0.91f;
+		}
+	}
+	float friction2 = (0.6f * 0.6f * 0.91f * 0.91f * 0.6f * 0.91f) / (friction * friction * friction);
+	float sin = Mth::sin(pig->yRot * PI / 180);
+	float cos = Mth::cos(pig->yRot * PI / 180);
+	float aproxSpeed = pig->getSpeed() * friction2;
+	float dist = max((int)moveSpeed, 1);
+	dist = aproxSpeed / dist;
+	float normMoveSpeed = moveSpeed * dist;
+	float xa = -(normMoveSpeed * sin);
+	float za = normMoveSpeed * cos;
+
+	if (Mth::abs(xa) > Mth::abs(za))
+	{
+		if (xa < 0) xa -= mob->bbWidth / 2.0f;
+		if (xa > 0) xa += mob->bbWidth / 2.0f;
+		za = 0;
+	}
+	else
+	{
+		xa = 0;
+		if (za < 0) za -= mob->bbWidth / 2.0f;
+		if (za > 0) za += mob->bbWidth / 2.0f;
+	}
+
+	int xt = Mth::floor(mob->x + xa);
+	int zt = Mth::floor(mob->z + za);
+
+	Node *size = new Node(Mth::floor(mob->bbWidth + 1), Mth::floor(mob->bbHeight + player->bbHeight + 1), Mth::floor(mob->bbWidth + 1));
+
+	if (x != xt || z != zt)
+	{
+		if (PathFinder::isFree(mob, xt, y, zt, size, false, false, true) == PathFinder::TYPE_BLOCKED
+			&& PathFinder::isFree(mob, x, y + 1, z, size, false, false, true) == PathFinder::TYPE_OPEN
+			&& PathFinder::isFree(mob, xt, y + 1, zt, size, false, false, true) == PathFinder::TYPE_OPEN)
+		{
+			pig->getJumpControl()->jump();
+		}
+	}
+
+	if (!player->abilities.instabuild && speed >= maxSpeed * 0.5f && mob->getRandom()->nextFloat() < 0.006f && !boosting)
+	{
+		shared_ptr<ItemInstance> carriedItem = player->getCarriedItem();
+
+		if (carriedItem != NULL && carriedItem->id == Item::carrotOnAStick_Id)
+		{
+			carriedItem->hurt(1, player);
+
+			if (carriedItem->count == 0)
+			{
+				shared_ptr<ItemInstance> replacement = shared_ptr<ItemInstance>(new ItemInstance(Item::fishingRod));
+				replacement->setTag(carriedItem->tag);
+				player->inventory->items[player->inventory->selected] = replacement;
+			}
+		}
+	}
+
+	mob->travel(0, moveSpeed);
+}
+
+bool ControlledByPlayerGoal::isBoosting()
+{
+	return boosting;
+}
+
+void ControlledByPlayerGoal::boost()
+{
+	boosting = true;
+	boostTime = 0;
+	boostTimeTotal = mob->getRandom()->nextInt(MAX_BOOST_TIME + MIN_BOOST_TIME + 1) + MIN_BOOST_TIME;
+}
+
+bool ControlledByPlayerGoal::canBoost()
+{
+	return !isBoosting() && speed > maxSpeed * 0.3f;
+}
+
+// Player.cpp
+bool Player::interact(shared_ptr<Entity> entity)
+{
+	if (entity->interact( dynamic_pointer_cast<Player>( shared_from_this() ) )) return true;
+	shared_ptr<ItemInstance> item = getSelectedItem();
+	if (item != NULL && dynamic_pointer_cast<Mob>( entity ) != NULL)
+	{		
+		// 4J - PC Comments
+		// Hack to prevent item stacks from decrementing if the player has
+		// the ability to instabuild
+		if(this->abilities.instabuild) item = item->copy();
+		if(item->interactEnemy(dynamic_pointer_cast<Mob>(entity)))
+		{
+			// 4J - PC Comments
+			// Don't remove the item in hand if the player has the ability
+			// to
+			// instabuild
+			if (item->count <= 0 && !this->abilities.instabuild)
+			{
+				removeSelectedItem();
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
+// Player.cpp
+void Player::removeSelectedItem()
+{
+	inventory->setItem(inventory->selected, nullptr);
+}
+
+// SaddleItem.cpp
+bool SaddleItem::interactEnemy(shared_ptr<ItemInstance> itemInstance, shared_ptr<Mob> mob) 
+{
+    if ( dynamic_pointer_cast<Pig>(mob) )
+	{
+        shared_ptr<Pig> pig = dynamic_pointer_cast<Pig>(mob);
+        if (!pig->hasSaddle() && !pig->isBaby()) 
+		{
+            pig->setSaddle(true);
+            itemInstance->count--;
+        }
+		return true;
+    }
+	return false;
+}
+
+// DyePowderItem.cpp
+bool DyePowderItem::interactEnemy(shared_ptr<ItemInstance> itemInstance, shared_ptr<Mob> mob) 
+{
+	if (dynamic_pointer_cast<Sheep>( mob ) != NULL) 
+	{
+		shared_ptr<Sheep> sheep = dynamic_pointer_cast<Sheep>(mob);
+		// convert to tile-based color value (0 is white instead of black)
+		int newColor = ClothTile::getTileDataForItemAuxValue(itemInstance->getAuxValue());
+		if (!sheep->isSheared() && sheep->getColor() != newColor) 
+		{
+			sheep->setColor(newColor);
+			itemInstance->count--;
+		}
+		return true;
+	}
+	return false;
+}
+
+// ClothTile.cpp
+int ClothTile::getTileDataForItemAuxValue(int auxValue)
+{
+	return (~auxValue & 0xf);
 }
 
 }

@@ -26,6 +26,20 @@ int main(){try{
     entity.yaw=180;
     const auto turned=buildMobMesh(entity,light);
     require(near(zombie[24].z+turned[24].z,41.f),"Source body yaw rotates the front face about the entity");
+    // QuadrupedModel::render for a calf: the body at half size (lower), the
+    // head at full size.
+    SimulatedEntity cow{L"Cow",{10.5,80,20.5},{},0};
+    const auto adult=buildMobMesh(cow,light);
+    cow.baby=true;
+    const auto calf=buildMobMesh(cow,light);
+    float adultTop=0,calfTop=0,calfHeadWidth=0,adultHeadWidth=0;
+    for(const auto& v:adult)adultTop=std::max(adultTop,v.y);
+    for(const auto& v:calf)calfTop=std::max(calfTop,v.y);
+    // The head is the first cube (36 vertices): its width along x is kept.
+    auto headWidth=[](const std::vector<Vertex>& mesh){float lo=1e9f,hi=-1e9f;for(int i=0;i<36;++i){lo=std::min(lo,mesh[i].x);hi=std::max(hi,mesh[i].x);}return hi-lo;};
+    adultHeadWidth=headWidth(adult);calfHeadWidth=headWidth(calf);
+    require(calf.size()==adult.size() && calfTop<adultTop && near(calfHeadWidth,adultHeadWidth),
+            "A calf is smaller but keeps a full-size head");
     entity.id=L"Skeleton";
     const auto skeleton=buildMobMesh(entity,light);
     require(skeleton.size()==zombie.size(),"Skeleton replaces limb boxes without dropping faces");

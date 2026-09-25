@@ -15,7 +15,20 @@ struct Part {
     bool mirror=false,humanoid=false;
     float grow=0;
     int textureWidth=64,textureHeight=32;
+    // A head part, which a young model draws at full size (the rest is halved).
+    bool head=false;
 };
+// QuadrupedModel/ChickenModel::render for a young mob: the head translated by
+// (0, yHeadOffs, zHeadOffs), the rest scaled by 1/2 after a 24-pixel drop.
+struct Young { bool on=false;float yHead=0,zHead=0; };
+Young youngOf(const SimulatedEntity& entity){
+    if(!entity.baby)return {};
+    if(entity.id==L"Pig")return {true,4,4};       // PigModel: yHeadOffs 4
+    if(entity.id==L"Cow" || entity.id==L"MushroomCow")return {true,8,6}; // CowModel: zHeadOffs + 2
+    if(entity.id==L"Sheep")return {true,8,4};
+    if(entity.id==L"Chicken")return {true,5,2};   // ChickenModel::render
+    return {};
+}
 Point rotate(Point point,const Part& part){
     const float cx=std::cos(part.xRot),sx=std::sin(part.xRot);
     const float cy=std::cos(part.yRot),sy=std::sin(part.yRot);
@@ -26,7 +39,7 @@ Point rotate(Point point,const Part& part){
     point={point.x*cz-point.y*sz,point.x*sz+point.y*cz,point.z};
     return {point.x+part.pivot.x,point.y+part.pivot.y,point.z+part.pivot.z};
 }
-void addPart(std::vector<Vertex>& mesh,const Part& part,const SimulatedEntity& entity,int light,float modelScale){
+void addPart(std::vector<Vertex>& mesh,const Part& part,const SimulatedEntity& entity,int light,float modelScale,Young young={}){
     // Cube.cpp constructs these eight corners, then its six _Polygon faces.
     float x0=part.x-part.grow,x1=part.x+part.width+part.grow;
     if(part.mirror)std::swap(x0,x1);
@@ -62,7 +75,11 @@ void addPart(std::vector<Vertex>& mesh,const Part& part,const SimulatedEntity& e
         std::array<Vertex,4> quad;
         for(int i=0;i<4;++i){
             const int sourceIndex=face.point[part.mirror?3-i:i];
-            const Point p=rotate(corner[sourceIndex],part);
+            Point p=rotate(corner[sourceIndex],part);
+            if(young.on){
+                if(part.head)p={p.x,p.y+young.yHead,p.z+young.zHead};
+                else p={p.x*.5f,(p.y+24)*.5f,p.z*.5f};
+            }
             const float modelX=-p.x/16.f*modelScale,modelZ=p.z/16.f*modelScale;
             // MobRenderer uses glScalef(-1,-1,1) and translates the model
             // origin 24/16 blocks above the entity's feet.
@@ -80,24 +97,25 @@ void quadruped(std::vector<Part>& parts,const SimulatedEntity& entity,bool wool)
     const int legSize=pig?6:12;
     const float stride=std::min(1.f,float(std::hypot(entity.velocity.x,entity.velocity.z)*8));
     const float phase=entity.age*.6662f;
+    const auto head=[&](Part part){part.head=true;parts.push_back(part);};
     if(cow){
-        parts.push_back({-4,-4,-6,8,8,6,0,0,{0,4,-8}});
-        parts.push_back({-5,-5,-4,1,3,1,22,0,{0,4,-8}});
-        parts.push_back({4,-5,-4,1,3,1,22,0,{0,4,-8}});
+        head({-4,-4,-6,8,8,6,0,0,{0,4,-8}});
+        head({-5,-5,-4,1,3,1,22,0,{0,4,-8}});
+        head({4,-5,-4,1,3,1,22,0,{0,4,-8}});
         parts.push_back({-6,-10,-7,12,18,10,18,4,{0,5,2},pi/2});
         parts.push_back({-2,2,-8,4,6,1,52,0,{0,5,2},pi/2});
     }else if(sheep){
         if(wool){
-            parts.push_back({-3,-4,-4,6,6,6,0,0,{0,6,-8},0,0,0,false,false,.6f});
+            head({-3,-4,-4,6,6,6,0,0,{0,6,-8},0,0,0,false,false,.6f});
             parts.push_back({-4,-10,-7,8,16,6,28,8,{0,5,2},pi/2,0,0,false,false,1.75f});
         }else{
-            parts.push_back({-3,-4,-6,6,6,8,0,0,{0,6,-8}});
+            head({-3,-4,-6,6,6,8,0,0,{0,6,-8}});
             parts.push_back({-4,-10,-7,8,16,6,28,8,{0,5,2},pi/2});
         }
     }else{
-        parts.push_back({-4,-4,-8,8,8,8,0,0,{0,float(18-legSize),-6}});
+        head({-4,-4,-8,8,8,8,0,0,{0,float(18-legSize),-6}});
         parts.push_back({-5,-10,-7,10,16,8,28,8,{0,float(17-legSize),2},pi/2});
-        parts.push_back({-2,0,-9,4,3,1,16,16,{0,float(18-legSize),-6}});
+        head({-2,0,-9,4,3,1,16,16,{0,float(18-legSize),-6}});
     }
     for(int i=0;i<4;++i){
         const bool right=i%2,back=i<2;
@@ -111,9 +129,10 @@ void quadruped(std::vector<Part>& parts,const SimulatedEntity& entity,bool wool)
 void chicken(std::vector<Part>& parts,const SimulatedEntity& entity){
     const float stride=std::min(1.f,float(std::hypot(entity.velocity.x,entity.velocity.z)*8));
     const float phase=entity.age*.6662f;
-    parts.push_back({-2,-6,-2,4,6,3,0,0,{0,15,-4}});
-    parts.push_back({-2,-4,-4,4,2,2,14,0,{0,15,-4}});
-    parts.push_back({-1,-2,-3,2,2,2,14,4,{0,15,-4}});
+    const auto head=[&](Part part){part.head=true;parts.push_back(part);};
+    head({-2,-6,-2,4,6,3,0,0,{0,15,-4}});
+    head({-2,-4,-4,4,2,2,14,0,{0,15,-4}});
+    head({-1,-2,-3,2,2,2,14,4,{0,15,-4}});
     parts.push_back({-3,-4,-3,6,8,6,0,9,{0,16,0},pi/2});
     for(int side=0;side<2;++side){
         const float legAngle=std::cos(phase+(side?pi:0))*1.4f*stride;
@@ -357,7 +376,8 @@ std::vector<Vertex> buildMobMesh(const SimulatedEntity& entity,int packedLight,b
         (entity.id==L"Slime" || entity.id==L"LavaSlime")?float(std::clamp(entity.slimeSize,1,4)):1.f;
     const int effectiveLight=entity.id==L"Blaze" || entity.id==L"LavaSlime" ||
         (entity.id==L"Enderman" && coatOverlay)?((15<<20)|(15<<4)):packedLight;
-    for(const auto& part:parts)addPart(mesh,part,entity,effectiveLight,modelScale);
+    const Young young=youngOf(entity);
+    for(const auto& part:parts)addPart(mesh,part,entity,effectiveLight,modelScale,young);
     if(entity.id==L"Enderman" && coatOverlay)
         for(auto& vertex:mesh)vertex.r=vertex.g=vertex.b=1;
     if(coatOverlay && (entity.id==L"Sheep" || entity.id==L"Wolf")){

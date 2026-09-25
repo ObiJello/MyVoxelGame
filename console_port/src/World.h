@@ -11,6 +11,7 @@
 #include "ContainerItems.h"
 #include "PotionEffects.h"
 namespace console {
+namespace sim { class Mob; }
 enum Block : std::uint8_t { Air=0, Stone=1, Grass=2, Dirt=3, Cobble=4, Planks=5,
     Bedrock=7, Water=9, Lava=10, Sand=12, Log=17, Leaves=18, Glass=20, Sandstone=24,
     Wool=35, Bricks=45, Obsidian=49, Ice=79, Fence=85, FenceGate=107, Mycelium=110, NetherFence=113 };
@@ -35,6 +36,16 @@ struct SimulatedEntity {
     double blazeHeightOffset=.5,squidPhase=0,squidPhaseSpeed=.15,squidSpeed=0;
     float squidTentacleAngle=0;
     double wanderX=0,wanderZ=0;int wanderTicks=0;
+    // The source's mob (ported/tick EntityRules.cpp) that runs this one, for
+    // the kinds the port has (pigs, cows, sheep, chickens); the fields above
+    // mirror it after each tick. AgableMob's age (babies below 0), Animal's
+    // love time and the pig's saddle are saved with it.
+    std::shared_ptr<sim::Mob> ai;
+    int animalAge=0,inLove=0;
+    bool baby=false,saddled=false;
+    float headYaw=0;
+    // A loaded record's tag, read by the source mob when it is made.
+    std::shared_ptr<class CompoundTag> saved;
 };
 struct ExperienceOrbState {
     Vec3 position,velocity;
@@ -89,6 +100,13 @@ class World {
     void tickFurnaces();
     void ensureBrewingData(int x,int y,int z);
     void ensureTrapData(int x,int y,int z);
+    // The source's mobs: their tick (WorldTiles.cpp) and a native record's
+    // defeat once one has died or despawned.
+    void tickSourceMobs();
+    void markNativeDefeated(const SimulatedEntity& entity);
+    // The living entity nearest along a ray, if no block is nearer.
+    SimulatedEntity* pickLiving(Vec3 eye,Vec3 direction,double reach);
+    bool hurtSourceMob(SimulatedEntity& entity,int damage);
     void tickBrewingStands();
     void scheduleFluid(int x,int y,int z,int delay);
     void activateFluidChunks();
@@ -263,6 +281,11 @@ public:
     void tickTime();
     void setPlayerPosition(Vec3 position);
     bool spawnCreativeEgg(int entityId,Vec3 position);
+    // The hotbar slot the player holds (animals follow food in it).
+    void setHeldSlot(int slot);
+    // Mob::interact for the entity under the crosshair with the held item
+    // (feeding, shearing, milking, saddling); false when nothing happened.
+    bool useEntity(Vec3 eye,Vec3 direction,int slot,double reach=6);
     // Whether an egg of this entity id may spawn now (a modeled mob under the cap).
     bool eggSpawnable(int entityId)const;
     bool attackEntity(Vec3 eye,Vec3 direction,int heldItemId,double reach=6);

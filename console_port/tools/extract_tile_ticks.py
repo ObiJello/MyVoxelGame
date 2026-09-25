@@ -218,7 +218,9 @@ ENTITY_METHODS = [
     ('Level', 'getNearestAttackablePlayer(double'), ('Level', 'findPath(shared_ptr<Entity> from, shared_ptr'),
     ('Level', 'findPath(shared_ptr<Entity> from, int'), ('Level', 'isUnobstructed(AABB *aabb)'),
     ('Level', 'isUnobstructed(AABB *aabb, shared_ptr'), ('Level', 'containsAnyLiquid_NoLoad'),
-    ('ExperienceOrb', 'getExperienceValue'), ('Entity', 'rideTick'), ('Entity', 'positionRider'), ('Entity', 'getRidingHeight'), ('Entity', 'getRideHeight'),
+    ('ExperienceOrb', 'getExperienceValue'), ('Level', 'getEntities'), ('Level', 'getEntitiesOfClass'),
+    ('Level', 'getClosestEntityOfClass'), ('LevelChunk', 'getEntities'), ('LevelChunk', 'getEntitiesOfClass'), ('Entity', 'rideTick'), ('Entity', 'positionRider'), ('Entity', 'getRidingHeight'), ('Entity', 'getRideHeight'),
+    ('Entity', 'ride'), ('Entity', 'findStandUpPosition'), ('Entity', 'getSubEntities'), ('Level', 'canCreateMore'), ('Level', 'getTileCubes'),
     ('Tile', 'isPathfindable'), ('FenceGateTile', 'isPathfindable'), ('FenceTile', 'isPathfindable'),
     ('LiquidTile', 'isPathfindable'), ('LiquidTileDynamic', 'isPathfindable'), ('LiquidTileStatic', 'isPathfindable'),
     ('PressurePlateTile', 'isPathfindable'), ('SignTile', 'isPathfindable'), ('TrapDoorTile', 'isPathfindable'),
@@ -232,6 +234,13 @@ ENTITY_METHODS = [
                   'getActiveEffects', 'addEffect', 'addEffectNoUpdate', 'canBeAffected', 'isInvertedHealAndHarm',
                   'removeEffectNoUpdate', 'removeEffect', 'onEffectAdded', 'onEffectUpdated', 'onEffectRemoved')),
     ('PathfinderMob', '*'), ('RandomPos', '*'),
+    # The passive animals and their goals.
+    ('AgableMob', '*'), ('Animal', '*'), ('Pig', '*'), ('Cow', '*'), ('Sheep', '*'), ('Chicken', '*'),
+    ('FloatGoal', '*'), ('PanicGoal', '*'), ('BreedGoal', '*'), ('TemptGoal', '*'), ('FollowParentGoal', '*'),
+    ('RandomStrollGoal', '*'), ('LookAtPlayerGoal', '*'), ('RandomLookAroundGoal', '*'), ('EatTileGoal', '*'),
+    ('ControlledByPlayerGoal', '*'),
+    ('Player', 'interact'), ('Player', 'removeSelectedItem'), ('SaddleItem', 'interactEnemy'),
+    ('DyePowderItem', 'interactEnemy'), ('ClothTile', 'getTileDataForItemAuxValue'),
 ]
 # Static member definitions (one statement each), written before the methods
 # of the same output: (class, member, output).
@@ -253,9 +262,12 @@ ENUMS = [
 ]
 # Headers whose class declarations the host includes as they are
 # (SourceClasses.inc), in dependency order.
-HEADERS = ['ArrayWithLength', 'EntityEvent', 'MobType', 'Control', 'LookControl', 'MoveControl', 'JumpControl',
+HEADERS = ['ArrayWithLength', 'LevelEvent', 'EntityEvent', 'MobType', 'Control', 'LookControl', 'MoveControl', 'JumpControl',
            'BodyControl', 'Sensing', 'Goal', 'GoalSelector', 'Pos', 'Node', 'BinaryHeap', 'Path', 'PathFinder',
-           'PathNavigation', 'Mob', 'PathfinderMob', 'RandomPos']
+           'PathNavigation', 'Mob', 'PathfinderMob', 'RandomPos',
+           'Creature', 'AgableMob', 'Animal', 'Pig', 'Cow', 'Sheep', 'Chicken',
+           'FloatGoal', 'PanicGoal', 'BreedGoal', 'TemptGoal', 'FollowParentGoal', 'RandomStrollGoal',
+           'LookAtPlayerGoal', 'RandomLookAroundGoal', 'EatTileGoal', 'ControlledByPlayerGoal']
 # Forward declarations the copies drop (the host has these as aliases).
 HEADER_SKIP_FORWARD = {'LevelSource', 'CompoundTag', 'Vec3', 'AABB', 'Material', 'Random', 'LightLayer', 'Facing',
                        'Direction', 'Mth', 'HitResult'}
@@ -263,7 +275,7 @@ HEADER_SKIP_FORWARD = {'LevelSource', 'CompoundTag', 'Vec3', 'AABB', 'Material',
 # to TileConstants.inc as TILE_CONSTANTS_<Class> for the stand-in classes.
 CONSTANT_CLASSES = ['FireTile', 'HeavyTile', 'TopSnowTile', 'DoorTile', 'TntTile', 'StairTile', 'HalfSlabTile',
                     'NotGateTile', 'DiodeTile', 'TrapDoorTile', 'FenceGateTile', 'PistonBaseTile',
-                    'PistonExtensionTile', 'DispenserTile']
+                    'PistonExtensionTile', 'DispenserTile', 'MobCategory', 'DyePowderItem']
 # The class's source file where it differs from the class name.
 SOURCE_FILE = {'WaterlilyTile': 'WaterLilyTile.cpp'}
 
@@ -423,12 +435,14 @@ def rules_file(methods, output):
 def expected():
     rules = rules_file(METHODS, 'TileTickRules.cpp')
     tile_h = re.sub(r'//[^\n]*', '', FILES['tile.h'].read_text(encoding='utf-8-sig'))
-    ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
+    ids = ''.join(f'static constexpr int {m[1]}_Id = {m[2]};\n'
                   for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', tile_h))
-    ids += ''.join(f'static const int SHAPE_{m[1]} = {m[2]};\n'
+    ids += ''.join(f'static constexpr int {m[1]} = {m[2]};\n'
+                   for m in re.finditer(r'static const int (TILE_NUM_SHIFT)\s*=\s*(\d+)', tile_h))
+    ids += ''.join(f'static constexpr int SHAPE_{m[1]} = {m[2]};\n'
                    for m in re.finditer(r'static const int SHAPE_(\w+)\s*=\s*(-?\d+)', tile_h))
     item_h = re.sub(r'//[^\n]*', '', FILES['item.h'].read_text(encoding='utf-8-sig'))
-    item_ids = ''.join(f'static const int {m[1]}_Id = {m[2]};\n'
+    item_ids = ''.join(f'static constexpr int {m[1]}_Id = {m[2]};\n'
                        for m in re.finditer(r'static const int (\w+)_Id\s*=\s*(\d+)', item_h))
     constants = []
     for cls in CONSTANT_CLASSES:
@@ -442,11 +456,22 @@ def expected():
                 if not d:
                     raise SystemExit(f'{cls}::{m[1]} has no value')
                 value = d[1]
-            lines.append(f'static const int {m[1]} = {value.strip()};')
+            lines.append(f'static constexpr int {m[1]} = {value.strip()};')
         constants.append(f'#define TILE_CONSTANTS_{cls} \\\n    ' + ' \\\n    '.join(lines) + '\n')
     files = {'RenderShapes.inc': render_shapes(), 'TileTickRules.cpp': rules, 'EntityRules.cpp': rules_file(ENTITY_METHODS, 'EntityRules.cpp'),
              'TileIds.inc': ids, 'ItemIds.inc': item_ids, 'TileConstants.inc': ''.join(constants)}
     files['SourceClasses.inc'] = header_classes(HEADERS)
+    # EntityIO::staticCtor's registrations: the class, save id and number.
+    entity_io = re.findall(r'^\s*setId\(\w+::create,\s*(eTYPE_\w+),\s*L"(\w+)",\s*(\d+)', source('EntityIO'), re.M)
+    files['EntityIoIds.inc'] = ('// Generated by tools/extract_tile_ticks.py from EntityIO::staticCtor.\n' +
+                                ''.join(f'CONSOLE_ENTITY_IO({t}, L"{n}", {i})\n' for t, n, i in entity_io))
+    # The IDS_* string ids the extracted code names (PS3Media/strings.h, the
+    # numbering app.GetString and the port's string table use).
+    strings_h = (SRC / '../Minecraft.Client/PS3Media/strings.h').read_text(encoding='utf-8-sig', errors='replace')
+    defined = dict(re.findall(r'#define (IDS_\w+)\s+(\d+)', strings_h))
+    used = sorted(set(re.findall(r'\b(IDS_\w+)', rules + files['EntityRules.cpp'])) & set(defined))
+    files['StringIds.inc'] = ('// Generated by tools/extract_tile_ticks.py from PS3Media/strings.h.\n' +
+                              ''.join(f'static constexpr int {name} = {defined[name]};\n' for name in used))
     for header, name, output in ENUMS:
         files[output] = f'// Generated by tools/extract_tile_ticks.py from {header}.\n' + header_enum(header, name)
     return files

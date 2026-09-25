@@ -114,7 +114,8 @@ int main(){try{
     if(remaining)for(int i=0;i<remaining->size();++i)
         if(auto* candidate=dynamic_cast<CompoundTag*>(remaining->get(i)))
             deadCowSaved|=candidate->getString(L"id")==L"Cow" &&
-                          candidate->getShort(L"Health")==0 &&
+                          // Mob::addAdditonalSaveData: the health as it is (below 0 after overkill).
+                          candidate->getShort(L"Health")<=0 &&
                           candidate->getString(L"ArchiveField")==L"keep-me";
     require(remaining && deadCowSaved,
             "Native death animation and unrelated NBT survive a mid-death save");

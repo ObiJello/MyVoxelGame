@@ -1,6 +1,7 @@
 #include "TileTickHost.h"
 #include "TileProperties.h"
 
+#include <algorithm>
 #include <cstring>
 #include <typeinfo>
 #include <memory>
@@ -27,6 +28,10 @@ Random* Item::random=new Random();
 Item* Item::bucket_empty=new BucketItem(Item::bucket_empty_Id,0);
 Item* Item::bucket_water=new BucketItem(Item::bucket_water_Id,Tile::water_Id);
 Item* Item::bucket_lava=new BucketItem(Item::bucket_lava_Id,Tile::lava_Id);
+Item *Item::dye_powder=Item::byId(Item::dye_powder_Id),*Item::egg=Item::byId(Item::egg_Id),
+    *Item::feather=Item::byId(Item::feather_Id),*Item::fishingRod=Item::byId(Item::fishingRod_Id),
+    *Item::leather=Item::byId(Item::leather_Id),*Item::milk=Item::byId(Item::milk_Id),
+    *Item::porkChop_cooked=Item::byId(Item::porkChop_cooked_Id),*Item::shears=Item::byId(Item::shears_Id);
 Item* Item::byId(int id){
     static MinecartItem minecart(minecart_Id,0),chestMinecart(minecart_chest_Id,1),furnaceMinecart(minecart_furnace_Id,2);
     static std::unordered_map<int,std::unique_ptr<Item>> others;
@@ -37,6 +42,8 @@ Item* Item::byId(int id){
     case minecart_Id:return &minecart;
     case minecart_chest_Id:return &chestMinecart;
     case minecart_furnace_Id:return &furnaceMinecart;
+    case saddle_Id:{static SaddleItem saddle(saddle_Id);return &saddle;}
+    case dye_powder_Id:{static DyePowderItem dye(dye_powder_Id);return &dye;}
     default:break;
     }
     auto& item=others[id];
@@ -291,6 +298,21 @@ bool fireCanBurn(int tile){
     return Tile::fire->canBurn(&level,0,0,0);
 }
 
+// Level::getChunk for entity lookups: the chunk's entities by the block
+// their y is in (LevelChunk::addEntity files them by xChunk/zChunk/yChunk).
+LevelChunk* Level::getChunk(int xc,int zc){
+    auto& chunk=entityChunks.try_emplace({xc,zc},false).first->second;
+    for(auto& block:chunk.blocks)block.clear();
+    const auto place=[&](const shared_ptr<Entity>& e){
+        if(!e || Mth::floor(e->x/16)!=xc || Mth::floor(e->z/16)!=zc)return;
+        chunk.blocks[std::clamp(Mth::floor(e->y/16),0,chunk.ENTITY_BLOCKS_LENGTH-1)].push_back(e);
+    };
+    for(const auto& e:entities)if(!e->removed)place(e);
+    std::vector<shared_ptr<Entity>> others;
+    hostEntities(others);
+    for(const auto& e:others)place(e);
+    return &chunk;
+}
 LevelChunk* ChunkSource::getChunk(int chunkX,int chunkZ){
     return level->hasChunk(chunkX,chunkZ)?&loaded:&missing;
 }

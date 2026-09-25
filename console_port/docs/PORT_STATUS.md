@@ -1706,3 +1706,37 @@ reconstruct is now taken from the source:
 - Tests: placement facing, texture faces, a lever firing one item per rising edge,
   buckets both ways, arrows kept with a failed click, a spawn egg's pig, contents
   dropping when broken.
+
+### Mobs from the source: entities and the passive animals (September 25)
+
+- The tick host now has the source's `Entity` (movement with the y/x/z clips and
+  step-up, water and lava, falling, fire, pushing), `Mob` (tick, `aiStep`, `travel`,
+  hurting, knockback, death, loot, looking, the old and the new AI steps),
+  `PathfinderMob`, the look/move/jump/body controls, `Sensing`, `Goal` and
+  `GoalSelector`, path finding (`PathFinder`, `Path`, `Node`, `BinaryHeap`,
+  `PathNavigation`, `RandomPos`), `AgableMob`, `Animal`, `Pig`, `Cow`, `Sheep`,
+  `Chicken` and their goals (float, panic, breed, tempt, follow parent, random stroll,
+  look at player, random look around, eat grass, the saddled pig's control). The
+  class declarations are the source headers, copied by the extractor, which also
+  copies the source's enums (`eINSTANCEOF`, sounds, particles, textures, chat ids),
+  static definitions and every method of a class when asked; the `DamageSource`
+  family, `Level::getCubes`, the liquid and fire queries, the entity queries
+  (`Level::getEntities`/`getEntitiesOfClass` over `LevelChunk`'s entity blocks) and
+  `Level::canCreateMore` are the source's too. The host uses the real `AABB` and NBT.
+- In the World, pigs, cows, sheep and chickens are run by those classes: they wander
+  while the player is near, panic when hit, follow their food, breed when fed (with
+  the 4J breeding caps), calves grow up, lambs eat grass, sheep can be sheared, cows
+  milked, pigs saddled (riding is not ported), sheep dyed, chickens lay eggs
+  (`Player::interact` and the items' `interactEnemy`). The player is a persistent `sim::Player`
+  (position, health, held item; hits and pushes go back to the World). Save records
+  carry the mobs' own `addAdditonalSaveData` fields (Age, InLove, Sheared, Color,
+  Saddle, Health...), which they read back when they are made. Young mobs are drawn
+  as the source's young models (full-size head, half-size body).
+- Tiles whose collision is not ported collide by the World's shapes; mob effects,
+  lighting colour and icons are host stand-ins; 4J's extra wandering for fenced-in
+  animals is not used (it runs on the server thread's small entity ids).
+- Tests: entity falling, walls, stepping up, water; a mob's knockback, invulnerability,
+  death and path round a wall; pigs wandering and panicking, a cow following wheat,
+  breeding, a lamb eating grass, an egg; in the World, breeding by feeding, milking,
+  shearing, a hit, and a calf across a save; the young model.
+

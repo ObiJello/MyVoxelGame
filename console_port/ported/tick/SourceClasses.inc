@@ -112,6 +112,47 @@ typedef arrayWithLength<ClipChunk> ClipChunkArray;
 
 typedef arrayWithLength<shared_ptr<ItemInstance> > ItemInstanceArray;
 
+// LevelEvent.h
+// 4J - brought forward new sound events from 1.2.3
+class LevelEvent
+{
+public:
+    static const int SOUND_CLICK = 1000;
+    static const int SOUND_CLICK_FAIL = 1001;
+    static const int SOUND_LAUNCH = 1002;
+    static const int SOUND_OPEN_DOOR = 1003;
+    static const int SOUND_FIZZ = 1004;
+	static const int SOUND_PLAY_RECORDING = 1005;
+
+    static const int SOUND_GHAST_WARNING = 1007;
+    static const int SOUND_GHAST_FIREBALL = 1008;
+    static const int SOUND_BLAZE_FIREBALL = 1009;
+
+    static const int SOUND_ZOMBIE_WOODEN_DOOR = 1010;
+    static const int SOUND_ZOMBIE_IRON_DOOR = 1011;
+    static const int SOUND_ZOMBIE_DOOR_CRASH = 1012;
+	static const int SOUND_WITHER_BOSS_SPAWN = 1013;
+	static const int SOUND_WITHER_BOSS_SHOOT = 1014;
+	static const int SOUND_BAT_LIFTOFF = 1015;
+	static const int SOUND_ZOMBIE_INFECTED = 1016;
+	static const int SOUND_ZOMBIE_CONVERTED = 1017;
+	static const int SOUND_DRAGON_DEATH = 1018;
+
+	static const int SOUND_ANVIL_BROKEN = 1020;
+	static const int SOUND_ANVIL_USED = 1021;
+	static const int SOUND_ANVIL_LAND = 1022;
+
+    static const int PARTICLES_SHOOT = 2000;
+    static const int PARTICLES_DESTROY_BLOCK = 2001;
+    static const int PARTICLES_POTION_SPLASH = 2002;
+    static const int PARTICLES_EYE_OF_ENDER_DEATH = 2003;
+    static const int PARTICLES_MOBTILE_SPAWN = 2004;
+
+	//static const int ENDERDRAGON_KILLED = 9000; // 4J Added to signal the the enderdragon was killed
+	static const int ENDERDRAGON_FIREBALL_SPLASH = 9001;
+	static const int END_EGG_TELEPORT = 9002;
+};
+
 // EntityEvent.h
 class EntityEvent
 {
@@ -1075,4 +1116,550 @@ public:
 
 private:
 	static Vec3 *generateRandomPos(shared_ptr<PathfinderMob> mob, int xzDist, int yDist, Vec3 *dir, int quadrant = -1);		// 4J added quadrant
+};
+
+// Creature.h
+class Level;
+
+class Creature
+{
+public:
+	Creature() {}
+};
+
+// AgableMob.h
+class AgableMob : public PathfinderMob
+{
+private:
+	static const int DATA_AGE_ID = 12;
+
+	float registeredBBWidth;
+	float registeredBBHeight;
+
+public:
+	AgableMob(Level *level);
+
+	virtual bool interact(shared_ptr<Player> player);
+
+protected:
+	virtual void defineSynchedData();
+
+public:
+	virtual shared_ptr<AgableMob> getBreedOffspring(shared_ptr<AgableMob> target) = 0;
+	virtual int getAge();
+	virtual void setAge(int age);
+	virtual void addAdditonalSaveData(CompoundTag *tag);
+	virtual void readAdditionalSaveData(CompoundTag *tag);
+	virtual void aiStep();
+	virtual bool isBaby();
+	virtual void updateSize(bool isBaby);
+
+protected:
+	virtual void setSize(float w, float h);
+	void internalSetSize(float scale);
+};
+
+// Animal.h
+class Level;
+class DamageSource;
+
+class Animal : public AgableMob, public Creature
+{
+private:
+	static const int DATA_IN_LOVE = 13;	// 4J added
+
+//	int inLove;							// 4J removed - now synched data
+	int loveTime;
+	weak_ptr<Player> loveCause;
+
+public:
+	Animal(Level *level);
+
+protected:
+	virtual void defineSynchedData();
+	virtual void serverAiMobStep();
+
+public:
+	virtual void aiStep();
+
+protected:
+	virtual void checkHurtTarget(shared_ptr<Entity> target, float d);
+
+private:
+	virtual void breedWith(shared_ptr<Animal> target);
+
+public:
+	virtual float getWalkTargetValue(int x, int y, int z);
+
+public:
+	virtual bool hurt(DamageSource *source, int dmg);
+	virtual void addAdditonalSaveData(CompoundTag *tag);
+	virtual void readAdditionalSaveData(CompoundTag *tag);
+
+protected:
+	virtual shared_ptr<Entity> findAttackTarget();
+
+public:
+	virtual bool canSpawn();
+	virtual int getAmbientSoundInterval();
+
+protected:
+	virtual bool removeWhenFarAway();
+	virtual int getExperienceReward(shared_ptr<Player> killedBy);
+
+public:
+	virtual bool isFood(shared_ptr<ItemInstance> itemInstance);
+	virtual bool interact(shared_ptr<Player> player);
+
+protected:
+	int getInLoveValue();					// 4J added
+
+public:
+	void setInLoveValue(int value); // 4J added
+	void setInLove(shared_ptr<Player> player);			// 4J added, then modified to match latest Java for XboxOne achievements
+	shared_ptr<Player> getLoveCause();
+	bool isInLove();
+    void resetLove();
+    virtual bool canMate(shared_ptr<Animal> partner);
+
+	// 4J added for determining whether animals are enclosed or not
+private:
+	bool m_isDespawnProtected;
+
+	static const int MAX_WANDER_DISTANCE = 20;		// Maximum distance that the entity can wander before being considered as not enclosed & therefore not protected (in tiles)
+	short m_minWanderX, m_maxWanderX;				// Bounding x values that this has moved since last being set to protected ( in tiles )
+	short m_minWanderZ, m_maxWanderZ;				// Bounding z values that this has moved since last being set to protected ( in tiles )
+	void updateDespawnProtectedState();
+public:
+	virtual bool isDespawnProtected();
+	virtual void setDespawnProtected();
+
+};
+
+// Pig.h
+class Player;
+class LightningBolt;
+class ControlledByPlayerGoal;
+
+class Pig : public Animal
+{
+public:
+	eINSTANCEOF GetType() { return eTYPE_PIG; }
+	static Entity *create(Level *level) { return new Pig(level); }
+private:
+	static const int DATA_SADDLE_ID = 16;
+	ControlledByPlayerGoal *controlGoal;
+
+public:
+	Pig(Level *level);
+
+	virtual bool useNewAi();
+	virtual int getMaxHealth();
+	virtual bool canBeControlledByRider();
+
+protected:
+	virtual void defineSynchedData();
+
+public:
+	virtual void addAdditonalSaveData(CompoundTag *tag);
+	virtual void readAdditionalSaveData(CompoundTag *tag);
+
+protected:
+	virtual int getAmbientSound();
+	virtual int getHurtSound();
+	virtual int getDeathSound();
+
+public:
+	virtual bool interact(shared_ptr<Player> player);
+
+protected:
+	virtual int getDeathLoot();
+	virtual void dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel);
+
+public:
+	bool hasSaddle();
+	void setSaddle(bool value);
+	virtual void thunderHit(const LightningBolt *lightningBolt);
+
+protected:
+	virtual void causeFallDamage(float distance);
+
+public:
+	virtual shared_ptr<AgableMob> getBreedOffspring(shared_ptr<AgableMob> target);
+	bool isFood(shared_ptr<ItemInstance> itemInstance);
+	ControlledByPlayerGoal *getControlGoal();
+};
+
+// Cow.h
+class Player;
+class Level;
+
+class Cow : public Animal
+{
+public:
+	eINSTANCEOF GetType() { return eTYPE_COW; }
+	static Entity *create(Level *level) { return new Cow(level); }
+
+public:
+	Cow(Level *level);
+	virtual bool useNewAi();
+	virtual int getMaxHealth();
+
+protected:
+	virtual int getAmbientSound();
+	virtual int getHurtSound();
+	virtual int getDeathSound();
+	virtual float getSoundVolume();
+	virtual int getDeathLoot();
+	virtual void dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel);
+
+public:
+	virtual bool interact(shared_ptr<Player> player);
+	virtual shared_ptr<AgableMob> getBreedOffspring(shared_ptr<AgableMob> target);
+};
+
+// Sheep.h
+class EatTileGoal;
+class CraftingContainer;
+
+
+class Sheep : public Animal
+{
+private:
+	class SheepContainer : public AbstractContainerMenu
+	{
+		bool stillValid(shared_ptr<Player> player) { return false; }
+	};
+
+	shared_ptr<CraftingContainer> container;
+public:
+	eINSTANCEOF GetType() { return eTYPE_SHEEP; }
+	static Entity *create(Level *level) { return new Sheep(level); }
+
+private:
+	static const int EAT_ANIMATION_TICKS = SharedConstants::TICKS_PER_SECOND * 2;
+	static const int DATA_WOOL_ID = 16;
+
+	int eatAnimationTick;
+	EatTileGoal *eatTileGoal;
+
+public:
+	static const float COLOR[][3];
+
+public:
+	Sheep(Level *level);
+
+protected:
+	virtual bool useNewAi();
+	virtual void newServerAiStep();
+
+public:
+	void aiStep();
+	virtual int getMaxHealth();
+
+protected:
+	virtual void defineSynchedData();
+
+public:
+	virtual void dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel);
+	virtual int getDeathLoot();
+
+public:
+	virtual void handleEntityEvent(byte id);
+
+public:
+	float getHeadEatPositionScale(float a);
+	float getHeadEatAngleScale(float a);
+
+	virtual bool interact(shared_ptr<Player> player);
+	virtual void addAdditonalSaveData(CompoundTag *tag);
+	virtual void readAdditionalSaveData(CompoundTag *tag);
+
+protected:
+	virtual int getAmbientSound();
+	virtual int getHurtSound();
+	virtual int getDeathSound();
+
+public:
+	int getColor();
+	void setColor(int color);
+	bool isSheared();
+	void setSheared(bool value);
+
+	static int getSheepColor(Random *random);
+	virtual shared_ptr<AgableMob> getBreedOffspring(shared_ptr<AgableMob> target);
+
+	virtual void ate();
+
+	void finalizeMobSpawn();
+
+private:
+	int getOffspringColor(shared_ptr<Animal> animal, shared_ptr<Animal> partner);
+	int getDyeColor(shared_ptr<Animal> animal);
+};
+
+// Chicken.h
+class Level;
+
+class Chicken : public Animal
+{
+public:
+	eINSTANCEOF GetType() { return eTYPE_CHICKEN; }
+	static Entity *create(Level *level) { return new Chicken(level); }
+    bool sheared;
+    float flap;
+    float flapSpeed;
+    float oFlapSpeed, oFlap;
+    float flapping;
+    int eggTime;
+
+private:	
+	void _init();
+
+public:
+	Chicken(Level *level);
+	virtual bool useNewAi();
+	virtual int getMaxHealth();
+	virtual void aiStep();	
+
+protected:
+	virtual void causeFallDamage(float distance);
+	virtual int getAmbientSound();
+    virtual int getHurtSound();
+    virtual int getDeathSound();
+    virtual int getDeathLoot();
+	virtual void dropDeathLoot(bool wasKilledByPlayer, int playerBonusLevel);
+
+public:
+	virtual shared_ptr<AgableMob> getBreedOffspring(shared_ptr<AgableMob> target);
+	virtual bool isFood(shared_ptr<ItemInstance> itemInstance);
+
+};
+
+// FloatGoal.h
+class Mob;
+
+class FloatGoal : public Goal
+{
+private:
+	Mob *mob;
+
+public:
+	FloatGoal(Mob *mob);
+
+	virtual bool canUse();
+	virtual void tick();
+};
+
+// PanicGoal.h
+class PathfinderMob;
+
+class PanicGoal : public Goal
+{
+private:
+	PathfinderMob *mob;
+	float speed;
+	double posX, posY, posZ;
+
+public:
+	PanicGoal(PathfinderMob *mob, float speed);
+
+	virtual bool canUse();
+	virtual void start();
+	virtual bool canContinueToUse();
+};
+
+// BreedGoal.h
+class Animal;
+class Level;
+
+class BreedGoal : public Goal
+{
+private:
+	Animal *animal; // Owner of this goal
+	Level *level;
+	weak_ptr<Animal> partner;
+	int loveTime;
+	float speed;
+
+public:
+	BreedGoal(Animal *animal, float speed);
+
+	virtual bool canUse();
+	virtual bool canContinueToUse();
+	virtual void stop();
+	virtual void tick();
+
+private:
+	shared_ptr<Animal> getFreePartner();
+	void breed();
+
+public:
+	// 4J Added override to update ai elements when loading entity from schematics
+	virtual void setLevel(Level *level) { this->level = level; }
+};
+
+// TemptGoal.h
+class TemptGoal : public Goal
+{
+private:
+	PathfinderMob *mob;
+	float speed;
+	double px, py, pz, pRotX, pRotY;
+	weak_ptr<Player> player;
+	int calmDown ;
+	bool _isRunning;
+	int itemId;
+	bool canScare;
+	bool oldAvoidWater;
+
+public:
+	TemptGoal(PathfinderMob *mob, float speed, int itemId, bool canScare);
+
+	bool canUse();
+	bool canContinueToUse();
+	void start();
+	void stop();
+	void tick();
+	bool isRunning();
+};
+
+// FollowParentGoal.h
+class Animal;
+
+class FollowParentGoal : public Goal
+{
+private:
+	Animal *animal; // Owner of this goal
+	weak_ptr<Animal> parent;
+	float speed;
+	int timeToRecalcPath;
+
+public:
+	FollowParentGoal(Animal *animal, float speed);
+
+	virtual bool canUse();
+	virtual bool canContinueToUse();
+	virtual void start();
+	virtual void stop();
+	virtual void tick();
+};
+
+// RandomStrollGoal.h
+class PathfinderMob;
+
+class RandomStrollGoal : public Goal
+{
+private:
+	PathfinderMob *mob;
+	double wantedX, wantedY, wantedZ;
+	float speed;
+
+public:
+	RandomStrollGoal(PathfinderMob *mob, float speed);
+
+	virtual bool canUse();
+	virtual bool canContinueToUse();
+	virtual void start();
+};
+
+// LookAtPlayerGoal.h
+class Mob;
+class Level;
+
+class LookAtPlayerGoal : public Goal
+{
+private:
+	Mob *mob; // Owner of this goal
+
+protected:
+	weak_ptr<Entity> lookAt;
+
+private:
+	float lookDistance;
+	int lookTime;
+	float probability;
+	const type_info& lookAtType;
+
+public:
+	LookAtPlayerGoal(Mob *mob, const type_info& lookAtType, float lookDistance);
+	LookAtPlayerGoal(Mob *mob, const type_info& lookAtType, float lookDistance, float probability);
+	virtual ~LookAtPlayerGoal() {}
+
+	virtual bool canUse();
+	virtual bool canContinueToUse();
+	virtual void start();
+	virtual void stop();
+	virtual void tick();
+};
+
+// RandomLookAroundGoal.h
+class RandomLookAroundGoal : public Goal
+{
+private:
+	Mob *mob;
+	double relX, relZ;
+	int lookTime;
+
+public:
+	RandomLookAroundGoal(Mob *mob);
+
+	virtual bool canUse();
+	virtual bool canContinueToUse();
+	virtual void start();
+	virtual void tick();
+};
+
+// EatTileGoal.h
+// note: Mob should implement handleEntityEvent for client state, also ate to take action upon eating
+class EatTileGoal : public Goal
+{
+private:
+	static const int EAT_ANIMATION_TICKS = SharedConstants::TICKS_PER_SECOND * 2;
+
+	Mob *mob; // Owner of this goal
+	Level *level;
+	int eatAnimationTick;
+
+public:
+	EatTileGoal(Mob *mob);
+
+	virtual bool canUse();
+	virtual void start();
+	virtual void stop();
+	virtual bool canContinueToUse();
+	virtual int getEatAnimationTick();
+	virtual void tick();
+	
+	// 4J Added override to update ai elements when loading entity from schematics
+	virtual void setLevel(Level *level) { this->level = level; }
+};
+
+// ControlledByPlayerGoal.h
+class Mob;
+
+class ControlledByPlayerGoal : public Goal
+{
+private:
+	static const int MIN_BOOST_TIME = SharedConstants::TICKS_PER_SECOND * 7;
+	static const int MAX_BOOST_TIME = SharedConstants::TICKS_PER_SECOND * 35;
+
+	Mob *mob; // Owner of this goal
+	float maxSpeed;
+	float walkSpeed;
+	float speed;
+	bool boosting;
+	int boostTime;
+	int boostTimeTotal;
+
+public:
+	ControlledByPlayerGoal(Mob *mob, float maxSpeed, float walkSpeed); // 4J Added walkSpeed param
+
+	void start();
+	void stop();
+	bool canUse();
+	void tick();
+	bool isBoosting();
+	void boost();
+	bool canBoost();
 };

@@ -49,6 +49,46 @@ std::unique_ptr<CompoundTag> dropStack(int id,int count,int damage){
 }
 }
 
+// The player as the source's mobs see it (Level::players): its position,
+// health and held item come from the World before each Level; being hurt
+// goes to the World's player (Player::hurt's creative rule and the Normal
+// difficulty scaling are CombatRules'), being moved to the client
+// (World::takePlayerPush), knockback (xd/yd/zd) to World::takePlayerKnockback.
+struct WorldPlayer final:sim::Player {
+    PlayerHurtState* hurtState=nullptr;
+    Vec3* push=nullptr;
+    Vec3* position=nullptr;
+    bool survival=true;
+    float getHeadHeight()override{return .12f;}
+    bool hurt(sim::DamageSource*,int damage)override{
+        return hurtState && applySourcePlayerHurt(*hurtState,damage,2,!survival);
+    }
+    // Riding is not ported: a saddled pig does not carry the player yet.
+    void ride(std::shared_ptr<sim::Entity>)override{}
+    void move(double dx,double dy,double dz,bool)override{
+        if(!push || !position)return;
+        push->x+=dx;push->y+=dy;push->z+=dz;
+        position->x+=dx;position->y+=dy;position->z+=dz;
+    }
+};
+// The mobs the port runs from the source, by saved id.
+std::shared_ptr<sim::Mob> newSourceMob(const std::wstring& id,sim::Level* level){
+    if(id==L"Pig")return std::make_shared<sim::Pig>(level);
+    if(id==L"Cow")return std::make_shared<sim::Cow>(level);
+    if(id==L"Sheep")return std::make_shared<sim::Sheep>(level);
+    if(id==L"Chicken")return std::make_shared<sim::Chicken>(level);
+    return nullptr;
+}
+std::wstring sourceMobId(sim::Mob& mob){
+    switch(mob.GetType()){
+    case sim::eTYPE_PIG:return L"Pig";
+    case sim::eTYPE_COW:return L"Cow";
+    case sim::eTYPE_SHEEP:return L"Sheep";
+    case sim::eTYPE_CHICKEN:return L"Chicken";
+    default:return L"";
+    }
+}
+bool sourceMobKind(const std::wstring& id){return id==L"Pig" || id==L"Cow" || id==L"Sheep" || id==L"Chicken";}
 // The live sim::Level over the client world, in level coordinates (client
 // coordinates less half the window, which keeps chunks aligned). The region is
 // read wherever a resident chunk exists (the source reads loaded neighbours),
@@ -101,6 +141,23 @@ public:
         previous_=current_.previous;
         for(auto& te:s_.tickingTileEntities)te->level=this;
         skyDarken_=consoleOldSkyDarken(world.dayTime(),world.rainLevel(),world.thunderLevel());
+        // The player and the source's mobs, pointed at this Level.
+        if(!s_.simPlayer)s_.simPlayer=std::make_shared<WorldPlayer>();
+        auto& player=static_cast<WorldPlayer&>(*s_.simPlayer);
+        player.hurtState=&s_.playerHurt;player.push=&s_.playerPush;player.position=&s_.playerPosition;
+        player.survival=world.survival();
+        player.level=this;
+        const Vec3 feet=s_.playerPosition;
+        player.setPos(feet.x-half,feet.y+player.heightOffset,feet.z-half);
+        player.xd=player.yd=player.zd=0;
+        player.setHealth(s_.playerHurt.health);
+        player.abilities.instabuild=player.abilities.invulnerable=!world.survival();
+        const auto carried=world.carriedItems();
+        const int held=std::clamp(s_.heldSlot,0,8);
+        player.inventory->selected=0;
+        player.inventory->items[0]=carried[held].id?std::make_shared<sim::ItemInstance>(carried[held].id,carried[held].count,carried[held].damage):nullptr;
+        if(s_.hasPlayerPosition && s_.playerHurt.health>0)players.push_back(s_.simPlayer);
+        for(auto& e:s_.entities)if(e.ai){entities.push_back(e.ai);e.ai->setLevel(this);}
     }
     int getTile(int x,int y,int z)override{
         if(y<0 || y>=maxBuildHeight || !resident(x,z))return 0;
@@ -160,86 +217,83 @@ public:
         return biomeHasRain(id);
     }
     std::int64_t getTime()override{return world_.time();}
-    // Level::getEntities / getEntitiesOfClass over a box: the player (a Mob
-    // and a Player), the mobs, and for any entity also dropped items and
-    // experience orbs (arrows are not ported). Each comes back as a stand-in
-    // whose move() moves the real one; the player's is handed to the client
-    // (World::takePlayerPush).
-    std::vector<std::shared_ptr<sim::Entity>> entitiesIn(const sim::AABB& box,EntityClass kind)override{
+    // The World's entities as stand-ins for Level::getEntities and
+    // getEntitiesOfClass: the player (a Player), the mobs (Mobs), dropped
+    // items (ItemEntity) and experience orbs (ExperienceOrb). Each stand-in's
+    // move() moves the real one and hurt() hurts it; its push (explosion
+    // knockback) is applied when the stand-in goes with this Level. Made once
+    // per Level.
+    template<class Base> struct Proxy final:Base {
+        std::function<void(double,double,double)> moveFn,pushFn;
+        std::function<bool(int)> hurtFn;
+        float head=0;
+        template<class... A> explicit Proxy(A&&... args):Base(std::forward<A>(args)...){}
+        void move(double dx,double dy,double dz,bool)override{moveFn(dx,dy,dz);}
+        bool hurt(sim::DamageSource*,int damage)override{return hurtFn && hurtFn(damage);}
+        float getHeadHeight()override{return head;}
+        ~Proxy()override{if(pushFn && (this->xd!=0 || this->yd!=0 || this->zd!=0))pushFn(this->xd,this->yd,this->zd);}
+    };
+    struct ProxyMob:sim::Mob {
+        ProxyMob():Mob(nullptr){}
+        int getMaxHealth()override{return 20;}
+    };
+    std::vector<std::shared_ptr<sim::Entity>> hostEntities_;
+    bool hostEntitiesMade_=false;
+    void hostEntities(std::vector<std::shared_ptr<sim::Entity>>& out)override{
+        if(!hostEntitiesMade_){makeHostEntities();hostEntitiesMade_=true;}
+        out.insert(out.end(),hostEntities_.begin(),hostEntities_.end());
+    }
+    void makeHostEntities(){
         // Entity position (feet, or the player's eye line: Player's y is its
         // feet plus heightOffset), box, head height, and what moving, hurting
-        // and pushing it does to the real one. The push (explosion knockback)
-        // is applied when the stand-in goes.
-        struct Proxy final:sim::Player {
-            std::function<void(double,double,double)> moveFn,pushFn;
-            std::function<bool(int)> hurtFn;
-            float head=0;
-            void move(double dx,double dy,double dz,bool)override{moveFn(dx,dy,dz);}
-            bool hurt(sim::DamageSource*,int damage)override{return hurtFn && hurtFn(damage);}
-            float getHeadHeight()override{return head;}
-            ~Proxy()override{if(pushFn && (xd!=0 || yd!=0 || zd!=0))pushFn(xd,yd,zd);}
-        };
-        std::vector<std::shared_ptr<sim::Entity>> found;
-        auto add=[&](const Vec3& feet,double width,double height,float yOffset,float head,
-                     std::function<void(double,double,double)> moveFn,std::function<bool(int)> hurtFn,
-                     std::function<void(double,double,double)> pushFn){
-            auto entity=std::make_shared<Proxy>();
+        // and pushing it does to the real one.
+        const auto place=[&](auto entity,const Vec3& feet,double width,double height,float yOffset,float head,
+                             std::function<void(double,double,double)> moveFn,std::function<bool(int)> hurtFn,
+                             std::function<void(double,double,double)> pushFn){
             entity->x=feet.x-half;entity->y=feet.y+yOffset;entity->z=feet.z-half;entity->heightOffset=yOffset;
+            entity->xd=entity->yd=entity->zd=0;
+            entity->bbWidth=float(width);entity->bbHeight=float(height);
             entity->bb->set(entity->x-width/2,feet.y,entity->z-width/2,entity->x+width/2,feet.y+height,entity->z+width/2);
             entity->head=head;
             entity->moveFn=std::move(moveFn);entity->hurtFn=std::move(hurtFn);entity->pushFn=std::move(pushFn);
-            found.push_back(entity);
-        };
-        const auto overlaps=[&](const Vec3& feet,double width,double height){
-            const double x=feet.x-half,z=feet.z-half;
-            return x+width/2>box.x0 && x-width/2<box.x1 && feet.y+height>box.y0 && feet.y<box.y1 &&
-                   z+width/2>box.z0 && z-width/2<box.z1;
+            hostEntities_.push_back(entity);
         };
         const auto shift=[](Vec3& v,double dx,double dy,double dz){v.x+=dx;v.y+=dy;v.z+=dz;};
-        if(kind==EntityClass::Arrow)return found;
-        if(s_.hasPlayerPosition && s_.playerHurt.health>0 && overlaps(s_.playerPosition,.6,1.8))
-            add(s_.playerPosition,.6,1.8,1.62f,.12f,
-                [this,shift](double dx,double dy,double dz){shift(s_.playerPush,dx,dy,dz);shift(s_.playerPosition,dx,dy,dz);},
-                // DamageSource::explosion scales with the difficulty (Normal here).
-                [this](int damage){return applySourcePlayerHurt(s_.playerHurt,damage,2,!world_.survival());},
-                [this,shift](double dx,double dy,double dz){shift(s_.playerKnockback,dx,dy,dz);});
-        if(kind==EntityClass::Player)return found;
+        if(s_.hasPlayerPosition && s_.playerHurt.health>0)hostEntities_.push_back(s_.simPlayer);
         for(std::size_t i=0;i<s_.entities.size();++i){
             const auto& entity=s_.entities[i];
-            if(entity.health<=0)continue;
+            if(entity.health<=0 || entity.ai)continue;
             const auto [width,height]=entitySizeOf(entity.id,entity.slimeSize);
-            if(overlaps(entity.position,width,height))
-                add(entity.position,width,height,0,float(height)*.85f,
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].position,dx,dy,dz);},
-                    [this,i](int damage){
-                        // Mob::hurt: the invulnerability window keeps only a larger hit's excess.
-                        auto& target=s_.entities[i];
-                        if(damage<=0 || target.health<=0)return false;
-                        if(target.invulnerableTicks>10){
-                            if(damage<=target.lastHurt)return false;
-                            target.health-=damage-target.lastHurt;
-                        }else{target.health-=damage;target.invulnerableTicks=20;target.hurtTicks=10;}
-                        target.lastHurt=damage;
-                        return true;
-                    },
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].velocity,dx,dy,dz);});
+            place(std::make_shared<Proxy<ProxyMob>>(),entity.position,width,height,0,float(height)*.85f,
+                [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].position,dx,dy,dz);},
+                [this,i](int damage){
+                    // Mob::hurt: the invulnerability window keeps only a larger hit's excess.
+                    auto& target=s_.entities[i];
+                    if(damage<=0 || target.health<=0)return false;
+                    if(target.invulnerableTicks>10){
+                        if(damage<=target.lastHurt)return false;
+                        target.health-=damage-target.lastHurt;
+                    }else{target.health-=damage;target.invulnerableTicks=20;target.hurtTicks=10;}
+                    target.lastHurt=damage;
+                    return true;
+                },
+                [this,i,shift](double dx,double dy,double dz){shift(s_.entities[i].velocity,dx,dy,dz);});
         }
-        if(kind==EntityClass::Mob)return found;
-        for(std::size_t i=0;i<s_.droppedItems.size();++i)
-            if(overlaps(s_.droppedItems[i].position,.25,.25))
-                add(s_.droppedItems[i].position,.25,.25,.125f,0,
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].position,dx,dy,dz);},
-                    // ItemEntity::hurt
-                    [this,i](int damage){s_.droppedItems[i].health-=damage;return true;},
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].velocity,dx,dy,dz);});
+        for(std::size_t i=0;i<s_.droppedItems.size();++i){
+            auto stack=std::make_shared<sim::ItemInstance>(s_.droppedItems[i].id,s_.droppedItems[i].count,s_.droppedItems[i].damage);
+            place(std::make_shared<Proxy<sim::ItemEntity>>(this,0.0,0.0,0.0,stack),s_.droppedItems[i].position,.25,.25,.125f,0,
+                [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].position,dx,dy,dz);},
+                // ItemEntity::hurt
+                [this,i](int damage){s_.droppedItems[i].health-=damage;return true;},
+                [this,i,shift](double dx,double dy,double dz){shift(s_.droppedItems[i].velocity,dx,dy,dz);});
+        }
         for(std::size_t i=0;i<s_.experienceOrbs.size();++i)
-            if(overlaps(s_.experienceOrbs[i].position,.5,.5))
-                add(s_.experienceOrbs[i].position,.5,.5,.25f,0,
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].position,dx,dy,dz);},
-                    // ExperienceOrb::hurt
-                    [this,i](int damage){s_.experienceOrbs[i].health-=damage;return true;},
-                    [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].velocity,dx,dy,dz);});
-        return found;
+            place(std::make_shared<Proxy<sim::ExperienceOrb>>(this,0.0,0.0,0.0,s_.experienceOrbs[i].value),
+                s_.experienceOrbs[i].position,.5,.5,.25f,0,
+                [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].position,dx,dy,dz);},
+                // ExperienceOrb::hurt
+                [this,i](int damage){s_.experienceOrbs[i].health-=damage;return true;},
+                [this,i,shift](double dx,double dy,double dz){shift(s_.experienceOrbs[i].velocity,dx,dy,dz);});
     }
     // Level::clip between two points (level coordinates): the port's raycast.
     sim::HitResult* clip(::Vec3* a,::Vec3* b)override{
@@ -260,7 +314,8 @@ public:
         sim::Explosion explosion(this,nullptr,x,y,z,r);
         explosion.explode();
         explosion.finalizeExplosion(false);
-        found.clear();
+        // The stand-ins go now, applying their pushes.
+        hostEntities_.clear();hostEntitiesMade_=false;entityChunks.clear();es.clear();
     }
     // Entity::move for a box: each axis (y, then x, then z) as far as it goes
     // before touching a block the box does not already overlap.
@@ -375,13 +430,138 @@ public:
     // Level::addEntity for what a dispenser makes: an item entity (thrown
     // items, dropped contents) or a spawn egg's mob.
     void addEntity(std::shared_ptr<sim::Entity> e)override{
-        if(auto item=std::dynamic_pointer_cast<sim::ItemEntity>(e)){
-            if(item->item && item->item->count>0)
-                world_.spawnDroppedItem({e->x+half,e->y,e->z+half},{e->xd,e->yd,e->zd},stackOf(*item->item),item->throwTime);
-        }else if(auto mob=std::dynamic_pointer_cast<sim::EggMob>(e))
+        // Items go into the World when this Level does: the source sets their
+        // motion after adding them (Sheep::interact, DispenserTile::throwItem).
+        if(auto item=std::dynamic_pointer_cast<sim::ItemEntity>(e))pendingItems_.push_back(item);
+        else if(auto mob=std::dynamic_pointer_cast<sim::EggMob>(e))
             world_.spawnCreativeEgg(mob->entityId,{e->x+half,e->y,e->z+half});
+        else if(auto orb=std::dynamic_pointer_cast<sim::ExperienceOrb>(e))
+            world_.spawnExperienceOrbs({e->x+half,e->y,e->z+half},orb->value);
+        else if(auto animal=std::dynamic_pointer_cast<sim::Mob>(e);animal && !sourceMobId(*animal).empty()){
+            // A mob the source made (a calf, a chick): the World keeps it.
+            SimulatedEntity entity;entity.id=sourceMobId(*animal);
+            entity.ai=animal;
+            s_.entities.push_back(std::move(entity));
+            mirrorMob(s_.entities.back());
+            entities.push_back(animal);
+            ++world_.revision;
+        }
+    }
+    // The World's record of a source mob after it has run.
+    void mirrorMob(SimulatedEntity& entity){
+        auto& mob=*entity.ai;
+        entity.position={mob.x+half,mob.y,mob.z+half};
+        entity.velocity={mob.xd,mob.yd,mob.zd};
+        entity.yaw=mob.yBodyRot;entity.headYaw=mob.yHeadRot;
+        entity.health=std::max(0,mob.getHealth());
+        entity.hurtTicks=mob.hurtTime;entity.deathTicks=mob.deathTime;
+        entity.invulnerableTicks=mob.invulnerableTime;
+        if(auto* agable=dynamic_cast<sim::AgableMob*>(&mob)){entity.animalAge=agable->getAge();entity.baby=agable->isBaby();}
+        if(auto* sheep=dynamic_cast<sim::Sheep*>(&mob)){entity.sheared=sheep->isSheared();entity.woolColor=sheep->getColor();}
+        if(auto* pig=dynamic_cast<sim::Pig*>(&mob))entity.saddled=pig->hasSaddle();
+    }
+    // A source mob for a World record: the record's position, facing and
+    // motion, and its saved fields (Mob, AgableMob, Animal, Sheep, Pig
+    // readAdditionalSaveData) or the ones the World set.
+    void adopt(SimulatedEntity& entity){
+        auto mob=newSourceMob(entity.id,this);
+        if(!mob)return;
+        mob->moveTo(entity.position.x-half,entity.position.y,entity.position.z-half,entity.yaw,0);
+        mob->yBodyRot=mob->yHeadRot=entity.yaw;
+        mob->xd=entity.velocity.x;mob->yd=entity.velocity.y;mob->zd=entity.velocity.z;
+        if(entity.saved)mob->readAdditionalSaveData(entity.saved.get());
+        else{
+            mob->setHealth(entity.health);
+            if(auto* agable=dynamic_cast<sim::AgableMob*>(mob.get()))agable->setAge(entity.animalAge);
+            if(auto* sheep=dynamic_cast<sim::Sheep*>(mob.get())){sheep->setSheared(entity.sheared);sheep->setColor(entity.woolColor);}
+            if(auto* pig=dynamic_cast<sim::Pig*>(mob.get()))pig->setSaddle(entity.saddled);
+        }
+        entity.saved.reset();
+        entity.ai=mob;
+        entities.push_back(mob);
+    }
+public:
+    // Level::tickEntities for the source's mobs in the window, and the
+    // World's records after them. A mob that is removed has finished dying
+    // (Mob::tickDeath) or despawned (Mob::checkDespawn).
+    void tickSourceMobs(){
+        for(auto& entity:s_.entities)if(!entity.ai && sourceMobKind(entity.id) && entity.health>0)adopt(entity);
+        const auto running=entities;
+        for(const auto& e:running){
+            if(e->removed)continue;
+            if(!world_.inside(Mth::floor(e->x+half),Mth::floor(e->y),Mth::floor(e->z+half)))continue;
+            e->tick();
+        }
+        for(std::size_t i=0;i<s_.entities.size();++i){
+            auto& entity=s_.entities[i];
+            if(!entity.ai)continue;
+            mirrorMob(entity);
+            // The record's tick count drives the drawn gait (as the other mobs').
+            ++entity.age;
+            if(entity.lastHurtByPlayerTicks>0)--entity.lastHurtByPlayerTicks;
+            if(entity.ai->removed){
+                if(entity.native)world_.markNativeDefeated(entity);
+                entity.deathTicks=std::max(entity.deathTicks,20);
+                entity.health=std::min(entity.health,0);
+            }
+        }
+        ++world_.revision;
+    }
+    // Player::attack: the hit as the player's (knockback, panic).
+    bool attackSourceMob(SimulatedEntity& entity,int damage){
+        if(!entity.ai)adopt(entity);
+        if(!entity.ai)return false;
+        const bool hurt=entity.ai->hurt(sim::DamageSource::playerAttack(s_.simPlayer),damage);
+        mirrorMob(entity);
+        // The record keeps Mob::lastHurtByPlayerTime (PLAYER_HURT_EXPERIENCE_TIME),
+        // which the source does not save, so a death across a save still gives XP.
+        if(hurt)entity.lastHurtByPlayerTicks=sim::Mob::PLAYER_HURT_EXPERIENCE_TIME;
+        return hurt;
+    }
+    // Mob::interact with the player's held stack; the stack's changes, items
+    // added to the inventory and dropped go back to the World.
+    bool interactSourceMob(SimulatedEntity& entity){
+        if(!entity.ai)adopt(entity);
+        if(!entity.ai)return false;
+        auto& player=*s_.simPlayer;
+        const auto before=player.inventory->items[0];
+        const int beforeId=before?before->id:0,beforeCount=before?before->count:0,beforeDamage=before?before->damage:0;
+        const auto items=pendingItems_.size();
+        // Sheep::interact shears and still answers Animal::interact's false:
+        // what it did counts, not only its answer.
+        bool used=s_.simPlayer->interact(entity.ai);
+        mirrorMob(entity);
+        const int slot=std::clamp(s_.heldSlot,0,8);
+        const auto after=player.inventory->items[0];
+        used|=pendingItems_.size()!=items || after!=before || (after && (after->count!=beforeCount || after->damage!=beforeDamage));
+        for(unsigned int i=1;i<player.inventory->items.length;++i)used|=bool(player.inventory->items[i]);
+        used|=!player.dropped.empty();
+        if(!used)return false;
+        if(!after || after->count<=0 || after->id!=beforeId){
+            if(beforeCount>0)world_.consumeCarried(slot,beforeCount);
+            if(after && after->count>0)world_.addCarriedItem(after->id,after->count,after->auxValue);
+        }else{
+            if(after->count<beforeCount)world_.consumeCarried(slot,beforeCount-after->count);
+            if(after->damage>beforeDamage)world_.wearCarried(slot,after->damage-beforeDamage);
+        }
+        for(unsigned int i=1;i<player.inventory->items.length;++i)
+            if(auto& extra=player.inventory->items[i]){
+                if(extra->count>0)world_.addCarriedItem(extra->id,extra->count,extra->auxValue);
+                extra=nullptr;
+            }
+        for(const auto& dropped:player.dropped)
+            world_.spawnDroppedItem({player.x+half,player.y-.3,player.z+half},{0,.1,0},dropStack(dropped->id,dropped->count,dropped->auxValue),40);
+        player.dropped.clear();
+        return true;
     }
     bool canSpawnEgg(int entityId)override{return world_.eggSpawnable(entityId);}
+    // Level::countInstanceOf, with the entities the port does not run yet
+    // (thrown things, minecarts, boats) counted at their limit, so the
+    // dispenser keeps them rather than making one.
+    int countInstanceOf(sim::eINSTANCEOF clas,bool singleType)override{
+        if(clas==sim::eTYPE_PROJECTILE || clas==sim::eTYPE_SMALL_FIREBALL || clas==sim::eTYPE_MINECART || clas==sim::eTYPE_BOAT)return 1<<30;
+        return sim::Level::countInstanceOf(clas,singleType);
+    }
     // Level::levelEvent: the dispenser's clicks, launches and smoke (sound and
     // particles are not ported), kept for the tests.
     void levelEvent(int type,int x,int y,int z,int)override{
@@ -395,13 +575,29 @@ public:
         const World::State::TileEvent event{x,y,z,tile,b0,b1};
         if(std::find(list.begin(),list.end(),event)==list.end())list.push_back(event);
     }
+    std::vector<std::shared_ptr<sim::ItemEntity>> pendingItems_;
+    void spawnPendingItems(){
+        for(const auto& item:pendingItems_)if(item->item && item->item->count>0)
+            world_.spawnDroppedItem({item->x+half,item->y,item->z+half},{item->xd,item->yd,item->zd},
+                                    stackOf(*item->item),item->throwTime);
+        pendingItems_.clear();
+    }
     ~WorldTickLevel()override{
+        spawnPendingItems();
         for(auto& [at,te]:traps_)
             // Items change in place too (the buckets), so every one goes back.
             if(!te->isRemoved() && getTile(at[0],at[1],at[2])==sim::Tile::dispenser_Id)saveTrap(at,*te);
         // The tile entities hold their level: hand them back to the level
         // that was current when this one was made.
         for(auto& te:s_.tickingTileEntities)if(te->level==this)te->level=previous_;
+        for(auto& e:s_.entities)if(e.ai && e.ai->level==this)e.ai->setLevel(previous_);
+        if(auto& player=*s_.simPlayer;player.level==this){
+            if(player.xd!=0 || player.yd!=0 || player.zd!=0){
+                s_.playerKnockback.x+=player.xd;s_.playerKnockback.y+=player.yd;s_.playerKnockback.z+=player.zd;
+                player.xd=player.yd=player.zd=0;
+            }
+            player.level=previous_;
+        }
     }
     // Biome::isHumid: downfall above 0.85.
     bool isHumidAt(int x,int,int z)override{
@@ -703,7 +899,7 @@ bool World::useItemOn(int x,int y,int z,int face,int slot){
     // flint and steel, which is not worn by it), then the item's.
     if(auto* tile=sim::Tile::tiles[get(x,y,z)]){
         auto player=std::make_shared<sim::Player>();
-        player->selected=std::make_shared<sim::ItemInstance>(instance);
+        player->inventory->items[player->inventory->selected]=std::make_shared<sim::ItemInstance>(instance);
         if(tile->use(&level,x-width/2,y,z-depth/2,player,face,0,0,0))return true;
     }
     if(!sim::useItemOn(level,instance,x-width/2,y,z-depth/2,face))return false;
@@ -928,5 +1124,36 @@ void World::tickWeather(){
     state->oThunderLevel=state->thunderLevel;
     state->thunderLevel+=data.isThundering()?0.01f:-0.01f;
     state->thunderLevel=std::clamp(state->thunderLevel,0.f,1.f);
+}
+}
+
+namespace console {
+void World::tickSourceMobs(){
+    if(state->pending)return;
+    WorldTickLevel level(*this,*state);
+    level.tickSourceMobs();
+}
+void World::markNativeDefeated(const SimulatedEntity& entity){
+    if(auto record=state->records.find({entity.nativeChunkX,entity.nativeChunkZ});
+       record!=state->records.end() && record->second->extra)
+        if(auto* list=dynamic_cast<TagList*>(record->second->extra->get(L"Entities"));
+           list && entity.recordIndex>=0 && entity.recordIndex<list->size())
+            if(auto* tag=dynamic_cast<CompoundTag*>(list->get(entity.recordIndex)))
+                tag->putBoolean(L"console_port.defeated",true);
+}
+bool World::hurtSourceMob(SimulatedEntity& entity,int damage){
+    if(state->pending)return false;
+    WorldTickLevel level(*this,*state);
+    return level.attackSourceMob(entity,damage);
+}
+void World::setHeldSlot(int slot){state->heldSlot=std::clamp(slot,0,8);}
+bool World::useEntity(Vec3 eye,Vec3 direction,int slot,double reach){
+    setHeldSlot(slot);
+    SimulatedEntity* target=pickLiving(eye,direction,reach);
+    if(!target || !(target->ai || sourceMobKind(target->id)))return false;
+    WorldTickLevel level(*this,*state);
+    const bool used=level.interactSourceMob(*target);
+    if(used)++revision;
+    return used;
 }
 }

@@ -266,7 +266,9 @@ for every tile. Redstone works from the source: dust, torches, levers, buttons,
 pressure plates, repeaters, lamps, and powered doors, trapdoors and gates, and
 pistons and sticky pistons. TNT lights from flint and steel, redstone and other
 explosions, and explodes with the original `Explosion`. Dispensers throw items, empty
-and fill buckets and hatch spawn eggs when powered. Other unfinished systems include per-chunk mesh uploads,
+and fill buckets and hatch spawn eggs when powered. Pigs, cows, sheep and chickens run on
+the source's mob AI: they wander, panic, follow food, breed, grow up, eat grass and
+lay eggs; sheep can be sheared and cows milked. Other unfinished systems include per-chunk mesh uploads,
 ambient occlusion, survival, mobs/entities, inventories and recipes, audio/music,
 animation, first-person hand, split screen, networking, PSN/store services, and legacy
 saves. `docs/COVERAGE.md` lists every source class and whether the port has it;
