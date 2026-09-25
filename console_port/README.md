@@ -259,7 +259,8 @@ integration remain pending; these libraries have only been tested nonvisually.
 Other unfinished systems include per-chunk mesh uploads, ambient occlusion, complete tile properties
 and behaviors, survival, mobs/entities, inventories and recipes, audio/music,
 animation, first-person hand, split screen, networking, PSN/store services, and legacy
-saves. Water is static and rendering still uses one region mesh. Existing 96/128-high
+saves. `docs/COVERAGE.md` lists every source class and whether the port has it;
+`docs/TICK_MAP.md` follows the game tick and gives the order of the remaining work. Existing 96/128-high
 prototype `.mcp` saves expand on load without overwriting the old file. See `docs/PORT_STATUS.md` for exact boundaries.
 
 The imported source and assets retain their original provenance. This folder does
