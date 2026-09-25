@@ -151,3 +151,13 @@ under it. Break the top half of a door (in survival it should drop one door). Li
 fire on netherrack or wood with flint and steel and watch it spread and burn wood,
 leaves and wool, and burn out on stone. The flames should flicker. Note anything
 that flows, falls or burns differently from how you remember it.
+
+## Redstone
+
+Place a lever, a line of redstone dust and a redstone lamp; flip the lever and check
+the dust brightens (fainter further along) and the lamp lights, then goes out a moment
+after you flip it back. Put a redstone torch on the side of a block and power the block:
+the torch should go out. Try a repeater (right click changes its delay, and the torches
+on it move), stone and wooden buttons, wooden and stone pressure plates (stand on
+them), and doors, trapdoors and fence gates opened by a signal. Note anything that
+powers, delays or looks different from how you remember it.

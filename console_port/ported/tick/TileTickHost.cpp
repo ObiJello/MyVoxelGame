@@ -176,6 +176,54 @@ struct CellLevel final:Level {
     bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
 };
 }
+// A read-only level over a world's tiles and data.
+struct ReadLevel final:Level {
+    const std::function<int(int,int,int)>& tile;
+    const std::function<int(int,int,int)>& data;
+    ReadLevel(const std::function<int(int,int,int)>& tile,const std::function<int(int,int,int)>& data):tile(tile),data(data){}
+    int getTile(int x,int y,int z)override{return tile(x,y,z);}
+    int getData(int x,int y,int z)override{return data(x,y,z);}
+    bool setTileAndDataNoUpdate(int,int,int,int,int)override{return false;}
+    bool setDataNoUpdate(int,int,int,int)override{return false;}
+    bool hasChunk(int,int)override{return true;}
+    int getRawBrightness(int,int,int)override{return 0;}
+    int getDaytimeRawBrightness(int,int,int)override{return 0;}
+    int getBrightness(LightLayer::variety,int,int,int)override{return 0;}
+    bool canSeeSky(int,int,int)override{return false;}
+    bool isRainingAt(int,int,int)override{return false;}
+    bool hasChunksAt(int,int,int,int,int,int)override{return true;}
+    void spawnResources(int,int,int,int,int)override{}
+    bool placeTree(TreeKind,int,Random&,int,int,int)override{return false;}
+};
+bool isSolidBlockingTile(int tile){
+    initializeTiles();
+    CellLevel level;level.tile=tile&255;
+    return level.isSolidBlockingTile(0,0,0);
+}
+bool dustShouldConnectTo(const std::function<int(int,int,int)>& tile,const std::function<int(int,int,int)>& data,
+                         int x,int y,int z,int direction){
+    initializeTiles();
+    ReadLevel level(tile,data);
+    return RedStoneDustTile::shouldConnectTo(&level,x,y,z,direction);
+}
+std::array<float,6> tileShape(int tile,int data){
+    initializeTiles();
+    auto* storage=Tile::shapeStorage();
+    *storage=Tile::ThreadStorage{};
+    switch(tile){
+    // DiodeTile::updateDefaultShape.
+    case Tile::diode_off_Id:case Tile::diode_on_Id:return {0,0,0,1,2.0f/16.0f,1};
+    case Tile::lever_Id:case Tile::button_stone_Id:case Tile::button_wood_Id:
+    case Tile::pressurePlate_stone_Id:case Tile::pressurePlate_wood_Id:case Tile::trapdoor_Id:{
+        CellLevel level;level.tile=tile;level.data=data;
+        Tile::tiles[tile]->updateShape(&level,0,0,0);
+        break;
+    }
+    default:break;
+    }
+    return {float(storage->xx0),float(storage->yy0),float(storage->zz0),float(storage->xx1),float(storage->yy1),float(storage->zz1)};
+}
+
 bool isTopSolidBlocking(int tile,int data){
     initializeTiles();
     CellLevel level;level.tile=tile&255;level.data=data;

@@ -1622,8 +1622,13 @@ reconstruct is now taken from the source:
 - The in-game Use tooltip follows `Minecraft::tick`: chests Open; workbenches,
   furnaces, brewing stands, enchanting tables, anvils, wooden doors, levers, buttons,
   trapdoors and gates Use (the port showed Open for all of them).
-- Lamps use their atlas slots; dust, levers, buttons, plates, repeaters and
-  trapdoors still draw as cubes until their `TileRenderer` shapes are ported.
+- Drawing: `tesselateDustInWorld` (with the colours.xml dust colours and the
+  source's `(max>>16)&0xFF - (min>>16)&0xFF` precedence kept), `tesselateLeverInWorld`
+  and both `tesselateDiodeInWorld` overloads join `ported/TileRender.cpp`; buttons,
+  pressure plates and trapdoors draw their `updateShape` box. `tesselateBlockInWorld`
+  itself is a stand-in (flat face shading, no ambient occlusion). Repeaters and
+  trapdoors collide as their shape; lamps use their atlas slots. Stone pressure plates
+  and wooden buttons join the lighting engine's tile table.
 - `console_tile_tick_core` drives a lever through dust to a lamp (signal strength
   falling by one per dust, the lamp's four-tick delay), a redstone torch inverting,
   a repeater's delay and delay cycling, a pressure plate under the player, and doors.

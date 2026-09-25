@@ -100,6 +100,37 @@ int main(){try{
  auto wallTorch=buildTerrainMeshRegion(plants,plants.blockSnapshot(),28,20,1,1);
  float lowest=1e9f;for(const auto& v:wallTorch.opaque)if(v.y<=180.2001f)lowest=std::min(lowest,v.x);
  require(lowest<28.2f,"A wall torch's foot sits against the wall");
+ // Redstone: TileRenderer::tesselateDustInWorld (a lone dust is the cut
+ // cross and its overlay, tinted with colours.xml's unlit colour),
+ // tesselateLeverInWorld (the cobblestone base and the handle),
+ // tesselateDiodeInWorld (four sides, two torches and the top) and the
+ // updateShape boxes of buttons, plates and trapdoors.
+ World redstone;
+ auto meshOf=[&](int x,int id,int data){
+  require(redstone.set(x,180,40,static_cast<Block>(id)),"Place a redstone part");redstone.setData(x,180,40,data);
+  return buildTerrainMeshRegion(redstone,redstone.blockSnapshot(),x,40,1,1).opaque;
+ };
+ const auto dust=meshOf(20,55,0);
+require(dust.size()==12,"Lone dust is the cross and its overlay");
+ require(std::abs(dust[0].r-0x4c/255.f)<.002f && dust[0].g==0,"Unlit dust uses the colour table");
+ for(const auto& v:dust)require(std::abs(v.y-(180+.25f/16))<.0001f && v.x>=20.3f && v.x<=20.7f,"Dust lies flat, cut to the middle");
+ const auto lever=meshOf(22,69,5);
+ require(lever.size()==12*6,"A lever is its base and handle");
+ bool cobble=false;for(const auto& v:lever)if(v.u*16>=-.001f && v.u*16<=1.001f && v.v*16>=.999f && v.v*16<=2.001f)cobble=true;
+ require(cobble,"The lever base is cobblestone");
+ const auto repeater=meshOf(24,93,0);
+ require(repeater.size()==(4+12+1)*6,"A repeater is its sides, two torches and its top");
+ for(const auto& v:repeater)require(v.y>=180-3.f/16-.001f && v.y<=180+13.f/16+.001f,"Repeater torches stand on the slab");
+ const auto button=meshOf(26,77,1);
+ require(button.size()==36,"A button is a small box");
+ for(const auto& v:button)require(v.x>=26 && v.x<=26+2.f/16+.001f && v.y>=180+5.f/16-.001f && v.y<=180+11.f/16+.001f,"A button sits on the east face of the block west of it");
+ const auto plate=meshOf(28,70,0);
+ require(plate.size()==36,"A pressure plate is a thin box");
+ for(const auto& v:plate)require(v.y<=180+1.f/16+.001f,"A pressure plate is a sixteenth high");
+ const auto trapdoor=meshOf(30,96,0);
+ require(trapdoor.size()==36,"A trapdoor is a slab");
+ for(const auto& v:trapdoor)require(v.y<=180+3.f/16+.001f,"A closed trapdoor lies at the bottom");
+ require(redstone.collides({24.5,180.05,40.5},.6,1.8) && !redstone.collides({24.5,180.2,40.5},.6,1.8),"A repeater collides as a slab");
  FallingBlock sand;sand.position={30.5,185.49,30.5};sand.tile=12;
  const auto falling=buildFallingBlockMesh(sand,0);
  require(falling.size()==36,"A falling block is a full cube");

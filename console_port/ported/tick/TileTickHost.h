@@ -12,7 +12,9 @@
 #include "Mth.h"
 #include "Random.h"
 #include <cstdint>
+#include <array>
 #include <deque>
+#include <functional>
 #include <typeinfo>
 #include <unordered_map>
 #include <unordered_set>
@@ -838,6 +840,13 @@ void initializeTiles();
 // that has no Level (the terrain mesh).
 bool isTopSolidBlocking(int tile,int data);
 bool fireCanBurn(int tile);
+// Level::isSolidBlockingTile for one tile, RedStoneDustTile::shouldConnectTo
+// over a world read through `tile`/`data`, and a tile's shape
+// (Tile::updateShape, or the default shape) as x0, y0, z0, x1, y1, z1.
+bool isSolidBlockingTile(int tile);
+bool dustShouldConnectTo(const std::function<int(int,int,int)>& tile,const std::function<int(int,int,int)>& data,
+                         int x,int y,int z,int direction);
+std::array<float,6> tileShape(int tile,int data);
 // Whether a scheduled tick of this tile runs original code here; the ticks of
 // the other tiles stay in the saved chunk untouched.
 bool tickPorted(int id);

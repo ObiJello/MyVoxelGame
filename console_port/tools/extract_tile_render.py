@@ -16,11 +16,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / 'source_full/Minecraft.Client/TileRenderer.cpp'
 OUT = ROOT / 'ported/TileRender.cpp'
 METHODS = ['TileRenderer::tesselateFireInWorld', 'TileRenderer::tesselateTorchInWorld',
-           'TileRenderer::tesselateTorch']
+           'TileRenderer::tesselateTorch', 'TileRenderer::tesselateDiodeInWorld(DiodeTile *tt',
+           'TileRenderer::tesselateDiodeInWorld( DiodeTile* tt', 'TileRenderer::tesselateLeverInWorld',
+           'TileRenderer::tesselateDustInWorld']
 
 
 def method(text, name):
-    matches = list(re.finditer(r'^\S[^\n]*\b' + re.escape(name) + r'\s*\(', text, re.M))
+    # A name with a parenthesis picks one overload by its parameter text.
+    tail = '' if '(' in name else r'\s*\('
+    matches = list(re.finditer(r'^\S[^\n]*\b' + re.escape(name) + tail, text, re.M))
     if len(matches) != 1:
         raise SystemExit(f'{name}: {len(matches)} definitions')
     start = text.rindex('\n', 0, matches[0].start()) + 1

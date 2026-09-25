@@ -397,4 +397,544 @@ void TileRenderer::tesselateTorch( Tile* tt, float x, float y, float z, float xx
 	t->vertexUV( ( float )( x0 ), ( float )( y + 1 ), ( float )( z - r ), ( float )( u1 ), ( float )( v0 ) );
 }
 
+bool TileRenderer::tesselateDiodeInWorld(DiodeTile *tt, int x, int y, int z)
+{
+	Tesselator *t = Tesselator::getInstance();
+
+	tesselateDiodeInWorld(tt, x, y, z, level->getData(x, y, z) & DiodeTile::DIRECTION_MASK);
+
+	return true;
+}
+
+void TileRenderer::tesselateDiodeInWorld( DiodeTile* tt, int x, int y, int z, int dir )
+{
+	// render half-block edges
+	tesselateBlockInWorld( tt, x, y, z );
+
+	Tesselator* t = Tesselator::getInstance();
+
+	if ( SharedConstants::TEXTURE_LIGHTING )
+	{
+		t->tex2( getLightColor(tt,  level, x, y, z ) );
+		t->color( 1.0f, 1.0f, 1.0f );
+	}
+	else
+	{
+		float br = tt->getBrightness( level, x, y, z );
+		if ( Tile::lightEmission[tt->id] > 0 ) br = 1.0f;
+		t->color( br, br, br );
+	}
+
+	int data = level->getData(x, y, z);
+
+	// 4J Stu - This block gets moved in a later version, but we don't need that yet
+	// BEGIN TORCH SECTION
+	{
+		int			dir = data & DiodeTile::DIRECTION_MASK;
+		int			delay = ( data & DiodeTile::DELAY_MASK ) >> DiodeTile::DELAY_SHIFT;
+		float		h = -3.0f / 16.0f;
+		float		transmitterX = 0.0f;
+		float		transmitterZ = 0.0f;
+		float		receiverX = 0.0f;
+		float		receiverZ = 0.0f;
+
+		switch ( dir )
+		{
+			case Direction::SOUTH:
+				receiverZ = -5.0f / 16.0f;
+				transmitterZ = DiodeTile::DELAY_RENDER_OFFSETS[delay];
+				break;
+			case Direction::NORTH:
+				receiverZ = 5.0f / 16.0f;
+				transmitterZ = -DiodeTile::DELAY_RENDER_OFFSETS[delay];
+				break;
+			case Direction::EAST:
+				receiverX = -5.0f / 16.0f;
+				transmitterX = DiodeTile::DELAY_RENDER_OFFSETS[delay];
+				break;
+			case Direction::WEST:
+				receiverX = 5.0f / 16.0f;
+				transmitterX = -DiodeTile::DELAY_RENDER_OFFSETS[delay];
+				break;
+		}
+
+		// render transmitter
+		tesselateTorch( tt, x + transmitterX, y + h, z + transmitterZ, 0.0f, 0.0f, 0 );
+		// render receiver
+		tesselateTorch( tt, x + receiverX, y + h, z + receiverZ, 0.0f, 0.0f, 0 );
+	}
+	// END TORCH SECTION
+
+	Icon *tex = getTexture(tt, Facing::UP, data);
+	float u0 = tex->getU0(true);
+	float u1 = tex->getU1(true);
+	float v0 = tex->getV0(true);
+	float v1 = tex->getV1(true);
+
+	float		r = 2.0f / 16.0f;
+
+	float		x0 = ( float )( x + 1.0f );
+	float		x1 = ( float )( x + 1.0f );
+	float		x2 = ( float )( x + 0.0f );
+	float		x3 = ( float )( x + 0.0f );
+
+	float		z0 = ( float )( z + 0.0f );
+	float		z1 = ( float )( z + 1.0f );
+	float		z2 = ( float )( z + 1.0f );
+	float		z3 = ( float )( z + 0.0f );
+
+	float		y0 = ( float )( y + r );
+
+	if ( dir == Direction::NORTH )
+	{
+		// rotate 180 degrees
+		x0 = x1 = ( float )( x + 0.0f );
+		x2 = x3 = ( float )( x + 1.0f );
+		z0 = z3 = ( float )( z + 1.0f );
+		z1 = z2 = ( float )( z + 0.0f );
+	}
+	else if ( dir == Direction::EAST )
+	{
+		// rotate 90 degrees counter-clockwise
+		x0 = x3 = ( float )( x + 0.0f );
+		x1 = x2 = ( float )( x + 1.0f );
+		z0 = z1 = ( float )( z + 0.0f );
+		z2 = z3 = ( float )( z + 1.0f );
+	}
+	else if ( dir == Direction::WEST )
+	{
+		// rotate 90 degrees clockwise
+		x0 = x3 = ( float )( x + 1.0f );
+		x1 = x2 = ( float )( x + 0.0f );
+		z0 = z1 = ( float )( z + 1.0f );
+		z2 = z3 = ( float )( z + 0.0f );
+	}
+
+	t->vertexUV( x3 , y0 , z3 , u0 , v0  );
+	t->vertexUV( x2 , y0 , z2 , u0 , v1  );
+	t->vertexUV( x1 , y0 , z1 , u1 , v1  );
+	t->vertexUV( x0 , y0 , z0 , u1 , v0  );
+}
+
+bool TileRenderer::tesselateLeverInWorld( Tile* tt, int x, int y, int z )
+{
+	int			data = level->getData( x, y, z );
+
+	int			dir = data & 7;
+	bool		flipped = ( data & 8 ) > 0;
+
+	Tesselator* t = Tesselator::getInstance();
+
+	bool hadFixed = hasFixedTexture();
+	if (!hadFixed) this->setFixedTexture(getTexture(Tile::stoneBrick));
+	float		w1 = 4.0f / 16.0f;
+	float		w2 = 3.0f / 16.0f;
+	float		h = 3.0f / 16.0f;
+
+	if ( dir == 5 )
+	{
+		setShape( 0.5f - w2, 0.0f, 0.5f - w1, 0.5f + w2, h, 0.5f + w1 );
+	}
+	else if ( dir == 6 )
+	{
+		setShape( 0.5f - w1, 0.0f, 0.5f - w2, 0.5f + w1, h, 0.5f + w2 );
+	}
+	else if ( dir == 4 )
+	{
+		setShape( 0.5f - w2, 0.5f - w1, 1.0f - h, 0.5f + w2, 0.5f + w1, 1.0f );
+	}
+	else if ( dir == 3 )
+	{
+		setShape( 0.5f - w2, 0.5f - w1, 0, 0.5f + w2, 0.5f + w1, h );
+	}
+	else if ( dir == 2 )
+	{
+		setShape( 1.0f - h, 0.5f - w1, 0.5f - w2, 1.0f, 0.5f + w1, 0.5f + w2 );
+	}
+	else if ( dir == 1 )
+	{
+		setShape( 0, 0.5f - w1, 0.5f - w2, h, 0.5f + w1, 0.5f + w2 );
+	}
+	else if (dir == 0)
+	{
+		setShape(0.5f - w1, 1 - h, 0.5f - w2, 0.5f + w1, 1, 0.5f + w2);
+	}
+	else if (dir == 7)
+	{
+		setShape(0.5f - w2, 1 - h, 0.5f - w1, 0.5f + w2, 1, 0.5f + w1);
+	}
+	this->tesselateBlockInWorld( tt, x, y, z );
+
+	if ( !hadFixed ) this->clearFixedTexture();
+
+	float		br;
+	if ( SharedConstants::TEXTURE_LIGHTING )
+	{
+		t->tex2( getLightColor(tt,  level, x, y, z ) );
+		br = 1;
+	}
+	else
+	{
+		br = tt->getBrightness( level, x, y, z );
+	}
+	if ( Tile::lightEmission[tt->id] > 0 ) br = 1.0f;
+	t->color( br, br, br );
+	Icon *tex = getTexture(tt, 0);
+
+	if (hasFixedTexture()) tex = fixedTexture;
+	float u0 = tex->getU0(true);
+	float v0 = tex->getV0(true);
+	float u1 = tex->getU1(true);
+	float v1 = tex->getV1(true);
+
+	Vec3*		corners[8];
+	float		xv = 1.0f / 16.0f;
+	float		zv = 1.0f / 16.0f;
+	float		yv = 10.0f / 16.0f;
+	corners[0] = Vec3::newTemp( -xv, -0, -zv );
+	corners[1] = Vec3::newTemp( +xv, -0, -zv );
+	corners[2] = Vec3::newTemp( +xv, -0, +zv );
+	corners[3] = Vec3::newTemp( -xv, -0, +zv );
+	corners[4] = Vec3::newTemp( -xv, +yv, -zv );
+	corners[5] = Vec3::newTemp( +xv, +yv, -zv );
+	corners[6] = Vec3::newTemp( +xv, +yv, +zv );
+	corners[7] = Vec3::newTemp( -xv, +yv, +zv );
+
+	for ( int i = 0; i < 8; i++ )
+	{
+		if ( flipped )
+		{
+			corners[i]->z -= 1 / 16.0f;
+			corners[i]->xRot( 40 * PI / 180 );
+		}
+		else
+		{
+			corners[i]->z += 1 / 16.0f;
+			corners[i]->xRot( -40 * PI / 180 );
+		}
+		if (dir == 0 || dir == 7)
+		{
+			corners[i]->zRot(180 * PI / 180);
+		}
+		if ( dir == 6 || dir == 0 )
+		{
+			corners[i]->yRot( 90 * PI / 180 );
+		}
+
+		if ( dir > 0 && dir < 5 )
+		{
+			corners[i]->y -= 6 / 16.0f;
+			corners[i]->xRot( 90 * PI / 180 );
+
+			if ( dir == 4 ) corners[i]->yRot( 0 * PI / 180 );
+			if ( dir == 3 ) corners[i]->yRot( 180 * PI / 180 );
+			if ( dir == 2 ) corners[i]->yRot( 90 * PI / 180 );
+			if ( dir == 1 ) corners[i]->yRot( -90 * PI / 180 );
+
+			corners[i]->x += x + 0.5;
+			corners[i]->y += y + 8 / 16.0f;
+			corners[i]->z += z + 0.5;
+		}
+		else if (dir == 0 || dir == 7)
+		{
+			corners[i]->x += x + 0.5;
+			corners[i]->y += y + 14 / 16.0f;
+			corners[i]->z += z + 0.5;
+		}
+		else
+		{
+			corners[i]->x += x + 0.5;
+			corners[i]->y += y + 2 / 16.0f;
+			corners[i]->z += z + 0.5;
+		}
+	}
+
+	Vec3*		c0 = NULL, *c1 = NULL, *c2 = NULL, *c3 = NULL;
+	for ( int i = 0; i < 6; i++ )
+	{
+		if ( i == 0 )
+		{
+			u0 = tex->getU(7, true);
+			v0 = tex->getV(6, true);
+			u1 = tex->getU(9, true);
+			v1 = tex->getV(8, true);
+		}
+		else if ( i == 2 )
+		{
+			u0 = tex->getU(7, true);
+			v0 = tex->getV(6, true);
+			u1 = tex->getU(9, true);
+			v1 = tex->getV1(true);
+		}
+		if ( i == 0 )
+		{
+			c0 = corners[0];
+			c1 = corners[1];
+			c2 = corners[2];
+			c3 = corners[3];
+		}
+		else if ( i == 1 )
+		{
+			c0 = corners[7];
+			c1 = corners[6];
+			c2 = corners[5];
+			c3 = corners[4];
+		}
+		else if ( i == 2 )
+		{
+			c0 = corners[1];
+			c1 = corners[0];
+			c2 = corners[4];
+			c3 = corners[5];
+		}
+		else if ( i == 3 )
+		{
+			c0 = corners[2];
+			c1 = corners[1];
+			c2 = corners[5];
+			c3 = corners[6];
+		}
+		else if ( i == 4 )
+		{
+			c0 = corners[3];
+			c1 = corners[2];
+			c2 = corners[6];
+			c3 = corners[7];
+		}
+		else if ( i == 5 )
+		{
+			c0 = corners[0];
+			c1 = corners[3];
+			c2 = corners[7];
+			c3 = corners[4];
+		}
+		t->vertexUV( ( float )( c0->x ), ( float )( c0->y ), ( float )( c0->z ), ( float )( u0 ), ( float )( v1 ) );
+		t->vertexUV( ( float )( c1->x ), ( float )( c1->y ), ( float )( c1->z ), ( float )( u1 ), ( float )( v1 ) );
+		t->vertexUV( ( float )( c2->x ), ( float )( c2->y ), ( float )( c2->z ), ( float )( u1 ), ( float )( v0 ) );
+		t->vertexUV( ( float )( c3->x ), ( float )( c3->y ), ( float )( c3->z ), ( float )( u0 ), ( float )( v0 ) );
+	}
+	return true;
+
+}
+
+bool TileRenderer::tesselateDustInWorld( Tile* tt, int x, int y, int z )
+{
+	Tesselator* t = Tesselator::getInstance();
+
+	int			data = level->getData( x, y, z );
+	Icon *crossTexture = RedStoneDustTile::getTexture(RedStoneDustTile::TEXTURE_CROSS);
+	Icon *lineTexture = RedStoneDustTile::getTexture(RedStoneDustTile::TEXTURE_LINE);
+	Icon *crossTextureOverlay = RedStoneDustTile::getTexture(RedStoneDustTile::TEXTURE_CROSS_OVERLAY);
+	Icon *lineTextureOverlay = RedStoneDustTile::getTexture(RedStoneDustTile::TEXTURE_LINE_OVERLAY);
+
+	float		br;
+	if ( SharedConstants::TEXTURE_LIGHTING )
+	{
+		t->tex2( getLightColor(tt,  level, x, y, z ) );
+		br = 1;
+	}
+	else
+	{
+		br = tt->getBrightness( level, x, y, z );
+	}
+	// 4J Stu - not used any more
+	//float		pow = ( data / 15.0f );
+	//float		red = pow * 0.6f + 0.4f;
+	//if ( data == 0 ) red = 0.3f;
+
+	//float		green = pow * pow * 0.7f - 0.5f;
+	//float		blue = pow * pow * 0.6f - 0.7f;
+	//if ( green < 0 ) green = 0;
+	//if ( blue < 0 ) blue = 0;
+
+	unsigned int colour = 0;
+	if(data == 0)
+	{
+		colour = Minecraft::GetInstance()->getColourTable()->getColor( eMinecraftColour_Tile_RedstoneDustUnlit );
+	}
+	else
+	{
+		unsigned int minColour = Minecraft::GetInstance()->getColourTable()->getColor( eMinecraftColour_Tile_RedstoneDustLitMin );
+		unsigned int maxColour = Minecraft::GetInstance()->getColourTable()->getColor( eMinecraftColour_Tile_RedstoneDustLitMax );
+
+		byte redComponent = ((minColour>>16)&0xFF) + (( (maxColour>>16)&0xFF - (minColour>>16)&0xFF)*( (data-1)/14.0f));
+		byte greenComponent = ((minColour>>8)&0xFF) + (( (maxColour>>8)&0xFF - (minColour>>8)&0xFF)*( (data-1)/14.0f));
+		byte blueComponent = ((minColour)&0xFF) + (( (maxColour)&0xFF - (minColour)&0xFF)*( (data-1)/14.0f));
+
+		colour = redComponent<<16 | greenComponent<<8 | blueComponent;
+	}
+
+	float red = ((colour>>16)&0xFF)/255.0f;
+	float green = ((colour>>8)&0xFF)/255.0f;
+	float blue = (colour&0xFF)/255.0f;
+
+	if ( SharedConstants::TEXTURE_LIGHTING )
+	{
+		t->color( red, green, blue );
+	}
+	else
+	{
+		t->color( br * red, br * green, br * blue );
+	}
+	const float dustOffset = 0.25f / 16.0f;
+	const float overlayOffset = 0.25f / 16.0f;
+
+	bool		w = RedStoneDustTile::shouldConnectTo( level, x - 1, y, z, Direction::WEST )
+		|| ( !level->isSolidBlockingTile( x - 1, y, z ) && RedStoneDustTile::shouldConnectTo( level, x - 1, y - 1, z,
+																							  Direction::UNDEFINED ) );
+	bool		e = RedStoneDustTile::shouldConnectTo( level, x + 1, y, z, Direction::EAST )
+		|| ( !level->isSolidBlockingTile( x + 1, y, z ) && RedStoneDustTile::shouldConnectTo( level, x + 1, y - 1, z,
+																							  Direction::UNDEFINED ) );
+	bool		n = RedStoneDustTile::shouldConnectTo( level, x, y, z - 1, Direction::NORTH )
+		|| ( !level->isSolidBlockingTile( x, y, z - 1 ) && RedStoneDustTile::shouldConnectTo( level, x, y - 1, z - 1,
+																							  Direction::UNDEFINED ) );
+	bool		s = RedStoneDustTile::shouldConnectTo( level, x, y, z + 1, Direction::SOUTH )
+		|| ( !level->isSolidBlockingTile( x, y, z + 1 ) && RedStoneDustTile::shouldConnectTo( level, x, y - 1, z + 1,
+																							  Direction::UNDEFINED ) );
+	if ( !level->isSolidBlockingTile( x, y + 1, z ) )
+	{
+		if ( level->isSolidBlockingTile( x - 1, y, z ) && RedStoneDustTile::shouldConnectTo( level, x - 1, y + 1, z,
+																							 Direction::UNDEFINED ) ) w
+				= true;
+		if ( level->isSolidBlockingTile( x + 1, y, z ) && RedStoneDustTile::shouldConnectTo( level, x + 1, y + 1, z,
+																							 Direction::UNDEFINED ) ) e
+				= true;
+		if ( level->isSolidBlockingTile( x, y, z - 1 ) && RedStoneDustTile::shouldConnectTo( level, x, y + 1, z - 1,
+																							 Direction::UNDEFINED ) ) n
+				= true;
+		if ( level->isSolidBlockingTile( x, y, z + 1 ) && RedStoneDustTile::shouldConnectTo( level, x, y + 1, z + 1,
+																							 Direction::UNDEFINED ) ) s
+				= true;
+	}
+	float		x0 = ( float )( x + 0.0f );
+	float		x1 = ( float )( x + 1.0f );
+	float		z0 = ( float )( z + 0.0f );
+	float		z1 = ( float )( z + 1.0f );
+
+	int			pic = 0;
+	if ( ( w || e ) && ( !n && !s ) ) pic = 1;
+	if ( ( n || s ) && ( !e && !w ) ) pic = 2;
+
+	if ( pic == 0 )
+	{
+//		if ( e || n || s || w )
+		int u0 = 0;
+		int v0 = 0;
+		int u1 = SharedConstants::WORLD_RESOLUTION;
+		int v1 = SharedConstants::WORLD_RESOLUTION;
+
+		int cutDistance = 5;
+		if (!w) x0 += cutDistance / (float) SharedConstants::WORLD_RESOLUTION;
+		if (!w) u0 += cutDistance;
+		if (!e) x1 -= cutDistance / (float) SharedConstants::WORLD_RESOLUTION;
+		if (!e) u1 -= cutDistance;
+		if (!n) z0 += cutDistance / (float) SharedConstants::WORLD_RESOLUTION;
+		if (!n) v0 += cutDistance;
+		if (!s) z1 -= cutDistance / (float) SharedConstants::WORLD_RESOLUTION;
+		if (!s) v1 -= cutDistance;
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z1 ), crossTexture->getU(u1, true), crossTexture->getV(v1) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z0 ), crossTexture->getU(u1, true), crossTexture->getV(v0) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z0 ), crossTexture->getU(u0, true), crossTexture->getV(v0) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z1 ), crossTexture->getU(u0, true), crossTexture->getV(v1) );
+
+		t->color( br, br, br );
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z1 ), crossTextureOverlay->getU(u1, true), crossTextureOverlay->getV(v1, true) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z0 ), crossTextureOverlay->getU(u1, true), crossTextureOverlay->getV(v0, true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z0 ), crossTextureOverlay->getU(u0, true), crossTextureOverlay->getV(v0, true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z1 ), crossTextureOverlay->getU(u0, true), crossTextureOverlay->getV(v1, true) );
+	}
+	else if ( pic == 1 )
+	{
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z1 ), lineTexture->getU1(true), lineTexture->getV1(true) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z0 ), lineTexture->getU1(true), lineTexture->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z0 ), lineTexture->getU0(true), lineTexture->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z1 ), lineTexture->getU0(true), lineTexture->getV1(true) );
+
+		t->color( br, br, br );
+		t->vertexUV( ( float )( x1 ), ( float )( y + overlayOffset ), ( float )( z1 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + overlayOffset ), ( float )( z0 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + overlayOffset ), ( float )( z0 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + overlayOffset ), ( float )( z1 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+	}
+	else
+	{
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z1 ), lineTexture->getU1(true), lineTexture->getV1(true) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + dustOffset ), ( float )( z0 ), lineTexture->getU0(true), lineTexture->getV1(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z0 ), lineTexture->getU0(true), lineTexture->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + dustOffset ), ( float )( z1 ), lineTexture->getU1(true), lineTexture->getV0(true) );
+
+		t->color( br, br, br );
+		t->vertexUV( ( float )( x1 ), ( float )( y + overlayOffset ), ( float )( z1 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+		t->vertexUV( ( float )( x1 ), ( float )( y + overlayOffset ), ( float )( z0 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + overlayOffset ), ( float )( z0 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+		t->vertexUV( ( float )( x0 ), ( float )( y + overlayOffset ), ( float )( z1 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+	}
+
+	if ( !level->isSolidBlockingTile( x, y + 1, z ) )
+	{
+		const float yStretch = .35f / 16.0f;
+
+		if ( level->isSolidBlockingTile( x - 1, y, z ) && level->getTile( x - 1, y + 1, z ) == Tile::redStoneDust_Id )
+		{
+			t->color( br * red, br * green, br * blue );
+			t->vertexUV( ( float )( x + dustOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 1 ), lineTexture->getU1(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + dustOffset ), ( float )( y + 0 ), ( float )( z + 1 ), lineTexture->getU0(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + dustOffset ), ( float )( y + 0 ), ( float )( z + 0 ), lineTexture->getU0(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + dustOffset ), ( float )( y + 1 + yStretch ), ( float )( z +	 0 ), lineTexture->getU1(true), lineTexture->getV1(true) );
+
+			t->color( br, br, br );
+			t->vertexUV( ( float )( x + overlayOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 1 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + overlayOffset ), ( float )( y + 0 ), ( float )( z + 1 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + overlayOffset ), ( float )( y + 0 ), ( float )( z +	 0 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + overlayOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 0 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+		}
+		if ( level->isSolidBlockingTile( x + 1, y, z ) && level->getTile( x + 1, y + 1, z ) == Tile::redStoneDust_Id )
+		{
+			t->color( br * red, br * green, br * blue );
+			t->vertexUV( ( float )( x + 1 - dustOffset ), ( float )( y + 0 ), ( float )( z + 1 ), lineTexture->getU0(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + 1 - dustOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 1 ), lineTexture->getU1(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + 1 - dustOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 0 ), lineTexture->getU1(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + 1 - dustOffset ), ( float )( y + 0 ), ( float )( z + 0 ), lineTexture->getU0(true), lineTexture->getV0(true) );
+
+			t->color( br, br, br );
+			t->vertexUV( ( float )( x + 1 - overlayOffset ), ( float )( y + 0 ), ( float )( z + 1 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + 1 - overlayOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 1 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + 1 - overlayOffset ), ( float )( y + 1 + yStretch ), ( float )( z + 0 ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + 1 - overlayOffset ), ( float )( y + 0 ), ( float )( z + 0 ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+		}
+		if ( level->isSolidBlockingTile( x, y, z - 1 ) && level->getTile( x, y + 1, z - 1 ) == Tile::redStoneDust_Id )
+		{
+			t->color( br * red, br * green, br * blue );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 0 ), ( float )( z + dustOffset ), lineTexture->getU0(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 1 + yStretch ), ( float )( z + dustOffset ), lineTexture->getU1(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 1 + yStretch ), ( float )( z + dustOffset ), lineTexture->getU1(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 0 ), ( float )( z + dustOffset ), lineTexture->getU0(true), lineTexture->getV0(true) );
+
+			t->color( br, br, br );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 0 ), ( float )( z + overlayOffset ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 1 + yStretch ), ( float )( z + overlayOffset ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 1 + yStretch ), ( float )( z + overlayOffset ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 0 ), ( float )( z + overlayOffset ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+		}
+		if ( level->isSolidBlockingTile( x, y, z + 1 ) && level->getTile( x, y + 1, z + 1 ) == Tile::redStoneDust_Id )
+		{
+			t->color( br * red, br * green, br * blue );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 1 + yStretch ), ( float )( z + 1 - dustOffset ), lineTexture->getU1(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 0 ), ( float )( z + 1 -	dustOffset ), lineTexture->getU0(true), lineTexture->getV0(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 0 ), ( float )( z + 1 -	dustOffset ), lineTexture->getU0(true), lineTexture->getV1(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 1 + yStretch ), ( float )( z + 1 - dustOffset ), lineTexture->getU1(true), lineTexture->getV1(true) );
+
+			t->color( br, br, br );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 1 + yStretch ), ( float )( z + 1 - overlayOffset ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + 1 ), ( float )( y + 0 ), ( float )( z + 1 - overlayOffset ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV0(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 0 ), ( float )( z + 1 - overlayOffset ), lineTextureOverlay->getU0(true), lineTextureOverlay->getV1(true) );
+			t->vertexUV( ( float )( x + 0 ), ( float )( y + 1 + yStretch ), ( float )( z + 1 - overlayOffset ), lineTextureOverlay->getU1(true), lineTextureOverlay->getV1(true) );
+		}
+	}
+
+
+	return true;
+
+}
+
 }

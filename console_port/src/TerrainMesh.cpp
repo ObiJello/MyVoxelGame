@@ -10,6 +10,7 @@
 #include "LiquidFlow.h"
 #include "BiomeTint.h"
 #include <array>
+#include <functional>
 #include <cmath>
 #include <utility>
 #include <stdexcept>
@@ -97,23 +98,32 @@ TerrainMesh buildTerrainMeshRegion(const World& world,const std::vector<std::uin
         }
         const int data=world.getData(x,y,z);
         if(b==116)mesh.enchantTables.push_back({x,y,z});
-        if(b==51 || b==50 || b==75 || b==76){
-            // TileRenderer::tesselateFireInWorld and tesselateTorchInWorld
-            // (ported/TileRender.cpp).
-            tile_render::LevelSource level{
-                [&](int fx,int fy,int fz){return int(blockAt(fx,fy,fz));},
-                [&](int fx,int fy,int fz){return world.getData(fx,fy,fz);},
+        switch(static_cast<int>(b)){
+        case 50:case 51:case 55:case 69:case 70:case 72:case 75:case 76:case 77:case 93:case 94:case 96:case 143:{
+            // TileRenderer's shapes for fire, torches, dust, levers and
+            // repeaters (ported/TileRender.cpp), and the updateShape box of
+            // buttons, pressure plates and trapdoors.
+            const std::function<int(int,int,int)> tileAt=[&](int fx,int fy,int fz){return int(blockAt(fx,fy,fz));};
+            const std::function<int(int,int,int)> dataAt=[&](int fx,int fy,int fz){return world.getData(fx,fy,fz);};
+            // Facing (down, up, north, south, west, east) to textureTile's faces.
+            static constexpr int portFace[6]{1,0,4,5,2,3};
+            tile_render::LevelSource level{tileAt,dataAt,
                 [&](int fx,int fy,int fz){return sim::isTopSolidBlocking(blockAt(fx,fy,fz),world.getData(fx,fy,fz));},
+                [&](int fx,int fy,int fz){return sim::isSolidBlockingTile(blockAt(fx,fy,fz));},
                 [&](int fx,int fy,int fz){return sim::fireCanBurn(blockAt(fx,fy,fz));},
+                [&](int fx,int fy,int fz,int direction){return sim::dustShouldConnectTo(tileAt,dataAt,fx,fy,fz,direction);},
                 [&](int fx,int fy,int fz){return world.renderLight(fx,fy,fz);},
-                [&](int tile,int face,int tileData){return textureTile(static_cast<Block>(tile),face,tileData);}};
+                [&](int tile,int face,int tileData){return textureTile(static_cast<Block>(tile),portFace[face<0||face>5?1:face],tileData);},
+                [&](int fx,int fy,int fz){return sim::tileShape(int(blockAt(fx,fy,fz)),world.getData(fx,fy,fz));}};
             const auto quads=tile_render::tesselate(level,static_cast<int>(b),x,y,z);
             for(std::size_t q=0;q+3<quads.size();q+=4)for(int k:indices){
                 const auto& v=quads[q+k];
-                mesh.opaque.push_back({v.x,v.y,v.z,v.u,v.v,1,1,1,1,
+                mesh.opaque.push_back({v.x,v.y,v.z,v.u,v.v,v.r,v.g,v.b,1,
                                        (((v.light>>4)&15)+.5f)/16,(((v.light>>20)&15)+.5f)/16});
             }
             continue;
+        }
+        default:break;
         }
         // TileRenderer draws these alpha-cutout blocks as crossed or wall
         // planes. A cube here turns an entire biome's undergrowth into boxes.

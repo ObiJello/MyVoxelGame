@@ -21,10 +21,12 @@ CONSOLE_TUTORIAL_TILE(67,stone,false,255,0) // StairTile
 CONSOLE_TUTORIAL_TILE(68,wood,false,0,0) // Wall SignTile
 CONSOLE_TUTORIAL_TILE(69,decoration,false,0,0) // LeverTile
 CONSOLE_TUTORIAL_TILE(71,metal,false,0,0) // DoorTile
+CONSOLE_TUTORIAL_TILE(70,stone,false,0,0) // PressurePlateTile
 CONSOLE_TUTORIAL_TILE(72,wood,false,0,0) // PressurePlateTile
 CONSOLE_TUTORIAL_TILE(75,decoration,false,0,0) // NotGateTile
 CONSOLE_TUTORIAL_TILE(76,decoration,false,0,7) // NotGateTile
 CONSOLE_TUTORIAL_TILE(77,decoration,false,0,0) // ButtonTile
+CONSOLE_TUTORIAL_TILE(143,decoration,false,0,0) // ButtonTile
 CONSOLE_TUTORIAL_TILE(85,wood,false,0,0) // FenceTile
 CONSOLE_TUTORIAL_TILE(90,portal,false,0,11) // PortalTile
 CONSOLE_TUTORIAL_TILE(93,decoration,false,0,0) // DiodeTile

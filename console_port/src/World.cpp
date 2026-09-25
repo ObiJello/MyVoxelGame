@@ -130,6 +130,15 @@ int textureTile(Block b,int face,int data) {
     case 50:return 80;
     case 75:return 115;
     case 76:return 99;
+    // Redstone parts: lever (0,6); buttons and plates take stone or planks;
+    // trapdoor (4,5); a repeater's top (repeater, repeater_lit), its torches'
+    // redtorch icons underneath (the torch renderer asks for the bottom) and
+    // the stone slab top on its sides.
+    case 69:return 96;
+    case 70:case 77:return 1;
+    case 72:case 143:return 4;
+    case 96:return 84;
+    case 93:case 94:return face==0?(b==94?147:131):face==1?(b==94?99:115):6;
     case 123:return 211; // redstoneLight
     case 124:return 212; // redstoneLight_lit
     default:return 1;
@@ -143,7 +152,7 @@ bool solid(Block b) {
     case 6:case 27:case 28:case 30:case 31:case 32:case 37:case 38:case 39:case 40:
     case 50:case 51:case 55:case 59:case 63:case 66:case 68:case 69:case 70:case 72:case 75:case 76:case 77:
     case 78:case 83:case 90:case 104:case 105:case 106:case 111:case 115:case 127:
-    case 131:case 132:case 141:case 142:return false;
+    case 131:case 132:case 141:case 142:case 143:return false;
     default:return true;
     }
 }

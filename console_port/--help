@@ -4,7 +4,6 @@
 #include "LadderShape.h"
 #include "FenceShape.h"
 namespace console {
-namespace sim { std::array<float,6> tileShape(int tile,int data); } // ported/tick/TileTickHost.h
 bool consoleIsStair(int id) {
     // Original Tile::staticCtor stair registrations, replacing RTTI registry lookup.
     switch(id){case 53:case 67:case 108:case 109:case 114:case 128:
@@ -306,31 +305,8 @@ BlockShape chestShape(const BlockShapeAccess& access,int x,int y,int z){
 }
  return result;
 }
-bool consoleIsPartialBlock(int id){return consoleIsStair(id) || id==44 || id==64 || id==71 || id==65 || id==54 || id==116 || id==117 || id==118 || id==93 || id==94 || id==96 || consoleIsFenceLike(id);}
+bool consoleIsPartialBlock(int id){return consoleIsStair(id) || id==44 || id==64 || id==71 || id==65 || id==54 || consoleIsFenceLike(id);}
 BlockShape consoleCollisionShape(const BlockShapeAccess& access,int x,int y,int z){
- // Repeaters and trapdoors collide with their shape (Tile::getAABB after
- // DiodeTile::updateDefaultShape / TrapDoorTile::updateShape).
- if(const int id=access.getTile(x,y,z);id==93 || id==94 || id==96){
-  const auto box=sim::tileShape(id,access.getData(x,y,z));
-  BlockShape shape;shape.count=1;shape.boxes[0]={box[0],box[1],box[2],box[3],box[4],box[5]};
-  return shape;
- }
- if(access.getTile(x,y,z)==116){BlockShape shape;shape.count=1;shape.boxes[0]={0,0,0,1,12./16,1};return shape;}
- if(access.getTile(x,y,z)==117){
-  BlockShape shape;shape.count=2;
-  shape.boxes[0]={7./16,0,7./16,9./16,14./16,9./16};
-  shape.boxes[1]={0,0,0,1,2./16,1};
-  return shape;
- }
- if(access.getTile(x,y,z)==118){
-  BlockShape shape;shape.count=5;
-  shape.boxes[0]={0,0,0,1,5./16,1};
-  shape.boxes[1]={0,0,0,2./16,1,1};
-  shape.boxes[2]={0,0,0,1,1,2./16};
-  shape.boxes[3]={14./16,0,0,1,1,1};
-  shape.boxes[4]={0,0,14./16,1,1,1};
-  return shape;
- }
  if(consoleIsFenceLike(access.getTile(x,y,z)))return consoleFenceCollisionShape(access,x,y,z);
  if(access.getTile(x,y,z)==54)return chestShape(access,x,y,z);
  if(access.getTile(x,y,z)==65)return consoleLadderShape(access.getData(x,y,z));

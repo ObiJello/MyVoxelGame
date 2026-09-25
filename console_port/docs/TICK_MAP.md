@@ -83,16 +83,19 @@ and every `Bush`. Fire is drawn by `TileRenderer::tesselateFireInWorld`, extract
 `ported/TileRender.cpp` by `tools/extract_tile_render.py`, as are torches
 (`tesselateTorchInWorld`).
 
-Not yet: redstone (dust, torches, repeaters, levers, buttons, pressure plates and the
-doors, trapdoors and gates they power), pistons and `runTileEvents`, TNT (burnt TNT
-simply goes; explosions are unported), nether portals (fire on obsidian lights
+Redstone is the source's: dust, redstone torches, levers, buttons, pressure plates,
+repeaters and lamps, and the doors, trapdoors and gates they open (see
+`docs/PORT_STATUS.md`, Redstone).
+
+Not yet: pistons and `runTileEvents`, TNT (burnt TNT simply goes; explosions are
+unported), nether portals (fire on obsidian lights
 normally), the Fire Spreads host option (always on), and saving a block that is
 mid-fall.
 
 ## Order of work
 
-1. **Tile updates**: redstone (dust, torches, repeaters, levers, buttons, pressure
-   plates, powered doors, trapdoors and gates), then pistons and `runTileEvents`.
+1. **Tile updates**: pistons and `runTileEvents` (note blocks, chest lids),
+   dispensers and TNT with explosions.
 2. **Mobs**: the `Goal` AI, `MobCategory` spawning, combat, armour, difficulty.
 3. **More tiles**: rails and minecarts, beds and sleeping, TNT and explosions,
    dispensers, boats.

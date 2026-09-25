@@ -29,8 +29,8 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 | Stats and achievements | 14 | 2 | 2 | 10 |
 | Commands | 9 | 0 | 0 | 9 |
 | Networking | 96 | 0 | 4 | 92 |
-| Other | 102 | 11 | 25 | 66 |
-| **All** | **1247** | **119** | **329** | **799** |
+| Other | 102 | 11 | 26 | 65 |
+| **All** | **1247** | **119** | **330** | **798** |
 
 ## Main loop and levels
 
@@ -172,6 +172,6 @@ see `docs/PORT_STATUS.md` for what each piece covers.
 
 **Ported (11):** AABB, Direction, Facing, HitResult, IntCache, JavaMath, Material, MaterialColor, Mth, Random, Vec3
 
-**Partial (25):** AddItemRuleDefinition, ApplySchematicRuleDefinition, Buffer, Class, CollectItemRuleDefinition, Color, Command, Cube, DLCManager, DamageSource, EntityIO, EntityRenderDispatcher, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, TileEntity, User, Vertex
+**Partial (26):** AddItemRuleDefinition, ApplySchematicRuleDefinition, Buffer, Class, CollectItemRuleDefinition, Color, ColourTable, Command, Cube, DLCManager, DamageSource, EntityIO, EntityRenderDispatcher, Input, ItemInstance, ModelPart, NamedAreaRuleDefinition, Polygon, Pos, Settings, SharedConstants, StringHelpers, StringTable, TileEntity, User, Vertex
 
-**Missing (66):** BinaryHeap, BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, ColourTable, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityDamageSource, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IndirectEntityDamageSource, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Node, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, SynchedEntityData, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs
+**Missing (65):** BinaryHeap, BlockDestructionProgress, BlockGenMethods, BlockReplacements, BoundingBox, BufferedImage, BufferedReader, ByteBuffer, C4JThread, ClientConstants, ClientSideMerchant, CommandDispatcher, CompleteAllRuleDefinition, CompoundGameRuleDefinition, ConsoleInput, Console_Utils, Consoles_App, Creature, DLCPack, DemoUser, DoorInfo, Enemy, EntityDamageSource, EntityPos, EntityTracker, Extrax64Stubs, FlippedIcon, FloatBuffer, FoliageColor, GameRule, GameRuleDefinition, GameRuleManager, GrassColor, Hasher, I18n, IndirectEntityDamageSource, IntBuffer, KeyMapping, Language, LeaderboardManager, Minecraft.World, Minimap, Model, Node, Npc, OffsettedRenderList, PerformanceTimer, Rarity, Rect2i, SmoothFloat, SonyCommerce, SonyHttp, Stitcher, SynchedEntityData, TelemetryManager, TexOffs, ThreadName, TileEntityRenderDispatcher, TrackedEntity, UseTileRuleDefinition, WaterColor, WeighedRandom, WstringLookup, glWrapper, stubs

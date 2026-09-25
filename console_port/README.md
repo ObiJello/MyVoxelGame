@@ -262,8 +262,9 @@ hoes, seeds, carrots, potatoes, nether wart and bone meal work (`docs/TICK_MAP.m
 Blocks react to their neighbours as in the source: liquids flow with the original
 `LiquidTile` code, sand and gravel fall, fire burns and spreads, torches, doors,
 ladders, signs and plants drop when their support goes, and scheduled ticks are kept
-for every tile. Other unfinished systems include per-chunk mesh uploads, ambient
-occlusion, redstone, pistons, survival, mobs/entities, inventories and recipes, audio/music,
+for every tile. Redstone works from the source: dust, torches, levers, buttons,
+pressure plates, repeaters, lamps, and powered doors, trapdoors and gates. Other
+unfinished systems include per-chunk mesh uploads, ambient occlusion, pistons, survival, mobs/entities, inventories and recipes, audio/music,
 animation, first-person hand, split screen, networking, PSN/store services, and legacy
 saves. `docs/COVERAGE.md` lists every source class and whether the port has it;
 `docs/TICK_MAP.md` follows the game tick and gives the order of the remaining work. Existing 96/128-high
