@@ -46,7 +46,7 @@ namespace Game {
     }
 
     UseResult TntUseItemOn(ItemStack& stack, ILevelWrite* level, const glm::ivec3& pos,
-                           IUsePlayer* player, uint32_t /*hand*/,
+                           IUsePlayer* player, uint32_t hand,
                            const BlockHitResult& /*hit*/) {
         if (!level) return UseResult::Pass;
 
@@ -79,8 +79,9 @@ namespace Game {
         level->SetBlock(pos.x, pos.y, pos.z, BlockID::Air, World::UpdateFlags::All);
 
         if (isFlintAndSteel) {
-            // MC hurtAndBreak(1). Durability is not modelled yet; the call site
-            // is what matters (see ItemBehaviors' HurtAndBreak note).
+            // MC itemStack.hurtAndBreak(1, player, hand) — no wear in
+            // creative (hasInfiniteMaterials), which HurtAndBreak checks.
+            HurtAndBreak(stack, 1, level, player, hand);
         } else if (player && !player->isCreative()) {
             // MC itemStack.consume(1, player) — a fire charge is used up.
             if (stack.count > 0) --stack.count;

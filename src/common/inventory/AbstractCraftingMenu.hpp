@@ -54,6 +54,13 @@ namespace Game {
         // CraftingResultSlot calls it; not meant for anyone else.
         void OnResultTaken(ContainerClickResult& result);
 
+        // MC CraftingMenu/InventoryMenu.canTakeItemForPickAll: never the
+        // output square — pick-all skips OnTake, so the grid would not be
+        // consumed.
+        bool CanTakeItemForPickAll(int slotIndex) const override {
+            return slotIndex != m_resultMenuIndex;
+        }
+
     protected:
         AbstractCraftingMenu(Inventory* playerInventory, int gridWidth, int gridHeight)
             : AbstractContainerMenu(playerInventory),

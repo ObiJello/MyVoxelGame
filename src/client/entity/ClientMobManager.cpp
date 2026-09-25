@@ -10,6 +10,8 @@
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/decoration/Painting.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
 #include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
@@ -277,6 +279,12 @@ namespace Client {
                     return std::make_unique<Game::EndCrystal>(level);
                 case Game::EntityTypeId::ArmorStand:
                     return std::make_unique<Game::ArmorStand>(level);
+                case Game::EntityTypeId::Painting:
+                    return std::make_unique<Game::Painting>(level);
+                case Game::EntityTypeId::ItemFrame:
+                    return std::make_unique<Game::ItemFrame>(level, /*glow=*/false);
+                case Game::EntityTypeId::GlowItemFrame:
+                    return std::make_unique<Game::ItemFrame>(level, /*glow=*/true);
                 case Game::EntityTypeId::EnderPearl:
                     return std::make_unique<Game::ThrownEnderpearl>(level);
                 default: break;
@@ -605,6 +613,12 @@ namespace Client {
             Game::EquipmentSlot::LEGS,     Game::EquipmentSlot::CHEST,   Game::EquipmentSlot::HEAD,
         };
         for (int i = 0; i < 6; ++i) stand->SetItemSlot(kSlots[i], packet.equipment[static_cast<size_t>(i)]);
+    }
+
+    void ClientMobManager::SetItemFrameItem(int32_t id, const Game::ItemStack& item) {
+        ClientMob* entry = Find(id);
+        if (!entry) return;
+        if (auto* frame = dynamic_cast<Game::ItemFrame*>(entry->mob.get())) frame->SetItemSilently(item);
     }
 
     void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,

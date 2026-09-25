@@ -4,6 +4,8 @@
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
+#include "common/network/packets/game/ItemFrameDataS2CPacket.hpp"
 #include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/network/packets/game/DragonPackets.hpp"
@@ -95,6 +97,9 @@ namespace Server {
             p.effectFlags     = visuals.flags;
             p.effectParticles = visuals.particles;
         }
+        // MC DATA_CUSTOM_NAME / DATA_CUSTOM_NAME_VISIBLE on first sight.
+        p.customName        = mob.GetCustomName();
+        p.customNameVisible = mob.IsCustomNameVisible();
 
         // The block a block-shaped entity carries. Sent once, on the add
         // packet, because neither entity's state changes after spawn — a
@@ -297,6 +302,15 @@ namespace Server {
                                Network::Serialization::Serialize(BuildArmorStandData(*stand, id)),
                                EntityPacketOut::Kind::Data, out);
                     }
+                    // An item frame's framed item follows the same way
+                    // (ItemFrameDataS2C) — only when there is one; the
+                    // client's default is an empty frame.
+                    if (const auto* frame = dynamic_cast<const Game::ItemFrame*>(&mob);
+                        frame && !frame->GetItem().IsEmpty()) {
+                        EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
+                               Network::Serialization::Serialize(Network::ItemFrameDataS2CPacket{id, frame->GetItem()}),
+                               EntityPacketOut::Kind::Data, out);
+                    }
                     if (const auto* crystal =
                             dynamic_cast<const Game::EndCrystal*>(&mob);
                         crystal && crystal->HasBeamTarget()) {
@@ -345,6 +359,18 @@ namespace Server {
 
             // An armor stand whose poses or equipment changed this tick (a
             // swap, a break, /data) tells every current watcher.
+            // An item frame whose item changed this tick (placed, knocked
+            // out) tells every current watcher.
+            if (auto* frame = dynamic_cast<Game::ItemFrame*>(mobPtr);
+                frame && frame->ConsumeItemDirty()) {
+                const auto payload = Network::Serialization::Serialize(
+                    Network::ItemFrameDataS2CPacket{id, frame->GetItem()});
+                for (uint32_t connId : tracked.watchers) {
+                    EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
+                           payload, EntityPacketOut::Kind::Data, out);
+                }
+            }
+
             if (auto* stand = dynamic_cast<Game::ArmorStand*>(mobPtr);
                 stand && stand->ConsumeDataDirty()) {
                 const auto payload = Network::Serialization::Serialize(BuildArmorStandData(*stand, id));
@@ -427,6 +453,8 @@ namespace Server {
 
             const bool dataChanged =
                 effectVisuals != tracked.lastEffectVisuals ||
+                mob.GetCustomName() != tracked.lastCustomName ||
+                mob.IsCustomNameVisible() != tracked.lastCustomNameVisible ||
                 flags != tracked.lastFlags || variant != tracked.lastVariant ||
                 carriedBlock != tracked.lastCarriedBlock ||
                 hurtTime != tracked.lastHurtTime || deathTime != tracked.lastDeathTime ||
@@ -659,6 +687,8 @@ namespace Server {
                 p.blockStateRaw = carriedBlock;
                 p.effectFlags     = effectVisuals.flags;
                 p.effectParticles = effectVisuals.particles;
+                p.customName        = mob.GetCustomName();
+                p.customNameVisible = mob.IsCustomNameVisible();
 
                 const auto payload = Network::Serialization::Serialize(p);
                 for (uint32_t connId : tracked.watchers) {
@@ -678,6 +708,8 @@ namespace Server {
                 tracked.lastVehicleId = vehicleId;
                 tracked.lastScale     = mob.scale;
                 tracked.lastEffectVisuals = effectVisuals;
+                tracked.lastCustomName        = mob.GetCustomName();
+                tracked.lastCustomNameVisible = mob.IsCustomNameVisible();
             }
         }
 

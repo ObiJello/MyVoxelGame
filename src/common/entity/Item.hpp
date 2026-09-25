@@ -20,7 +20,9 @@
 #include "../data/DataComponentMap.hpp"
 #include "../core/Features.hpp"
 #include "ItemUseAnimation.hpp"
+#include "EquipmentSlot.hpp"
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include "ClientItemLoader.hpp"   // CompositeChild
@@ -32,6 +34,7 @@ namespace Game {
     class ILevelWrite;
     class IUsePlayer;
     class Inventory;
+    class JavaRandom;
     // Container-click plumbing. Forward-declared rather than included:
     // AbstractContainerMenu.hpp pulls in Inventory.hpp which pulls in this
     // header, and the click-override typedefs below only need these by
@@ -479,5 +482,112 @@ namespace Game {
     // count. Used by the container diff to answer "do I need to resend this
     // slot".
     bool ItemStacksMatch(const ItemStack& a, const ItemStack& b);
+
+    // ── Durability — MC ItemStack.java isDamageableItem .. hurtAndBreak ────
+    // Implemented in ItemDurability.cpp. The components are DAMAGE /
+    // MAX_DAMAGE / UNBREAKABLE (DataComponents.hpp); Item.Properties
+    // .durability(n) puts MAX_DAMAGE n and DAMAGE 0 in the item's
+    // defaultComponents (ItemRegistry_RegisterDurability).
+
+    // MC isDamageableItem: MAX_DAMAGE present, UNBREAKABLE absent, DAMAGE
+    // present (its item default counts).
+    bool IsDamageableItem(const ItemStack& stack);
+    // MC isDamaged: damageable and DAMAGE > 0.
+    bool IsDamaged(const ItemStack& stack);
+    // MC getDamageValue: DAMAGE (default 0) clamped to 0..getMaxDamage.
+    int  GetDamageValue(const ItemStack& stack);
+    // MC setDamageValue: DAMAGE = clamp(value, 0, getMaxDamage). A value
+    // equal to the item's default drops the stack's override (MC's patch map
+    // removes an entry that matches the prototype), so a fully repaired tool
+    // stacks and compares equal to a fresh one again.
+    void SetDamageValue(ItemStack& stack, int value);
+    // MC getMaxDamage: MAX_DAMAGE, default 0.
+    int  GetMaxDamage(const ItemStack& stack);
+    // MC isBroken: damageable and DAMAGE >= MAX_DAMAGE.
+    bool IsBrokenItem(const ItemStack& stack);
+    // MC nextDamageWillBreak: damageable and DAMAGE >= MAX_DAMAGE - 1 (what
+    // stops an elytra gliding on its last point).
+    bool NextDamageWillBreak(const ItemStack& stack);
+    // MC isValidRepairItem: the REPAIRABLE component's HolderSet holds the
+    // repair stack's item.
+    bool IsValidRepairItem(const ItemStack& item, const ItemStack& repairItem);
+
+    // MC ItemStack.isEnchantable: ENCHANTABLE present and no ENCHANTMENTS
+    // yet — what the enchanting table asks.
+    bool IsEnchantable(const ItemStack& stack);
+    // MC ItemStack.isEnchanted: a non-empty ENCHANTMENTS (not STORED).
+    bool IsEnchanted(const ItemStack& stack);
+    // MC ItemStack.getRarity: an enchanted COMMON / UNCOMMON item shows RARE,
+    // an enchanted RARE shows EPIC. Returned as the Rarity enum's raw value
+    // (DataComponents.hpp's Rarity) so this header needs no component types.
+    uint8_t GetStackRarity(const ItemStack& stack);
+
+    // MC Item.isBarVisible / getBarWidth / getBarColor — the durability bar
+    // GuiGraphics.renderItemBar draws under the count: shown while damaged,
+    // 0..13 px (Item.MAX_BAR_WIDTH), coloured Mth.hsvToRgb(remaining / 3, 1,
+    // 1) — green through yellow to red. The colour is 0xRRGGBB.
+    static constexpr int kItemMaxBarWidth = 13;
+    bool     IsBarVisible(const ItemStack& stack);
+    int      GetBarWidth(const ItemStack& stack);
+    uint32_t GetBarColor(const ItemStack& stack);
+
+    // MC ItemStack.processDurabilityChange: 0 for anything not damageable or
+    // an owner with infinite materials (creative); a positive change runs the
+    // item's enchantments' item_damage effects (Unbreaking) —
+    // EnchantmentHelper.processDurabilityChange.
+    int ProcessDurabilityChange(const ItemStack& stack, int amount, JavaRandom& random,
+                                bool hasInfiniteMaterials);
+
+    // MC ItemStack.hurtAndBreak(amount, ServerLevel, ServerPlayer, onBreak):
+    // SERVER ONLY. Applies the processed change; when that breaks the item a
+    // copy of it goes to `onBreak` and the stack shrinks by one.
+    void HurtAndBreak(ItemStack& stack, int amount, JavaRandom& random, bool hasInfiniteMaterials,
+                      const std::function<void(const ItemStack& broken)>& onBreak);
+
+    // MC ItemStack.hurtAndBreak(amount, LivingEntity owner, EquipmentSlot):
+    // the owner's level must be a server level (a client copy is a no-op, as
+    // MC's `owner.level() instanceof ServerLevel`); a player owner in
+    // creative takes no wear; a break calls owner.OnEquippedItemBroken.
+    void HurtAndBreak(ItemStack& stack, int amount, LivingEntity& owner, EquipmentSlot slot);
+
+    // The item-behaviour form of the same call (Item.useOn / use run on both
+    // sides here): `hand` 0 = main, 1 = off. No-op on the client's
+    // prediction; on the server the player is the ServerPlayer behind the
+    // IUsePlayer, whose isCreative() is MC's hasInfiniteMaterials, and a
+    // break reaches IUsePlayer::OnEquippedItemBroken.
+    void HurtAndBreak(ItemStack& stack, int amount, ILevelWrite* level, IUsePlayer* player,
+                      uint32_t hand);
+
+    // MC ItemStack.hurtWithoutBreaking(amount, player): the change stops at
+    // one point short of breaking. Server only, like hurtAndBreak.
+    void HurtWithoutBreaking(ItemStack& stack, int amount, JavaRandom& random,
+                             bool hasInfiniteMaterials);
+
+    // MC ItemStack.hurtAndConvertOnBreak(amount, newItem, owner, slot): wear
+    // the stack; if it broke, the result is `newItem` (damageable → undamaged)
+    // carrying the broken stack's components, else the stack itself. The
+    // carrot / warped fungus on a stick becoming a fishing rod.
+    ItemStack HurtAndConvertOnBreak(ItemStack& stack, int amount, ItemID newItem,
+                                    LivingEntity& owner, EquipmentSlot slot);
+
+    // MC Item.mineBlock (and ShearsItem.mineBlock): the main-hand tool that
+    // just broke a block takes its TOOL damage_per_block, unless the block
+    // breaks instantly (destroy time 0) — or, for shears, unless it was fire.
+    // Server only (ServerPlayerGameMode.destroyBlock, survival).
+    void MineBlock(ItemStack& stack, BlockID block, ILevelWrite* level, IUsePlayer* player);
+
+    // MC ItemStack.hurtEnemy + postHurtEnemy: the held item after a landed
+    // melee hit wears by its WEAPON item_damage_per_attack. Returns MC
+    // hurtEnemy's answer (the stack carries WEAPON).
+    bool HurtEnemy(ItemStack& stack, LivingEntity& attacker);
+
+    // MC LivingEntity.entityEventForEquipmentBreak: the entity event (47..52,
+    // 65, 68) a broken piece in `slot` is broadcast with.
+    uint8_t EntityEventForEquipmentBreak(EquipmentSlot slot);
+    // The slot an equipment-break event names, or false for any other event
+    // byte — the client's side of the same table.
+    bool EquipmentSlotForBreakEvent(uint8_t event, EquipmentSlot& out);
+    // The break sound: the stack's BREAK_SOUND, else entity.item.break.
+    std::string GetBreakSound(const ItemStack& stack);
 
 } // namespace Game

@@ -16,12 +16,11 @@
 //   pools      rolls / bonus_rolls (constant, uniform, binomial providers)
 //   conditions minecraft:random_chance; anything else passes with one warning
 //   functions  set_count, set_name, enchant_randomly, enchant_with_levels,
-//              set_enchantments, set_potion, set_stew_effect,
+//              set_enchantments, set_damage, set_potion, set_stew_effect,
 //              set_written_book_pages, set_book_cover, set_writable_book_pages
 //              (every ListOperation mode: replace_all, replace_section,
-//              insert, append); the rest
-//              (set_damage, exploration_map, …) have no component to write
-//              into yet and leave the bare item.
+//              insert, append); the rest (exploration_map, …) have no
+//              component to write into yet and leave the bare item.
 #pragma once
 
 #include "common/inventory/Container.hpp"

@@ -486,6 +486,11 @@ namespace Game {
         // MC Axolotl.getWalkTargetValue — flat 0.
         float GetWalkTargetValue(const glm::ivec3&) const override { return 0.0f; }
 
+        // MC Axolotl.removeWhenFarAway: !fromBucket && !hasCustomName — an
+        // axolotl despawns despite being an Animal, unless named. No bucket
+        // system, so the name is the only arm here.
+        bool RemoveWhenFarAway(double) const override { return !HasCustomName(); }
+
         // MC Axolotl.finalizeSpawn — the two-variant pack token; the third
         // member onward of a pack spawns as a baby.
         std::shared_ptr<SpawnGroupData>

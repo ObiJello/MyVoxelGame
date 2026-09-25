@@ -52,6 +52,23 @@ namespace Game {
         // to orbs at the player — the menu has no player position and the
         // client applies clicks predictively, where this must award nothing.
         float xpBanked = 0.0f;
+        // Experience levels the click spent (MC AnvilMenu.onTake →
+        // player.giveExperienceLevels(-cost)). Like xpBanked, the SESSION
+        // applies it: the menu has no player, and the client's predictive
+        // run of the same click must not touch its level.
+        int levelsSpent = 0;
+        // An anvil result was taken (MC AnvilMenu.onTake → access.execute):
+        // the session rolls the anvil's 12% wear and plays the use / break
+        // event at the menu's block. The menu cannot — it has no level.
+        bool anvilUsed = false;
+        // A grindstone result was taken (MC GrindstoneMenu's result slot
+        // onTake → access.execute): the session pays the experience at the
+        // block's centre and plays levelEvent 1042 there. `grindstoneXp` is
+        // the removed enchantments' summed minimum costs; the halved-plus-
+        // random roll (getExperienceAmount) is the session's, on the level's
+        // random — the client's predictive run of the same take awards nothing.
+        bool grindstoneUsed = false;
+        int  grindstoneXp   = 0;
     };
 
     class AbstractContainerMenu {
@@ -139,6 +156,15 @@ namespace Game {
         // PlayerSession's remote-slot bookkeeping.
         virtual int MenuIndexForInventorySlot(int inventoryIndex) const {
             return IsValidSlotIndex(inventoryIndex) ? inventoryIndex : -1;
+        }
+
+        // MC AbstractContainerMenu.canTakeItemForPickAll — may a double-click
+        // collect from `slotIndex`? A menu whose result square commits its
+        // operation on take (ItemCombinerMenu) says no for it: pick-all never
+        // runs onTake, so collecting from it would be a free copy.
+        virtual bool CanTakeItemForPickAll(int slotIndex) const {
+            (void)slotIndex;
+            return true;
         }
 
         // ── Data slots (MC addDataSlots / ContainerData) ──────────────────

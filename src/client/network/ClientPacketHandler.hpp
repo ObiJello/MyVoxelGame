@@ -44,6 +44,7 @@ namespace Client {
         void onUnloadChunkS2C(const Network::UnloadChunkS2CPacket& packet) override { handleChunkUnload(packet); }
         void onChunkUnchangedS2C(const Network::ChunkUnchangedS2CPacket& packet) override { handleChunkUnchanged(packet); }
         void onLightUpdateS2C(const Network::LightUpdateS2CPacket& packet) override;
+        void onChunksBiomesS2C(const Network::ChunksBiomesS2CPacket& packet) override;
         void onBlockChangeS2C(const Network::BlockChangeS2CPacket& packet) override { handleBlockChange(packet); }
         void onClientboundSectionBlocksUpdate(const Network::ClientboundSectionBlocksUpdateS2CPacket& packet) override { handleSectionBlocksUpdate(packet); }
         void onMultiBlockChangeS2C(const Network::MultiBlockChangeS2CPacket& packet) override { handleMultiBlockChange(packet); }
@@ -86,6 +87,7 @@ namespace Client {
         void onBossEventS2C(const Network::BossEventS2CPacket& packet) override { handleBossEvent(packet); }
         void onEndCrystalBeamS2C(const Network::EndCrystalBeamS2CPacket& packet) override { handleEndCrystalBeam(packet); }
         void onArmorStandDataS2C(const Network::ArmorStandDataS2CPacket& packet) override { handleArmorStandData(packet); }
+        void onItemFrameDataS2C(const Network::ItemFrameDataS2CPacket& packet) override { handleItemFrameData(packet); }
 
         // ── /tick state ────────────────────────────────────────────────────
         // Handled inline: both are two-field mirrors into the client's
@@ -197,6 +199,7 @@ namespace Client {
         void handleBossEvent(const Network::BossEventS2CPacket& packet);
         void handleEndCrystalBeam(const Network::EndCrystalBeamS2CPacket& packet);
         void handleArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
+        void handleItemFrameData(const Network::ItemFrameDataS2CPacket& packet);
         void handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet);
         void handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet);
         void handleXpOrbSpawn(const Network::XpOrbSpawnS2CPacket& packet);

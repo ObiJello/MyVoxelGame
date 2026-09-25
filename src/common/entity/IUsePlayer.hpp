@@ -17,6 +17,7 @@
 #include <string>
 
 #include "../inventory/MenuType.hpp"
+#include "EquipmentSlot.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
 
@@ -88,6 +89,15 @@ namespace Game {
         // state is already local and will be corrected by the server's
         // InventorySetSlotS2C if it disagrees.
         virtual void markSlotDirty(int slotIndex) = 0;
+
+        // MC LivingEntity.onEquippedItemBroken — a held or worn item just
+        // wore out (HurtAndBreak, Item.hpp): the break sound and particles for
+        // everyone who sees the player. `broken` is the stack as it was before
+        // it shrank. Only the server's player has anyone to tell; the
+        // client's predictor never wears items.
+        virtual void OnEquippedItemBroken(const ItemStack& broken, EquipmentSlot slot) {
+            (void)broken; (void)slot;
+        }
 
         // MC Player.openMenu — a block just asked for its container UI.
         //

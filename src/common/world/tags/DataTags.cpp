@@ -28,6 +28,7 @@ namespace Game::DataTags {
                 case Registry::Fluid:      return "fluid";
                 case Registry::EntityType: return "entity_type";
                 case Registry::Item:       return "item";
+                case Registry::DamageType: return "damage_type";
             }
             return "block";
         }
@@ -46,7 +47,7 @@ namespace Game::DataTags {
             std::vector<std::string> empty;
         };
 
-        Index g_index[4];
+        Index g_index[5];
         std::mutex g_mutex;
 
         void ScanRegistry(Index& index, Registry registry) {
@@ -120,6 +121,14 @@ namespace Game::DataTags {
         if (!index.loaded) Build(index, registry);
         auto it = index.byId.find(WithNamespace(std::string(id)));
         return it == index.byId.end() ? index.empty : it->second;
+    }
+
+    bool HasTag(Registry registry, std::string_view id, std::string_view tag) {
+        std::string want(tag);
+        if (!want.empty() && want[0] == '#') want.erase(0, 1);
+        want = "#" + WithNamespace(std::move(want));
+        const std::vector<std::string>& tags = TagsFor(registry, id);
+        return std::binary_search(tags.begin(), tags.end(), want);
     }
 
     bool TagExists(Registry registry, std::string_view tag) {

@@ -51,6 +51,8 @@
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/sound/LevelEventSounds.hpp"
+#include "common/world/block/FallingBlock.hpp"   // AnvilDamaged
+#include "common/entity/decoration/ItemFrame.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/PlayerMovementSounds.hpp"
 #include "common/sound/SoundType.hpp"
@@ -87,6 +89,7 @@
 #include "common/entity/Item.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/Inventory.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include <algorithm>
 #include <iterator>
 #include <array>
@@ -2109,8 +2112,16 @@ namespace Server {
         // isCreative(), so no drop is ever produced.
         if (m_connection && !creativeBreak) {
             const Game::Block& brokenBlock = Game::BlockRegistry::Get(oldBlock);
-            const Game::ItemStack& heldStack =
-                m_player->getInventory().GetSelectedStack();
+            // MC ServerPlayerGameMode.destroyBlock: `destroyedWith =
+            // itemStack.copy()` and `canDestroy = hasCorrectToolForDrops`
+            // are taken BEFORE `itemStack.mineBlock(...)` wears the tool, so
+            // the loot below rolls against the tool as it was — a pickaxe
+            // that breaks on this very ore still drops it (and keeps its
+            // Fortune for the roll).
+            Game::ItemStack& mainHand = m_player->getItemInHand(0);
+            const Game::ItemStack heldStack = mainHand;
+            const bool canDestroy = Game::HasCorrectToolForDrops(heldStack.itemId, brokenBlock);
+            Game::MineBlock(mainHand, oldBlock, world, m_player);
 
             // MC's binary drop gate (ServerPlayerGameMode.destroyBlock:278
             // → Player.hasCorrectToolForDrops:605): a block flagged
@@ -2119,7 +2130,7 @@ namespace Server {
             // always pass. Note this same predicate already picks the
             // ×30 vs ×100 mining-speed divisor in MiningSpeed.cpp:71 —
             // it just wasn't consulted for drops until now.
-            if (Game::HasCorrectToolForDrops(heldStack.itemId, brokenBlock)) {
+            if (canDestroy) {
                 Game::LootContext lootCtx;
                 lootCtx.block          = oldBlock;
                 lootCtx.blockState     = lootState.Index();
@@ -2325,8 +2336,27 @@ namespace Server {
             Game::Mob* mob = level->Mobs() ? level->Mobs()->Find(packet.entityId) : nullptr;
             if (!mob) return;
             if (glm::distance(m_player->getPosition(), mob->position) > 8.0) return;   // isWithinEntityInteractionRange(3) + slack
-            for (const Game::SpawnEggEntry& e : Game::kSpawnEggTable) {
-                if (e.type == mob->GetType()) { item = e.item; break; }
+            // The non-mob entities that ride the mob pipeline answer with
+            // their own item (MC Painting / ArmorStand / EndCrystal
+            // .getPickResult); every mob with its spawn egg.
+            switch (mob->GetType()) {
+                case Game::EntityTypeId::Painting:   item = Game::Items::Painting;   break;
+                case Game::EntityTypeId::ItemFrame:
+                case Game::EntityTypeId::GlowItemFrame:
+                    // MC ItemFrame.getPickResult: the framed item, else the
+                    // frame (its name included).
+                    if (auto* frame = dynamic_cast<Game::ItemFrame*>(mob)) {
+                        const Game::ItemStack pick = frame->PickResult();
+                        item = pick.itemId;
+                    }
+                    break;
+                case Game::EntityTypeId::ArmorStand: item = Game::Items::ArmorStand; break;
+                case Game::EntityTypeId::EndCrystal: item = Game::Items::EndCrystal; break;
+                default:
+                    for (const Game::SpawnEggEntry& e : Game::kSpawnEggTable) {
+                        if (e.type == mob->GetType()) { item = e.item; break; }
+                    }
+                    break;
             }
         }
         if (item == Game::Items::Air) return;
@@ -2522,6 +2552,19 @@ namespace Server {
                                          m_openMenuPartnerPos.z - pcp.z * 16)
                 : nullptr;
             if (dynamic_cast<Game::BaseContainerBlockEntity*>(pbe)) return false;
+        } else if (chunk && (dynamic_cast<Game::ItemCombinerMenu*>(&m_player->container()) ||
+                             dynamic_cast<Game::EnchantmentMenu*>(&m_player->container()) ||
+                             dynamic_cast<Game::BeaconMenu*>(&m_player->container()))) {
+            // A menu with no block entity: its slots are its own, so the
+            // only question is MC's isValidBlock — is the block still there?
+            // An anvil chipped by use (or by another player) is still an
+            // anvil (BlockTags.ANVIL).
+            auto isAnvil = [](Game::BlockID id) {
+                return id == Game::BlockID::Anvil || id == Game::BlockID::ChippedAnvil ||
+                       id == Game::BlockID::DamagedAnvil;
+            };
+            const Game::BlockID here = sessionWorld->GetBlock(m_openMenuPos.x, m_openMenuPos.y, m_openMenuPos.z);
+            if (here == m_openMenuBlock || (isAnvil(here) && isAnvil(m_openMenuBlock))) return false;
         }
 
         // Gone (broken, or its chunk unloaded). Drop the menu before anything
@@ -2530,7 +2573,13 @@ namespace Server {
         m_hasMenuPartner    = false;
         // A surviving half of a double chest lets its lid down.
         StopChestLids();
-        m_player->closeContainerMenu();
+        // A menu with its own input slots (an anvil, a grindstone) hands them
+        // back as it closes; what the inventory cannot take goes into the
+        // world, as it does on an ordinary close.
+        Game::ContainerClickResult closed = m_player->closeContainerMenu();
+        for (const auto& extra : closed.extraDrops) {
+            DropItemFromPlayer(extra);
+        }
         // Re-seeds m_remoteSlots/m_remoteCarried from the menu we just fell
         // back to, and tells the client to show the plain inventory. The data
         // diff reseeds on its own next tick, when the slot count changes.
@@ -2652,7 +2701,13 @@ namespace Server {
             return;
         }
 
+        // The anvil's result slot asks for the player's level (mayPickup).
+        if (auto* anvil = dynamic_cast<Game::AnvilMenu*>(&m_player->container())) {
+            anvil->SetPlayerLevel(m_player->getExperience().Level());
+        }
         auto result = m_player->container().DoClick(packet);
+        ApplyMenuTakeCosts(result);
+        ApplyGrindstoneTake(result);
 
 #if INVENTORY_CLICK_TRACE
         {
@@ -2712,6 +2767,63 @@ namespace Server {
         AwardBankedExperience(m_player->getPosition(), result.xpBanked);
     }
 
+    void PlayerSession::ApplyMenuTakeCosts(const Game::ContainerClickResult& result) {
+        if (!m_player) return;
+        // MC AnvilMenu.onTake: `if (!player.hasInfiniteMaterials())
+        // player.giveExperienceLevels(-cost)` — the menu already skipped
+        // the charge for a creative player.
+        if (result.levelsSpent > 0) m_player->getExperience().GiveLevels(-result.levelsSpent);
+        if (!result.anvilUsed) return;
+
+        Game::World* world = SessionWorld();
+        if (!world) return;
+        const glm::ivec3 pos = m_openMenuPos;
+        // MC AnvilMenu.onTake's access.execute: outside creative, a 12%
+        // chance (player.getRandom()) the anvil takes a step of wear —
+        // chipped, damaged, then gone with the break event (1029); every
+        // other use plays the use event (1030). For everyone, the taker too:
+        // the client's run of onTake has ContainerLevelAccess.NULL.
+        const Game::BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
+        const bool isAnvil = state.Block() == Game::BlockID::Anvil ||
+                             state.Block() == Game::BlockID::ChippedAnvil ||
+                             state.Block() == Game::BlockID::DamagedAnvil;
+        if (!m_player->isCreative() && isAnvil && m_player->soundRandom().NextFloat() < 0.12f) {
+            const Game::BlockState damaged = Game::AnvilDamaged(state);
+            if (damaged.Block() == Game::BlockID::Air) {
+                // level.removeBlock(pos, false) — flags 3.
+                world->SetBlock(pos, Game::BlockState{}, Game::World::UpdateFlags::All, Game::World::kUpdateLimit);
+                Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::SOUND_ANVIL_BROKEN, pos, 0,
+                                          world->Random());
+            } else {
+                // level.setBlock(pos, newState, 2) — clients only, no
+                // neighbour updates. The menu stays open: it is still an anvil.
+                world->SetBlock(pos, damaged, Game::World::UpdateFlags::UpdateClients, Game::World::kUpdateLimit);
+                Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::SOUND_ANVIL_USED, pos, 0,
+                                          world->Random());
+            }
+        } else {
+            Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::SOUND_ANVIL_USED, pos, 0,
+                                      world->Random());
+        }
+    }
+
+    void PlayerSession::ApplyGrindstoneTake(const Game::ContainerClickResult& result) {
+        if (!result.grindstoneUsed || !m_player) return;
+        Game::World* world = SessionWorld();
+        if (!world) return;
+        const glm::ivec3 pos = m_openMenuPos;
+        // getExperienceAmount: ceil(amount / 2) + level.random.nextInt(that).
+        if (result.grindstoneXp > 0) {
+            const int half = (result.grindstoneXp + 1) / 2;
+            Game::JavaRandom* random = world->Random();
+            const int amount = half + (random ? random->NextInt(half) : 0);
+            AwardWorldExperience(glm::dvec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5), amount);
+        }
+        // level.levelEvent(1042, pos, 0) — null player: everyone hears it.
+        Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::SOUND_GRINDSTONE_USED, pos, 0,
+                                  world->Random());
+    }
+
     void PlayerSession::AwardWorldExperience(const glm::dvec3& pos, int amount) {
         if (amount <= 0) return;
         // THIS session's level — GetXpOrbs() is Overworld-pinned, so mining
@@ -2752,6 +2864,15 @@ namespace Server {
 
         const glm::dvec3 pos = m_player->getPosition();
         Game::Inventory& inventory = m_player->getInventory();
+        // MC Player.destroyVanishingCursedItems, before dropAll: every stack
+        // carrying prevent_equipment_drop (Curse of Vanishing) is removed
+        // outright instead of dropping.
+        for (int slot = 0; slot < Game::Inventory::TOTAL_SIZE; ++slot) {
+            const Game::ItemStack& stack = inventory.GetSlot(slot);
+            if (!stack.IsEmpty() && Game::EnchantmentHelper::HasPreventEquipmentDrop(stack)) {
+                inventory.SetSlotFull(slot, Game::ItemStack{});
+            }
+        }
         if (auto* items = ItemEntitiesOrNull()) {
             for (int slot = 0; slot < Game::Inventory::TOTAL_SIZE; ++slot) {
                 const Game::ItemStack& stack = inventory.GetSlot(slot);
@@ -3206,9 +3327,32 @@ namespace Server {
 
         // Player.mayBuild: abilities.mayBuild, off in adventure and spectator.
         const bool mayBuild = m_player->getGameMode() != Server::GameMode::ADVENTURE;
+        // The enchanting table checks the clicker's level and
+        // hasInfiniteMaterials (EnchantmentMenu.clickMenuButton).
+        auto* enchanting = dynamic_cast<Game::EnchantmentMenu*>(&m_player->container());
+        if (enchanting) {
+            enchanting->SetPlayerState(m_player->getExperience().Level(), m_player->isCreative());
+        }
         Game::ContainerClickResult result;
         const bool accepted = m_player->container().ClickMenuButton(
             static_cast<int>(packet.buttonId), mayBuild, result);
+        if (enchanting) {
+            if (const int cost = enchanting->ConsumePerformedCost(); cost > 0) {
+                // MC clickMenuButton's access.execute: player.onEnchantmentPerformed
+                // (the button's 1..3 levels off, a fresh seed), the new seed
+                // into the menu (which rerolls the rows), and the table's
+                // sound for everyone — level.playSound(null, pos,
+                // ENCHANTMENT_TABLE_USE, BLOCKS, 1.0, random * 0.1 + 0.9).
+                m_player->onEnchantmentPerformed(cost);
+                enchanting->SetEnchantmentSeed(m_player->getEnchantmentSeed());
+                if (Game::World* world = SessionWorld()) {
+                    Game::JavaRandom* random = world->Random();
+                    const float pitch = (random ? random->NextFloat() : 0.5f) * 0.1f + 0.9f;
+                    world->PlaySound(nullptr, m_openMenuPos, Game::SoundEvents::ENCHANTMENT_TABLE_USE,
+                                     Game::SoundSource::Blocks, 1.0f, pitch);
+                }
+            }
+        }
         // What a button handed the player but did not fit (the lectern's Take
         // Book into a full inventory — MC player.drop(book, false)).
         if (!result.droppedItem.IsEmpty()) DropItemFromPlayer(result.droppedItem);
@@ -3289,6 +3433,19 @@ namespace Server {
         menu->SetSelectionHint(packet.item);
         Game::ContainerClickResult result;
         menu->TryMoveItems(packet.item, result);
+        BroadcastContainerChanges();
+    }
+
+    void PlayerSession::HandleRenameItem(const Network::RenameItemC2SPacket& packet) {
+        // MC ServerGamePacketListenerImpl.handleRenameItem: only an open,
+        // still-valid anvil takes a name (setItemName validates it).
+        ASSERT_SERVER_THREAD();
+        if (!m_player || !m_connection) return;
+        auto* menu = dynamic_cast<Game::AnvilMenu*>(&m_player->container());
+        if (!menu) return;
+        if (CloseMenuIfBlockGone()) return;   // !menu.stillValid(player)
+        menu->SetPlayerLevel(m_player->getExperience().Level());
+        menu->SetItemName(packet.name);
         BroadcastContainerChanges();
     }
 
@@ -3950,6 +4107,9 @@ namespace Server {
                 // clear air between it and the table. Without that scan the
                 // table would always offer level-1 enchantments.
                 ench->SetBookshelfPower(CountBookshelvesAround(pending->pos));
+                // `addDataSlot(enchantmentSeed).set(player.getEnchantmentSeed())`
+                // — the offers are rolled from the player's seed.
+                ench->SetEnchantmentSeed(m_player->getEnchantmentSeed());
                 menu  = std::move(ench);
                 title = blockNameAt(pending->pos);
                 break;
@@ -4051,6 +4211,9 @@ namespace Server {
                                pending->type != Game::MenuType::Merchant);
         if (pending->type != Game::MenuType::Merchant) m_merchantEntityId = -1;
         m_openMenuPos       = pending->pos;
+        if (Game::World* world = SessionWorld()) {
+            m_openMenuBlock = world->GetBlock(pending->pos.x, pending->pos.y, pending->pos.z);
+        }
         m_player->openContainerMenu(std::move(menu), pending->type);
 
         // MC ChestMenu's constructor: container.startOpen(player) — the lid
@@ -4317,6 +4480,33 @@ namespace Server {
         // ── Armor stand (MC ArmorStandItem.useOn) ─────────────────────────
         if (!heldStack.IsEmpty() && heldStack.itemId == Game::Items::ArmorStand) {
             const bool placed = server->PlaceArmorStandFromUse(*this, hit, m_player->getYaw());
+            if (placed && !isCreative) {
+                heldStack.count -= 1;
+                if (heldStack.count <= 0) heldStack.Clear();
+            }
+            AckInteraction(packet.sequence, placed);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+
+        // ── Painting (MC HangingEntityItem.useOn) ─────────────────────────
+        // Server-side for the armor stand's reason: it adds an entity.
+        if (!heldStack.IsEmpty() && heldStack.itemId == Game::Items::Painting) {
+            const bool placed = server->PlacePaintingFromUse(*this, hit, heldStack);
+            if (placed && !isCreative) {
+                heldStack.count -= 1;
+                if (heldStack.count <= 0) heldStack.Clear();
+            }
+            AckInteraction(packet.sequence, placed);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+
+        // ── Item frames (MC ItemFrameItem → HangingEntityItem.useOn) ──────
+        if (!heldStack.IsEmpty() &&
+            (heldStack.itemId == Game::Items::ItemFrame || heldStack.itemId == Game::Items::GlowItemFrame)) {
+            const bool placed = server->PlaceItemFrameFromUse(*this, hit, heldStack,
+                                                              heldStack.itemId == Game::Items::GlowItemFrame);
             if (placed && !isCreative) {
                 heldStack.count -= 1;
                 if (heldStack.count <= 0) heldStack.Clear();
@@ -5174,7 +5364,7 @@ namespace Server {
 
         Game::ItemStack& stack = m_player->getItemInHand(hand);
         const int oldCount = stack.count;                       // :296
-        // :297 oldDamage — durability excluded.
+        const int oldDamage = Game::GetDamageValue(stack);      // :297
 
         const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
         const Game::UseResult result =
@@ -5189,7 +5379,8 @@ namespace Server {
         // :307 — nothing observable changed and the item has no use duration
         // → done, no resync needed.
         if (resultStack.count == oldCount
-            && Game::GetUseDuration(resultStack) <= 0) {
+            && Game::GetUseDuration(resultStack) <= 0
+            && Game::GetDamageValue(resultStack) == oldDamage) {
             return result;
         }
         // :309-310 — an aborted consumable start (FAIL from e.g. "not hungry")

@@ -57,28 +57,33 @@ namespace Game {
     }
 
     float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround,
-                                float effectMultiplier, bool eyeInWater) {
+                                float effectMultiplier, bool eyeInWater,
+                                float miningEfficiency, float submergedMiningSpeed) {
         float speed = GetItemDestroySpeed(held, target);
-        // TODO: efficiency enchant (MINING_EFFICIENCY). BLOCK_BREAK_SPEED is
-        // 1.0 for every player (no source modifies it here).
+        // MC: `if (speed > 1.0F) speed += MINING_EFFICIENCY` — Efficiency
+        // only helps a tool that is already fast on this block.
+        // BLOCK_BREAK_SPEED is 1.0 for every player (no source modifies it
+        // here).
+        if (speed > 1.0f) speed += miningEfficiency;
         // Player.getDestroySpeed's two effect steps (MobEffectUtil
         // .hasDigSpeed → ×(1 + (amp + 1) · 0.2); MINING_FATIGUE → ×0.3^(amp + 1)),
         // folded by the caller into one factor.
         speed *= effectMultiplier;
         // MC: `if (isEyeInFluid(WATER)) speed *= SUBMERGED_MINING_SPEED` — the
-        // attribute's base is 0.2 (AQUA_AFFINITY would raise it to 1.0; no
-        // enchantments exist to do so).
-        if (eyeInWater) speed *= 0.2f;
+        // attribute's base is 0.2; Aqua Affinity's ×5 total makes it 1.0.
+        if (eyeInWater) speed *= submergedMiningSpeed;
         if (!onGround) speed /= 5.0f;
         return speed;
     }
 
     float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround,
-                                    float effectMultiplier, bool eyeInWater) {
+                                    float effectMultiplier, bool eyeInWater,
+                                    float miningEfficiency, float submergedMiningSpeed) {
         if (target.destroyTime < 0.0f) return 0.0f;       // unbreakable
         if (target.destroyTime <= 0.0f) return 1.0f;      // instant break
         const float playerSpeed = GetPlayerDestroySpeed(held, target, onGround, effectMultiplier,
-                                                        eyeInWater);
+                                                        eyeInWater, miningEfficiency,
+                                                        submergedMiningSpeed);
         const float modifier = HasCorrectToolForDrops(held, target) ? 30.0f : 100.0f;
         return playerSpeed / target.destroyTime / modifier;
     }

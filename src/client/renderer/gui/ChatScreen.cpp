@@ -371,6 +371,7 @@ namespace {
             {"time",        "/time <set|add|query> <time>  (time: <n>[t|s|d])"},
             {"dimension",   "/dimension <overworld|nether|end|hush|twilight|aether>  (travels as the dimension's portal would from where you stand)"},
             {"locate",      "/locate <structure|biome|poi> <id|#tag>"},
+            {"fillbiome",   "/fillbiome <x1> <y1> <z1> <x2> <y2> <z2> <biome> [replace <biome|#tag>]"},
             {"gamerule",    "/gamerule <rule> [value]"},
             {"portal",      "/portal <make|make_biway|make_full> <w> <h> <dim> <x> <y> <z> | "
                             "make_loop <w> <h> <dx> <dy> <dz> [turn] | make_mirror <w> <h> | "
@@ -553,6 +554,21 @@ namespace {
                     candidates = CollectBlockNames();
                 } else if (argIndex == 5) {
                     candidates = {"destroy", "keep", "replace"};
+                }
+            } else if (cmd == "fillbiome") {
+                // MC FillBiomeCommand's tree: two BlockPosArguments, a
+                // ResourceArgument over the whole biome registry (any biome
+                // may be placed in any dimension, so not just this one's),
+                // then `replace` and a ResourceOrTagArgument filter.
+                if (argIndex >= 1 && argIndex <= 6) {
+                    candidates = {"~"};
+                } else if (argIndex == 7 || argIndex == 9) {
+                    const WorldgenRegistry& reg = WorldgenIds("biome");
+                    SuggestResources(reg.elements, word, "", candidates);
+                    if (argIndex == 9) SuggestResources(word.empty() ? reg.topTags : reg.tags, word, "#", candidates);
+                    resourceFiltered = true;
+                } else if (argIndex == 8) {
+                    candidates = {"replace"};
                 }
             } else if (cmd == "replaceall") {
                 // /replaceall <block> <radius> <newblock>

@@ -23,6 +23,12 @@
 //   15  POTION_CONTENTS               16  POTION_DURATION_SCALE
 //   17  SUSPICIOUS_STEW_EFFECTS       18  WRITTEN_BOOK_CONTENT
 //   19  WRITABLE_BOOK_CONTENT         20  DYED_COLOR
+//   21  DAMAGE                        22  MAX_DAMAGE
+//   23  UNBREAKABLE                   24  REPAIR_COST
+//   25  ENCHANTMENTS                  26  REPAIRABLE
+//   27  ENCHANTABLE                   28  WEAPON
+//   29  BREAK_SOUND                   30  DAMAGE_RESISTANT
+//   40  PAINTING_VARIANT  (40, clear of the ids after 30 parallel work claims)
 //  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
 #pragma once
 
@@ -49,6 +55,31 @@ namespace Game {
         ToolType   type        = ToolType::None;
         MiningTier tier        = MiningTier::Wood;
         float      miningSpeed = 1.0f;
+        // MC Tool.damagePerBlock (codec default 1): the wear Item.mineBlock
+        // deals per block with a non-zero destroy time. Swords, the mace and
+        // the trident carry 2 (ToolMaterial.applySwordProperties, their
+        // createToolProperties).
+        int        damagePerBlock = 1;
+    };
+
+    // Mirrors the Weapon record — world/item/component/Weapon.java:
+    // (itemDamagePerAttack, disableBlockingForSeconds). The wear a landed
+    // melee hit deals the held item (ItemStack.postHurtEnemy); 1 for swords,
+    // spears, the mace and the trident, 2 for every other tool
+    // (ToolMaterial.applyToolProperties), the axe's 5 s shield disable.
+    struct Weapon {
+        int   itemDamagePerAttack       = 1;
+        float disableBlockingForSeconds = 0.0f;
+    };
+
+    // Mirrors the Repairable record — world/item/enchantment/Repairable.java:
+    // the HolderSet<Item> an anvil / crafting-grid repair accepts. Entries are
+    // the HolderSet's raw form: "#ns:tag" or "ns:item" (a material's repair
+    // tag, the elytra's phantom membrane, the mace's breeze rod). Membership
+    // is resolved per item through DataTags at query time
+    // (IsValidRepairItem).
+    struct Repairable {
+        std::vector<std::string> items;
     };
 
     // Mirrors world/item/consume_effects/ConsumeEffect.java — a sealed
@@ -151,13 +182,16 @@ namespace Game {
     };
 
     // Mirrors the Equippable record — Equippable.java:32. Omitted fields
-    // (assetId, cameraOverlay, allowedEntities, dispensable, damageOnHurt,
-    // equipOnInteract, canBeSheared, shearingSound) have no consumers here —
-    // no entity rendering / dispensers / mob equip; add when those exist.
+    // (assetId, cameraOverlay, allowedEntities, dispensable, equipOnInteract,
+    // canBeSheared, shearingSound) have no consumers here — no entity
+    // rendering / dispensers / mob equip; add when those exist.
     struct Equippable {
         EquipmentSlot slot       = EquipmentSlot::HEAD;
         std::string   equipSound = "item.armor.equip_generic"; // Holder<SoundEvent> → name (log-stub)
         bool          swappable  = true;   // right-click auto-equip allowed
+        // MC damageOnHurt (default true): the piece wears when its wearer is
+        // hurt (LivingEntity.doHurtEquipment). False on the elytra.
+        bool          damageOnHurt = true;
     };
 
     // Mirrors the BlocksAttacks record — BlocksAttacks.java:30. The full data
@@ -292,21 +326,71 @@ namespace Game::DataComponents {
     // (Game::ResolveItemLayerTint); absent = the tint's LEATHER_COLOR default.
     extern const DataComponentType<int32_t> DYED_COLOR;
 
+    // MC DataComponents.PAINTING_VARIANT ("minecraft:painting/variant") — the
+    // canvas a painting item hangs, as the variant's id ("minecraft:kebab";
+    // Game::PaintingVariants resolves it). Absent = a random fitting
+    // #placeable canvas (Painting::Create). Set on the creative tab's preset
+    // paintings; the painting's own drop never carries it (MC dropItem).
+    extern const DataComponentType<std::string> PAINTING_VARIANT;
+
+    // ── Durability (MC DataComponents.java:122-128) ─────────────────────────
+    // Item.Properties.durability(n) sets all three on the prototype: MAX_DAMAGE
+    // n, DAMAGE 0, MAX_STACK_SIZE 1 (Item.java). The free functions in
+    // Item.hpp (IsDamageableItem, GetDamageValue, HurtAndBreak, ...) are the
+    // only readers; nothing else should poke DAMAGE directly.
+
+    // Wear taken so far (MC DAMAGE, ExtraCodecs.NON_NEGATIVE_INT). The item's
+    // default 0 lives in defaultComponents; SetDamageValue drops the stack's
+    // override again once it matches it, as MC's patch map does.
+    extern const DataComponentType<int32_t> DAMAGE;
+
+    // Durability cap (MC MAX_DAMAGE, ExtraCodecs.POSITIVE_INT).
+    extern const DataComponentType<int32_t> MAX_DAMAGE;
+
+    // MC UNBREAKABLE — a Unit: presence is the whole value. The bool carried
+    // is always true; an unbreakable stack never takes wear
+    // (IsDamageableItem) and the tooltip says "Unbreakable".
+    extern const DataComponentType<bool> UNBREAKABLE;
+
+    // Prior-work penalty the anvil adds and doubles (MC REPAIR_COST; every
+    // item's default is 0 — DataComponents.COMMON_ITEM_COMPONENTS — so an
+    // absent value reads as 0).
+    extern const DataComponentType<int32_t> REPAIR_COST;
+
+    // Enchantments on the item itself — tools, weapons, armour (MC
+    // DataComponents.java:155). Every MC item defaults to EMPTY
+    // (COMMON_ITEM_COMPONENTS), so an absent component reads as EMPTY here.
+    // Enchanted books keep theirs in STORED_ENCHANTMENTS instead; go through
+    // EnchantmentHelper::SetEnchantments, which picks the right one.
+    extern const DataComponentType<ItemEnchantments> ENCHANTMENTS;
+
+    // What repairs the item in an anvil / grindstone combine (MC REPAIRABLE).
+    extern const DataComponentType<Repairable> REPAIRABLE;
+
+    // MC ENCHANTABLE (Enchantable.value) — the enchantability the table and
+    // enchant_with_levels roll against. Absent = not enchantable.
+    extern const DataComponentType<int32_t> ENCHANTABLE;
+
+    // MC WEAPON — the wear a landed melee hit deals the item.
+    extern const DataComponentType<Weapon> WEAPON;
+
+    // MC BREAK_SOUND (a sound event holder; the id here). Absent reads as
+    // the COMMON_ITEM_COMPONENTS default, entity.item.break — only the shield
+    // and wolf armour carry their own.
+    extern const DataComponentType<std::string> BREAK_SOUND;
+
+    // MC DAMAGE_RESISTANT (DamageResistant.types, a damage-type tag; the tag
+    // id here). Item.Properties.fireResistant() puts #minecraft:is_fire on
+    // the netherite gear: a resistant piece takes no wear from the sources
+    // it resists (ItemStack.canBeHurtBy). Only the durable items carry it so
+    // far — the item entities' own fire immunity is not modelled.
+    extern const DataComponentType<std::string> DAMAGE_RESISTANT;
+
     // ── TODO: future component types to register, in MC parity order ────────
     // Each one unlocks a chunk of behaviour by populating Item.use() base
     // dispatch (see Item.hpp ItemUseFn doc comment) and other systems.
     //
-    //   DAMAGE             (int)        DataComponents.java:81  — current durability used
-    //   MAX_DAMAGE         (int)        DataComponents.java:82  — durability cap
-    //   TOOL               (Tool)       DataComponents.java:108 — mining speed + correctForDrops
-    //   CONSUMABLE         (Consumable) DataComponents.java:128 — food/drink eat-timer + sound + saturation
-    //   EQUIPPABLE         (Equippable) DataComponents.java:130 — armor slot + auto-equip on right-click
-    //   BLOCKS_ATTACKS     (BlocksAttacks) DataComponents.java:135 — shield blocking config
     //   KINETIC_WEAPON     (KineticWeapon) DataComponents.java:139 — mace wind-up swing
-    //   FOOD               (FoodProperties) — older eating system; superseded by CONSUMABLE
-    //   CUSTOM_NAME        (Component)  — anvil-renamed items
-    //   LORE               (List<Component>) — book lore text
-    //   DYED_COLOR         (DyedItemColor) — leather-armor dye
     //   BANNER_PATTERNS    (BannerPatternLayers) — banner / shield patterns
     //
     // None are registered yet because we have no consumers (no food eating,

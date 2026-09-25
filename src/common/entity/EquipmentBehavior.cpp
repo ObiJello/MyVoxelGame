@@ -8,6 +8,7 @@
 #include "Inventory.hpp"
 #include "../core/Log.hpp"
 #include "../world/level/WorldDrops.hpp"
+#include "../world/enchantment/EnchantmentHelper.hpp"
 #include "server/player/ServerPlayer.hpp"
 
 #include <unordered_map>
@@ -27,9 +28,13 @@ namespace Game::EquipmentBehavior {
         const Game::ItemStack inEquipmentSlot = inv.GetSlot(slotIdx);  // value copy
         const bool creative = player.getGameMode() == Server::GameMode::CREATIVE;
 
-        // :57 — PREVENT_ARMOR_CHANGE enchant check omitted (no curse of
-        // binding); isSameItemSameComponents approximated by item id (no
-        // component equality op) → same item already worn = FAIL.
+        // :57 — a worn piece carrying prevent_armor_change (Curse of
+        // Binding) stays on outside creative; isSameItemSameComponents
+        // approximated by item id (no component equality op) → same item
+        // already worn = FAIL.
+        if (!creative && Game::EnchantmentHelper::HasPreventArmorChange(inEquipmentSlot)) {
+            return UseResult::Fail;
+        }
         if (!inEquipmentSlot.IsEmpty() && inEquipmentSlot.itemId == inHand.itemId) {
             return UseResult::Fail;
         }
@@ -156,7 +161,14 @@ namespace Game {
 
         // Elytra — CHEST slot, equip_elytra (Items.java elytra row). Data-only:
         // no gliding system, but it equips/renders in the chest slot.
+        // `.setDamageOnHurt(false)`: the elytra wears only while gliding, never
+        // from the hits that wear armour (LivingEntity.doHurtEquipment).
         SetArmor(Items::Elytra, EquipmentSlot::CHEST, "item.armor.equip_elytra");
+        if (auto it = pureItems.find(Items::Elytra); it != pureItems.end()) {
+            Equippable elytra = *it->second.defaultComponents.get(EQUIPPABLE);
+            elytra.damageOnHurt = false;
+            it->second.defaultComponents.set(EQUIPPABLE, elytra);
+        }
 
         // The Hush's cloak of silence (docs/the-hush.md) — a CHEST wearable
         // like the elytra: no armour value, the equip sound of leather. What

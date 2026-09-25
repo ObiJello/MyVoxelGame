@@ -3,6 +3,8 @@
 
 #include "common/world/level/World.hpp"
 #include "server/player/ServerPlayer.hpp"
+#include "common/entity/Item.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/session/PlayerSessionManager.hpp"
 #include "common/core/Features.hpp"
@@ -33,6 +35,37 @@ namespace Server {
             ServerPlayer* player;
             bool          eligible;   // alive and not a spectator
         };
+
+        // MC ExperienceOrb.repairPlayerItems: while points remain, a random
+        // damaged item the player wears or holds whose enchantment carries
+        // repair_with_xp (Mending, in a slot it works in) is repaired by
+        // modifyDurabilityToRepairFromXp(points) — Mending's ×2 — and the
+        // points that repair consumed come off. Returns what is left for the
+        // experience bar. The repaired slot reaches the client through the
+        // per-tick inventory diff.
+        int RepairPlayerItems(ServerPlayer& player, int amount) {
+            const Game::EnchantmentEquipment equipment =
+                Game::EnchantmentEquipment::OfInventory(player.getInventory());
+            Game::JavaRandom& random = player.soundRandom();   // source.getRandom()
+            for (;;) {
+                Game::ItemStack* item =
+                    Game::EnchantmentHelper::GetRandomDamagedItemWithRepairWithXp(equipment, random);
+                if (!item) return amount;
+                const int toRepairFromXp =
+                    Game::EnchantmentHelper::ModifyDurabilityToRepairFromXp(*item, amount, random);
+                const int damage = Game::GetDamageValue(*item);
+                const int repair = std::min(toRepairFromXp, damage);
+                Game::SetDamageValue(*item, damage - repair);
+                if (repair > 0) {
+                    const int remaining = amount - repair * amount / toRepairFromXp;
+                    if (remaining > 0) {
+                        amount = remaining;
+                        continue;
+                    }
+                }
+                return 0;
+            }
+        }
     } // namespace
 
     // ── Award (MC ExperienceOrb.award) ─────────────────────────────────────
@@ -305,11 +338,10 @@ namespace Server {
                 if (!orb.GetAABB().Intersects(touchBox)) continue;
 
                 delay = Game::ExperienceOrb::kTakeDelayTicks;
-                // No Mending here — the engine has no repair-with-XP
-                // enchantment, so the whole value goes to the bar
-                // (MC repairPlayerItems falls through to
-                // giveExperiencePoints when nothing wants repair).
-                v.player->getExperience().GivePoints(orb.value);
+                // MC ExperienceOrb.playerTouch: Mending takes its share first
+                // (repairPlayerItems); only what is left reaches the bar.
+                const int remaining = RepairPlayerItems(*v.player, orb.value);
+                if (remaining > 0) v.player->getExperience().GivePoints(remaining);
 
                 outPickups.push_back(XpOrbPickupEvent{ orb.id, v.id });
                 orb.pickedUp = true;

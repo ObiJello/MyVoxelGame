@@ -175,6 +175,9 @@ namespace Game {
         { "hush_leviathan", 3.5f, 3.0f, 2.55f, MobCategory::Creature, 10, 3, 0.0f, 0.0f, 0.0f, 3, false },
         { "lumen_moth", 0.5f, 0.5f, 0.3f, MobCategory::Ambient, 5, 3, 0.0f, 0.0f, 0.0f, 0, false },
         { "the_unsung", 1.5f, 3.8f, 3.3f, MobCategory::Monster, 16, 3, 0.0f, 0.0f, 0.0f, 200, true },
+        { "painting", 0.5f, 0.5f, 0.425f, MobCategory::Misc, 10, 2147483647, 0.0f, 0.0f, 0.0f, 0, false },
+        { "glow_item_frame", 0.5f, 0.5f, 0.0f, MobCategory::Misc, 10, 2147483647, 0.0f, 0.0f, 0.0f, 0, false },
+        { "item_frame", 0.5f, 0.5f, 0.0f, MobCategory::Misc, 10, 2147483647, 0.0f, 0.0f, 0.0f, 0, false },
     };
 
 } // namespace Game

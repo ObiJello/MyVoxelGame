@@ -23,9 +23,15 @@
 #include "common/sound/SoundEvents.hpp"
 #include "GeneratedItemList.hpp"
 #include "SpawnEggs.hpp"
+#include "common/entity/decoration/HangingEntity.hpp"
+#include "EndCrystal.hpp"
+#include "FallingBlockEntity.hpp"
+#include "PrimedTnt.hpp"
+#include "projectile/Projectile.hpp"
 #include "mobs/SulfurCube.hpp"
 #include "../world/level/WorldMobSpawn.hpp"
 #include "mobs/Animals.hpp"
+#include "ArmorStand.hpp"
 #include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/block/BlockPlacement.hpp"
@@ -50,7 +56,9 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <optional>
 #include <random>
+#include <string>
 #include <unordered_map>
 
 namespace Game {
@@ -98,23 +106,12 @@ namespace Game {
             // TODO(game-events): once GameEvent system exists, broadcast here.
         }
 
-        // Mirrors MC `ItemStack.hurtAndBreak(amount, owner, slot)`
-        // (ItemStack.java:728). Reads the DAMAGE component, increments it, and
-        // breaks the item if it would exceed the MAX_DAMAGE component.
-        // We have the DataComponentMap infra (used for enchanted_book) but no
-        // DAMAGE / MAX_DAMAGE components registered yet — those plus the
-        // `breakItem` flow (sound, particles, slot empty) are a follow-up PR.
-        void HurtAndBreak(ItemStack& stack, int /*amount*/, uint32_t /*hand*/) {
-            (void)stack;
-            // TODO(durability): once DataComponents::DAMAGE + MAX_DAMAGE land:
-            //   auto dmg = stack.get(DataComponents::DAMAGE).value_or(0);
-            //   auto max = stack.get(DataComponents::MAX_DAMAGE).value_or(0);
-            //   if (max > 0 && ++dmg >= max) {
-            //       playBreakSound(); spawnBreakParticles(); stack.Clear();
-            //       triggerItemBroken(player, slot);
-            //   } else if (max > 0) {
-            //       stack.components.set(DataComponents::DAMAGE, dmg);
-            //   }
+        // Mirrors MC `itemStack.hurtAndBreak(amount, player, hand)` from an
+        // Item.useOn: server only (the client's prediction never wears the
+        // item), none in creative, and a break shrinks the stack and plays the
+        // break effects through the player (Game::HurtAndBreak, Item.hpp).
+        void UseOnHurtAndBreak(ItemStack& stack, int amount, const UseOnContext& ctx) {
+            HurtAndBreak(stack, amount, ctx.world, ctx.player, ctx.hand);
         }
 
         // MC `Block.popResourceFromFace(level, pos, face, itemStack)` —
@@ -242,7 +239,7 @@ namespace Game {
                         return UseResult::Fail;
                     }
                     GameEventEmit("block_change", pos);
-                    HurtAndBreak(stack, 1, ctx.hand);
+                    UseOnHurtAndBreak(stack, 1, ctx);
                     return UseResult::Success;
                 }
             }
@@ -278,7 +275,7 @@ namespace Game {
             // TODO(advancements): CriteriaTriggers.PLACED_BLOCK.trigger(serverPlayer, firePos, itemStack);
 
             // MC: `if (player instanceof ServerPlayer) itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot());`
-            HurtAndBreak(stack, 1, ctx.hand);
+            UseOnHurtAndBreak(stack, 1, ctx);
 
             return UseResult::Success;
         }
@@ -512,7 +509,7 @@ namespace Game {
                 PopResourceFromFace(ctx.world, pos, ctx.hitResult.face, dropItem);
             }
 
-            HurtAndBreak(stack, 1, ctx.hand);
+            UseOnHurtAndBreak(stack, 1, ctx);
             return UseResult::Success;
         }
 
@@ -581,7 +578,7 @@ namespace Game {
                     return UseResult::Fail;
                 }
                 GameEventEmit("block_change", pos);
-                HurtAndBreak(stack, 1, ctx.hand);
+                UseOnHurtAndBreak(stack, 1, ctx);
                 return UseResult::Success;
                 // MC also calls CampfireBlock.dowse, which is particles + a
                 // game event only — the food stays on the fire and simply
@@ -596,7 +593,7 @@ namespace Game {
                                                 World::UpdateFlags::All);
             if (!ok) return UseResult::Fail;
             GameEventEmit("block_change", pos);
-            HurtAndBreak(stack, 1, ctx.hand);
+            UseOnHurtAndBreak(stack, 1, ctx);
             return UseResult::Success;
         }
         // ── Axe — mirrors AxeItem.java:38-105 ───────────────────────────────
@@ -762,7 +759,7 @@ namespace Game {
                 return UseResult::Fail;
             }
             GameEventEmit("block_change", pos);
-            HurtAndBreak(stack, 1, ctx.hand);
+            UseOnHurtAndBreak(stack, 1, ctx);
             return UseResult::Success;                                  // :60
         }
 
@@ -799,6 +796,46 @@ namespace Game {
         template <uint8_t Color>
         UseResult InteractEntity_DyeColor(ItemStack& stack, LivingEntity& target) {
             return InteractEntity_Dye(stack, target, Color);
+        }
+
+        // ── Name tag — mirrors NameTagItem.interactLivingEntity ─────────────
+        //
+        // Only a RENAMED tag (an anvil-set CUSTOM_NAME) names anything; a
+        // blank one passes, so the click falls through to the entity. The
+        // target must be a type that saves (a named lightning bolt would
+        // vanish with its name) and alive. The tracker sees the new name on
+        // its next sweep and resends it with the mob's entity data.
+        UseResult InteractEntity_NameTag(ItemStack& stack, LivingEntity& target) {
+            std::optional<std::string> customName = stack.components.get(DataComponents::CUSTOM_NAME);
+            if (!customName || !target.CanSerialize()) return UseResult::Pass;
+            // MC's target is a LivingEntity; the hanging entities ride the
+            // living pipeline here (HangingEntity.hpp) but are plain Entities
+            // in MC, so a name tag passes them by.
+            if (dynamic_cast<const HangingEntity*>(&target)) return UseResult::Pass;
+            // The same for the other plain Entities this port runs as mobs:
+            // primed TNT, a falling block, an End crystal and every
+            // projectile never reach interactLivingEntity in MC.
+            if (dynamic_cast<const PrimedTnt*>(&target) ||
+                dynamic_cast<const FallingBlockEntity*>(&target) ||
+                dynamic_cast<const EndCrystal*>(&target) ||
+                dynamic_cast<const Projectile*>(&target)) {
+                return UseResult::Pass;
+            }
+            if (!target.IsAlive()) return UseResult::Success;
+
+            target.SetCustomName(std::move(customName));
+            // `if (target instanceof Mob) mob.setPersistenceRequired()`. The
+            // armor stand derives from this port's Mob but is a plain
+            // LivingEntity in MC, so it takes the name and nothing else.
+            if (auto* mob = dynamic_cast<Mob*>(&target); mob && !dynamic_cast<ArmorStand*>(mob)) {
+                mob->SetPersistenceRequired(true);
+            }
+
+            // MC itemStack.shrink(1). Creative is restored by the dispatch's
+            // count snapshot, as for dye.
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            return UseResult::Success;
         }
 
         // ── Spawn eggs — mirrors SpawnEggItem.java:52-89 ────────────────────
@@ -853,8 +890,15 @@ namespace Game {
             // :91-105 spawnMob. The peaceful-difficulty rule and the placement
             // slide live server-side with the mob managers; see
             // IntegratedServer::SpawnMobFromItemUse.
+            // EntityType.createDefaultStackConfig → applyComponentsFromItemStack:
+            // a renamed egg names the mob it spawns.
+            std::optional<std::string> eggName = stack.components.get(DataComponents::CUSTOM_NAME);
+            const auto applyStackComponents = [&eggName](Mob& mob) {
+                if (eggName) mob.SetCustomName(eggName);
+            };
             if (SpawnMobFromItem(type, spawnPos, /*tryMoveDown=*/true, movedUp,
-                                 ctx.world->GetDimension())) {
+                                 ctx.world->GetDimension(), /*portalCooldownTicks=*/0,
+                                 applyStackComponents)) {
                 // :101 itemStack.consume(1, user) — only on a successful spawn,
                 // so an egg rejected by difficulty is not eaten. Creative is
                 // restored by the dispatch's stack snapshot.
@@ -1718,6 +1762,11 @@ namespace Game {
         wireInteract(Items::GreenDye,     &InteractEntity_DyeColor<13>);
         wireInteract(Items::RedDye,       &InteractEntity_DyeColor<14>);
         wireInteract(Items::BlackDye,     &InteractEntity_DyeColor<15>);
+
+        // Name tag (NameTagItem.java). Mob.checkAndHandleImportantInteractions
+        // gives it the click before the mob's own interaction — see
+        // IntegratedServer::HandleInteract.
+        wireInteract(Items::NameTag, &InteractEntity_NameTag);
 
         // Spawn eggs, one row per implemented mob (SpawnEggItem.java:52).
         // Eggs for mobs this port does not have are deliberately left

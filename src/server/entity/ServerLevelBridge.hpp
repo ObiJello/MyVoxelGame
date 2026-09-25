@@ -29,11 +29,14 @@
 #include "common/core/Features.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/Item.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "server/portal/MobPortalCollision.hpp"
 #endif
 
+#include <array>
 #include <memory>
 #include <unordered_map>
 #include <atomic>
@@ -107,6 +110,23 @@ namespace Server {
         // a mob hitting a mob.
         bool Hurt(Game::MobDamageSource source, float amount, Game::Entity* attacker) override;
 
+        // A worn-out piece of the player's (HurtAndBreak through the view):
+        // the break effects are the ServerPlayer's to send — the view is not
+        // a tracked entity, so LivingEntity's entity event would go nowhere.
+        void OnEquippedItemBroken(const Game::ItemStack& broken, Game::EquipmentSlot slot) override;
+
+        // ── The player's equipment, for the enchantment runners ────────────
+        // MC Player.getItemBySlot: the selected hotbar stack for MAINHAND,
+        // the offhand and the four armour slots of the ServerPlayer's
+        // inventory (live — an effect that wears a piece wears the real one).
+        Game::ItemStack* EquipmentInSlot(Game::EquipmentSlot slot) override;
+        bool HasEquipmentSlots() const override { return m_player != nullptr; }
+        // MC LivingEntity.getWeaponItem: the main hand.
+        Game::ItemStack* GetWeaponItem() override { return EquipmentInSlot(Game::EquipmentSlot::MAINHAND); }
+        // The player's fire lives on its ServerPlayer (which applies the
+        // BURNING_TIME scaling itself — Fire Protection).
+        void IgniteForTicks(int ticks) override;
+
         // ── Status effects on a player ────────────────────────────────────
         //
         // The view's placeholder entity type is Zombie, so the type-tag
@@ -157,6 +177,16 @@ namespace Server {
         // Called once per server tick, before mobs tick.
         void SyncFromPlayer();
 
+        // The enchantment half of MC LivingEntity.baseTick / tick for the
+        // player: EnchantmentHelper.tickEffects, onChangedBlock's
+        // runLocationChangedEffects on a new block position, and
+        // collectEquipmentChanges — a changed slot's enchantment attribute
+        // modifiers come off and the new item's go on (Efficiency, Aqua
+        // Affinity, Respiration, Depth Strider, Swift Sneak, Sweeping Edge,
+        // Fire and Blast Protection's attributes), its location effects stop
+        // and restart. Called by TickCombatState.
+        void TickEnchantments();
+
         // The part of MC LivingEntity.baseTick that a client-authoritative
         // player still needs: the combat timers.
         //
@@ -205,6 +235,12 @@ namespace Server {
         // The world's difficulty, for MC's Player.hurtServer scaling pass.
         Game::Difficulty GetDifficultyOfLevel() const;
 
+        // MC LivingEntity.knockback on a ServerPlayer: the push only matters
+        // once sent (hurtMarked → a motion packet). The extra knockback of an
+        // attack — a sprint hit, the Knockback enchantment, a sweep — lands
+        // after Hurt has captured its own, so the view queues any push here.
+        void Knockback(double power, double dx, double dz) override;
+
         // MC Entity.addDeltaMovement on a ServerPlayer sets hurtMarked so the
         // push reaches the client as a velocity packet; here that packet is
         // the pending-knockback drain above. Used by the wind-charge burst,
@@ -246,6 +282,13 @@ namespace Server {
         bool          m_deathEffectsTriggered = false;
         // Between a survival START_DESTROY and its STOP / ABORT (SetDigging).
         bool          m_digging = false;
+        // TickEnchantments' state: MC lastEquipmentItems (per EquipmentSlot
+        // ordinal, MAINHAND..SADDLE), lastPos and
+        // activeLocationDependentEnchantments.
+        std::array<Game::ItemStack, 8>       m_lastEquipment{};
+        glm::ivec3                           m_lastBlockPos{0};
+        bool                                 m_hasLastBlockPos = false;
+        Game::ActiveLocationEnchantments     m_locationEnchantments;
     };
 
     // Game::EntityLevel over the server's world and session list.
@@ -381,13 +424,9 @@ namespace Server {
         // performed by its session (PlayerSession::FlushPendingMenuOpen).
         void OpenMerchantMenu(Game::LivingEntity& player, Game::Mob& merchant) override;
 
-        // MC ExperienceOrb.award, minus the orb. DEVIATION (documented in
-        // EntityLevel.hpp): the points go straight into a ServerPlayer's
-        // PlayerExperience — the credited player if still online, else the
-        // nearest player within an orb's 8-block follow range — so none of
-        // MC's orb mechanics exist: no split into orb-sized values
-        // (ExperienceOrb.getExperienceValue), no merge, no 2-tick pickup
-        // delay, no Mending repair, no orb lingering for whoever walks by.
+        // MC ExperienceOrb.award: real orbs at `pos` through THIS level's
+        // ExperienceOrbManager (split, merge, pickup delay and the Mending
+        // repair on pickup are the manager's).
         void AwardExperience(const glm::dvec3& pos, int amount,
                              int32_t creditPlayerEntityId) override;
 

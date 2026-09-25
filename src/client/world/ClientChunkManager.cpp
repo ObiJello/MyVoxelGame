@@ -656,6 +656,65 @@ namespace Client {
         }
     }
 
+    void ClientChunkManager::ApplyBiomes(const Network::ChunksBiomesS2CPacket& packet) {
+        PROFILE_ZONE_N("ApplyBiomes");
+        ASSERT_MAIN_THREAD();
+        // MC ClientPacketListener.handleChunksBiomes: every chunk's biomes go
+        // in first (ClientChunkCache.replaceBiomes — a chunk the client does
+        // not hold is skipped; its ChunkDataS2C, still to come, carries the
+        // new biomes), then the sections of the 3x3 around each are dirtied.
+        std::vector<Game::Math::ChunkPos> replaced;
+        replaced.reserve(packet.chunks.size());
+        for (const auto& data : packet.chunks) {
+            const Game::Math::ChunkPos chunkPos{data.chunkX, data.chunkZ};
+            auto it = m_chunks.find(chunkPos);
+            if (it == m_chunks.end() || !it->second || !it->second->chunkData ||
+                it->second->state != ChunkState::LOADED) {
+                continue;
+            }
+            // Decode the whole column before touching the chunk, so a bad
+            // container leaves it as it was rather than half replaced.
+            std::array<Game::PalettedContainer, Game::Math::SECTIONS_PER_CHUNK> biomes;
+            bool ok = true;
+            for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
+                Network::ChunkDataS2CPacket::ContainerData container = data.sections[static_cast<size_t>(y)];
+                biomes[static_cast<size_t>(y)] = Game::ChunkSection::MakeBiomeContainer();
+                if (!biomes[static_cast<size_t>(y)].ReadFrom(container.bits, std::move(container.palette),
+                                                             std::move(container.words))) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok) {
+                Log::Warning("Failed to decode biomes for chunk (%d, %d)", data.chunkX, data.chunkZ);
+                continue;
+            }
+            Game::Chunk& chunk = *it->second->chunkData;
+            {
+                const auto guard = chunk.LockExclusive();
+                for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
+                    if (auto* section = chunk.GetSection(y)) section->AdoptBiomes(std::move(biomes[static_cast<size_t>(y)]));
+                }
+            }
+            replaced.push_back(chunkPos);
+        }
+        // MC dirties every section of the neighbourhood; an all-air section
+        // has no mesh for a biome to tint, so those are left alone.
+        for (const Game::Math::ChunkPos& pos : replaced) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int dz = -1; dz <= 1; ++dz) {
+                    const Game::Math::ChunkPos neighbor{pos.x + dx, pos.z + dz};
+                    auto it = m_chunks.find(neighbor);
+                    if (it == m_chunks.end() || !it->second || it->second->state != ChunkState::LOADED) continue;
+                    for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
+                        if (it->second->sectionInfos[static_cast<size_t>(sectionY)].isAllAir) continue;
+                        MarkSectionDirty(neighbor, sectionY);
+                    }
+                }
+            }
+        }
+    }
+
     void ClientChunkManager::ProcessChunkDataS2CPacket(const Network::ChunkDataS2CPacket& packet) {
         PROFILE_ZONE_N("ProcessChunkData");
         ASSERT_MAIN_THREAD();

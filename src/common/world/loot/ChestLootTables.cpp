@@ -157,13 +157,13 @@ namespace Game::ChestLoot {
             enum class Kind : uint8_t {
                 SetCount, SetName, EnchantRandomly, EnchantWithLevels, SetEnchantments,
                 SetPotion, SetStewEffect, SetWrittenBookPages, SetBookCover, SetWritableBookPages,
-                Unsupported
+                SetDamage, Unsupported
             };
             Kind kind = Kind::Unsupported;
             std::string name;                  // the JSON "function" id, for logging
             std::vector<Condition> conditions;
-            NumberProvider count;              // set_count / enchant_with_levels levels
-            bool add = false;                  // set_count add
+            NumberProvider count;              // set_count / enchant_with_levels levels / set_damage damage
+            bool add = false;                  // set_count / set_damage add
             std::string text;                  // set_name
             bool hasOptions = false;           // enchant_*: options present
             std::vector<EnchantmentId> options;
@@ -378,6 +378,12 @@ namespace Game::ChestLoot {
                 if (fn.name == "set_count") {
                     fn.kind  = Function::Kind::SetCount;
                     fn.count = f.contains("count") ? ParseNumber(f["count"], 1.0f) : NumberProvider{};
+                    fn.add   = f.value("add", false);
+                } else if (fn.name == "set_damage") {
+                    // MC SetItemDamageFunction: {damage: NumberProvider (the
+                    // durability FRACTION left), add}.
+                    fn.kind  = Function::Kind::SetDamage;
+                    fn.count = f.contains("damage") ? ParseNumber(f["damage"], 1.0f) : NumberProvider{};
                     fn.add   = f.value("add", false);
                 } else if (fn.name == "set_name") {
                     fn.kind = Function::Kind::SetName;
@@ -609,6 +615,20 @@ namespace Game::ChestLoot {
                     if (stack.count <= 0) stack.Clear();
                     break;
                 }
+                case Function::Kind::SetDamage: {
+                    // MC SetItemDamageFunction.run: `damage` is the fraction
+                    // of durability REMAINING (added to what is left when
+                    // `add`), clamped to 0..1; a non-damageable item is left
+                    // alone (MC only logs).
+                    if (!IsDamageableItem(stack)) break;
+                    const int maxDamage = GetMaxDamage(stack);
+                    const float oldDamage = fn.add
+                        ? 1.0f - static_cast<float>(GetDamageValue(stack)) / static_cast<float>(maxDamage)
+                        : 0.0f;
+                    const float damage = 1.0f - std::clamp(fn.count.GetFloat(ctx.random) + oldDamage, 0.0f, 1.0f);
+                    SetDamageValue(stack, static_cast<int>(std::floor(damage * static_cast<float>(maxDamage))));
+                    break;
+                }
                 case Function::Kind::SetName:
                     if (!fn.text.empty()) stack.components.set(DataComponents::CUSTOM_NAME, fn.text);
                     break;
@@ -629,7 +649,7 @@ namespace Game::ChestLoot {
                         ctx.random.NextInt(static_cast<int>(compatible.size())))];
                     const auto& d = EnchantmentDefinitions::Get(id);
                     const int level = ctx.random.NextInt(1, std::max(1, d.maxLevel));
-                    if (targetIsBook) stack = ItemStack(Items::EnchantedBook, stack.count);
+                    if (targetIsBook) stack = ItemStack(Items::EnchantedBook, 1);   // new ItemStack(ENCHANTED_BOOK)
                     EnchantmentHelper::Enchant(stack, id, level);
                     break;
                 }

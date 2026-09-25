@@ -165,6 +165,13 @@ namespace Server {
         m_session.HandleSelectTrade(packet);
     }
 
+    void ServerPlayPacketListener::onRenameItemC2S(const Network::RenameItemC2SPacket& packet) {
+        // MC handleRenameItem: behind the load gate like the rest of the
+        // container family.
+        if (!m_session.HasClientLoaded()) return;
+        m_session.HandleRenameItem(packet);
+    }
+
     void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {
         m_session.HandleInventoryClick(packet);
     }

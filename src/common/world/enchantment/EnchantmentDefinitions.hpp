@@ -15,11 +15,14 @@
 #pragma once
 
 #include "Enchantment.hpp"
+#include "EnchantmentEffects.hpp"
 #include "common/entity/Item.hpp"
 
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace Game { class JavaRandom; }
 
 namespace Game::EnchantmentDefinitions {
 
@@ -41,6 +44,17 @@ namespace Game::EnchantmentDefinitions {
         std::vector<std::string> supportedItems;
         std::vector<std::string> primaryItems;   // empty = "same as supported"
         std::vector<EnchantmentId> exclusiveSet;
+        // MC Enchantment.getAnvilCost — the per-level fee AnvilMenu charges
+        // (halved, at least 1, from a book).
+        int  anvilCost = 0;
+        // MC EnchantmentDefinition.slots — the EquipmentSlotGroup names
+        // ("any", "mainhand", "hand", "armor", "feet", ...) the enchantment
+        // works in (Enchantment.matchingSlot).
+        std::vector<std::string> slots;
+        // MC Enchantment.effects — every effect component of the JSON's
+        // `effects` object (EnchantmentEffects.hpp). EnchantmentHelper's
+        // runners read these; nothing hard-codes what an enchantment does.
+        EnchantmentEffectComponents effects;
     };
 
     const Definition& Get(EnchantmentId id);
@@ -53,12 +67,32 @@ namespace Game::EnchantmentDefinitions {
     // in its exclusive_set.
     bool AreCompatible(EnchantmentId a, EnchantmentId b);
 
+    // MC Enchantment.modifyDurabilityChange → modifyItemFilteredCount(
+    // ITEM_DAMAGE, ...): every item_damage effect whose requirements match
+    // `item` rewrites `value` in turn (the level's random is the server
+    // level's, as MC passes serverLevel.getRandom()).
+    void ModifyDurabilityChange(EnchantmentId id, int level, const ItemStack& item,
+                                JavaRandom& random, float& value);
+
+    // MC Enchantment.matchingSlot(slot) over the definition's slot groups
+    // (EquipmentSlotGroup.test).
+    bool MatchingSlot(EnchantmentId id, EquipmentSlot slot);
+
+    // #minecraft:tooltip_order, in the tag's own order (nested tags inline),
+    // for ItemEnchantments.addToTooltip.
+    const std::vector<EnchantmentId>& TooltipOrder();
+
     // A HolderSet<Enchantment> as loot JSON writes it: "#minecraft:tag",
     // "minecraft:id", or an array of either. Tags come from
     // data/<ns>/tags/enchantment/**.json (nested "#tag" entries followed).
     // Unknown ids are dropped; a missing tag resolves to nothing.
     std::vector<EnchantmentId> ResolveSet(const std::vector<std::string>& entries);
     std::vector<EnchantmentId> ResolveTag(std::string_view tag);
+
+    // An enchantment tag ("minecraft:in_enchanting_table", "#..." accepted)
+    // in the tag's own order — what MC streams a named HolderSet in, and so
+    // the order a weighted roll over it must see.
+    std::vector<EnchantmentId> ResolveTagOrdered(std::string_view tag);
 
     // Every registered enchantment that has a definition (MC's "the whole
     // registry" fallback when a function names no options).

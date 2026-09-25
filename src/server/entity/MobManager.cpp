@@ -12,6 +12,9 @@
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/entity/ItemEntity.hpp"
+#include "common/world/enchantment/EnchantmentDefinitions.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 
 #include "common/core/TickParallel.hpp"
 
@@ -821,8 +824,15 @@ namespace Server {
         // MC dropAllDeathLoot (:1480): the loot-table half AND dropExperience
         // (:1557) both sit behind the mob_drops rule.
         const bool mobDrops = Game::Rules::GetBool(Game::Rules::Id::MobDrops);
+        // The killing blow's causing entity (ATTACKING_ENTITY), and the
+        // Looting its enchantment slots carry.
+        Game::LivingEntity* killer = ResolveKiller(mob.GetKillerId());
+        const int lootingLevel = killer
+            ? Game::EnchantmentHelper::GetEnchantmentLevel(Game::Enchantments::Looting,
+                                                           Game::EnchantmentEquipment::Of(*killer))
+            : 0;
         if ((!mob.IsBaby() || isMonster) && mobDrops) {
-            EvaluateLootTable(mob, killedByPlayer, rng);
+            EvaluateLootTable(mob, killedByPlayer, lootingLevel, rng);
 
             // Sheep wool is not in the generated table: MC expresses it as an
             // `alternatives` entry keyed on the sheep's dye colour, which
@@ -848,14 +858,30 @@ namespace Server {
         // never reaches this manager. The award spawns real orb entities —
         // ServerLevelBridge::AwardExperience → ExperienceOrbManager::Award.
         if (killedByPlayer && mobDrops && (isMonster || !mob.IsBaby())) {
-            const int xp = mob.GetXpReward();
+            // MC dropExperience: processMobExperience over the killer's gear
+            // (the mob_experience component — no vanilla enchantment
+            // carries it, the hook is the data's).
+            const int xp = Game::EnchantmentHelper::ProcessMobExperience(*m_level, killer, mob,
+                                                                         mob.GetXpReward());
             if (xp > 0) {
                 m_level->AwardExperience(mob.position, xp, mob.LastHurtByPlayerId());
             }
         }
     }
 
-    void MobManager::EvaluateLootTable(Game::Mob& mob, bool killedByPlayer,
+    Game::LivingEntity* MobManager::ResolveKiller(int32_t id) const {
+        if (id < 0) return nullptr;
+        if (Game::IsMobEntityId(id)) {
+            Game::Mob* mob = Find(id);
+            return mob && !mob->IsRemoved() ? mob : nullptr;
+        }
+        if (id < Game::kItemEntityIdBase && m_level) {
+            return m_level->GetPlayerView(static_cast<uint32_t>(id));
+        }
+        return nullptr;
+    }
+
+    void MobManager::EvaluateLootTable(Game::Mob& mob, bool killedByPlayer, int lootingLevel,
                                        Game::JavaRandom& rng) {
         const Game::MobLootTable* table = Game::FindMobLootTable(mob.GetType());
         if (!table) return;
@@ -868,7 +894,24 @@ namespace Server {
             slimeSize = slime->GetSize();
         }
 
-        const bool onFire = mob.IsOnFire();
+        // furnace_smelt's conditions (any_of): the mob burning, or the
+        // direct attacker's main hand carrying a #minecraft:smelts_loot
+        // enchantment (Fire Aspect) — a fire-aspect kill cooks the drop even
+        // on the blow that lit it.
+        bool onFire = mob.IsOnFire();
+        if (!onFire) {
+            if (Game::LivingEntity* direct = ResolveKiller(mob.GetKillerDirectId())) {
+                if (const Game::ItemStack* weapon = direct->EquipmentInSlot(Game::EquipmentSlot::MAINHAND)) {
+                    for (const Game::EnchantmentId id :
+                         Game::EnchantmentDefinitions::ResolveTag("minecraft:smelts_loot")) {
+                        if (Game::EnchantmentHelper::GetItemEnchantmentLevel(id, *weapon) > 0) {
+                            onFire = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
 
         for (int p = 0; p < table->poolCount; ++p) {
             const Game::MobLootPool& pool = table->pools[p];
@@ -879,7 +922,14 @@ namespace Server {
             if (pool.requiresPlayerKill && !killedByPlayer) continue;
             if (pool.sizeMin > 0 &&
                 (slimeSize < pool.sizeMin || slimeSize > pool.sizeMax)) continue;
-            if (pool.chance < 1.0f && rng.NextFloat() >= pool.chance) continue;
+            // random_chance_with_enchanted_bonus: a Looting killer swaps the
+            // unenchanted chance for enchanted_chance.calculate(level).
+            float chance = pool.chance;
+            if (lootingLevel > 0 && pool.lootingChanceBase >= 0.0f) {
+                chance = pool.otherChance * (pool.lootingChanceBase +
+                                             pool.lootingChancePerLevel * static_cast<float>(lootingLevel - 1));
+            }
+            if (chance < 1.0f && rng.NextFloat() >= chance) continue;
 
             // MC LootPool.addRandomItems: sample the roll count (the witch's
             // ingredient pool is uniform(1,3))...
@@ -920,9 +970,20 @@ namespace Server {
                 // MC's way of saying "often nothing" — the SAMPLE is clamped
                 // to no-drop, never the range, or those rates inflate by up
                 // to 50%.
-                const int count = chosen->minCount >= chosen->maxCount
+                int count = chosen->minCount >= chosen->maxCount
                     ? chosen->minCount
                     : chosen->minCount + rng.NextInt(chosen->maxCount - chosen->minCount + 1);
+                // enchanted_count_increase (Looting), on the sampled count —
+                // before the no-drop clamp, so Looting can lift a -1 coal to
+                // a drop: count += round(level * uniform(min, max)), then
+                // limitSize(limit) when it has one.
+                if (lootingLevel > 0 && (chosen->lootingMin != 0.0f || chosen->lootingMax != 0.0f)) {
+                    const float v = chosen->lootingMin >= chosen->lootingMax
+                        ? chosen->lootingMin
+                        : rng.NextFloat() * (chosen->lootingMax - chosen->lootingMin) + chosen->lootingMin;
+                    count += static_cast<int>(std::floor(static_cast<float>(lootingLevel) * v + 0.5f));
+                    if (chosen->lootingLimit > 0) count = std::min(count, chosen->lootingLimit);
+                }
                 if (count <= 0) continue;
 
                 // furnace_smelt: a mob killed while burning drops the cooked

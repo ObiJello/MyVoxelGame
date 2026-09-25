@@ -21,9 +21,11 @@ Conditions supported at runtime:
                                           lastHurtByPlayerMemoryTime)
   * minecraft:random_chance             — plain probability
   * minecraft:random_chance_with_enchanted_bonus
-                                        — emitted at its LOOTING-0 value
-                                          (unenchanted_chance); no enchanted
-                                          weapons on mob kills yet
+                                        — the looting-0 value folds into
+                                          `chance`; the enchanted_chance
+                                          (a linear LevelBasedValue) is
+                                          emitted beside it for the killer's
+                                          Looting level
   * minecraft:entity_properties {this, type_specific slime size}
                                         — the slime/magma-cube size gates
                                           (slimeball only from size 1, magma
@@ -113,12 +115,32 @@ def compile_one_condition(cond, gates):
 
     if kind == "minecraft:random_chance":
         gates["chance"] *= float(cond.get("chance", 1.0))
+        gates["other_chance"] *= float(cond.get("chance", 1.0))
         return None
 
     if kind == "minecraft:random_chance_with_enchanted_bonus":
-        # Looting is not implemented; the looting-0 probability is exactly
-        # `unenchanted_chance` (MC EnchantedCountIncreaseFunction's sibling).
-        gates["chance"] *= float(cond.get("unenchanted_chance", 1.0))
+        # LootItemRandomChanceWithEnchantedBonusCondition: the killer's level
+        # of `enchantment` (Looting) picks enchanted_chance.calculate(level)
+        # over unenchanted_chance. The looting-0 probability folds into
+        # `chance` like any random_chance; the enchanted curve rides beside
+        # it (the other chances multiplied in separately, so the runtime can
+        # swap the unenchanted factor for the enchanted one).
+        if cond.get("enchantment", "minecraft:looting") != "minecraft:looting":
+            return ("unsupported", f"enchanted bonus on {cond.get('enchantment')}")
+        enchanted = cond.get("enchanted_chance", {})
+        if isinstance(enchanted, (int, float)):
+            base, per = float(enchanted), 0.0
+        elif isinstance(enchanted, dict) and enchanted.get("type") == "minecraft:linear":
+            base = float(enchanted.get("base", 0.0))
+            per = float(enchanted.get("per_level_above_first", 0.0))
+        else:
+            return ("unsupported", f"enchanted_chance {json.dumps(enchanted)[:60]}")
+        if gates["looting_base"] >= 0.0:
+            return ("unsupported", "two enchanted-bonus chances on one pool")
+        unenchanted = float(cond.get("unenchanted_chance", 1.0))
+        gates["chance"] *= unenchanted
+        gates["looting_base"] = base
+        gates["looting_per"] = per
         return None
 
     if kind == "minecraft:entity_properties":
@@ -159,7 +181,10 @@ def compile_one_condition(cond, gates):
 
 def compile_conditions(conds):
     gates = {"player_kill": False, "chance": 1.0,
-             "size_min": 0, "size_max": SIZE_MAX_OPEN}
+             "size_min": 0, "size_max": SIZE_MAX_OPEN,
+             # random_chance_with_enchanted_bonus: the enchanted curve
+             # (base < 0 = none) and the product of every OTHER chance.
+             "looting_base": -1.0, "looting_per": 0.0, "other_chance": 1.0}
     for cond in conds or []:
         result = compile_one_condition(cond, gates)
         if result is not None:
@@ -170,9 +195,10 @@ def compile_conditions(conds):
 # ── Entry / function parsing ────────────────────────────────────────────────
 
 # The standard shape of furnace_smelt's own condition list: any_of(this
-# is_on_fire, attacker holds a #smelts_loot weapon). The on-fire half is what
-# the runtime implements; the enchantment half does not exist here. Recognised
-# so it does not spam the report.
+# is_on_fire, direct attacker's main hand carries a #smelts_loot enchantment).
+# MobManager::EvaluateLootTable implements both halves at runtime, so the
+# emitted row only needs the cooked item. Recognised so it does not spam the
+# report.
 def is_standard_smelt_conditions(conds):
     if not conds:
         return True
@@ -195,7 +221,8 @@ def parse_entry(entry, items, warnings, mob, pool_idx):
         # is weight 1 against empty weight 4).
         return {"item": None, "weight": int(entry.get("weight", 1)),
                 "lo": 0, "hi": 0, "smelt": None,
-                "size_min": 0, "size_max": SIZE_MAX_OPEN}
+                "size_min": 0, "size_max": SIZE_MAX_OPEN,
+                "loot_lo": 0.0, "loot_hi": 0.0, "loot_limit": 0}
 
     if etype != "minecraft:item":
         warnings.append(f"{where}: skipped entry type {etype}"
@@ -218,7 +245,7 @@ def parse_entry(entry, items, warnings, mob, pool_idx):
         warnings.append(f"{where}: skipped entry {slug} — unsupported condition {verdict[1]}")
         return None
     gates = verdict[1]
-    if gates["player_kill"] or gates["chance"] != 1.0:
+    if gates["player_kill"] or gates["chance"] != 1.0 or gates["looting_base"] >= 0.0:
         # Nothing in the current data puts these on an ENTRY; the emitted row
         # has no slot for them, so refuse rather than half-model.
         warnings.append(f"{where}: skipped entry {slug} — entry-level "
@@ -227,6 +254,7 @@ def parse_entry(entry, items, warnings, mob, pool_idx):
 
     lo, hi = 1, 1
     smelt = None
+    loot_lo, loot_hi, loot_limit = 0.0, 0.0, 0
 
     for fn in entry.get("functions", []):
         kind = fn.get("function", "")
@@ -259,16 +287,30 @@ def parse_entry(entry, items, warnings, mob, pool_idx):
             if smelt is None:
                 warnings.append(f"{where}: no cooked form for {slug}")
         elif kind == "minecraft:enchanted_count_increase":
-            # Looting. No enchantments on mob kills yet, so the bonus is zero
-            # and the entry is otherwise unaffected.
-            pass
+            # EnchantedCountIncreaseFunction (Looting): count +=
+            # round(level * count.getFloat()), then limitSize(limit) when
+            # limit > 0. The count is a uniform (or constant) provider.
+            if fn.get("enchantment", "minecraft:looting") != "minecraft:looting":
+                warnings.append(f"{where}: enchanted_count_increase on "
+                                f"{fn.get('enchantment')} for {slug} unhandled")
+                continue
+            count = fn.get("count", {})
+            if isinstance(count, dict) and count.get("type") == "minecraft:uniform":
+                loot_lo = float(count.get("min", 0.0))
+                loot_hi = float(count.get("max", 1.0))
+            elif isinstance(count, (int, float)):
+                loot_lo = loot_hi = float(count)
+            else:
+                warnings.append(f"{where}: unhandled enchanted_count_increase count on {slug}")
+            loot_limit = int(fn.get("limit", 0))
         else:
             warnings.append(f"{where}: skipped entry {slug} — unsupported function {kind}")
             return None
 
     return {"item": items[slug], "weight": int(entry.get("weight", 1)),
             "lo": lo, "hi": hi, "smelt": smelt,
-            "size_min": gates["size_min"], "size_max": gates["size_max"]}
+            "size_min": gates["size_min"], "size_max": gates["size_max"],
+            "loot_lo": loot_lo, "loot_hi": loot_hi, "loot_limit": loot_limit}
 
 
 # parse_entry wants to know whether its pool had siblings when phrasing the
@@ -321,11 +363,21 @@ def parse_pool(pool, items, warnings, mob, pool_idx):
 
     return {"player_kill": gates["player_kill"], "chance": gates["chance"],
             "size_min": gates["size_min"], "size_max": gates["size_max"],
+            "looting_base": gates["looting_base"], "looting_per": gates["looting_per"],
+            "other_chance": gates["other_chance"],
             "min_rolls": min_rolls, "max_rolls": max_rolls,
             "entries": entries}
 
 
 # ── Emission ────────────────────────────────────────────────────────────────
+
+def cfloat(v):
+    """A C++ float literal: 6 significant digits, always with a point."""
+    text = f"{float(v):.6g}"
+    if "." not in text and "e" not in text and "inf" not in text and "nan" not in text:
+        text += ".0"
+    return text + "f"
+
 
 HPP = """// File: src/common/world/loot/GeneratedMobLoot.hpp
 // AUTO-GENERATED by tools/gen_mob_loot.py — DO NOT EDIT BY HAND.
@@ -357,6 +409,12 @@ namespace Game {
         // magma cube's size>=2 cream entry. sizeMin 0 = ungated.
         int    sizeMin;
         int    sizeMax;
+        // MC enchanted_count_increase (Looting): count += round(level *
+        // uniform(lootingMin, lootingMax)), capped at lootingLimit when that
+        // is > 0. Both 0 = no Looting bonus on this entry.
+        float  lootingMin;
+        float  lootingMax;
+        int    lootingLimit;
     };
 
     struct MobLootPool {
@@ -373,6 +431,13 @@ namespace Game {
         // sizeMin 0 = ungated.
         int   sizeMin;
         int   sizeMax;
+        // random_chance_with_enchanted_bonus with a Looting killer: the
+        // chance becomes otherChance * (lootingChanceBase +
+        // lootingChancePerLevel * (level - 1)). lootingChanceBase < 0 = the
+        // pool has no enchanted bonus.
+        float lootingChanceBase;
+        float lootingChancePerLevel;
+        float otherChance;
         const MobLootEntry* entries;
         int   entryCount;
     };
@@ -445,17 +510,17 @@ namespace Game {
                     item_expr = f"Items::{e['item']}" if e["item"] else "Items::Air"
                     smelt_expr = f"Items::{e['smelt']}" if e["smelt"] else "Items::Air"
                     f.write(f"        {{ {item_expr}, {e['weight']}, {e['lo']}, {e['hi']},"
-                            f" {smelt_expr}, {e['size_min']}, {e['size_max']} }},\n")
+                            f" {smelt_expr}, {e['size_min']}, {e['size_max']},"
+                            f" {cfloat(e['loot_lo'])}, {cfloat(e['loot_hi'])}, {e['loot_limit']} }},\n")
                 f.write("    };\n")
             f.write(f"    static const MobLootPool k_{mob}[] = {{\n")
             for pi, pool in enumerate(pools):
                 pk = "true" if pool["player_kill"] else "false"
-                chance = f"{pool['chance']:.6g}"
-                if "." not in chance and "e" not in chance:
-                    chance += ".0"
-                chance += "f"
+                chance = cfloat(pool['chance'])
                 f.write(f"        {{ {pool['min_rolls']}, {pool['max_rolls']}, {pk}, {chance},"
                         f" {pool['size_min']}, {pool['size_max']},"
+                        f" {cfloat(pool['looting_base'])}, {cfloat(pool['looting_per'])},"
+                        f" {cfloat(pool['other_chance'])},"
                         f" k_{mob}_p{pi}, {len(pool['entries'])} }},\n")
             f.write("    };\n\n")
 

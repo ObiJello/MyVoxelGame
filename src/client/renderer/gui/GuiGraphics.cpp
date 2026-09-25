@@ -1004,10 +1004,22 @@ namespace Render {
     }
 
     void GuiGraphics::RenderItemDecorations(const Game::ItemStack& slot, int x, int y) {
+        // MC GuiGraphics.itemDecorations: the durability bar, then the
+        // (cooldown — no item cooldowns here), then the count on top.
         if (slot.IsEmpty()) return;
-        if (slot.count <= 1) return;
 
-        // Draw stack count in bottom-right corner (MC style)
+        // itemBar: a 13x2 black trough two px in and 13 down, the coloured
+        // 1-px bar (Mth.hsvToRgb(remaining / 3, 1, 1)) over its top row.
+        if (Game::IsBarVisible(slot)) {
+            const int left = x + 2;
+            const int top  = y + 13;
+            Fill(left, top, left + Game::kItemMaxBarWidth, top + 2, 0xFF000000u);
+            Fill(left, top, left + Game::GetBarWidth(slot), top + 1,
+                 0xFF000000u | Game::GetBarColor(slot));
+        }
+
+        if (slot.count == 1) return;
+        // itemCount: bottom-right corner, x + 19 - 2 - width, y + 6 + 3.
         std::string countStr = std::to_string(slot.count);
         int textWidth = GetStringWidth(countStr);
         DrawString(countStr, x + 17 - textWidth, y + 9, 0xFFFFFFFF, true);

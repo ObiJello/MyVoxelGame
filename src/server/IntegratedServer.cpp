@@ -8,6 +8,10 @@
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/decoration/Painting.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/decoration/PaintingVariants.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
@@ -34,6 +38,7 @@
 #include "commands/SummonCommand.hpp"
 #include "commands/ForceLoadCommand.hpp"
 #include "commands/SetBlockCommand.hpp"
+#include "commands/FillBiomeCommand.hpp"
 #include "level/ChunkKeeper.hpp"
 #include "level/LighthouseGuide.hpp"
 #include "commands/ReplaceAllCommand.hpp"
@@ -99,6 +104,8 @@
 #include "common/entity/projectile/ShulkerBullet.hpp"
 #include "common/entity/projectile/LlamaSpit.hpp"
 #include "common/entity/projectile/ThrownTrident.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
@@ -118,6 +125,7 @@
 #include "common/core/Mth.hpp"
 #include "common/world/pathfinder/PathTypeTable.hpp"
 #include "common/world/chunk/Heightmap.hpp"
+#include "common/world/chunk/Chunk.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/network/PacketRegistry.hpp"
@@ -819,6 +827,7 @@ namespace Server {
         ShapeCommand::Register(m_commandDispatcher);
         SummonCommand::Register(m_commandDispatcher);
         SetBlockCommand::Register(m_commandDispatcher);
+        FillBiomeCommand::Register(m_commandDispatcher);
         ForceLoadCommand::Register(m_commandDispatcher);
         ReplaceAllCommand::Register(m_commandDispatcher);
         ExecuteCommand::Register(m_commandDispatcher);
@@ -2701,6 +2710,13 @@ namespace Server {
                 // ArmorStand.hpp for why it rides this pipeline.
                 case Game::EntityTypeId::ArmorStand:
                     return std::make_unique<Game::ArmorStand>(level);
+                // Neither is MC's Painting a Mob — see Painting.hpp.
+                case Game::EntityTypeId::Painting:
+                    return std::make_unique<Game::Painting>(level);
+                case Game::EntityTypeId::ItemFrame:
+                    return std::make_unique<Game::ItemFrame>(level, /*glow=*/false);
+                case Game::EntityTypeId::GlowItemFrame:
+                    return std::make_unique<Game::ItemFrame>(level, /*glow=*/true);
                 default: break;
             }
             // Everything else is built from its generated def. Promoting one to
@@ -3501,6 +3517,18 @@ namespace Server {
             // MC does this through the summon's NBT; there is no NBT argument
             // here, so both take their vanilla defaults — a full 80-tick fuse,
             // and sand.
+            // A painting or an item frame is placed by its CELL (MC
+            // BlockAttachedEntity.setPos: pos = BlockPos.containing(x, y, z),
+            // then the box), facing its default south (a painting with the
+            // registry's first variant) — what MC's /summon without NBT
+            // hangs, and, unsupported, pops at its first survival check.
+            if (auto* hanging = dynamic_cast<Game::HangingEntity*>(mob.get())) {
+                const glm::dvec3 at = mob->position;
+                hanging->SetHangingPos(glm::ivec3(static_cast<int>(std::floor(at.x)),
+                                                  static_cast<int>(std::floor(at.y)),
+                                                  static_cast<int>(std::floor(at.z))));
+                hanging->SetDirection(Game::Direction::South);
+            }
             if (auto* tnt = dynamic_cast<Game::PrimedTnt*>(mob.get())) {
                 tnt->InitPrimed(mob->position, nullptr);
                 // InitPrimed stamps the default 80-tick fuse, so any override
@@ -3725,11 +3753,107 @@ namespace Server {
         stand->yBodyRot = stand->yBodyRotO = yRot;
         stand->yHeadRot = stand->yHeadRotO = yRot;
         stand->xRot = stand->xRotO = 0.0f;
+        // EntityType.createDefaultStackConfig → applyComponentsFromItemStack:
+        // a renamed stand item names the stand (the drop of a broken one
+        // carries the name back — ArmorStand::BrokenByPlayer).
+        if (ServerPlayer* placer = session.GetPlayer()) {
+            const Game::Inventory& inv = placer->getInventory();
+            const Game::ItemStack& used = inv.GetSlot(Game::Inventory::HotbarToIndex(inv.GetSelectedSlot()));
+            if (used.itemId == Game::Items::ArmorStand) {
+                if (auto name = used.components.get(Game::DataComponents::CUSTOM_NAME)) {
+                    stand->SetCustomName(std::move(name));
+                }
+            }
+        }
         const glm::dvec3 at = stand->position;
         if (mobs->Add(std::move(stand)) == 0) return false;
         // MC ArmorStandItem.useOn: level.playSound(null, x, y, z,
         // ARMOR_STAND_PLACE, BLOCKS, 0.75F, 0.8F).
         bridge->PlaySound(nullptr, at, Game::SoundEvents::ARMOR_STAND_PLACE, Game::SoundSource::Blocks, 0.75f, 0.8f);
+        return true;
+    }
+
+    bool IntegratedServer::PlacePaintingFromUse(PlayerSession& session,
+                                                const Game::BlockHitResult& hit,
+                                                const Game::ItemStack& used) {
+        // MC HangingEntityItem.useOn, the painting branch.
+        if (hit.face < 0 || hit.face > 5) return false;
+        const auto face = static_cast<Game::Direction>(hit.face);
+        // mayPlace: `!direction.getAxis().isVertical() && player.mayUseItemAt`
+        // (an adventure-mode player may not).
+        if (!Game::IsHorizontal(face)) return false;
+        if (ServerPlayer* placer = session.GetPlayer();
+            placer && placer->getGameMode() == Server::GameMode::ADVENTURE) {
+            return false;
+        }
+        ServerLevel& level = LevelOf(session);
+        ServerLevelBridge* bridge = level.MobLevel();
+        MobManager* mobs = level.Mobs();
+        if (!bridge || !mobs) return false;
+
+        const glm::ivec3 pos = hit.blockPos + glm::ivec3(Game::StepX(face), Game::StepY(face), Game::StepZ(face));
+        // Painting.create: nothing placeable fits here → CONSUME, no painting.
+        auto painting = Game::Painting::Create(bridge, pos, face, bridge->Random());
+        if (!painting) return false;
+
+        // EntityType.createDefaultStackConfig → applyComponentsFromItemStack:
+        // a renamed painting item names the painting (its drop carries the
+        // name back — Painting::DropItem).
+        if (auto name = used.components.get(Game::DataComponents::CUSTOM_NAME)) {
+            painting->SetCustomName(std::move(name));
+        }
+        // …and a creative preset's PAINTING_VARIANT replaces the random pick
+        // (Painting.applyImplicitComponent). MC still ran Painting.create
+        // first, so a preset needs SOME placeable canvas to fit there too.
+        if (auto variant = used.components.get(Game::DataComponents::PAINTING_VARIANT)) {
+            const int index = Game::PaintingVariants::IndexOf(*variant);
+            if (index >= 0) {
+                painting->SetVariant(index);
+                painting->SetDirection(face);
+            }
+        }
+        if (!painting->Survives()) return false;
+
+        // Hung first, then the sound — MC plays it before addFreshEntity,
+        // but a painting the manager refuses must not be heard.
+        Game::Painting& hung = *painting;
+        if (mobs->Add(std::move(painting)) == 0) return false;
+        hung.PlayPlacementSound();
+        return true;
+    }
+
+    bool IntegratedServer::PlaceItemFrameFromUse(PlayerSession& session,
+                                                 const Game::BlockHitResult& hit,
+                                                 const Game::ItemStack& used, bool glow) {
+        // MC HangingEntityItem.useOn, the item frame branch.
+        if (hit.face < 0 || hit.face > 5) return false;
+        const auto face = static_cast<Game::Direction>(hit.face);
+        ServerLevel& level = LevelOf(session);
+        ServerLevelBridge* bridge = level.MobLevel();
+        MobManager* mobs = level.Mobs();
+        if (!bridge || !mobs) return false;
+
+        const glm::ivec3 pos = hit.blockPos + glm::ivec3(Game::StepX(face), Game::StepY(face), Game::StepZ(face));
+        // ItemFrameItem.mayPlace: inside the build height, and a player who
+        // may build (not adventure).
+        if (pos.y < bridge->GetMinY() || pos.y > bridge->GetMaxY()) return false;
+        if (ServerPlayer* placer = session.GetPlayer();
+            placer && placer->getGameMode() == Server::GameMode::ADVENTURE) {
+            return false;
+        }
+
+        auto frame = std::make_unique<Game::ItemFrame>(bridge, glow);
+        frame->SetHangingPos(pos);
+        frame->SetDirection(face);
+        // applyComponentsFromItemStack: a renamed frame item names the frame.
+        if (auto name = used.components.get(Game::DataComponents::CUSTOM_NAME)) {
+            frame->SetCustomName(std::move(name));
+        }
+        if (!frame->Survives()) return false;
+
+        Game::ItemFrame& hung = *frame;
+        if (mobs->Add(std::move(frame)) == 0) return false;
+        hung.PlayPlacementSound();
         return true;
     }
 
@@ -4026,9 +4150,10 @@ namespace Server {
         // the click passes through to mobInteract. Consumes one egg on
         // success (creative is restored by the caller's snapshot).
         //
-        // Not ported: applyComponentsFromItemStack (no item components carry
-        // entity data here) and Fox.onOffspringSpawnedFromEgg's trust of the
-        // spawner (fox trust is not modelled).
+        // applyComponentsFromItemStack carries the one entity-facing item
+        // component this port has, CUSTOM_NAME (a renamed egg names the baby).
+        // Not ported: Fox.onOffspringSpawnedFromEgg's trust of the spawner
+        // (fox trust is not modelled).
         Game::UseResult SpawnOffspringFromSpawnEgg(Game::Mob& parent, Game::ItemStack& held) {
             if (held.IsEmpty()) return Game::UseResult::Pass;
             const Game::EntityTypeId eggType = Game::SpawnEggEntityType(held.itemId);
@@ -4055,6 +4180,10 @@ namespace Server {
             offspring->xRot = 0.0f;
             offspring->yHeadRot = 0.0f;
             offspring->yBodyRot = 0.0f;
+            // applyComponentsFromItemStack → Entity.applyImplicitComponent(CUSTOM_NAME).
+            if (auto name = held.components.get(Game::DataComponents::CUSTOM_NAME)) {
+                offspring->SetCustomName(std::move(name));
+            }
             level->AddFreshEntity(std::move(offspring));
 
             held.count -= 1;
@@ -4306,6 +4435,24 @@ namespace Server {
                 }
             }
 
+            // The hanging entities are plain Entities in MC: an item frame
+            // has its own interact (take the held item / turn the framed
+            // one), a painting none, and neither reaches the mob branches
+            // below (name tag, spawn egg, mobInteract, an item's
+            // interactLivingEntity).
+            if (auto* frame = dynamic_cast<Game::ItemFrame*>(mobTarget)) {
+                const Game::ItemStack frameBefore = held;
+                const Game::UseResult r = frame->Interact(*attacker, held);
+                // itemStack.consume(1, player): nothing is used up in creative.
+                if (creative) {
+                    if (held.IsEmpty()) held = frameBefore;
+                    else                held.count = frameBefore.count;
+                }
+                if (Game::ConsumesAction(r)) session->SendInventoryFull();
+                return;
+            }
+            if (dynamic_cast<Game::HangingEntity*>(mobTarget)) return;
+
             const Game::ItemStack before = held;
 
             // MC restores only the COUNT in creative — see the same note on
@@ -4317,10 +4464,18 @@ namespace Server {
                 else                held.count = before.count;
             };
 
-            // MC Mob.interact → checkAndHandleImportantInteractions: the
-            // spawn-egg branch runs BEFORE mobInteract, so an egg on its own
+            // MC Mob.interact → checkAndHandleImportantInteractions: a name
+            // tag's interactLivingEntity comes first of all (a renamed tag
+            // names a villager rather than opening its trades), then the
+            // spawn-egg branch, both BEFORE mobInteract, so an egg on its own
             // adult always makes a baby rather than, say, feeding it.
-            Game::UseResult r = SpawnOffspringFromSpawnEgg(*mobTarget, held);
+            Game::UseResult r = Game::UseResult::Pass;
+            if (held.itemId == Game::Items::NameTag) {
+                if (const auto nameTag = Game::ItemRegistry::Get(held.itemId).interactLivingEntity) {
+                    r = nameTag(held, *target);
+                }
+            }
+            if (!Game::ConsumesAction(r)) r = SpawnOffspringFromSpawnEgg(*mobTarget, held);
             if (!Game::ConsumesAction(r)) r = mobTarget->MobInteract(*attacker, held);
             // A villager's trading screen (Merchant.openTradingScreen) is a
             // request the mob recorded on the player — open it now, on the
@@ -4355,7 +4510,12 @@ namespace Server {
         // not. See PlayerEntityView::SetDigging.
         attacker->Swing();
 
-        const Game::ItemStack& held = player->getInventory().GetSlot(
+        // MC Player.attack: `if (entity.skipAttackInteraction(this)) return;`
+        // — a painting breaks itself there; no damage, knockback, sweep or
+        // weapon wear follows, and the attack charge is left alone.
+        if (target->SkipAttackInteraction(*attacker)) return;
+
+        Game::ItemStack& held = player->getInventory().MutableSlot(
             Game::Inventory::HotbarToIndex(player->getInventory().GetSelectedSlot()));
 
         float itemDamage = 0.0f, itemSpeed = 0.0f;
@@ -4366,9 +4526,23 @@ namespace Server {
         // +3 and WEAKNESS's -4 per level.
         float damage = player->getAttackDamage(itemDamage);
 
+        // MC createAttackSource(attackingItemStack): a player_attack whose
+        // causing and direct entity are the attacker (and whose weapon is
+        // the main hand) — what every enchantment below is evaluated against.
+        const Game::DamageSourceInfo damageSource =
+            Game::DamageSourceInfo::Of(Game::MobDamageSource::PlayerAttack, attacker, nullptr);
+
         // MC getAttackStrengthScale(0.5F) — the half tick is MC's, and it is
         // why a hit that lands exactly on the boundary counts as full strength.
         const float strengthScale = player->getAttackStrengthScale(0.5f);
+
+        // MC Player.attack: magicBoost = strength * (getEnchantedDamage -
+        // baseDamage) — ServerPlayer.getEnchantedDamage runs the weapon's
+        // `minecraft:damage` effects (Sharpness everywhere, Smite / Bane of
+        // Arthropods / Impaling against their #sensitive_to_* targets). It
+        // scales LINEARLY with the charge, not by the quadratic below.
+        const float magicBoost = strengthScale *
+            (Game::EnchantmentHelper::ModifyDamage(*mobLevel, held, *target, damageSource, damage) - damage);
 
         // MC baseDamageScaleFactor: 0.2 + scale^2 * 0.8. Swinging at zero
         // charge does 20% damage, not zero — the curve is quadratic, so half a
@@ -4379,7 +4553,7 @@ namespace Server {
         // so a second click in the same tick is already at zero charge.
         player->resetAttackStrengthTicker();
 
-        if (damage <= 0.0f) return;
+        if (damage <= 0.0f && magicBoost <= 0.0f) return;
 
         const bool fullStrength = strengthScale > 0.9f;
 
@@ -4413,6 +4587,10 @@ namespace Server {
                        && !sprinting;
         if (crit) damage *= 1.5f;
 
+        // MC totalDamage = baseDamage + magicBoost: the enchantment bonus
+        // is added after the crit multiplier, so a crit does not scale it.
+        const float totalDamage = damage + magicBoost;
+
         // MC isSweepAttack: a full-strength, non-crit, non-knockback hit with a
         // sword while standing on the ground and moving no faster than a walk.
         // The speed gate (`< getSpeed() * 2.5`) is what stops a sprint-jump
@@ -4428,10 +4606,10 @@ namespace Server {
         // hurtServer -> EnderDragon.hurt(part, ...): a head hit is full
         // damage, everything else the body reduction (HurtPart's default).
         const bool hit = dragonTarget
-            ? dragonTarget->HurtPart(Game::MobDamageSource::PlayerAttack, damage,
+            ? dragonTarget->HurtPart(Game::MobDamageSource::PlayerAttack, totalDamage,
                                      attacker, dragonHeadHit,
                                      /*direct=*/attacker)
-            : target->Hurt(Game::MobDamageSource::PlayerAttack, damage, attacker);
+            : target->Hurt(Game::MobDamageSource::PlayerAttack, totalDamage, attacker);
         if (hit) {
             attacker->SetLastHurtMob(target);
 
@@ -4455,8 +4633,11 @@ namespace Server {
                 mobTarget->IgniteForSeconds(15);
             }
 
-            // MC's sprint hit adds 0.5 extra knockback on top of the base the
-            // damage already applied (Player.causeExtraKnockback).
+            // MC Player.causeExtraKnockback(entity, getKnockback(entity,
+            // source) + (knockbackAttack ? 0.5 : 0)): the extra push on top of
+            // the base the damage already applied. getKnockback is
+            // ATTACK_KNOCKBACK through the weapon's `minecraft:knockback`
+            // effects (the Knockback enchantment's +1 per level), halved.
             //
             // The (sin, -cos) is MC's and is NOT the facing vector — it is the
             // facing NEGATED, because Knockback subtracts the impulse it is
@@ -4464,14 +4645,21 @@ namespace Server {
             // read as attacker-minus-target). Passing the facing directly, as
             // this did, dragged the target toward the attacker on every
             // sprint hit instead of launching it.
-            if (sprinting && fullStrength) {
-                const float yaw = attacker->yRot * Game::Mth::kDegToRad;
-                target->Knockback(0.5, std::sin(yaw), -std::cos(yaw));
+            {
+                const float attributeKnockback =
+                    static_cast<float>(attacker->GetAttributeValue(Game::Attribute::AttackKnockback));
+                const float knockback = Game::EnchantmentHelper::ModifyKnockback(
+                                            *mobLevel, held, *target, damageSource, attributeKnockback) / 2.0f
+                                      + ((sprinting && fullStrength) ? 0.5f : 0.0f);
+                if (knockback > 0.0f) {
+                    const float yaw = attacker->yRot * Game::Mth::kDegToRad;
+                    target->Knockback(knockback, std::sin(yaw), -std::cos(yaw));
+                }
             }
             if (sweep) {
                 // MC Player.doSweepAttack opens with PLAYER_ATTACK_SWEEP.
                 playServerSideSound(Game::SoundEvents::PLAYER_ATTACK_SWEEP);
-                DoSweepAttack(*attacker, *target, strengthScale);
+                DoSweepAttack(*attacker, *target, damage, damageSource, strengthScale);
             }
             // MC attackVisualEffects: the crit sound, or — for a plain hit —
             // the strong / weak swing.
@@ -4480,7 +4668,23 @@ namespace Server {
                 playServerSideSound(fullStrength ? Game::SoundEvents::PLAYER_ATTACK_STRONG
                                                  : Game::SoundEvents::PLAYER_ATTACK_WEAK);
             }
-            BroadcastAttackEffects(level.Dimension(), *target, crit);
+            // attackVisualEffects: the crit burst, and magicCrit when the
+            // enchantments added damage.
+            BroadcastAttackEffects(level.Dimension(), *target, crit, magicBoost > 0.0f);
+
+            // MC Player.itemAttackInteraction: EnchantmentHelper
+            // .doPostAttackEffectsWithItemSource — the target's worn Thorns,
+            // then the weapon's post_attack effects (Fire Aspect's ignite,
+            // Bane of Arthropods' Slowness IV) — then postHurtEnemy, the
+            // weapon's item_damage_per_attack of wear (1 for a sword, 2 for a
+            // tool). A tool worn out here leaves the hand empty.
+            {
+                Game::ItemStack& weapon = player->getInventory().MutableSlot(
+                    Game::Inventory::HotbarToIndex(player->getInventory().GetSelectedSlot()));
+                Game::EnchantmentHelper::DoPostAttackEffectsWithItemSource(*mobLevel, *target,
+                                                                           damageSource, &weapon);
+                Game::HurtEnemy(weapon, *attacker);
+            }
 
             // MC Player.attack's last line: 0.1 exhaustion per landed hit.
             // causeFoodExhaustion no-ops for an invulnerable player, which is
@@ -4527,7 +4731,8 @@ namespace Server {
     }
 
     void IntegratedServer::DoSweepAttack(Server::PlayerEntityView& attacker,
-                                         Game::LivingEntity& target,
+                                         Game::LivingEntity& target, float baseDamage,
+                                         const Game::DamageSourceInfo& source,
                                          float strengthScale) {
         // The sweep asks "what else is standing next to what I hit", which is
         // a query against the attacker's own level's entity set.
@@ -4540,11 +4745,11 @@ namespace Server {
         // MC Player.doSweepAttack: everything living inside the TARGET's box
         // inflated by (1.0, 0.25, 1.0), except the attacker and the target
         // itself, within 3 blocks of the attacker, takes
-        // `1.0 * attackStrengthScale` and a 0.4 knockback along the attacker's
-        // facing. The 1.0 is `1 + SWEEPING_DAMAGE_RATIO * baseDamage` with the
-        // ratio at its unenchanted 0 — the sweep does NOT scale with the
-        // weapon, which is why it reads as a nudge to the crowd rather than a
-        // second full hit.
+        // `getEnchantedDamage(nearby, 1 + SWEEPING_DAMAGE_RATIO * baseDamage)
+        // * attackStrengthScale` and a 0.4 knockback along the attacker's
+        // facing, then the post-attack effects. Unenchanted the ratio is 0 —
+        // a flat 1, a nudge to the crowd; Sweeping Edge's attribute (1/2,
+        // 2/3, 3/4) is what turns it into a real second hit.
         Game::AABB box = target.GetAABB();
         box.min -= glm::vec3(1.0f, 0.25f, 1.0f);
         box.max += glm::vec3(1.0f, 0.25f, 1.0f);
@@ -4553,17 +4758,27 @@ namespace Server {
         mobLevel->GetEntitiesInBox(box, &attacker, nearby);
 
         const float yaw = attacker.yRot * Game::Mth::kDegToRad;
-        const float sweepDamage = 1.0f * strengthScale;
+        const float sweepDamage = 1.0f +
+            static_cast<float>(attacker.GetAttributeValue(Game::Attribute::SweepingDamageRatio)) * baseDamage;
+        Game::ItemStack* weapon = attacker.GetWeaponItem();
 
         for (Game::Entity* entity : nearby) {
             if (entity == &target) continue;
             auto* living = dynamic_cast<Game::LivingEntity*>(entity);
             if (!living || !living->IsAlive() || !living->IsAttackable()) continue;
+            // MC sweeps getEntitiesOfClass(LivingEntity.class, …): a painting
+            // or item frame rides the living pipeline here but is a plain
+            // Entity there, so a sweep never breaks one.
+            if (dynamic_cast<Game::HangingEntity*>(living)) continue;
             if (attacker.DistanceToSqr(*living) >= 9.0) continue;
 
-            if (living->Hurt(Game::MobDamageSource::PlayerAttack, sweepDamage, &attacker)) {
+            const float enchantedDamage =
+                (weapon ? Game::EnchantmentHelper::ModifyDamage(*mobLevel, *weapon, *living, source, sweepDamage)
+                        : sweepDamage) * strengthScale;
+            if (living->Hurt(Game::MobDamageSource::PlayerAttack, enchantedDamage, &attacker)) {
                 // Same negated-facing convention as the sprint knockback above.
                 living->Knockback(0.4, std::sin(yaw), -std::cos(yaw));
+                Game::EnchantmentHelper::DoPostAttackEffects(*mobLevel, *living, source);
             }
         }
     }
@@ -4598,25 +4813,29 @@ namespace Server {
 
     void IntegratedServer::BroadcastAttackEffects(Game::DimensionId dimension,
                                                   const Game::LivingEntity& target,
-                                                  bool crit) {
+                                                  bool crit, bool magicCrit) {
         if (!m_networkServer) return;
 
         // MC broadcasts entity event 2 for a generic hurt, which is what makes
         // a MOB flash red for onlookers. Mobs already flash from their synched
-        // hurtTime, so the only new signal here is the crit particle burst
-        // (event 4 in this port's numbering, unused by any mob).
-        if (!crit) return;
-
-        Network::EntityEventS2CPacket p;
-        p.entityId = target.GetId();
-        p.event = kEntityEventCrit;
-        const auto data = Network::Serialization::Serialize(p);
+        // hurtTime, so the only new signals here are the crit particle burst
+        // and the enchanted-hit burst (MC's Animate packet ids 4 and 5, this
+        // port's events 200 / 201).
+        if (!crit && !magicCrit) return;
 
         const Game::Math::ChunkPos cp{
             static_cast<int32_t>(std::floor(target.position.x / 16.0)),
             static_cast<int32_t>(std::floor(target.position.z / 16.0))
         };
-        SendToChunkWatchersAt(dimension, cp, Network::PacketId::EntityEventS2C, data);
+        const auto send = [&](uint8_t event) {
+            Network::EntityEventS2CPacket p;
+            p.entityId = target.GetId();
+            p.event = event;
+            SendToChunkWatchersAt(dimension, cp, Network::PacketId::EntityEventS2C,
+                                  Network::Serialization::Serialize(p));
+        };
+        if (crit) send(kEntityEventCrit);
+        if (magicCrit) send(kEntityEventMagicCrit);
     }
 
     void IntegratedServer::BroadcastItemEntityUpdates(ServerLevel& level, int64_t serverTick) {
@@ -4833,6 +5052,52 @@ namespace Server {
                 conn->SendPacketIn(dimension, static_cast<uint8_t>(packetId), data);
             }
         });
+    }
+
+    void IntegratedServer::ResendBiomesForChunks(Game::DimensionId dimension,
+                                                const std::vector<std::shared_ptr<Game::Chunk>>& chunks) {
+        if (!m_sessionManager || chunks.empty()) return;
+        // Each chunk's column is encoded once (ChunkBiomeData), then grouped
+        // per watching player — MC's chunksForPlayers map.
+        std::vector<Network::ChunksBiomesS2CPacket::ChunkBiomeData> columns;
+        columns.reserve(chunks.size());
+        std::unordered_map<uint32_t, std::vector<size_t>> chunksForPlayers;
+        for (const auto& chunk : chunks) {
+            if (!chunk) continue;
+            Network::ChunksBiomesS2CPacket::ChunkBiomeData column;
+            column.chunkX = chunk->pos.x;
+            column.chunkZ = chunk->pos.z;
+            {
+                const auto guard = chunk->LockShared();
+                for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK; ++y) {
+                    auto& dst = column.sections[static_cast<size_t>(y)];
+                    if (const Game::ChunkSection* section = chunk->GetSection(y)) {
+                        const Game::PalettedContainer& biomes = section->Biomes();
+                        dst.bits    = static_cast<uint8_t>(biomes.StorageBits());
+                        dst.palette = biomes.Palette();
+                        dst.words   = biomes.RawWords();
+                    } else {
+                        dst.bits = 0;
+                        dst.palette = { Game::kFallbackBiomeId };
+                    }
+                }
+            }
+            const size_t index = columns.size();
+            columns.push_back(std::move(column));
+            for (uint32_t playerId : m_sessionManager->GetChunkWatchers(dimension, chunk->pos)) {
+                chunksForPlayers[playerId].push_back(index);
+            }
+        }
+        for (const auto& [playerId, indices] : chunksForPlayers) {
+            auto session = m_sessionManager->GetSession(playerId);
+            auto* conn = session ? session->GetConnection() : nullptr;
+            if (!conn) continue;
+            Network::ChunksBiomesS2CPacket packet;
+            packet.chunks.reserve(indices.size());
+            for (size_t index : indices) packet.chunks.push_back(columns[index]);
+            conn->SendPacketIn(dimension, static_cast<uint8_t>(Network::PacketId::ChunksBiomesS2C),
+                               Network::Serialization::Serialize(packet));
+        }
     }
 
     void IntegratedServer::OnChunkSentToClient(PlayerSession& session, Game::DimensionId dimension,

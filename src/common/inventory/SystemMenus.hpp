@@ -12,6 +12,7 @@
 #include "AbstractContainerMenu.hpp"
 #include "SimpleContainer.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/world/enchantment/EnchantmentInstance.hpp"
 #include <memory>
 #include <vector>
 
@@ -20,13 +21,18 @@ namespace Game {
     class BrewingStandBlockEntity;
 
     // ── Enchanting table (MC EnchantmentMenu) ─────────────────────────────
-    // Slots: 0 item, 1 lapis. Data: three costs, the enchantment seed, and
-    // three (enchantment id, level) clues — MC publishes exactly these so the
-    // client can render the three offer rows without knowing the roll.
+    // Slots: 0 item (one at a time), 1 lapis. Data: three costs, the
+    // enchantment seed, and three (enchantment id, level) clues — MC publishes
+    // exactly these so the client can render the three offer rows without
+    // knowing the roll.
     //
-    // LIVE: bookshelf power, the three level costs, the level/lapis checks,
-    //       and the roll itself (weighted pick over the enchantment registry).
-    // The cost curve and power scan are MC's verbatim; see the .cpp.
+    // MC EnchantmentMenu line for line: the offers are rolled on the SERVER
+    // only (MC's slotsChanged runs inside access.execute, a no-op on the
+    // client — here the menu learns it is the server's copy from
+    // SetBookshelfPower / SetEnchantmentSeed) from the player's enchantment
+    // seed; costs from EnchantmentHelper.getEnchantmentCost, the clue from
+    // the same selectEnchantment roll the button then applies
+    // (#minecraft:in_enchanting_table, the item's ENCHANTABLE value).
     class EnchantmentMenu : public AbstractContainerMenu {
     public:
         static constexpr int SLOT_ITEM  = 0;
@@ -45,14 +51,42 @@ namespace Game {
         explicit EnchantmentMenu(Inventory* playerInventory);
 
         // Bookshelves around the table, 0..15 (MC counts them in slotsChanged).
+        // Server only — also what marks this copy as the table's (see above).
         void SetBookshelfPower(int power);
         int  BookshelfPower() const { return m_power; }
 
-        // MC EnchantmentMenu.clickMenuButton — take offer `slot` (0..2).
-        // `playerLevel` is checked and the cost returned so the caller can
-        // charge it; 0 means the offer was refused.
-        int TakeOffer(int slot, int playerLevel, bool creative,
-                      ContainerClickResult& result);
+        // MC `enchantmentSeed.set(player.getEnchantmentSeed())` — at open and
+        // after every enchantment performed. Server only; re-rolls the offers.
+        void SetEnchantmentSeed(int seed);
+        int  EnchantmentSeed() const { return GetData(DATA_SEED); }
+
+        // The clicking player's experience level and hasInfiniteMaterials
+        // (creative), refreshed by the session before each button click.
+        void SetPlayerState(int experienceLevel, bool infiniteMaterials) {
+            m_playerLevel = experienceLevel;
+            m_infiniteMaterials = infiniteMaterials;
+        }
+
+        // MC EnchantmentMenu.clickMenuButton(player, buttonId): take offer
+        // `buttonId` (0..2) with the state SetPlayerState gave.
+        bool ClickMenuButton(int buttonId, bool mayBuild, ContainerClickResult& result) override;
+
+        // The body of clickMenuButton: checks lapis (buttonId + 1) and levels
+        // (at least the row's cost and buttonId + 1) unless creative, enchants
+        // the item (a book becomes an enchanted book), spends the lapis.
+        // Returns the levels the player must be charged — buttonId + 1, MC
+        // Player.onEnchantmentPerformed — or 0 when refused. The caller
+        // charges them, rerolls the player's seed and hands it back through
+        // SetEnchantmentSeed.
+        int TakeOffer(int slot, int playerLevel, bool creative, ContainerClickResult& result);
+
+        // The levels the last ClickMenuButton performed an enchantment for,
+        // cleared by the read (0 = nothing happened).
+        int ConsumePerformedCost() {
+            const int cost = m_performedCost;
+            m_performedCost = 0;
+            return cost;
+        }
 
         void QuickMoveStack(int slotIndex, ContainerClickResult& result) override;
         int  MenuIndexForInventorySlot(int inventoryIndex) const override;
@@ -61,11 +95,16 @@ namespace Game {
 
     private:
         void RollOffers();
+        // MC EnchantmentMenu.getEnchantmentList.
+        std::vector<EnchantmentInstance> GetEnchantmentList(const ItemStack& item, int slot, int cost);
 
         SimpleContainer m_inputs{2};
         JavaRandom      m_random;
         int             m_power = 0;
-        int             m_seed  = 0;
+        bool            m_serverSide = false;
+        int             m_playerLevel = 0;
+        bool            m_infiniteMaterials = false;
+        int             m_performedCost = 0;
     };
 
     // ── Brewing stand (MC BrewingStandMenu) ───────────────────────────────

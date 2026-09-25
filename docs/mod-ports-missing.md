@@ -27,7 +27,7 @@ lists with the diff script before trusting them after later passes.
 - **Remaining TF landmarks.** Dark tower, knight stronghold, labyrinth, hydra lair, yeti
   cave, aurora palace, troll cave, final castle, giant house, mushroom tower, camp,
   fallen trunk (they log "not yet ported").
-- **Durability** (no tool/armour wears out anywhere in the engine), **mob spawner blocks**
+- **Mob spawner blocks**
   (inert), **thorns contact damage**, **worn armour on players/mobs** (armour stands only),
   **sounds and music** (no sound system), **block light** (glowing blocks don't light
   their surroundings), TF's per-biome sky light colour and coloured leaf tints.

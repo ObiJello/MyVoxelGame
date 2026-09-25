@@ -703,11 +703,12 @@ namespace Game {
             // ── travelInWater / travelInLava ───────────────────────────
             // moveRelative(0.02, input): the input vector, normalised when
             // longer than one, scaled by the fixed fluid speed; a crouching
-            // player's input is 0.3 (isMovingSlowly).
+            // player's input is scaled by SNEAKING_SPEED (0.3, more with
+            // Swift Sneak — LocalPlayer.modifyInput).
             glm::vec3 inputDir(movementInput.x, 0.0f, movementInput.z);
             if (glm::dot(inputDir, inputDir) > 1.0f) inputDir = glm::normalize(inputDir);
-            if (physics.isSneaking) inputDir *= 0.3f;
-            const float speed = 0.02f;
+            if (physics.isSneaking) inputDir *= physics.sneakingSpeed;
+            float speed = 0.02f;
 
             // MC travelInFluid's baseGravity is getEffectiveGravity(): with
             // SLOW_FALLING and the body not rising (isFalling, sampled after
@@ -719,6 +720,19 @@ namespace Game {
             float hDrag, vDrag, gravityTerm;
             if (!lavaTravel) {
                 hDrag = sprint ? 0.9f : 0.8f;                  // getWaterSlowDown
+                // WATER_MOVEMENT_EFFICIENCY (Depth Strider), halved off the
+                // ground, blends the slow-down toward land's 0.546 and the
+                // stroke toward the walking speed (getSpeed: MOVEMENT_SPEED
+                // in MC units, 0.1 a walk — this port's per-second walk
+                // mapped back).
+                float waterWalker = physics.waterMovementEfficiency;
+                if (!physics.isOnGround) waterWalker *= 0.5f;
+                if (waterWalker > 0.0f) {
+                    const float scale = physics.scale > 0.0f ? physics.scale : 1.0f;
+                    const float mcSpeed = 0.1f * physics.baseSpeed / (PlayerPhysics::WALK_SPEED * scale);
+                    hDrag += (0.54600006f - hDrag) * waterWalker;
+                    speed += (mcSpeed - speed) * waterWalker;
+                }
                 if (physics.effectDolphinsGrace) hDrag = 0.96f;   // DOLPHINS_GRACE
                 vDrag = 0.8f;
                 // getFluidFallingAdjustedMovement: gravity/16 — 0.08/16 —
@@ -879,7 +893,7 @@ namespace Game {
             // of UpdatePlayerPhysics), matching MC's isCrouching requiring
             // !abilities.flying, so shift-descending in creative is unaffected.
             if (physics.isSneaking) {
-                horizontalMovement *= PlayerPhysics::SNEAKING_SPEED;
+                horizontalMovement *= physics.sneakingSpeed;   // SNEAKING_SPEED (Swift Sneak)
             }
 
             // Add residual horizontal velocity (set by portal teleports
@@ -942,6 +956,34 @@ namespace Game {
                     physics.velocity.z = slideAxis(physics.velocity.z, horizontalMovement.z, dispZ);
                     horizontalMovement.x = deltaTime > 0.0f ? dispX / deltaTime : 0.0f;
                     horizontalMovement.z = deltaTime > 0.0f ? dispZ / deltaTime : 0.0f;
+                }
+            }
+            if (!slide && physics.isOnGround && !physics.isFlying) {
+                // MC Entity.move's tail: deltaMovement *= getBlockSpeedFactor
+                // (soul sand and honey 0.4 — the block AT the feet, else the
+                // one below that affects movement, water excepted), lifted
+                // toward 1 by MOVEMENT_EFFICIENCY (LivingEntity
+                // .getBlockSpeedFactor's lerp — Soul Speed on soul blocks).
+                // Folded into the walk exactly: the tick map
+                // v' = (v + a)·f·0.546 settles at a/(1 - 0.546·f) a tick, so
+                // against a normal block's a/(1 - 0.546) the walk scales by
+                // (1 - 0.546) / (1 - 0.546·f).
+                const auto factorOf = [](BlockID id) {
+                    return (id == BlockID::SoulSand || id == BlockID::HoneyBlock) ? 0.4f : 1.0f;
+                };
+                const glm::ivec3 feet(static_cast<int>(std::floor(physics.position.x)),
+                                      static_cast<int>(std::floor(physics.position.y)),
+                                      static_cast<int>(std::floor(physics.position.z)));
+                const BlockID here = context.GetBlockState(feet.x, feet.y, feet.z).Block();
+                float blockFactor = factorOf(here);
+                if (here != BlockID::Water && blockFactor == 1.0f) {
+                    const glm::ivec3 below = BlockPosBelowThatAffectsMovement(physics.position);
+                    blockFactor = factorOf(context.GetBlockState(below.x, below.y, below.z).Block());
+                }
+                blockFactor += (1.0f - blockFactor) * std::clamp(physics.movementEfficiency, 0.0f, 1.0f);
+                if (blockFactor != 1.0f) {
+                    constexpr float kRetain = 0.6f * 0.91f;
+                    horizontalMovement *= (1.0f - kRetain) / (1.0f - kRetain * blockFactor);
                 }
             }
             if (!slide) {

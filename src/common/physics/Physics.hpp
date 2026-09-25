@@ -200,6 +200,20 @@ namespace Game {
         int   effectLevitation    = -1;
         bool  effectSlowFalling   = false;
         bool  effectDolphinsGrace = false;
+        // The movement attributes the local player's enchantments move,
+        // written by ClientPlayer alongside the effect state:
+        //   sneakingSpeed           Attributes.SNEAKING_SPEED (Swift Sneak):
+        //                           the crouching input scale.
+        //   waterMovementEfficiency Attributes.WATER_MOVEMENT_EFFICIENCY
+        //                           (Depth Strider): travelInWater's blend
+        //                           toward land drag and walking speed.
+        //   movementEfficiency      Attributes.MOVEMENT_EFFICIENCY (Soul
+        //                           Speed on soul blocks): how far the block
+        //                           speed factor is lifted back to 1.
+        // (Soul Speed's MOVEMENT_SPEED bonus rides effectSpeedFactor.)
+        float sneakingSpeed           = SNEAKING_SPEED;
+        float waterMovementEfficiency = 0.0f;
+        float movementEfficiency      = 0.0f;
         
         // Mutable flight speeds for noclip mode
         float noclipHorizontalSpeed = NOCLIP_HORIZONTAL_SPEED;

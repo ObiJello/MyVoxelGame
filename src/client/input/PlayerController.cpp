@@ -1178,7 +1178,9 @@ namespace Game {
         const bool onGround = player->physics.isOnGround;
         const float inc = GetDestroyProgressPerTick(held, block, onGround,
                                                     player->GetEffectDigSpeedMultiplier(),
-                                                    player->physics.isEyeInWater);
+                                                    player->physics.isEyeInWater,
+                                                    player->GetMiningEfficiency(),
+                                                    player->GetSubmergedMiningSpeed());
 
         digState.destroyProgress += inc;
         // MC continueDestroyBlock: `if (destroyTicks % 4.0F == 0.0F)` the hit
@@ -1599,7 +1601,9 @@ namespace Game {
                         player->inventory.GetSelectedItem(), block,
                         player->physics.isOnGround,
                         player->GetEffectDigSpeedMultiplier(),
-                        player->physics.isEyeInWater);
+                        player->physics.isEyeInWater,
+                        player->GetMiningEfficiency(),
+                        player->GetSubmergedMiningSpeed());
                     if (inc >= 1.0f) {
                         // Instant break — set up minimal state so FinishDig's
                         // packet/inventory path runs, then fire it.

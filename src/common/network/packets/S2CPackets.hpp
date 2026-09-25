@@ -73,6 +73,18 @@ namespace Packets {
         PacketId getId() const override { return PacketId::LightUpdateS2C; }
     };
 
+    class ChunksBiomesS2CPacketImpl : public IS2CPacket {
+    private:
+        ChunksBiomesS2CPacket m_data;
+    public:
+        std::chrono::steady_clock::time_point m_timestamp = std::chrono::steady_clock::now();
+    public:
+        explicit ChunksBiomesS2CPacketImpl(ChunksBiomesS2CPacket data) : m_data(std::move(data)) {}
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+        void apply(IPacketListener& listener) override { listener.onChunksBiomesS2C(m_data); }
+        PacketId getId() const override { return PacketId::ChunksBiomesS2C; }
+    };
+
     class UnloadChunkS2CPacketImpl : public IS2CPacket {
     private:
         UnloadChunkS2CPacket m_data;
@@ -876,6 +888,26 @@ namespace Packets {
         const ArmorStandDataS2CPacket& getData() const { return m_data; }
 
         PacketId getId() const override { return PacketId::ArmorStandDataS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class ItemFrameDataS2CPacketImpl : public IS2CPacket {
+    private:
+        ItemFrameDataS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit ItemFrameDataS2CPacketImpl(ItemFrameDataS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onItemFrameDataS2C(m_data);
+        }
+
+        const ItemFrameDataS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::ItemFrameDataS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

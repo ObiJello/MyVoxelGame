@@ -411,6 +411,11 @@ namespace Game {
     // (the held weapon's attack damage).
     double ComputeAttributeWithEffects(Attribute attribute, double base,
                                        const std::vector<MobEffectInstance>& effects);
+    // The same templates added onto an instance that already carries other
+    // modifiers (the worn enchantments' — EnchantmentHelper::
+    // PlayerAttributeValue), so every modifier folds in MC's one pass.
+    void AddEffectAttributeModifiers(AttributeInstance& instance,
+                                     const std::vector<MobEffectInstance>& effects);
     // MC GameRenderer.nightVisionScale.
     float NightVisionScale(const MobEffectInstance& nightVision, float partialTick);
     // MC LivingEntity.areAllEffectsAmbient.

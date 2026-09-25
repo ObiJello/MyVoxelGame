@@ -3,6 +3,7 @@
 // MC net.minecraft.world.entity.LightningBolt — see the header for the
 // timeline and what is not modelled.
 #include "common/entity/LightningBolt.hpp"
+#include "common/entity/decoration/HangingEntity.hpp"
 
 #include "common/sound/SoundEvents.hpp"
 #include "common/entity/Entity.hpp"
@@ -179,6 +180,9 @@ namespace Game {
     }
 
     void LightningBolt::ThunderHit(Entity& victim) {
+        // MC BlockAttachedEntity.thunderHit is empty: lightning neither burns
+        // nor breaks a painting or an item frame.
+        if (dynamic_cast<const HangingEntity*>(&victim)) return;
         // MC Entity.thunderHit:
         //     setRemainingFireTicks(remainingFireTicks + 1);
         //     if (remainingFireTicks == 0) igniteForSeconds(8);

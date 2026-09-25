@@ -33,11 +33,12 @@ namespace Server {
             }
         };
 
-        // Entity.getDisplayName: a player's name; a mob's translated type name
-        // (en_us "entity.minecraft.<id>" is the slug title-cased for every
-        // vanilla type this engine has — no custom names exist here).
+        // Entity.getDisplayName: a player's name; a mob's custom name (a name
+        // tag), else its translated type name (en_us "entity.minecraft.<id>"
+        // is the slug title-cased for every vanilla type this engine has).
         std::string DisplayName(const SelectedEntity& target) {
             if (target.kind == SelectedEntity::Kind::Player) return target.name;
+            if (target.mob && target.mob->HasCustomName()) return *target.mob->GetCustomName();
             std::string out;
             bool upper = true;
             for (char c : target.typeSlug) {

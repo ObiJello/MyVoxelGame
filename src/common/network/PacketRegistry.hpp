@@ -108,6 +108,10 @@
             // mid-range, clear of the ids straight after 0x59/0x5E/0x72/0x7B
             // that parallel work claims.
             LightUpdateS2C         = 0x6A,
+            // Biome columns of chunks a runtime biome edit changed (/fillbiome)
+            // — MC ClientboundChunksBiomesPacket, see ChunksBiomesS2CPacket.hpp.
+            // 0x64, mid-range, clear of the ids parallel work claims next.
+            ChunksBiomesS2C        = 0x64,
             // Books — MC ClientboundOpenBookPacket, see BookPackets.hpp. 0x66,
             // well clear of the ids after 0x5E and 0x7B that parallel work
             // claims next.
@@ -173,6 +177,7 @@
             BossEventS2C           = 0x48, // MC ClientboundBossEventPacket (reduced)
             EndCrystalBeamS2C      = 0x49, // crystal beam target (MC DATA_BEAM_TARGET)
             ArmorStandDataS2C      = 0x59, // armor stand poses + equipment — see ArmorStandDataS2CPacket.hpp
+            ItemFrameDataS2C       = 0x65, // an item frame's framed item (MC DATA_ITEM) — see ItemFrameDataS2CPacket.hpp
 
             // ── Immersive portals (see-through / walk-through surfaces) ────
             // Full-record upsert and removal of Game::Immersive::Portal,
@@ -242,6 +247,8 @@
             // Trading — MC ServerboundSelectTradePacket, see
             // MerchantPackets.hpp. 0xBC, clear of 0xB4.. neighbours.
             SelectTradeC2S          = 0xBC,
+            // Anvil — MC ServerboundRenameItemPacket, see AnvilPackets.hpp.
+            RenameItemC2S           = 0xBD,
         };
 
         // Convert PacketId to string for logging
@@ -283,6 +290,7 @@
                 case PacketId::BossEventS2C: return "BossEventS2C";
                 case PacketId::EndCrystalBeamS2C: return "EndCrystalBeamS2C";
                 case PacketId::ArmorStandDataS2C: return "ArmorStandDataS2C";
+                case PacketId::ItemFrameDataS2C: return "ItemFrameDataS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -295,6 +303,7 @@
                 case PacketId::UnloadChunkS2C: return "UnloadChunkS2C";
                 case PacketId::ChunkUnchangedS2C: return "ChunkUnchangedS2C";
                 case PacketId::LightUpdateS2C: return "LightUpdateS2C";
+                case PacketId::ChunksBiomesS2C: return "ChunksBiomesS2C";
                 case PacketId::ClientboundSectionBlocksUpdate: return "ClientboundSectionBlocksUpdate";
                 case PacketId::ChunkBatchStartS2C: return "ChunkBatchStartS2C";
                 case PacketId::ChunkBatchFinishedS2C: return "ChunkBatchFinishedS2C";
@@ -380,6 +389,7 @@
                 case PacketId::EditBookC2S:       return "EditBookC2S";
                 case PacketId::ContainerButtonClickC2S: return "ContainerButtonClickC2S";
                 case PacketId::SelectTradeC2S: return "SelectTradeC2S";
+                case PacketId::RenameItemC2S: return "RenameItemC2S";
 #endif
 
                 default: return "Unknown";

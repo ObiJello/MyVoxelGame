@@ -32,6 +32,8 @@
 #include "common/world/math/WorldMath.hpp"
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -172,6 +174,10 @@ namespace Server {
             // invisible / glowing flags). Starts empty, which is also the
             // value AddEntity carried for an effect-free mob.
             Game::EffectVisuals lastEffectVisuals;
+            // The last synched custom name / CustomNameVisible (a name tag).
+            // Unnamed is also what AddEntity carried for an unnamed mob.
+            std::optional<std::string> lastCustomName;
+            bool    lastCustomNameVisible = false;
 
             std::unordered_set<uint32_t> watchers;
         };

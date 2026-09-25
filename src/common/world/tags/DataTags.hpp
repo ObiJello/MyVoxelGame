@@ -17,12 +17,19 @@
 
 namespace Game::DataTags {
 
-    enum class Registry { Block, Fluid, EntityType, Item };
+    // DamageType is MC's damage_type registry (data/<ns>/tags/damage_type) —
+    // the #is_fire / #bypasses_armor / #is_projectile sets the enchantment
+    // effects' damage_source_properties conditions test.
+    enum class Registry { Block, Fluid, EntityType, Item, DamageType };
 
     // Tags carried by `id` ("minecraft:stone" or plain "stone"), each as
     // "#minecraft:mineable/pickaxe", sorted. Empty when the id has none or
     // the data pack is missing.
     const std::vector<std::string>& TagsFor(Registry registry, std::string_view id);
+
+    // MC Holder.is(TagKey): does `id` carry `tag` ("minecraft:is_fire",
+    // "#minecraft:is_fire" or a bare "is_fire" all accepted).
+    bool HasTag(Registry registry, std::string_view id, std::string_view tag);
 
     // Whether a tag file exists for `tag` ("minecraft:logs" or "logs"),
     // so a command can reject a typo instead of matching nothing.

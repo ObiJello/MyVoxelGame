@@ -27,6 +27,7 @@
 
 #include "common/entity/Entity.hpp"
 #include "common/entity/Attributes.hpp"
+#include "common/entity/EquipmentSlot.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 
 #include <cmath>
@@ -34,6 +35,8 @@
 #include <vector>
 
 namespace Game {
+
+    struct ItemStack;
 
     // MC WalkAnimationState — drives the limb swing. Lives on the entity
     // because the renderer reads it with a partial tick, not just per tick.
@@ -96,6 +99,10 @@ namespace Game {
         FallingAnvil,
         FallingStalactite,
         Stalagmite,
+        // MC DamageTypes.THORNS — the Thorns enchantment's damage_entity
+        // effect hitting back at an attacker. Not in #no_knockback (a thorns
+        // prick does push) and not in #bypasses_armor.
+        Thorns,
     };
 
     // MC's `#minecraft:no_knockback` damage-type tag
@@ -308,6 +315,17 @@ namespace Game {
         // HUMANOID_ARMOR slots that hold anything. Mobs carry no equipment
         // in this engine, so 0 (which the invisibility term floors at 0.1).
         virtual float GetArmorCoverPercentage() const { return 0.0f; }
+        // MC LivingEntity.getItemBySlot, for the code that walks an entity's
+        // equipment (the enchantment runners — EnchantmentHelper's
+        // runIterationOnEquipment). Null when this entity has no such slot:
+        // mobs carry no equipment in this engine; the player's view answers
+        // from its ServerPlayer's inventory and the armor stand from its own
+        // six slots. Mutable because effects may wear what they find.
+        virtual ItemStack* EquipmentInSlot(EquipmentSlot slot) { (void)slot; return nullptr; }
+        // Whether EquipmentInSlot can answer anything at all — lets the hot
+        // damage path skip the enchantment walk for the (vast majority of)
+        // entities that hold nothing.
+        virtual bool HasEquipmentSlots() const { return false; }
         // The MOB_VISIBILITY product over worn equipment, for `targetingEntity`.
         virtual double GetEquipmentVisibilityFactor(const Entity* targetingEntity) const {
             (void)targetingEntity;
@@ -369,6 +387,10 @@ namespace Game {
         // MC Entity.lavaHurt on a LivingEntity: 4 damage from the LAVA
         // source, and the GENERIC_BURN sizzle when it lands.
         void LavaHurt() override;
+
+        // MC LivingEntity.igniteForTicks: ceil(ticks * BURNING_TIME) — Fire
+        // Protection's attribute shortens a burn.
+        void IgniteForTicks(int ticks) override;
 
         // MC LivingEntity.isAffectedByFluids — true for every living thing;
         // the player's override is `!abilities.flying`.
@@ -487,6 +509,14 @@ namespace Game {
         }
         float GetMaxAbsorption() const { return static_cast<float>(GetAttributeValue(Attribute::MaxAbsorption)); }
         MobDamageSource GetLastDamageSource() const { return m_lastDamageSource; }
+        // The causing entity of the blow that killed this entity (MC die's
+        // source.getEntity()), -1 when there was none. The death-drop pass
+        // reads it as the loot context's ATTACKING_ENTITY (whose Looting the
+        // mob loot tables ask) and as dropExperience's killer.
+        int32_t GetKillerId() const { return m_killerId; }
+        // The same blow's DIRECT entity (the arrow for a shot, the killer
+        // itself for a melee blow) — the loot tables' direct_attacker.
+        int32_t GetKillerDirectId() const { return m_killerDirectId; }
         // MC LivingEntity.getLastDamageSource nulls itself 40 ticks after the
         // hit (lastDamageStamp) — the memory the witch's fire-resistance drink
         // and PanicGoal read. Callers pair this with GetLastDamageSource.
@@ -577,8 +607,15 @@ namespace Game {
 
         // MC LivingEntity.handleEntityEvent — of its long switch, the one
         // case this port answers is 60 (POOF, sent at despawn/death removal);
-        // the equipment-break and drown cases wait on their systems.
+        // the equipment-break cases need the client copy's equipment, which a
+        // mob does not carry here, and the drown case waits on its system.
         void HandleEntityEvent(uint8_t id) override;
+
+        // MC LivingEntity.onEquippedItemBroken: broadcast the slot's break
+        // event (47..52, 65, 68 — EntityEventForEquipmentBreak). Reached from
+        // HurtAndBreak(stack, amount, owner, slot) on the server. The player's
+        // view forwards to its ServerPlayer, whose client draws the break.
+        virtual void OnEquippedItemBroken(const ItemStack& broken, EquipmentSlot slot);
 
         // MC LivingEntity.makePoofParticles — 20 POOF particles across the
         // body, drifting outward (spawn offset −v·10 gives the puff its
@@ -623,7 +660,11 @@ namespace Game {
         // subtraction, after Hurt has decided the damage lands.
         virtual void ActuallyHurt(MobDamageSource source, float amount, Entity* attacker);
 
-        virtual float GetDamageAfterArmorAbsorb(MobDamageSource source, float amount) const;
+        // MC CombatRules.getDamageAfterAbsorb over ARMOR / ARMOR_TOUGHNESS,
+        // the armor fraction first rewritten by the source's weapon's
+        // armor_effectiveness (Breach). `attacker` is the causing entity; the
+        // direct one is HurtDirectEntity().
+        virtual float GetDamageAfterArmorAbsorb(MobDamageSource source, float amount, Entity* attacker);
 
         // MC LivingEntity.getDamageAfterMagicAbsorb — the RESISTANCE effect's
         // 20%-per-level reduction (Void bypasses it, MC BYPASSES_RESISTANCE).
@@ -648,10 +689,9 @@ namespace Game {
         // its own BaseTick — see Fish::HandleAirSupply.
         void HandleUnderwaterAir();
 
-        // MC LivingEntity.decreaseAirSupply — the RESPIRATION (OXYGEN_BONUS)
-        // skip roll lives in MC's version; no such attribute exists here
-        // (mob armor is not modelled), so the base is a plain -1. Overridden
-        // by IronGolem (never loses air).
+        // MC LivingEntity.decreaseAirSupply — with an OXYGEN_BONUS
+        // (Respiration's attribute) of b, a tick keeps its air with chance
+        // 1 - 1/(b + 1). Overridden by IronGolem (never loses air).
         virtual int DecreaseAirSupply(int currentSupply);
 
         // MC LivingEntity.increaseAirSupply: +4/tick, clamped. The dolphin
@@ -745,6 +785,8 @@ namespace Game {
         MobDamageSource m_lastDamageSource = MobDamageSource::Generic;
         bool            m_hasLastDamageSource = false;
         int             m_lastDamageStamp = 0;   // MC lastDamageStamp (tickCount)
+        int32_t         m_killerId = -1;
+        int32_t         m_killerDirectId = -1;
     };
 
 } // namespace Game

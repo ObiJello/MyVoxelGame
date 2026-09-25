@@ -187,6 +187,9 @@ namespace Game {
         HushLeviathan = 167,  // "hush_leviathan"
         LumenMoth = 168,  // "lumen_moth"
         TheUnsung = 169,  // "the_unsung"
+        Painting = 170,  // "painting"
+        GlowItemFrame = 171,  // "glow_item_frame"
+        ItemFrame = 172,  // "item_frame"
         Count
     };
 
@@ -223,7 +226,7 @@ namespace Game {
     // LivingEntity.DEFAULT_BABY_SCALE — one value for every type.
     inline constexpr float kBabyScale = 0.5f;
 
-    inline constexpr int kEntityTypeCount = 170;
+    inline constexpr int kEntityTypeCount = 173;
     extern const EntityTypeInfo kEntityTypeTable[kEntityTypeCount];
 
     inline const EntityTypeInfo& GetEntityTypeInfo(EntityTypeId t) {

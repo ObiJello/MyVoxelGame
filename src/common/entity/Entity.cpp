@@ -916,9 +916,12 @@ namespace Game {
                            static_cast<int>(std::floor(hi.z + w * 0.5 - kShrink)));
     }
 
-    void Entity::IgniteForSeconds(int seconds) {
-        const int ticks = seconds * 20;
-        if (ticks > m_remainingFireTicks) m_remainingFireTicks = ticks;
+    void Entity::IgniteForSeconds(float seconds) {
+        IgniteForTicks(static_cast<int>(std::floor(seconds * 20.0f)));
+    }
+
+    void Entity::IgniteForTicks(int ticks) {
+        if (m_remainingFireTicks < ticks) m_remainingFireTicks = ticks;
     }
 
     void Entity::BaseTick() {

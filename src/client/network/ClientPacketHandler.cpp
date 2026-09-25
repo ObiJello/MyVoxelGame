@@ -131,6 +131,13 @@ namespace Client {
         g_clientChunkManager->ApplyLightUpdate(Game::Math::ChunkPos{packet.chunkX, packet.chunkZ}, *packet.light);
     }
 
+    void ClientPacketHandler::onChunksBiomesS2C(const Network::ChunksBiomesS2CPacket& packet) {
+        // MC ClientPacketListener.handleChunksBiomes (a /fillbiome edit).
+        m_stats.packetsProcessed++;
+        if (!g_clientChunkManager) return;
+        g_clientChunkManager->ApplyBiomes(packet);
+    }
+
     void ClientPacketHandler::handleChunkUnload(const Network::UnloadChunkS2CPacket& packet) {
         if (!g_clientChunkManager) {
             Log::Warning("[ClientPacketHandler] ChunkManager not available for chunk unload");
@@ -508,6 +515,8 @@ namespace Client {
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
             g_clientMobManager->SetEffectVisuals(packet.entityId, packet.effectFlags,
                                                  packet.effectParticles);
+            g_clientMobManager->SetCustomName(packet.entityId, packet.customName,
+                                              packet.customNameVisible);
 #if ENABLE_IMMERSIVE_PORTALS
             // The same mob may still be in another level's store: it just
             // crossed a portal server-side. Hand it over through that portal
@@ -614,6 +623,8 @@ namespace Client {
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
             g_clientMobManager->SetEffectVisuals(packet.entityId, packet.effectFlags,
                                                  packet.effectParticles);
+            g_clientMobManager->SetCustomName(packet.entityId, packet.customName,
+                                              packet.customNameVisible);
         }
         m_stats.packetsProcessed++;
     }
@@ -762,6 +773,11 @@ namespace Client {
             g_clientMobManager->SetEndCrystalBeam(packet.entityId, packet.hasTarget,
                                                   packet.target);
         }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleItemFrameData(const Network::ItemFrameDataS2CPacket& packet) {
+        if (g_clientMobManager) g_clientMobManager->SetItemFrameItem(packet.entityId, packet.item);
         m_stats.packetsProcessed++;
     }
 

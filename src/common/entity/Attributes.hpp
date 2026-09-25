@@ -57,6 +57,19 @@ namespace Game {
         // MC generic.luck — a PLAYER attribute (Player.createAttributes);
         // LUCK / UNLUCK move it. Appended so the table order stays put.
         Luck,
+        // The attributes MC's enchantments move (EnchantmentAttributeEffect,
+        // data/minecraft/enchantment/*.json `minecraft:attributes`), appended
+        // for the same reason. The player-only ones (Player.createAttributes)
+        // are read off the player; the living ones (createLivingAttributes)
+        // by the LivingEntity paths that consult them.
+        MiningEfficiency,        // Efficiency — Player.getDestroySpeed
+        SubmergedMiningSpeed,    // Aqua Affinity — ditto, eye in water
+        OxygenBonus,             // Respiration — decreaseAirSupply's skip roll
+        WaterMovementEfficiency, // Depth Strider — travelInWater
+        SneakingSpeed,           // Swift Sneak — LocalPlayer.modifyInput
+        SweepingDamageRatio,     // Sweeping Edge — Player.doSweepAttack
+        BurningTime,             // Fire Protection — LivingEntity.igniteForTicks
+        MovementEfficiency,      // Soul Speed — getBlockSpeedFactor's lerp
         Count
     };
 
@@ -95,6 +108,15 @@ namespace Game {
         /* StepHeight           */ { "step_height",            0.6,  0.0,    10.0 },
         /* TemptRange           */ { "tempt_range",           10.0,  0.0,  2048.0 },
         /* Luck                 */ { "luck",                   0.0, -1024.0, 1024.0 },
+        /* MiningEfficiency     */ { "mining_efficiency",      0.0,  0.0,  1024.0 },
+        /* SubmergedMiningSpeed */ { "submerged_mining_speed", 0.2,  0.0,    20.0 },
+        /* OxygenBonus          */ { "oxygen_bonus",           0.0,  0.0,  1024.0 },
+        /* WaterMovementEfficiency */
+                                   { "water_movement_efficiency", 0.0, 0.0,   1.0 },
+        /* SneakingSpeed        */ { "sneaking_speed",         0.3,  0.0,     1.0 },
+        /* SweepingDamageRatio  */ { "sweeping_damage_ratio",  0.0,  0.0,     1.0 },
+        /* BurningTime          */ { "burning_time",           1.0,  0.0,  1024.0 },
+        /* MovementEfficiency   */ { "movement_efficiency",    0.0,  0.0,     1.0 },
     };
 
     static_assert(sizeof(kAttributeTable) / sizeof(kAttributeTable[0]) ==
@@ -159,7 +181,26 @@ namespace Game {
         EffectAbsorption  = 25,
         EffectLuck        = 26,
         EffectUnluck      = 27,
+        // The first id of the enchantment-modifier range (see
+        // EnchantmentModifierId below). Everything at or above it belongs
+        // to an item's enchantments, never to a named modifier above.
+        EnchantmentBase   = 0x10000,
     };
+
+    // MC EnchantmentAttributeEffect.getModifier(level, slot): the effect's
+    // own id ("minecraft:enchantment.efficiency") suffixed with the slot it
+    // is worn in, so one enchantment on two pieces gives two modifiers that
+    // come and go with their pieces. Hashed (FNV-1a, stable across runs)
+    // into the EnchantmentBase range, the slot in the low three bits.
+    inline ModifierId EnchantmentModifierId(std::string_view effectId, uint8_t slot) {
+        uint32_t h = 2166136261u;
+        for (const char c : effectId) {
+            h ^= static_cast<uint8_t>(c);
+            h *= 16777619u;
+        }
+        return static_cast<ModifierId>(static_cast<uint32_t>(ModifierId::EnchantmentBase) +
+                                       ((h & 0x0FFFFFu) << 3) + (slot & 7u));
+    }
 
     // One attribute on one entity: a base value plus its modifier stack.
     class AttributeInstance {
@@ -177,6 +218,8 @@ namespace Game {
 
         // MC AttributeInstance.calculateValue, cached until something changes.
         double GetValue() const;
+
+        const std::vector<AttributeModifier>& Modifiers() const { return m_modifiers; }
 
         Attribute GetAttribute() const { return m_attribute; }
 

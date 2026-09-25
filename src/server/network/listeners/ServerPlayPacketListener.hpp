@@ -69,6 +69,7 @@ namespace Server {
         void onContainerButtonClickC2S(const Network::ContainerButtonClickC2SPacket& packet) override;
         // Trading (MerchantPackets.hpp)
         void onSelectTradeC2S(const Network::SelectTradeC2SPacket& packet) override;
+        void onRenameItemC2S(const Network::RenameItemC2SPacket& packet) override;
 
         // Inventory click + close
         void onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) override;

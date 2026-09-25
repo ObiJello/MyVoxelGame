@@ -28,6 +28,12 @@ namespace Game {
         // magma cube's size>=2 cream entry. sizeMin 0 = ungated.
         int    sizeMin;
         int    sizeMax;
+        // MC enchanted_count_increase (Looting): count += round(level *
+        // uniform(lootingMin, lootingMax)), capped at lootingLimit when that
+        // is > 0. Both 0 = no Looting bonus on this entry.
+        float  lootingMin;
+        float  lootingMax;
+        int    lootingLimit;
     };
 
     struct MobLootPool {
@@ -44,6 +50,13 @@ namespace Game {
         // sizeMin 0 = ungated.
         int   sizeMin;
         int   sizeMax;
+        // random_chance_with_enchanted_bonus with a Looting killer: the
+        // chance becomes otherChance * (lootingChanceBase +
+        // lootingChancePerLevel * (level - 1)). lootingChanceBase < 0 = the
+        // pool has no enchanted bonus.
+        float lootingChanceBase;
+        float lootingChancePerLevel;
+        float otherChance;
         const MobLootEntry* entries;
         int   entryCount;
     };

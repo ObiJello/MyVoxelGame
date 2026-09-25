@@ -364,6 +364,10 @@ namespace Client {
         // LightUpdateS2C: replace the masked light layers of a loaded chunk
         // and re-mesh those sections. Main thread.
         void ApplyLightUpdate(Game::Math::ChunkPos chunkPos, const Game::Lighting::NetCodec::Decoded& light);
+        // ChunksBiomesS2C: replace the biome containers of every listed chunk
+        // the client holds, then re-mesh the 3x3 chunks around each (biome
+        // tint blends across chunk borders). Main thread.
+        void ApplyBiomes(const Network::ChunksBiomesS2CPacket& packet);
         // ChunkDataS2C's light (null = none sent) into a freshly built chunk.
         // Any thread (PrebuildChunk runs on the I/O thread).
         static void AdoptLight(Game::Chunk& chunk, const Game::Lighting::NetCodec::Decoded* light);

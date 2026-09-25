@@ -12,6 +12,8 @@
 #include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/entity/alchemy/Potions.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/text/Language.hpp"
+#include "common/entity/decoration/PaintingVariants.hpp"
 #include "client/entity/Player.hpp"
 #include "common/world/portal/PortalState.hpp"
 #include "common/core/Features.hpp"
@@ -261,6 +263,38 @@ namespace Render {
                         ToLower(Game::GetItemStackHoverName(variant)).find(needle) != std::string::npos) {
                         m_filteredItems.push_back(std::move(variant));
                     }
+                }
+                return;
+            }
+            // Paintings — the plain painting, then CreativeModeTabs.
+            // generatePresetPaintings: one painting per #placeable variant,
+            // PAINTING_VARIANT set, ordered by area then width (a stable sort
+            // over the registry's id order, as MC's sorted() is). Each preset
+            // also matches on its canvas's title and author.
+            if (id == Game::Items::Painting) {
+                const std::string itemName = ToLower(Game::ItemRegistry::Get(id).name);
+                const bool itemNameMatches = needle.empty() || itemName.find(needle) != std::string::npos;
+                if (itemNameMatches) m_filteredItems.emplace_back(id, 1);
+                std::vector<int> presets = Game::PaintingVariants::Placeable();
+                std::sort(presets.begin(), presets.end());
+                std::stable_sort(presets.begin(), presets.end(), [](int a, int b) {
+                    const Game::PaintingVariant* va = Game::PaintingVariants::Get(a);
+                    const Game::PaintingVariant* vb = Game::PaintingVariants::Get(b);
+                    if (va->Area() != vb->Area()) return va->Area() < vb->Area();
+                    return va->width < vb->width;
+                });
+                for (int index : presets) {
+                    const Game::PaintingVariant* variant = Game::PaintingVariants::Get(index);
+                    bool matches = itemNameMatches;
+                    for (const auto* line : { &variant->title, &variant->author }) {
+                        if (matches || !*line) continue;
+                        const std::string text = ToLower(Game::Language::GetOrDefault((*line)->translate, ""));
+                        matches = !text.empty() && text.find(needle) != std::string::npos;
+                    }
+                    if (!matches) continue;
+                    Game::ItemStack preset(id, 1);
+                    preset.components.set(Game::DataComponents::PAINTING_VARIANT, variant->id);
+                    m_filteredItems.push_back(std::move(preset));
                 }
                 return;
             }

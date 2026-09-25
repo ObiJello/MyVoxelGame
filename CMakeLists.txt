@@ -834,6 +834,10 @@ set(GAME_SOURCES
             src/client/renderer/gui/ContainerScreen.hpp
             src/client/renderer/gui/FurnaceScreen.cpp
             src/client/renderer/gui/FurnaceScreen.hpp
+            src/client/renderer/gui/AnvilScreen.cpp
+            src/client/renderer/gui/AnvilScreen.hpp
+            src/client/renderer/gui/EnchantmentScreen.cpp
+            src/client/renderer/gui/EnchantmentScreen.hpp
             src/client/renderer/gui/CraftingScreen.cpp
 
             # Client rendering - Menu screens (title / options tree)
@@ -1079,6 +1083,8 @@ set(GAME_SOURCES
             src/common/world/block/GeneratedBlockHardness.cpp
             src/common/world/block/GeneratedBlockHardness.hpp
             src/common/world/block/FallingBlock.cpp
+            src/common/world/block/LegacySolid.cpp
+            src/common/world/block/LegacySolid.hpp
             src/common/world/block/FallingBlock.hpp
             src/common/world/block/TntBlock.cpp
             src/common/world/block/TntBlock.hpp
@@ -1148,6 +1154,14 @@ set(GAME_SOURCES
             src/common/entity/PrimedTnt.hpp
             src/common/entity/EndCrystal.cpp
             src/common/entity/ArmorStand.cpp
+            src/common/entity/decoration/HangingEntity.cpp
+            src/common/entity/decoration/HangingEntity.hpp
+            src/common/entity/decoration/ItemFrame.cpp
+            src/common/entity/decoration/ItemFrame.hpp
+            src/common/entity/decoration/Painting.cpp
+            src/common/entity/decoration/Painting.hpp
+            src/common/entity/decoration/PaintingVariants.cpp
+            src/common/entity/decoration/PaintingVariants.hpp
             src/common/entity/ArmorStand.hpp
             src/common/entity/EndCrystal.hpp
             src/common/entity/DragonFight.hpp
@@ -1578,6 +1592,8 @@ set(GAME_SOURCES
             src/server/commands/UpdateBlocksCommand.cpp
             src/server/commands/UpdateBlocksCommand.hpp
             src/server/commands/SetBlockCommand.hpp
+            src/server/commands/FillBiomeCommand.cpp
+            src/server/commands/FillBiomeCommand.hpp
             src/server/commands/ReplaceAllCommand.cpp
             src/server/commands/ReplaceAllCommand.hpp
             src/server/commands/SpawnAllCommand.cpp
@@ -1803,6 +1819,9 @@ set(GAME_SOURCES
             src/common/entity/Morph.hpp
             src/common/entity/Item.hpp
             src/common/entity/ItemBehaviors.cpp
+            src/common/entity/ItemDurability.cpp
+            src/common/entity/GeneratedItemDurability.cpp
+            src/common/entity/GeneratedItemDurability.hpp
             src/common/entity/ConsumableBehavior.cpp
             src/common/entity/ConsumableBehavior.hpp
             src/common/entity/EquipmentBehavior.cpp
@@ -1837,8 +1856,14 @@ set(GAME_SOURCES
             src/common/world/enchantment/Enchantment.hpp
             src/common/world/enchantment/ItemEnchantments.cpp
             src/common/world/enchantment/ItemEnchantments.hpp
+            src/common/world/enchantment/EnchantmentValueEffect.cpp
+            src/common/world/enchantment/EnchantmentValueEffect.hpp
             src/common/world/enchantment/EnchantmentHelper.cpp
             src/common/world/enchantment/EnchantmentHelper.hpp
+            src/common/world/enchantment/EnchantmentEffects.cpp
+            src/common/world/enchantment/EnchantmentEffects.hpp
+            src/common/world/damagesource/DamageSourceInfo.cpp
+            src/common/world/damagesource/DamageSourceInfo.hpp
 
             # Portal Gun feature — Features.hpp ENABLE_PORTAL_GUN strips
             # bodies when off (so safe to always list). Missing from this

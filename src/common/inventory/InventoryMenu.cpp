@@ -59,9 +59,10 @@ namespace Game {
             "container/slot/boots",
         };
         for (int i = 0; i < Inventory::ARMOR_SIZE; ++i) {
-            AddSlot(std::make_unique<ArmorSlot>(
-                playerInventory, Inventory::ARMOR_BEGIN + i, 8, 8 + i * SLOT_STEP))
-                .noItemIcon = kArmorIcons[i];
+            auto armor = std::make_unique<ArmorSlot>(
+                playerInventory, Inventory::ARMOR_BEGIN + i, 8, 8 + i * SLOT_STEP);
+            armor->owner = this;   // Curse of Binding reads the menu's creative flag
+            AddSlot(std::move(armor)).noItemIcon = kArmorIcons[i];
         }
 
         // 9..35 — main storage, 3 rows of 9 (InventoryMenu.java:55 →

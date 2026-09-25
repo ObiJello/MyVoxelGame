@@ -297,7 +297,7 @@ zeroed), TamableAnimalPanicGoal, OwnerHurtByTargetGoal / OwnerHurtTargetGoal
 
 - *Snow golem shearing* — `SnowGolem::MobInteract`/`Shear`: shears drop the
   carved pumpkin at eye height and clear DATA_PUMPKIN_ID (wire variant byte,
-  NBT "Pumpkin"); the head layer stops drawing it. Shears keep durability.
+  NBT "Pumpkin"); the head layer stops drawing it. The shears take a point of wear.
 - *Wither spawn* — only the soul-sand ritual calls makeInvulnerable (blue
   charge-up + spawn explosion); /summon and the egg spawn it fighting, as
   vanilla. *Breeze* wind + eyes layers, *snow golem* pumpkin head layer.

@@ -517,7 +517,7 @@ namespace Game {
         for (int pass = 0; pass < 2 && m_carried.count < maxStack; ++pass) {
             for (int i = 0; i < SlotCount() && m_carried.count < maxStack; ++i) {
                 Slot& s = GetSlot(i);
-                if (!s.MayPickup()) continue;
+                if (!s.MayPickup() || !CanTakeItemForPickAll(i)) continue;
                 const ItemStack& stack = s.GetItem();
                 if (stack.IsEmpty() || !IsSameItemSameComponents(stack, m_carried)) continue;
                 if (pass == 0 && stack.count >= maxStack) continue;   // partials first

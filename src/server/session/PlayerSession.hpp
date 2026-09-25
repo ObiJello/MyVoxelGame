@@ -495,6 +495,8 @@ namespace Server {
         // in the merchant screen — the hint for the result square, and the
         // payments moved in from the inventory (MerchantMenu.tryMoveItems).
         void HandleSelectTrade(const Network::SelectTradeC2SPacket& packet);
+        // MC handleRenameItem: the open anvil's name box changed.
+        void HandleRenameItem(const Network::RenameItemC2SPacket& packet);
         // A written book asked to be read during a use (IUsePlayer::
         // OpenItemGui): MC ServerPlayer.openItemGui — resolve it, then
         // OpenBookS2C. Drained right after HandleUseItem.
@@ -825,6 +827,11 @@ namespace Server {
         // CloseMenuIfBlockGone.
         bool       m_menuIsBlockBacked = false;
         glm::ivec3 m_openMenuPos{0, 0, 0};
+        // The block the menu was opened from. A menu with no block entity
+        // behind it (anvil, grindstone, enchanting table…) is valid while
+        // that block — or, for an anvil, any anvil — is still at the cell:
+        // MC ItemCombinerMenu.stillValid → isValidBlock.
+        Game::BlockID m_openMenuBlock = Game::BlockID::Air;
         // The other half of an open double chest. Its block entity is half of
         // the menu's CompoundContainer, so it has to stay alive too.
         bool       m_hasMenuPartner = false;
@@ -832,6 +839,15 @@ namespace Server {
 
         // Returns true when the menu was closed because its block vanished.
         bool CloseMenuIfBlockGone();
+        // The costs a click that took a menu's result left on its
+        // ContainerClickResult: the levels an anvil charges, and the anvil's
+        // wear roll + use sound. Run straight after every DoClick.
+        void ApplyMenuTakeCosts(const Game::ContainerClickResult& result);
+        // A grindstone result was taken (ContainerClickResult::grindstoneUsed):
+        // MC's result-slot onTake access.execute — the experience as orbs at
+        // the block's centre (getExperienceAmount's halved-plus-random roll)
+        // and levelEvent 1042 there. Run straight after every DoClick.
+        void ApplyGrindstoneTake(const Game::ContainerClickResult& result);
 
         // ── Merchant menu (MenuType::Merchant) ───────────────────────────
         // The trading mob, by entity id in the dimension it was opened in —

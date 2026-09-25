@@ -14,6 +14,7 @@ namespace Network {
     struct WorldgenIdsS2CPacket;
     struct ChunkUnchangedS2CPacket;
     struct LightUpdateS2CPacket;
+    struct ChunksBiomesS2CPacket;
     struct UnloadChunkS2CPacket;
     struct BlockChangeS2CPacket;
     struct ClientboundBlockUpdateS2CPacket;
@@ -51,6 +52,7 @@ namespace Network {
     struct ContainerButtonClickC2SPacket;
     struct MerchantOffersS2CPacket;
     struct SelectTradeC2SPacket;
+    struct RenameItemC2SPacket;
     struct RemoveMobEffectS2CPacket;
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
@@ -60,6 +62,7 @@ namespace Network {
     struct BossEventS2CPacket;
     struct EndCrystalBeamS2CPacket;
     struct ArmorStandDataS2CPacket;
+    struct ItemFrameDataS2CPacket;
     struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
@@ -128,6 +131,7 @@ namespace Network {
         virtual void onUnloadChunkS2C(const UnloadChunkS2CPacket& packet) {}
         virtual void onChunkUnchangedS2C(const ChunkUnchangedS2CPacket& packet) {}
         virtual void onLightUpdateS2C(const LightUpdateS2CPacket& packet) {}
+        virtual void onChunksBiomesS2C(const ChunksBiomesS2CPacket& packet) {}
         virtual void onChunkBatchStart() {}
         virtual void onChunkBatchFinished(int batchSize) {}
         
@@ -192,6 +196,8 @@ namespace Network {
         virtual void onEndCrystalBeamS2C(const EndCrystalBeamS2CPacket& packet) {}
         // Armor stand poses + equipment (ArmorStandDataS2CPacket.hpp)
         virtual void onArmorStandDataS2C(const ArmorStandDataS2CPacket& packet) {}
+        // Item frame's framed item (ItemFrameDataS2CPacket.hpp)
+        virtual void onItemFrameDataS2C(const ItemFrameDataS2CPacket& packet) {}
         virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
         virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
 
@@ -308,6 +314,7 @@ namespace Network {
         virtual void onContainerButtonClickC2S(const ContainerButtonClickC2SPacket& packet) {}
         // A trade picked in the list (MerchantPackets.hpp) — MC handleSelectTrade
         virtual void onSelectTradeC2S(const SelectTradeC2SPacket& packet) {}
+        virtual void onRenameItemC2S(const RenameItemC2SPacket& packet) {}
 
         // Play phase - Inventory clicks
         virtual void onInventoryClickC2S(const InventoryClickC2SPacket& packet) {}

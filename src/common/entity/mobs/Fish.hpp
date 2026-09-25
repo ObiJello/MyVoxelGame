@@ -40,9 +40,11 @@ namespace Game {
         // MC AbstractFish.getMaxSpawnClusterSize.
         int GetMaxSpawnClusterSize() const override { return 8; }
 
-        // MC removeWhenFarAway: !fromBucket && !hasCustomName — neither
-        // exists yet, so a wild fish always despawns like any water ambient.
-        bool RemoveWhenFarAway(double) const override { return true; }
+        // MC removeWhenFarAway: !fromBucket && !hasCustomName. No fish comes
+        // from a bucket here yet, so only a name keeps one; a name tag also
+        // sets PersistenceRequired, so this arm is for a name set otherwise
+        // (/summon, a loaded save).
+        bool RemoveWhenFarAway(double) const override { return !HasCustomName(); }
 
         // MC WaterAnimal.getBaseExperienceReward (WaterAnimal.java:32-34):
         // 1..3, same roll as Animal's. Out-of-line: needs the level random.

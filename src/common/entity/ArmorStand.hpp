@@ -125,6 +125,8 @@ namespace Game {
         static constexpr int kEquipmentSlots = 6;
         const ItemStack& GetItemBySlot(EquipmentSlot slot) const;
         void SetItemSlot(EquipmentSlot slot, const ItemStack& stack);
+        ItemStack* EquipmentInSlot(EquipmentSlot slot) override;
+        bool HasEquipmentSlots() const override { return true; }
         bool HasItemInSlot(EquipmentSlot slot) const { return !GetItemBySlot(slot).IsEmpty(); }
         int  GetDisabledSlots() const { return m_disabledSlots; }
         void SetDisabledSlots(int v) { m_disabledSlots = v; }

@@ -214,8 +214,16 @@ namespace Server {
 
         // MC LootTable.getRandomItems over the baked pool structure: per
         // pool, check conditions, roll N times, ONE weighted entry per roll.
-        void EvaluateLootTable(Game::Mob& mob, bool killedByPlayer,
+        // `lootingLevel` is the killer's Looting (EnchantmentHelper
+        // .getEnchantmentLevel over its main hand), which the pools'
+        // random_chance_with_enchanted_bonus and the entries'
+        // enchanted_count_increase read.
+        void EvaluateLootTable(Game::Mob& mob, bool killedByPlayer, int lootingLevel,
                                Game::JavaRandom& rng);
+
+        // The living entity behind a GetKillerId: a mob of this level or a
+        // player's view. Null when it is gone.
+        Game::LivingEntity* ResolveKiller(int32_t id) const;
 
         ServerLevelBridge* m_level;
         std::unordered_map<int32_t, std::unique_ptr<Game::Mob>> m_mobs;

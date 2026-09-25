@@ -32,6 +32,7 @@
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/math/WorldCoordinates.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -231,9 +232,99 @@ namespace Server {
         // The client-reported sprint (MC's shared flag 3 on the server's
         // player): what isSwimming and the mobs reading a player's sprint see.
         SetSprinting(m_player->isSprinting());
+        // The fall the move packets have accumulated (PlayerSession), which
+        // entity predicates read (Wind Burst's movement.fall_distance).
+        fallDistance = m_player->getFallDistance();
+    }
+
+    Game::ItemStack* PlayerEntityView::EquipmentInSlot(Game::EquipmentSlot slot) {
+        if (!m_player) return nullptr;
+        Game::Inventory& inventory = m_player->getInventory();
+        if (slot == Game::EquipmentSlot::MAINHAND) {
+            return &inventory.MutableSlot(Game::Inventory::HotbarToIndex(inventory.GetSelectedSlot()));
+        }
+        const int index = Game::InventoryIndexFor(slot);
+        return index >= 0 ? &inventory.MutableSlot(index) : nullptr;
+    }
+
+    void PlayerEntityView::Knockback(double power, double dx, double dz) {
+        const glm::dvec3 before = velocity;
+        Game::LivingEntity::Knockback(power, dx, dz);
+        if (velocity != before) {
+            m_pendingKnockback = velocity;
+            m_hasPendingKnockback = true;
+        }
+    }
+
+    void PlayerEntityView::IgniteForTicks(int ticks) {
+        if (m_player) m_player->igniteForTicks(ticks);
+    }
+
+    void PlayerEntityView::TickEnchantments() {
+        if (!m_player || !m_level || m_level->IsClientSide()) return;
+        const Game::EnchantmentEquipment equipment = Game::EnchantmentEquipment::Of(*this);
+
+        // MC LivingEntity.baseTick: EnchantmentHelper.tickEffects (Soul
+        // Speed's wisps and soul-escape sound) ...
+        if (!m_player->isDead()) Game::EnchantmentHelper::TickEffects(*m_level, equipment);
+
+        // ... and onChangedBlock → runLocationChangedEffects whenever the
+        // block position changes (Frost Walker's disk, Soul Speed's boost
+        // and wear).
+        const glm::ivec3 blockPos = BlockPosition();
+        if (!m_hasLastBlockPos || blockPos != m_lastBlockPos) {
+            m_lastBlockPos = blockPos;
+            m_hasLastBlockPos = true;
+            if (!m_player->isDead()) {
+                Game::EnchantmentHelper::RunLocationChangedEffects(m_level, m_level->Blocks(), m_level->Random(),
+                                                                   equipment, m_locationEnchantments);
+            }
+        }
+
+        // MC LivingEntity.collectEquipmentChanges: a slot whose stack no
+        // longer matches (ItemStack.matches — a new item, a different
+        // enchantment, a durability change) takes the old stack's
+        // enchantment modifiers off and stops its location effects, then
+        // puts the new stack's on (unless it is broken) and runs its
+        // location effects. Item attribute modifiers (armour, attack damage)
+        // are read from the slots on demand in this engine, so only the
+        // enchantments' pass through the view's attribute map.
+        static constexpr Game::EquipmentSlot kSlots[] = {
+            Game::EquipmentSlot::MAINHAND, Game::EquipmentSlot::OFFHAND, Game::EquipmentSlot::FEET,
+            Game::EquipmentSlot::LEGS, Game::EquipmentSlot::CHEST, Game::EquipmentSlot::HEAD,
+        };
+        for (const Game::EquipmentSlot slot : kSlots) {
+            Game::ItemStack& last = m_lastEquipment[static_cast<size_t>(slot)];
+            const Game::ItemStack* now = EquipmentInSlot(slot);
+            const Game::ItemStack current = now ? *now : Game::ItemStack{};
+            if (Game::ItemStacksMatch(current, last)) continue;
+            if (!last.IsEmpty()) {
+                Game::EnchantmentHelper::ForEachModifier(last, slot,
+                    [this](Game::Attribute attribute, const Game::AttributeModifier& modifier) {
+                        m_attributes.RemoveModifier(attribute, static_cast<Game::ModifierId>(modifier.id));
+                    });
+                Game::EnchantmentHelper::StopLocationBasedEffectsInSlot(equipment, m_locationEnchantments, slot);
+            }
+            last = current;
+            if (!current.IsEmpty() && !Game::IsBrokenItem(current)) {
+                Game::EnchantmentHelper::ForEachModifier(current, slot,
+                    [this](Game::Attribute attribute, const Game::AttributeModifier& modifier) {
+                        m_attributes.RemoveModifier(attribute, static_cast<Game::ModifierId>(modifier.id));
+                        m_attributes.AddModifier(attribute, modifier);
+                    });
+                if (!m_player->isDead()) {
+                    Game::EnchantmentHelper::RunLocationChangedEffectsInSlot(
+                        m_level, m_level->Blocks(), m_level->Random(), equipment, m_locationEnchantments, slot);
+                }
+            }
+        }
     }
 
     void PlayerEntityView::TickCombatState() {
+        // MC Entity.tick's tickCount, which a view never gets from a Tick():
+        // the effect cadences and the enchantment predicates'
+        // periodic_tick count on it.
+        ++tickCount;
         TickCombatTimers();
 
         // MC LivingEntity.tick's updateSwingTime — the view is never Tick()ed,
@@ -261,6 +352,10 @@ namespace Server {
         // heals and mining fatigue counts down. Runs AFTER SyncFromPlayer so
         // the health the ticks read is this tick's truth.
         TickEffects();
+
+        // The worn enchantments: tick and location effects, and the
+        // attribute modifiers of whatever the player now wears.
+        TickEnchantments();
 
         // MC Player.tick, after super.tick(): a TURTLE_HELMET worn with the
         // eye out of water tops WATER_BREATHING up to 10 s (turtleHelmetTick:
@@ -324,8 +419,12 @@ namespace Server {
         // tracker, so it rides along with the damage call. The slug is
         // title-cased ("zombie" -> "Zombie") to stand in for MC's translated
         // entity name.
+        // A named attacker is its name (MC Entity.getDisplayName: the custom
+        // name before the type's).
         std::string attackerName;
-        if (attacker) {
+        if (attacker && attacker->HasCustomName()) {
+            attackerName = *attacker->GetCustomName();
+        } else if (attacker) {
             const std::string_view slug = attacker->TypeInfo().slug;
             attackerName.assign(slug.begin(), slug.end());
             bool upper = true;
@@ -379,6 +478,9 @@ namespace Server {
             case Game::MobDamageSource::Stalagmite:
                 playerSource = DamageSource::STALAGMITE;
                 break;
+            case Game::MobDamageSource::Thorns:
+                playerSource = DamageSource::THORNS;
+                break;
             default:
                 break;
         }
@@ -406,7 +508,12 @@ namespace Server {
             if (amount == 0.0f) return;   // MC returns false without hurting
         }
 
-        m_player->damage(amount, playerSource, attackerName);
+        // MC's whole DamageSource rides along for the enchantment effects
+        // (Protection's damage-type tags, Breach through the attacker's
+        // weapon, Frost Walker's immunity).
+        const Game::DamageSourceInfo info =
+            Game::DamageSourceInfo::Of(source, attacker, HurtDirectEntity());
+        m_player->damage(amount, playerSource, attackerName, info);
         m_health = m_player->getHealth();
     }
 
@@ -512,6 +619,10 @@ namespace Server {
             }
         }
         return hit;
+    }
+
+    void PlayerEntityView::OnEquippedItemBroken(const Game::ItemStack& broken, Game::EquipmentSlot slot) {
+        if (m_player) m_player->OnEquippedItemBroken(broken, slot);
     }
 
     void PlayerEntityView::IndicateDamage(double xd, double zd) {

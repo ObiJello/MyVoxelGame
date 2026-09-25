@@ -162,7 +162,7 @@ namespace Game::Anvil {
         w.Int  ("XpLevel", xp.Level());
         w.Float("XpP",     xp.Progress());
         w.Int  ("XpTotal", xp.Total());
-        w.Int  ("XpSeed",  0);
+        w.Int  ("XpSeed",  player.getEnchantmentSeed());
         w.Int  ("Score",   0);
 
         w.Int   ("playerGameType", static_cast<int>(player.getGameMode()));
@@ -460,6 +460,7 @@ namespace Game::Anvil {
         xp.SetLevel   (data->GetValue<int32_t>("XpLevel", 0));
         xp.SetProgress(data->GetValue<float>("XpP", 0.0f));
         xp.SetTotal   (data->GetValue<int32_t>("XpTotal", 0));
+        player.setEnchantmentSeed(data->GetValue<int32_t>("XpSeed", 0));
 
         auto& inventory = player.getInventory();
         inventory.Clear();

@@ -1240,6 +1240,12 @@ namespace Server {
                     return std::make_unique<Network::Packets::SelectTradeC2SPacketImpl>(data);
                 }
                 break;
+            case PacketId::RenameItemC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeRenameItemC2S(payload);
+                    return std::make_unique<Network::Packets::RenameItemC2SPacketImpl>(std::move(data));
+                }
+                break;
 
 
             case PacketId::InventoryClickC2S:

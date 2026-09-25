@@ -31,6 +31,9 @@
 #include "client/renderer/gui/InventoryScreen.hpp"
 #include "client/renderer/gui/CreativeModeInventoryScreen.hpp"
 #include "client/renderer/gui/MerchantScreen.hpp"
+#include "client/renderer/gui/AnvilScreen.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
+#include "common/data/DataComponents.hpp"
 #include "client/renderer/gui/items/ChestItemRenderer.hpp"
 #include "client/renderer/gui/items/BedItemRenderer.hpp"
 #include "client/renderer/gui/items/ShulkerBoxItemRenderer.hpp"
@@ -182,6 +185,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/renderer/entity/XpOrbRenderer.hpp"
 #include "client/renderer/entity/LightningBoltRenderer.hpp"
 #include "client/entity/ClientMobManager.hpp"
+#include "common/text/Language.hpp"
 #include "client/entity/ClientFallingBlocks.hpp"
 #include "client/ClientTickRateManager.hpp"
 #include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
@@ -515,6 +519,10 @@ static uint16_t     s_lastPresencePort = 0;
     // the GUI scale it draws at.
     static Render::DebugScreen::Context s_debugContext;
     static int s_debugGuiScale = 1;
+    // The frame's entity partial tick (the world pass computes it), kept for
+    // RenderHUD's mob nametags so a tag rides the same lerped body the mob
+    // renderer drew.
+    static float s_entityPartialTick = 1.0f;
     // gpu_utilization entry: the whole-frame GPU timer, begun at frame start
     // and ended before Present; read back the following frame.
     static Render::GPUTimerHandle s_frameGpuTimer = Render::INVALID_GPU_TIMER;
@@ -1057,7 +1065,7 @@ static uint16_t     s_lastPresencePort = 0;
         // To replicate that without a 3D text pipeline, we project the head position to GUI
         // space and apply a scale = (0.025 * guiHeight * proj[1][1]) / (2 * depth) to GuiGraphics
         // so the rendered text occupies the same screen area as MC's billboard would.
-        if (Client::g_remotePlayerManager && !s_hideHudForLeave) {
+        if (!s_hideHudForLeave) {
             glm::mat4 nameVp = proj * view;
             // `view` is the render-space (camera-relative) view, so the eye
             // recovered from its inverse is the render-space one; it is
@@ -1075,8 +1083,10 @@ static uint16_t     s_lastPresencePort = 0;
             // `occluded` draws the see-through half alone (behind a wall);
             // `discrete` (a sneaking player, MC isDiscrete) the NORMAL-mode
             // half alone, which a wall hides — its caller drops it then.
-            auto drawTag = [&](const Client::RemotePlayer& rp, const glm::dvec3& tagWorld, bool occluded,
-                               bool discrete = false) {
+            // `bodyScale` sizes a player's tag with their body; a mob's is
+            // always 1 (MC submits every tag at the entity origin, unscaled).
+            auto drawTag = [&](const std::string& name, float bodyScale, const glm::dvec3& tagWorld,
+                               bool occluded, bool discrete = false) {
                 // nameVp is render-space: the world anchor goes through
                 // ToRender (double subtraction) before the projection.
                 glm::vec4 clip = nameVp * glm::vec4(Render::ToRender(tagWorld), 1.0f);
@@ -1094,9 +1104,9 @@ static uint16_t     s_lastPresencePort = 0;
                 // The tag grows and shrinks with the body, within limits
                 // that keep a tiny player's name readable and a giant's
                 // from covering the screen.
-                scale *= std::clamp(rp.scale, 0.5f, 8.0f);
+                scale *= std::clamp(bodyScale, 0.5f, 8.0f);
 
-                int textW = g_fontRenderer.GetStringWidth(rp.name);
+                int textW = g_fontRenderer.GetStringWidth(name);
                 const int lineH = Render::FontRenderer::LINE_HEIGHT;
 
                 graphics.PushMatrix();
@@ -1137,17 +1147,17 @@ static uint16_t     s_lastPresencePort = 0;
                     // (textColor + background), depth-tested — so visible
                     // only while nothing is in the way — and fogged.
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(rp.name, tagX, tagY, foggedWhite(0x80u), true);
+                    graphics.DrawString(name, tagX, tagY, foggedWhite(0x80u), true);
                 } else if (occluded) {
                     // Behind a wall only the see-through half passes.
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(rp.name, tagX, tagY, kSeeThroughText, true);
+                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, true);
                 } else {
                     // Both halves: the solid NORMAL text (white, fogged),
                     // then the see-through background and text over it.
-                    graphics.DrawString(rp.name, tagX, tagY, foggedWhite(0xFFu), true);
+                    graphics.DrawString(name, tagX, tagY, foggedWhite(0xFFu), true);
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(rp.name, tagX, tagY, kSeeThroughText, true);
+                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, true);
                 }
                 graphics.PopMatrix();
             };
@@ -1168,6 +1178,9 @@ static uint16_t     s_lastPresencePort = 0;
                                               static_cast<float>(len)).has_value();
             };
 
+            // Remote players first; the mob pass below runs with or without
+            // a player manager.
+            if (Client::g_remotePlayerManager)
             for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (rp.name.empty()) continue;
                 // /invisible, and MC LivingEntityRenderer.shouldShowName:
@@ -1193,10 +1206,10 @@ static uint16_t     s_lastPresencePort = 0;
                         // within 32 blocks only; and its NORMAL-mode tag is
                         // depth-tested, so a wall hides it.
                         if (glm::length(tagWorld - cameraPos) < 32.0 && !occluded) {
-                            drawTag(rp, tagWorld, false, /*discrete=*/true);
+                            drawTag(rp.name, rp.scale, tagWorld, false, /*discrete=*/true);
                         }
                     } else {
-                        drawTag(rp, tagWorld, occluded);
+                        drawTag(rp.name, rp.scale, tagWorld, occluded);
                     }
                 }
 
@@ -1227,8 +1240,8 @@ static uint16_t     s_lastPresencePort = 0;
                         const double depth = p.SignedDistanceToPlane(image);
                         if (depth <= 0.0 || depth > 3.0 * std::max(rp.scale, 0.05f)) return;
                         const bool hidden = blocked(cameraPos, image);
-                        if (!rp.isCrouching) drawTag(rp, image, hidden);
-                        else if (!hidden && glm::length(image - eye) < 32.0) drawTag(rp, image, false, true);
+                        if (!rp.isCrouching) drawTag(rp.name, rp.scale, image, hidden);
+                        else if (!hidden && glm::length(image - eye) < 32.0) drawTag(rp.name, rp.scale, image, false, true);
                         return;
                     }
                     bool occluded = blocked(cameraPos, through->point -
@@ -1240,10 +1253,96 @@ static uint16_t     s_lastPresencePort = 0;
                         });
                     }
                     // A sneaking player's tag (discrete): unoccluded, within 32.
-                    if (!rp.isCrouching) drawTag(rp, image, occluded);
-                    else if (!occluded && glm::length(image - eye) < 32.0) drawTag(rp, image, false, true);
+                    if (!rp.isCrouching) drawTag(rp.name, rp.scale, image, occluded);
+                    else if (!occluded && glm::length(image - eye) < 32.0) drawTag(rp.name, rp.scale, image, false, true);
                 });
 #endif
+            }
+
+            // ── Nametags above named mobs ─────────────────────────────────
+            // MC MobRenderer.shouldShowName: LivingEntityRenderer's rules
+            // (not invisible to the viewer — a spectator sees through
+            // INVISIBILITY — and not carrying a passenger), then
+            // entity.shouldShowName() (CustomNameVisible) or a custom name on
+            // the entity under the crosshair (crosshairPickEntity).
+            // ArmorStandRenderer overrides the whole test with
+            // CustomNameVisible alone, which is what lets an invisible stand
+            // be floating text. Both only within EntityRenderer's
+            // name_tag_distance (64, from the camera). The name is
+            // getDisplayName: the custom name, else the type's name. Mobs
+            // never sneak (isDiscrete), so theirs is always the two-part tag.
+            // Not drawn through portals: only the bound level's mobs.
+            if (Client::g_clientMobManager) {
+                const bool viewerSpectator = s_debugContext.player && s_debugContext.player->IsSpectator();
+                // The pick is a ray against every nearby mob — taken once,
+                // and only when a named mob actually needs the answer.
+                std::optional<int32_t> crosshairId;
+                // The model-mob list: primed TNT and falling blocks (the
+                // hundred-thousand-entity cases) are not walked for a tag.
+                for (const Client::ClientMob* entryPtr : Client::g_clientMobManager->ModelMobList()) {
+                    if (!entryPtr || !entryPtr->mob) continue;
+                    const Client::ClientMob& entry = *entryPtr;
+                    const int32_t id = entry.selfId;
+                    const Game::Mob& mob = *entry.mob;
+                    // MC ItemFrameRenderer.shouldShowName / getNameTag: a
+                    // frame shows its FRAMED ITEM's name — only when looked
+                    // at, and only when that item has a custom name.
+                    if (const auto* frame = dynamic_cast<const Game::ItemFrame*>(&mob)) {
+                        const Game::ItemStack& framed = frame->GetItem();
+                        if (framed.IsEmpty() || !framed.components.has(Game::DataComponents::CUSTOM_NAME)) continue;
+                        if (!crosshairId) {
+                            crosshairId = s_debugContext.controller ? s_debugContext.controller->PickEntity() : 0;
+                        }
+                        if (*crosshairId != id) continue;
+                        const glm::dvec3 framePos = glm::mix(entry.renderPrevPosition, mob.position,
+                                                             static_cast<double>(s_entityPartialTick));
+                        const glm::dvec3 tagWorld(framePos.x,
+                                                  framePos.y + static_cast<double>(mob.TypeInfo().height) + 0.5,
+                                                  framePos.z);
+                        drawTag(Game::GetItemStackHoverName(framed), 1.0f, tagWorld, blocked(cameraPos, tagWorld));
+                        continue;
+                    }
+                    if (!mob.HasCustomName() && !mob.IsCustomNameVisible()) continue;
+
+                    const glm::dvec3 renderPos = glm::mix(entry.renderPrevPosition, mob.position,
+                                                          static_cast<double>(s_entityPartialTick));
+                    const glm::dvec3 toMob = renderPos - cameraPos;
+                    if (glm::dot(toMob, toMob) >= 64.0 * 64.0) continue;
+
+                    bool show = mob.IsCustomNameVisible();
+                    if (mob.GetType() != Game::EntityTypeId::ArmorStand) {
+                        if (mob.IsEffectInvisible() && !viewerSpectator) continue;
+                        if (mob.IsVehicle()) continue;
+                        if (!show && mob.HasCustomName()) {
+                            if (!crosshairId) {
+                                crosshairId = s_debugContext.controller
+                                    ? s_debugContext.controller->PickEntity() : 0;
+                            }
+                            show = (*crosshairId == id);
+                        }
+                    }
+                    if (!show) continue;
+
+                    std::string name;
+                    if (mob.HasCustomName()) {
+                        name = *mob.GetCustomName();
+                    } else {
+                        const std::string slug(mob.TypeInfo().slug);
+                        name = Game::Language::GetOrDefault("entity.minecraft." + slug, slug);
+                    }
+                    if (name.empty()) continue;
+
+                    // MC's NAME_TAG attachment falls back AT_HEIGHT (the top
+                    // of the current box); submitNameTag lifts it 0.5 more.
+                    // A painting's "box" there is its type's 0.5 x 0.5
+                    // (EntityType.PAINTING sized(0.5, 0.5)) above its
+                    // centre, not the canvas.
+                    const double attachHeight = mob.GetType() == Game::EntityTypeId::Painting
+                        ? static_cast<double>(mob.TypeInfo().height)
+                        : static_cast<double>(mob.GetBbHeight());
+                    const glm::dvec3 tagWorld(renderPos.x, renderPos.y + attachHeight + 0.5, renderPos.z);
+                    drawTag(name, 1.0f, tagWorld, blocked(cameraPos, tagWorld));
+                }
             }
         }
 
@@ -5322,6 +5421,10 @@ static uint16_t     s_lastPresencePort = 0;
                             (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SHIFT))) ? GLFW_MOD_SHIFT : 0;
                 mods |= ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL)) ||
                          (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_CONTROL))) ? GLFW_MOD_CONTROL : 0;
+                // Cmd on macOS — MC's isSelectAll / isCopy / isPaste / isCut
+                // accept it, and the anvil's name box reads them.
+                mods |= ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SUPER)) ||
+                         (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SUPER))) ? GLFW_MOD_SUPER : 0;
 
                 auto edge = [&](bool& held, int key, int glfwKey) {
                     bool down = Input::IsGlfwKeyDown(key);
@@ -5360,6 +5463,15 @@ static uint16_t     s_lastPresencePort = 0;
                 edge(iendH,   GLFW_KEY_END,       GLFW_KEY_END);
                 edge(ibsH,    GLFW_KEY_BACKSPACE, GLFW_KEY_BACKSPACE);
                 edge(idelH,   GLFW_KEY_DELETE,    GLFW_KEY_DELETE);
+                // Select all / copy / paste / cut, for a text box in a
+                // container screen (the anvil's name, the creative search).
+                // Only meaningful with Ctrl/Cmd; the plain letters arrive as
+                // characters above.
+                static bool iaH=false, icH=false, ivH=false, ixH=false;
+                edge(iaH, GLFW_KEY_A, GLFW_KEY_A);
+                edge(icH, GLFW_KEY_C, GLFW_KEY_C);
+                edge(ivH, GLFW_KEY_V, GLFW_KEY_V);
+                edge(ixH, GLFW_KEY_X, GLFW_KEY_X);
 
                 // Mouse position: feed in window-pixel coords + GUI virtual size.
                 // Use the same GUI-scale formula as the render path (line 167).
@@ -5397,6 +5509,21 @@ static uint16_t     s_lastPresencePort = 0;
                 Input::ResetScrollOffset();
 
                 inv.Update(1.0f / 60.0f);
+
+                // The anvil's name box, BEFORE this frame's clicks: the
+                // server must hold the typed name when a click takes the
+                // result (MC sends ServerboundRenameItemPacket as each
+                // keystroke lands).
+                Network::RenameItemC2SPacket rename;
+                while (Render::ConsumeRenameItem(rename)) {
+                    if (Client::Control::IsControlling()) continue;
+                    if (networkClient && networkClient->IsConnected()) {
+                        if (auto conn = networkClient->GetConnection()) {
+                            conn->SendPacket(static_cast<uint8_t>(Network::PacketId::RenameItemC2S),
+                                             Network::Serialization::Serialize(rename));
+                        }
+                    }
+                }
 
                 // Drain pending clicks → server.
                 Network::InventoryClickC2SPacket click;
@@ -7944,6 +8071,7 @@ static uint16_t     s_lastPresencePort = 0;
                     Client::g_clientTickRate.IsEntityFrozen()
                         ? 1.0f
                         : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                s_entityPartialTick = partialTick;
 #if ENABLE_PORTAL_GUN
                 // Phase G (remote): for each remote player straddling an
                 // active portal pair we need BOTH halves drawn — entry-clipped

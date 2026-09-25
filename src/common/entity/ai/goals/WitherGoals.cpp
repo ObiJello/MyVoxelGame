@@ -5,6 +5,7 @@
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/decoration/HangingEntity.hpp"
 
 #include <vector>
 
@@ -48,6 +49,8 @@ namespace Game {
             // Projectiles ride the Mob pipeline here (MC's are not
             // LivingEntities and never reach this selector) — skip them.
             if (dynamic_cast<const Projectile*>(living)) return;
+            // The same for paintings and item frames (plain Entities in MC).
+            if (dynamic_cast<const HangingEntity*>(living)) return;
             if (!m_conditions.Test(m_wither, *living)) return;
             const double d = m_wither->DistanceToSqr(*living);
             if (!best || d < bestDistSq) { best = living; bestDistSq = d; }

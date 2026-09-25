@@ -1,7 +1,9 @@
 // File: src/common/inventory/Slot.cpp
 #include "Slot.hpp"
+#include "AbstractContainerMenu.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/EquipmentSlot.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include <algorithm>
 
 namespace Game {
@@ -53,6 +55,13 @@ namespace Game {
         if (here.count <= 0) here.Clear();
         SetChanged();
         return out;
+    }
+
+    bool ArmorSlot::MayPickup() const {
+        const ItemStack& item = GetItem();
+        const bool creative = owner && owner->creative;
+        if (!item.IsEmpty() && !creative && EnchantmentHelper::HasPreventArmorChange(item)) return false;
+        return Slot::MayPickup();
     }
 
     bool ArmorSlot::MayPlace(const ItemStack& stack) const {

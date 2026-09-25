@@ -296,11 +296,12 @@ namespace Game {
 
     UseResult Bighorn::MobInteract(LivingEntity& player, ItemStack& held) {
         // MC Sheep.mobInteract — the shears branch (see Sheep::MobInteract
-        // for the CONSUME cases and the durability note).
+        // for the CONSUME cases).
         if (held.itemId != Items::Shears) return GrazingAnimal::MobInteract(player, held);
         if (m_level && m_level->IsClientSide()) return UseResult::Consume;
         if (!ReadyForShearing()) return UseResult::Consume;
         Shear();
+        HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);   // MC hurtAndBreak(1, player, hand)
         return UseResult::Success;
     }
 

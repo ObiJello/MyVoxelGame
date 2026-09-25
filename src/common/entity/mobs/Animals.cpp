@@ -97,8 +97,8 @@ namespace Game {
         if (held.itemId == Items::Shears && ReadyForShearing()) {
             if (m_level && m_level->IsClientSide()) return UseResult::Success;
             Shear();
-            // MC: itemStack.hurtAndBreak(1, ...) — no durability system yet
-            // (the same note as Sheep::MobInteract).
+            // MC: itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot()).
+            HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
             return UseResult::Success;
         }
         return Animal::MobInteract(player, held);
@@ -404,10 +404,8 @@ namespace Game {
         if (!ReadyForShearing()) return UseResult::Consume;
 
         Shear();
-        // MC also does `itemStack.hurtAndBreak(1, player, hand)`. There is no
-        // durability system yet (see ItemBehaviors' HurtAndBreak stub), so the
-        // shears survive — the one deviation here, and it disappears the day
-        // the DAMAGE component lands.
+        // MC `itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot())`.
+        HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
         return UseResult::Success;
     }
 

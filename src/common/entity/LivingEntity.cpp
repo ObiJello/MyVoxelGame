@@ -7,6 +7,7 @@
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/entity/Item.hpp"
 #include "common/core/Mth.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
@@ -14,6 +15,8 @@
 #include "common/sound/EntitySounds.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/SoundType.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -958,10 +961,21 @@ namespace Game {
     }
 
     int LivingEntity::DecreaseAirSupply(int currentSupply) {
-        // MC decreaseAirSupply rolls OXYGEN_BONUS (the RESPIRATION enchant's
-        // attribute) to sometimes skip the tick; no mob wears enchanted
-        // helmets here, so MC's oxygenBonus == 0 path is the whole function.
+        // MC decreaseAirSupply: `oxygenBonus > 0 && random.nextDouble() >=
+        // 1 / (oxygenBonus + 1)` keeps the tick's air. OXYGEN_BONUS is the
+        // RESPIRATION enchantment's attribute (a player's helmet, through
+        // the view's equipment modifiers); with none the roll never happens.
+        const double oxygenBonus = GetAttributeValue(Attribute::OxygenBonus);
+        if (oxygenBonus > 0.0 && m_level &&
+            m_level->Random().NextDouble() >= 1.0 / (oxygenBonus + 1.0)) {
+            return currentSupply;
+        }
         return currentSupply - 1;
+    }
+
+    void LivingEntity::IgniteForTicks(int ticks) {
+        Entity::IgniteForTicks(static_cast<int>(std::ceil(
+            static_cast<double>(ticks) * GetAttributeValue(Attribute::BurningTime))));
     }
 
     void LivingEntity::HandleUnderwaterAir() {
@@ -1099,7 +1113,7 @@ namespace Game {
 
     // ── Damage ─────────────────────────────────────────────────────────────
 
-    float LivingEntity::GetDamageAfterArmorAbsorb(MobDamageSource source, float amount) const {
+    float LivingEntity::GetDamageAfterArmorAbsorb(MobDamageSource source, float amount, Entity* attacker) {
         // MC CombatRules.getDamageAfterAbsorb. Armor toughness is in the
         // formula but is 0 for every mob here; keeping it spelled out means a
         // mob that gains armour later needs no change.
@@ -1109,7 +1123,20 @@ namespace Game {
         const float toughness = static_cast<float>(GetAttributeValue(Attribute::ArmorToughness));
         const float f = 2.0f + toughness / 4.0f;
         const float g = std::clamp(armor - amount / f, armor * 0.2f, 20.0f);
-        return amount * (1.0f - g / 25.0f);
+        float armorFraction = g / 25.0f;
+        // source.getWeaponItem() (the direct entity's weapon): its
+        // armor_effectiveness effects (Breach) rewrite the fraction, clamped
+        // to [0, 1]. Server only, as MC's `level instanceof ServerLevel`.
+        Entity* const direct = m_hurtDirectEntity ? m_hurtDirectEntity : attacker;
+        if (direct && m_level && !m_level->IsClientSide()) {
+            if (ItemStack* weapon = direct->GetWeaponItem(); weapon && !weapon->IsEmpty()) {
+                const DamageSourceInfo info = DamageSourceInfo::Of(source, attacker, m_hurtDirectEntity);
+                armorFraction = std::clamp(EnchantmentHelper::ModifyArmorEffectiveness(
+                                               *m_level, *weapon, *this, info, armorFraction),
+                                           0.0f, 1.0f);
+            }
+        }
+        return amount * (1.0f - armorFraction);
     }
 
     float LivingEntity::GetDamageAfterMagicAbsorb(MobDamageSource source, float amount,
@@ -1132,8 +1159,20 @@ namespace Game {
         // through a zombie's 2 armor is the observable difference.
         const bool bypassesArmor =
             source == MobDamageSource::Magic || source == MobDamageSource::Wither;
-        if (!bypassesArmor) amount = GetDamageAfterArmorAbsorb(source, amount);
+        if (!bypassesArmor) amount = GetDamageAfterArmorAbsorb(source, amount, attacker);
         amount = GetDamageAfterMagicAbsorb(source, amount, attacker);
+        // getDamageAfterMagicAbsorb's tail: unless #bypasses_effects or
+        // #bypasses_enchantments, the worn enchantments' damage_protection
+        // (EnchantmentHelper.getDamageProtection), capped at 20 — at most
+        // 80 % off (CombatRules.getDamageAfterMagicAbsorb).
+        if (amount > 0.0f && HasEquipmentSlots() && m_level && !m_level->IsClientSide()) {
+            const DamageSourceInfo info = DamageSourceInfo::Of(source, attacker, m_hurtDirectEntity);
+            if (!info.Is("minecraft:bypasses_effects") && !info.Is("minecraft:bypasses_enchantments")) {
+                const float protection = EnchantmentHelper::GetDamageProtection(
+                    *m_level, *this, info, EnchantmentEquipment::Of(*this));
+                if (protection > 0.0f) amount *= 1.0f - std::clamp(protection, 0.0f, 20.0f) / 25.0f;
+            }
+        }
         // MC actuallyHurt: the absorption hearts (ABSORPTION's) soak the hit
         // first; whatever gets through comes off health.
         const float originalDamage = amount;
@@ -1192,6 +1231,16 @@ namespace Game {
         if (IsFireDamage(source)) {
             if (FireImmune()) return false;
             if (HasEffect(MobEffectId::FireResistance)) return false;
+        }
+
+        // MC LivingEntity.isInvulnerableTo → EnchantmentHelper
+        // .isImmuneToDamage: a worn enchantment's damage_immunity (Frost
+        // Walker against #burn_from_stepping) refuses the hit outright.
+        if (HasEquipmentSlots() && m_level && !m_level->IsClientSide()) {
+            const DamageSourceInfo info = DamageSourceInfo::Of(source, attacker, m_hurtDirectEntity);
+            if (EnchantmentHelper::IsImmuneToDamage(*m_level, *this, info, EnchantmentEquipment::Of(*this))) {
+                return false;
+            }
         }
 
         // MC hurtServer: `this.noActionTime = 0;` on every accepted hit — a
@@ -1268,6 +1317,8 @@ namespace Game {
         const bool voiced = m_level && !m_level->IsClientSide() && !IsPlayer();
         if (IsDeadOrDying()) {
             if (voiced && tookFullDamage) MakeSound(GetDeathSound());
+            m_killerId = attacker ? attacker->GetId() : -1;
+            m_killerDirectId = m_hurtDirectEntity ? m_hurtDirectEntity->GetId() : m_killerId;
             Die(source, attacker);
         } else if (voiced && tookFullDamage) {
             PlayHurtSound(source);
@@ -1340,6 +1391,16 @@ namespace Game {
             Swing();
         } else {
             Entity::HandleEntityEvent(id);
+        }
+    }
+
+    void LivingEntity::OnEquippedItemBroken(const ItemStack& broken, EquipmentSlot slot) {
+        // MC onEquippedItemBroken: broadcastEntityEvent(entityEventForEquipment-
+        // Break(slot)); stopLocationBasedEffects has nothing to undo here — an
+        // entity's attribute modifiers are not built from its equipment.
+        (void)broken;
+        if (m_level && !m_level->IsClientSide()) {
+            m_level->BroadcastEntityEvent(*this, EntityEventForEquipmentBreak(slot));
         }
     }
 

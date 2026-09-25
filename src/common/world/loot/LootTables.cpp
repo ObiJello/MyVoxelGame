@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/world/level/World.hpp"
 
 #include <algorithm>
@@ -59,21 +60,17 @@ namespace Game {
         }
 
         // ── Enchantments ────────────────────────────────────────────────────
-        // Tools cannot hold enchantments yet: DataComponents registers
-        // STORED_ENCHANTMENTS (enchanted books) but not ENCHANTMENTS — see the
-        // notes at Item.cpp:544 and EnchantmentHelper.hpp:24. Every Silk Touch
-        // and Fortune test below therefore evaluates at level 0, which is
-        // exactly MC's no-enchantment branch, so stone gives cobblestone and
-        // ores give their raw drop at ×1.
-        //
-        // This is the ONE function to change when ENCHANTMENTS lands. Every
-        // silk-touch alternative, table_bonus and apply_bonus in the baked data
-        // is already wired to it and starts working the moment it returns
-        // a real level.
+        // The tool's level of the enchantment a condition or bonus names — MC
+        // EnchantmentHelper.getItemEnchantmentLevel over the tool's
+        // ENCHANTMENTS (never STORED_ENCHANTMENTS: a held enchanted book is
+        // not a Silk Touch tool). Every silk-touch alternative,
+        // match_tool enchantment test, table_bonus and apply_bonus in the
+        // baked data reads its level here.
         int EnchantmentLevel(const ItemStack* tool, LootEnchantment which) {
             if (!tool || tool->IsEmpty()) return 0;
-            (void)which;   // Enchantment::SilkTouch / Enchantment::Fortune
-            return 0;
+            const EnchantmentId id = which == LootEnchantment::SilkTouch ? Enchantments::SilkTouch
+                                                                         : Enchantments::Fortune;
+            return EnchantmentHelper::GetItemEnchantmentLevel(id, *tool);
         }
 
         // ── Conditions ──────────────────────────────────────────────────────
@@ -468,12 +465,17 @@ namespace Game {
             return 15 + rng.NextInt(15) + rng.NextInt(15);
         }
 
-        // Everything else routes through Block.tryDropExperience, where a
-        // Silk Touch tool zeroes the payout (EnchantmentHelper
-        // .processBlockExperience — the silk_touch enchantment's
-        // block_experience effect sets it to 0).
-        if (EnchantmentLevel(tool, LootEnchantment::SilkTouch) > 0) return 0;
+        // Everything else routes through Block.tryDropExperience:
+        //   experience = EnchantmentHelper.processBlockExperience(level, tool,
+        //                                                   xpRange.sample(random))
+        // — the range is ALWAYS sampled (its draws are spent even under Silk
+        // Touch), then the tool's block_experience effects rewrite it (the
+        // silk_touch enchantment's `set 0`).
+        const int sampled = SampleBlockBreakExperience(block, rng);
+        return tool ? EnchantmentHelper::ProcessBlockExperience(*tool, sampled, rng) : sampled;
+    }
 
+    int LootTables::SampleBlockBreakExperience(BlockID block, JavaRandom& rng) {
         // UniformInt.of(min, max).sample == min + nextInt(max - min + 1).
         const auto uniform = [&rng](int min, int max) {
             return min + rng.NextInt(max - min + 1);

@@ -13,6 +13,7 @@
 #include "common/entity/IUsePlayer.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/RedstonePlus.hpp"
@@ -34,6 +35,7 @@
 #include "common/world/level/WorldDrops.hpp"
 #include "common/world/ticks/ScheduledTickAccess.hpp"
 
+#include <limits>
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -366,9 +368,32 @@ namespace Game {
             return state.Is(BlockID::Repeater) && RepeaterIsLocked(level, pos, state);
         }
 
+        // ComparatorBlock.getItemFrame: the one item frame in the cell that
+        // faces the comparator's way (hung on the far side of the conductor),
+        // or null when there is none — or more than one.
+        const ItemFrame* ComparatorItemFrame(ILevelWrite& level, Direction direction, const glm::ivec3& pos) {
+            EntityLevel* entities = level.Entities();
+            if (!entities) return nullptr;
+            AABB box;
+            box.min = glm::vec3(pos);
+            box.max = glm::vec3(pos) + glm::vec3(1.0f);
+            std::vector<Entity*> found;
+            entities->GetEntitiesInBox(box, nullptr, found);
+            const ItemFrame* frame = nullptr;
+            int count = 0;
+            for (const Entity* e : found) {
+                const auto* f = dynamic_cast<const ItemFrame*>(e);
+                if (!f || f->IsRemoved() || f->GetDirection() != direction) continue;
+                if (!f->GetAABB().Intersects(box)) continue;
+                frame = f;
+                ++count;
+            }
+            return count == 1 ? frame : nullptr;
+        }
+
         // ComparatorBlock.getInputSignal — DiodeBlock's, then a container's
-        // analog reading, directly in front or one conductor away. Item
-        // frames are not modelled here.
+        // analog reading, directly in front or, one conductor away, the
+        // larger of a container's reading and an item frame's.
         int ComparatorGetInputSignal(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
             int resultSignal = DiodeGetInputSignal(level, pos, state);
             const Direction direction = HorizontalFacingOf(state);
@@ -382,10 +407,13 @@ namespace Game {
                 targetPos = Relative(targetPos, direction);
                 targetState = StateAt(level, targetPos);
                 const Block& farDef = BlockRegistry::Get(targetState.Block());
+                const ItemFrame* frame = ComparatorItemFrame(level, direction, targetPos);
+                int signal = frame ? frame->GetAnalogOutput() : std::numeric_limits<int>::min();
                 if (farDef.hasAnalogOutputSignal && farDef.getAnalogOutputSignal) {
-                    resultSignal = farDef.getAnalogOutputSignal(level, targetPos, targetState,
-                                                                Opposite(direction));
+                    signal = std::max(signal, farDef.getAnalogOutputSignal(level, targetPos, targetState,
+                                                                           Opposite(direction)));
                 }
+                if (signal != std::numeric_limits<int>::min()) resultSignal = signal;
             }
             return resultSignal;
         }

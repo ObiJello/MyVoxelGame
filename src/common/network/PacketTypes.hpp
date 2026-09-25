@@ -27,6 +27,7 @@
 #include "packets/game/UnloadChunkS2CPacket.hpp"
 #include "packets/game/ChunkUnchangedS2CPacket.hpp"
 #include "packets/game/LightUpdateS2CPacket.hpp"
+#include "packets/game/ChunksBiomesS2CPacket.hpp"
 #include "packets/game/ChunkRequestFullC2SPacket.hpp"
 #include "packets/game/ChunkBatchStartS2CPacket.hpp"
 #include "packets/game/ChunkBatchFinishedS2CPacket.hpp"
@@ -50,6 +51,7 @@
 #include "packets/game/ExplodeS2CPacket.hpp"
 #include "packets/game/DragonPackets.hpp"
 #include "packets/game/ArmorStandDataS2CPacket.hpp"
+#include "packets/game/ItemFrameDataS2CPacket.hpp"
 #include "packets/game/PlayerInfoS2CPacket.hpp"
 #include "packets/game/ClientboundPlayerPositionPacket.hpp"
 #include "packets/game/InventoryFullS2CPacket.hpp"
@@ -103,6 +105,7 @@
 #include "packets/game/SoundPackets.hpp"
 #include "packets/game/BookPackets.hpp"
 #include "packets/game/MerchantPackets.hpp"
+#include "packets/game/AnvilPackets.hpp"
 
 #include "PacketRegistry.hpp"
 

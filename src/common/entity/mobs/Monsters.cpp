@@ -2213,8 +2213,8 @@ namespace Game {
         }
         if (m_level && m_level->IsClientSide()) return UseResult::Success;
         Shear();
-        // MC itemStack.hurtAndBreak(1, player, hand) — no durability yet
-        // (see the sheep's note); the shears survive.
+        // MC itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot()).
+        HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
         return UseResult::Success;
     }
 

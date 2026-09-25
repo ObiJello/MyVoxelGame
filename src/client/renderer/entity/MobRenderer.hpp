@@ -242,6 +242,8 @@ namespace Render {
         // `swimPitchDeg`/`swimPivotY` are DrownedRenderer.setupRotations' swim
         // tilt — a pitch about the mid-box pivot, applied after the death
         // flip, 0 for everything that is not a swimming drowned.
+        // `upsideDown`/`boundingBoxHeight` are setupRotations' Dinnerbone roll
+        // (EntityRenderState.isUpsideDown), after the yaw, before the swim tilt.
         static glm::mat4 EntityMatrix(const glm::dvec3& renderPos,
                                       const glm::vec3& cameraPos,
                                       float bodyRot, float scale,
@@ -249,7 +251,9 @@ namespace Render {
                                       const glm::vec3& modelScale = glm::vec3(1.0f),
                                       float swimPitchDeg = 0.0f,
                                       float swimPivotY = 0.0f,
-                                      const glm::vec3& modelOffset = glm::vec3(0.0f));
+                                      const glm::vec3& modelOffset = glm::vec3(0.0f),
+                                      bool upsideDown = false,
+                                      float boundingBoxHeight = 0.0f);
 
         // Build one mob's posed geometry into `verts`/`idx`, already in world
         // space. Returns the matrix it used.
@@ -416,6 +420,35 @@ namespace Render {
                               const glm::vec3& cameraPos,
                               std::vector<ModelVertex>& verts,
                               std::vector<uint32_t>& idx);
+        // MC PaintingRenderer: the canvas (front, on the variant's texture)
+        // and the frame (back and edges, on painting/back.png), each quad
+        // lit by the light of the block cell it covers — MC's
+        // lightCoordsPerBlock — baked into the vertex colour with the face's
+        // diffuse shade. Appends two batches' worth of geometry: the front
+        // indices first, then the frame's; returns the split.
+        struct PaintingGeometry {
+            TextureHandle front = INVALID_TEXTURE;
+            TextureHandle back  = INVALID_TEXTURE;
+            size_t frontFirst = 0, frontCount = 0;
+            size_t backFirst = 0,  backCount = 0;
+        };
+        PaintingGeometry AppendPainting(const Game::Mob& painting, const glm::dvec3& centerWorld,
+                                        std::vector<ModelVertex>& verts,
+                                        std::vector<uint32_t>& idx);
+        // MC ItemFrameRenderer: the frame (block/item_frame or
+        // block/glow_item_frame, on the blocks atlas — hidden for an
+        // invisible frame) and the framed item turned by its rotation, at
+        // the FIXED display transform (a block's model, or a flat item's
+        // extruded sprite). Two ranges, as for the painting.
+        struct ItemFrameGeometry {
+            TextureHandle frameTex = INVALID_TEXTURE;
+            size_t frameFirst = 0, frameCount = 0;
+            TextureHandle itemTex = INVALID_TEXTURE;
+            size_t itemFirst = 0, itemCount = 0;
+        };
+        ItemFrameGeometry AppendItemFrame(const Game::Mob& frame, const glm::dvec3& centerWorld,
+                                          std::vector<ModelVertex>& verts,
+                                          std::vector<uint32_t>& idx);
         TextureHandle m_whiteTexture = INVALID_TEXTURE;
         TextureHandle m_beamTexture = INVALID_TEXTURE;
         bool m_beamTextureTried = false;

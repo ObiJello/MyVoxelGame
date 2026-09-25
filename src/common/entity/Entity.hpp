@@ -27,6 +27,8 @@
 
 #include <glm/glm.hpp>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <vector>
 #include "common/world/fluid/FluidState.hpp"
@@ -40,6 +42,7 @@ namespace Game {
     // Clang and gives LNK2019 on MSVC (see CLAUDE.md).
     class  LivingEntity;
     class  BlockState;
+    struct ItemStack;
 
     // ── Entity id space ────────────────────────────────────────────────────
     //
@@ -165,6 +168,14 @@ namespace Game {
         // `velocity` field is a knockback accumulator, never integrated
         // movement (MC ServerPlayer.getKnownMovement makes the same split).
         virtual glm::dvec3 GetKnownMovement() const { return velocity; }
+
+        // MC Entity.getWeaponItem — the stack this entity attacks with, which
+        // a DamageSource reports as its weapon (DamageSource.getWeaponItem):
+        // a living attacker's main hand, the bow an arrow was fired from.
+        // Null by default (MC Entity's); the player's view and the arrow
+        // override it. Mutable because the enchantment effects that run
+        // against the weapon (post_attack, change_item_damage) may wear it.
+        virtual ItemStack* GetWeaponItem() { return nullptr; }
 
         // Settled-physics parking (see PrimedTnt::Tick). True while the
         // entity's mover is provably a no-op: on the ground, velocity zeroed
@@ -317,6 +328,10 @@ namespace Game {
         }
 
         AABB GetAABB() const {
+            if (m_hasFixedBox) {
+                const glm::dvec3 c = (m_fixedBox.min + m_fixedBox.max) * 0.5;
+                return AABB(glm::vec3(c), glm::vec3(m_fixedBox.max - m_fixedBox.min));
+            }
             const float w = GetBbWidth(), h = GetBbHeight();
             return AABB(glm::vec3(position.x, position.y + h * 0.5f, position.z),
                         glm::vec3(w, h, w));
@@ -327,12 +342,21 @@ namespace Game {
         // feeds but not for reach tests far from the origin — a few hundred
         // thousand blocks out, float spacing exceeds the reach distance itself.
         AABBd GetAABBd() const {
+            if (m_hasFixedBox) return m_fixedBox;
             const double w = GetBbWidth(), h = GetBbHeight();
             return AABBd{
                 glm::dvec3(position.x - w * 0.5, position.y,     position.z - w * 0.5),
                 glm::dvec3(position.x + w * 0.5, position.y + h, position.z + w * 0.5)
             };
         }
+
+        // MC Entity.setBoundingBox for the entities whose box is NOT the
+        // type's square footprint around the feet: a hanging entity's box is
+        // its canvas — up to 4 wide, 1/16 deep, centred on `position`
+        // (BlockAttachedEntity.recalculateBoundingBox). While set, GetAABB /
+        // GetAABBd return it instead of the width/height box.
+        void SetFixedBoundingBox(const AABBd& box) { m_fixedBox = box; m_hasFixedBox = true; }
+        bool HasFixedBoundingBox() const { return m_hasFixedBox; }
 
         glm::ivec3 BlockPosition() const {
             return glm::ivec3(static_cast<int>(std::floor(position.x)),
@@ -686,6 +710,18 @@ namespace Game {
         // sound of its own, and a sound bound to it never starts.
         bool IsSilent() const { return m_silent; }
         void SetSilent(bool silent) { m_silent = silent; }
+
+        // MC DATA_CUSTOM_NAME / DATA_CUSTOM_NAME_VISIBLE (the "CustomName" /
+        // "CustomNameVisible" NBT): a name tag's name, drawn above the entity
+        // when it is looked at, or always once CustomNameVisible is set. A
+        // plain string — MC's Component reduced to its text, as the item
+        // CUSTOM_NAME component already is. Synced on AddEntityS2C /
+        // SetEntityDataS2C; the renderer reads the client mob's copy.
+        const std::optional<std::string>& GetCustomName() const { return m_customName; }
+        bool HasCustomName() const { return m_customName.has_value(); }
+        void SetCustomName(std::optional<std::string> name) { m_customName = std::move(name); }
+        bool IsCustomNameVisible() const { return m_customNameVisible; }
+        void SetCustomNameVisible(bool visible) { m_customNameVisible = visible; }
         // MC Entity.playSound(sound, volume, pitch): unless silent, the level
         // plays it at this entity for everyone (except = null), in this
         // entity's sound category. Entity.cpp.
@@ -799,6 +835,16 @@ namespace Game {
         // primed TNT or light the next one in a row behind it. See their
         // overrides.
         virtual bool IsPickable() const { return true; }
+        // MC Entity.skipAttackInteraction(source): true when a player's
+        // attack on this entity is handled here and must not go on to the
+        // ordinary hit (damage, knockback, sweep, crit, the weapon's wear).
+        // A hanging entity breaks itself here (BlockAttachedEntity).
+        virtual bool SkipAttackInteraction(Entity& source) { (void)source; return false; }
+        // MC Entity.blocksBuilding: does this entity's box keep other things
+        // out of its space (EntityGetter.isUnobstructed — a mob spawning, a
+        // block going in)? True for everything the mob pipeline carries
+        // except a hanging entity.
+        virtual bool BlocksBuilding() const { return true; }
 
         // Client-visible flag bits (MC DATA_SHARED_FLAGS_ID).
         bool IsSprinting() const { return m_sprinting; }
@@ -808,7 +854,12 @@ namespace Game {
         virtual bool IsOnFire() const { return m_remainingFireTicks > 0; }
         void SetRemainingFireTicks(int t) { m_remainingFireTicks = t; }
         int  GetRemainingFireTicks() const { return m_remainingFireTicks; }
-        void IgniteForSeconds(int seconds);
+        // MC Entity.igniteForSeconds(float): igniteForTicks(floor(s * 20)).
+        void IgniteForSeconds(float seconds);
+        // MC Entity.igniteForTicks: the fire clock only ever grows. Virtual
+        // for MC LivingEntity's BURNING_TIME scaling (Fire Protection) and for
+        // the player's view, whose fire lives on its ServerPlayer.
+        virtual void IgniteForTicks(int ticks);
         // MC Entity.clearFire.
         void ClearFire() { m_remainingFireTicks = 0; }
 
@@ -853,6 +904,10 @@ namespace Game {
         // exactly as MC's Dolphin constructor does.
         int  m_airSupply = kTotalAirSupply;
         bool m_silent = false;   // MC DATA_SILENT
+        AABBd m_fixedBox{};              // see SetFixedBoundingBox
+        bool  m_hasFixedBox = false;
+        std::optional<std::string> m_customName;   // MC DATA_CUSTOM_NAME
+        bool m_customNameVisible = false;          // MC DATA_CUSTOM_NAME_VISIBLE
 
         // MC Entity.applyMovementEmissionAndPlaySound's odometers: moveDist
         // (horizontal, or full while climbing) and flyDist, each ×0.6, and the

@@ -10,6 +10,8 @@
 #include "common/world/spawn/SpawnPlacements.hpp"
 #include "common/world/level/HushStillnessRules.hpp"
 #include "common/sound/EntitySounds.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -122,6 +124,10 @@ namespace Game {
         to.SetLeftHanded(IsLeftHanded());
         to.SetNoAi(IsNoAi());
         if (IsPersistenceRequired()) to.SetPersistenceRequired(true);
+        // setCustomNameVisible, and CUSTOM_NAME from COMPONENTS_TO_COPY: a
+        // named zombie villager cured keeps its name.
+        to.SetCustomNameVisible(IsCustomNameVisible());
+        to.SetCustomName(GetCustomName());
         to.SetRemainingFireTicks(GetRemainingFireTicks());   // setSharedFlagOnFire
     }
 
@@ -196,6 +202,14 @@ namespace Game {
                 living->Knockback(extra, std::sin(angle), -std::cos(angle));
                 velocity.x *= 0.6;
                 velocity.z *= 0.6;
+            }
+            // MC Mob.doHurtTarget → EnchantmentHelper.doPostAttackEffects:
+            // the victim's worn post_attack effects (a player's Thorns
+            // pricking this mob and wearing the armour); a mob carries no
+            // weapon here, so the attacker half has nothing to run.
+            if (m_level && !m_level->IsClientSide() && living->HasEquipmentSlots()) {
+                const DamageSourceInfo source = DamageSourceInfo::Of(MobDamageSource::MobAttack, this, nullptr);
+                EnchantmentHelper::DoPostAttackEffects(*m_level, target, source);
             }
             SetLastHurtMob(&target);
             PlayAttackSound();   // MC Mob.doHurtTarget → playAttackSound
@@ -510,7 +524,7 @@ namespace Game {
         std::vector<Entity*> occupants;
         level.GetEntitiesInBox(box, this, occupants);
         for (const Entity* other : occupants) {
-            if (!other->IsRemoved() && other->GetAABB().Intersects(box)) return false;
+            if (!other->IsRemoved() && other->BlocksBuilding() && other->GetAABB().Intersects(box)) return false;
         }
         return true;
     }

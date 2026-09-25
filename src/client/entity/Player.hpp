@@ -8,8 +8,11 @@
 #include "common/physics/Physics.hpp"
 #include "common/entity/LivingEntity.hpp"   // WalkAnimationState (morph)
 #include "common/entity/Morph.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "../renderer/core/Camera.hpp"
 #include <glm/glm.hpp>
+#include <array>
 #include <optional>
 #include <chrono>
 #include <vector>
@@ -175,8 +178,40 @@ namespace Game {
         float GetEffectDigSpeedMultiplier() const { return Game::GetEffectDigSpeedMultiplier(activeEffects); }
         // Player.isMobilityRestricted — BLINDNESS: no sprinting.
         bool IsMobilityRestricted() const { return HasEffect(Game::MobEffectId::Blindness); }
-        // The effect state the physics step reads (PlayerPhysics::effect*).
+        // The effect state the physics step reads (PlayerPhysics::effect*),
+        // and the enchantment attributes beside it (sneaking speed, water
+        // movement efficiency, movement efficiency, Soul Speed's
+        // MOVEMENT_SPEED).
         void ApplyEffectPhysics();
+
+        // ── Enchantments on the local player's own equipment ─────────────
+        // MC syncs a player's attributes from the server; this client
+        // derives them from its own inventory instead — the same fold the
+        // server's player view runs (EnchantmentHelper::PlayerAttributeValue):
+        // the worn items' enchantment modifiers plus the location-based ones
+        // Soul Speed switches on over soul blocks, which the local physics
+        // and dig progress read every frame.
+        //
+        // UpdateEnchantmentLocationEffects is MC's onChangedBlock +
+        // collectEquipmentChanges for those location effects: run from
+        // UpdatePhysics, it re-evaluates them when the block position or a
+        // worn item changes. Only their attribute half runs here; the rest
+        // (Frost Walker's ice, Soul Speed's wear) is the server's.
+        void UpdateEnchantmentLocationEffects(IBlockAccess* blockAccess);
+        // MC Attributes.MINING_EFFICIENCY / SUBMERGED_MINING_SPEED for
+        // Player.getDestroySpeed (Efficiency, Aqua Affinity).
+        float GetMiningEfficiency();
+        float GetSubmergedMiningSpeed();
+        // A player attribute: `base` through the worn enchantments, the
+        // active location effects and the status effects.
+        double EnchantedAttributeValue(Game::Attribute attribute, double base);
+
+        Game::ActiveLocationEnchantments enchantmentLocationState;
+        Game::AttributeMap               enchantmentLocationAttributes;
+        std::array<Game::ItemStack, 8>   enchantmentLastEquipment{};
+        glm::ivec3                       enchantmentLastBlockPos{0};
+        bool                             enchantmentHasLastBlockPos = false;
+        Game::JavaRandom                 enchantmentRandom{0x5DEECE66DLL};
 
         // ── Bed / sleeping ──────────────────────────────────────────────
         // MC LivingEntity.sleepingPos (its presence IS isSleeping) and

@@ -58,6 +58,9 @@
 #include "common/world/level/WorldMobSpawn.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
 #include "GeneratedBlockStates.hpp"
+#include "common/world/lighting/BlockLightProperties.hpp"
+#include "common/world/lighting/ChunkLight.hpp"
+#include "common/world/ticks/ScheduledTickAccess.hpp"
 #include <optional>   // DoubleDoorPartner
 #include <string_view>
 #include "common/inventory/MenuType.hpp"
@@ -1004,6 +1007,109 @@ namespace Game {
             return UseResult::Consume;
         }
 
+        // ── Frosted ice (MC FrostedIceBlock) ─────────────────────────────
+        //
+        // What Frost Walker lays over water: it ages 0..3 on scheduled
+        // ticks while the light is bright enough (or it is thinly
+        // surrounded), then melts back to water, taking weakly supported
+        // neighbours with it.
+
+        // Direction.values(): down, up, north, south, west, east.
+        constexpr glm::ivec3 kFrostedIceNeighbours[6] = {
+            {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}, {-1, 0, 0}, {1, 0, 0},
+        };
+
+        // Mth.nextInt(random, min, max).
+        int FrostedIceNextInt(JavaRandom& random, int min, int max) {
+            return min >= max ? min : random.NextInt(max - min + 1) + min;
+        }
+
+        // IceBlock.melt: a dimension where water evaporates (the Nether's
+        // WATER_EVAPORATES) just loses the block; anywhere else it becomes
+        // water and tells the cell (neighborChanged(pos, WATER)).
+        void FrostedIceMelt(ILevelWrite& level, const glm::ivec3& pos) {
+            if (level.GetDimension() == DimensionId::Nether) {
+                level.SetBlock(pos.x, pos.y, pos.z, BlockStates::Default(BlockID::Air), World::UpdateFlags::All);
+                return;
+            }
+            level.SetBlock(pos.x, pos.y, pos.z, BlockStates::Default(BlockID::Water), World::UpdateFlags::All);
+            level.NeighborChanged(pos, BlockID::Water);
+        }
+
+        // FrostedIceBlock.fewerNeigboursThan (sic): fewer than `limit` of the
+        // six neighbours are frosted ice.
+        bool FrostedIceFewerNeighboursThan(const IBlockAccess& level, const glm::ivec3& pos, int limit) {
+            int result = 0;
+            for (const glm::ivec3& d : kFrostedIceNeighbours) {
+                const glm::ivec3 n = pos + d;
+                if (level.GetBlockState(n.x, n.y, n.z).Is(BlockID::FrostedIce) && ++result >= limit) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // FrostedIceBlock.slightlyMelt: age by one (UPDATE_CLIENTS), or melt
+        // at age 3. True when it melted.
+        bool FrostedIceSlightlyMelt(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+            const int age = state.GetIndex(PropertyId::AGE_3);
+            if (age < 3) {
+                level.SetBlock(pos.x, pos.y, pos.z, state.SetIndex(PropertyId::AGE_3, age + 1),
+                               World::UpdateFlags::UpdateClients);
+                return false;
+            }
+            FrostedIceMelt(level, pos);
+            return true;
+        }
+
+        void FrostedIceOnPlace(ILevelWrite& level, const glm::ivec3& pos, BlockState /*newState*/,
+                               BlockState /*oldState*/, bool /*movedByPiston*/) {
+            // scheduleTick(pos, this, Mth.nextInt(level.getRandom(), 60, 120)).
+            ScheduledTickAccess* ticks = level.Ticks();
+            JavaRandom* random = level.Random();
+            if (!ticks || !random) return;
+            ticks->ScheduleTick(pos, BlockID::FrostedIce, FrostedIceNextInt(*random, 60, 120));
+        }
+
+        void FrostedIceTick(ILevelWrite& level, const glm::ivec3& pos, BlockState state, JavaRandom& random) {
+            ScheduledTickAccess* ticks = level.Ticks();
+            if (!ticks) return;
+            if (random.NextInt(3) == 0 || FrostedIceFewerNeighboursThan(level, pos, 4)) {
+                // The End reads block light alone; elsewhere
+                // getMaxLocalRawBrightness (block, or sky less the darkening).
+                int brightness;
+                if (level.GetDimension() == DimensionId::End) {
+                    brightness = level.GetBrightness(Lighting::LightLayer::Block, pos.x, pos.y, pos.z);
+                } else {
+                    const World* world = dynamic_cast<const World*>(&level);
+                    brightness = level.GetMaxLocalRawBrightness(pos.x, pos.y, pos.z,
+                                                                world ? world->GetSkyDarken() : 0);
+                }
+                const int threshold = 11 - state.GetIndex(PropertyId::AGE_3) -
+                                      Lighting::BlockLightProperties::Dampening(state);
+                if (brightness > threshold && FrostedIceSlightlyMelt(level, pos, state)) {
+                    for (const glm::ivec3& d : kFrostedIceNeighbours) {
+                        const glm::ivec3 n = pos + d;
+                        const BlockState neighbour = level.GetBlockState(n.x, n.y, n.z);
+                        if (neighbour.Is(BlockID::FrostedIce) && !FrostedIceSlightlyMelt(level, n, neighbour)) {
+                            ticks->ScheduleTick(n, BlockID::FrostedIce, FrostedIceNextInt(random, 20, 40));
+                        }
+                    }
+                    return;
+                }
+            }
+            ticks->ScheduleTick(pos, BlockID::FrostedIce, FrostedIceNextInt(random, 20, 40));
+        }
+
+        void FrostedIceNeighborChanged(ILevelWrite& level, const glm::ivec3& pos, BlockState /*state*/,
+                                       BlockID sourceBlock, bool /*movedByPiston*/) {
+            // A frosted-ice neighbour changed and this one now has fewer
+            // than two frosted neighbours: it melts at once.
+            if (sourceBlock == BlockID::FrostedIce && FrostedIceFewerNeighboursThan(level, pos, 2)) {
+                FrostedIceMelt(level, pos);
+            }
+        }
+
     } // namespace
 
     // Declared at file scope in BlockRegistry.cpp, same as
@@ -1116,6 +1222,13 @@ namespace Game {
             if (FamilyOfPortalBlock(BlockID::AetherPortal)) {
                 portal->entityInside = &PortalEntityInside;
             }
+        }
+
+        // ── Frosted ice (MC FrostedIceBlock — Frost Walker's ice) ─────────
+        if (Block* ice = forSlug("frosted_ice")) {
+            ice->onPlace         = &FrostedIceOnPlace;
+            ice->tick            = &FrostedIceTick;
+            ice->neighborChanged = &FrostedIceNeighborChanged;
         }
 
         // ── The wither rose (MC WitherRoseBlock) ──────────────────────────

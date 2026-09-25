@@ -30,7 +30,7 @@ namespace Game {
 
     class BlockEntity;
     class CollectingNeighborUpdater;
-    class EntityLevel;
+    struct EntityLevel;   // struct, as defined — MSVC mangles the tag
 
     class World : public ILevelWrite {
     public:

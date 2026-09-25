@@ -266,20 +266,13 @@ namespace Game {
         if (IsAnvil(m_blockState.Block()) && damage > 0.0f) {
             JavaRandom& rng = m_level->Random();
             if (rng.NextFloat() < 0.05f + static_cast<float>(distance) * 0.05f) {
-                const BlockID next = AnvilDamaged(m_blockState.Block());
-                if (next == BlockID::Air) {
+                // Keeps the FACING: a chipped anvil must point the same way
+                // the anvil did, or it visibly snaps round on impact.
+                const BlockState next = AnvilDamaged(m_blockState);
+                if (next.Block() == BlockID::Air) {
                     m_cancelDrop = true;
                 } else {
-                    // Keep the FACING: a chipped anvil must point the same way
-                    // the anvil did, or it visibly snaps round on impact.
-                    const auto& oldDef =
-                        BlockRegistry::GetStateDefinition(m_blockState.Block());
-                    const auto& newDef = BlockRegistry::GetStateDefinition(next);
-                    BlockRegistry::BlockStateDefinition::PropertyMap props;
-                    const std::string_view facing =
-                        oldDef.ValueOf(m_blockState.Index(), "facing");
-                    if (!facing.empty()) props["facing"] = std::string(facing);
-                    m_blockState = BlockStates::FromIndex(next, newDef.IndexOf(props));
+                    m_blockState = next;
                 }
             }
         }

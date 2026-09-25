@@ -5,6 +5,8 @@
 #include "common/entity/alchemy/PotionBrewing.hpp"
 #include "common/world/block/entity/BrewingStandBlockEntity.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
+#include "common/world/enchantment/EnchantmentDefinitions.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/world/enchantment/ItemEnchantments.hpp"
 #include <algorithm>
 #include <chrono>
@@ -34,6 +36,28 @@ namespace Game {
     }
 
     // ══════════════════ Enchanting table ══════════════════════════════════
+    namespace {
+        // MC EnchantmentMenu's item slot: `getMaxStackSize() { return 1; }`.
+        class EnchantItemSlot : public Slot {
+        public:
+            using Slot::Slot;
+            int GetMaxStackSize() const override { return 1; }
+        };
+
+        // MC EnchantmentMenu's lapis slot: lapis only, with the empty-slot
+        // silhouette.
+        class LapisSlot : public Slot {
+        public:
+            LapisSlot(IContainer* container, int containerSlot, int x, int y)
+                : Slot(container, containerSlot, x, y) {
+                noItemIcon = "container/slot/lapis_lazuli";
+            }
+            bool MayPlace(const ItemStack& stack) const override {
+                return stack.itemId == Items::LapisLazuli;
+            }
+        };
+    }
+
     EnchantmentMenu::EnchantmentMenu(Inventory* playerInventory)
         : AbstractContainerMenu(playerInventory),
           m_random(static_cast<int64_t>(
@@ -41,13 +65,16 @@ namespace Game {
         SetOwnedData(std::make_unique<SimpleContainerData>(DATA_COUNT));
 
         // MC EnchantmentMenu: item at (15,47), lapis at (35,47).
-        AddSlot(std::make_unique<Slot>(&m_inputs, SLOT_ITEM,  15, 47));
-        AddSlot(std::make_unique<Slot>(&m_inputs, SLOT_LAPIS, 35, 47));
+        AddSlot(std::make_unique<EnchantItemSlot>(&m_inputs, SLOT_ITEM, 15, 47));
+        AddSlot(std::make_unique<LapisSlot>(&m_inputs, SLOT_LAPIS, 35, 47));
         auto add = [this](std::unique_ptr<Slot> s) -> Slot& { return AddSlot(std::move(s)); };
         AddPlayerSlots(*this, playerInventory, 84, add);
 
-        m_seed = m_random.NextInt(0x7FFFFFFF);
-        SetData(DATA_SEED, m_seed);
+        // enchantClue / levelClue start at -1 (costs at 0).
+        for (int i = 0; i < 3; ++i) {
+            SetData(DATA_CLUE_ID_0 + i, -1);
+            SetData(DATA_CLUE_LVL_0 + i, -1);
+        }
     }
 
     int EnchantmentMenu::MenuIndexForInventorySlot(int inventoryIndex) const {
@@ -61,139 +88,185 @@ namespace Game {
     }
 
     void EnchantmentMenu::SetBookshelfPower(int power) {
-        m_power = std::clamp(power, 0, 15);   // MC caps bookcases at 15
+        m_power = std::clamp(power, 0, 15);   // getEnchantmentCost caps bookcases at 15
+        m_serverSide = true;
+        RollOffers();
+    }
+
+    void EnchantmentMenu::SetEnchantmentSeed(int seed) {
+        SetData(DATA_SEED, seed);
+        m_serverSide = true;
         RollOffers();
     }
 
     void EnchantmentMenu::SlotsChanged(ContainerClickResult& result) {
         RollOffers();
-        for (int i = 0; i < 3; ++i) MarkChanged(result, SLOT_ITEM);
+        MarkChanged(result, SLOT_ITEM);
+    }
+
+    std::vector<EnchantmentInstance> EnchantmentMenu::GetEnchantmentList(const ItemStack& item,
+                                                                        int slot, int cost) {
+        // MC getEnchantmentList: reseed with seed + slot, roll over
+        // #minecraft:in_enchanting_table, and a plain book loses one of
+        // several results at random.
+        // Java's int addition wraps before the widening; signed overflow in
+        // C++ would be UB, so add as unsigned.
+        m_random.SetSeed(static_cast<int64_t>(static_cast<int32_t>(
+            static_cast<uint32_t>(GetData(DATA_SEED)) + static_cast<uint32_t>(slot))));
+        const std::vector<EnchantmentId> table =
+            EnchantmentDefinitions::ResolveTagOrdered("minecraft:in_enchanting_table");
+        if (table.empty()) return {};
+        std::vector<EnchantmentInstance> list =
+            EnchantmentHelper::SelectEnchantment(m_random, item, cost, table);
+        if (item.itemId == Items::Book && list.size() > 1) {
+            list.erase(list.begin() + m_random.NextInt(static_cast<int>(list.size())));
+        }
+        return list;
     }
 
     void EnchantmentMenu::RollOffers() {
+        // MC EnchantmentMenu.slotsChanged. The client's copy never rolls — its
+        // three rows are the server's data slots.
+        if (!m_serverSide) return;
         const ItemStack& item = m_inputs.GetItem(SLOT_ITEM);
-        auto clearOffers = [this] {
+        if (item.IsEmpty() || !IsEnchantable(item)) {
             for (int i = 0; i < 3; ++i) {
                 SetData(DATA_COST_0 + i, 0);
                 SetData(DATA_CLUE_ID_0 + i, -1);
                 SetData(DATA_CLUE_LVL_0 + i, -1);
             }
-        };
-        if (item.IsEmpty()) { clearOffers(); return; }
-
-        // MC EnchantmentMenu.slotsChanged: reseed from the stored enchantment
-        // seed so the same item + same table always shows the same three
-        // offers until one is taken. Re-rolling per frame would make the rows
-        // flicker.
-        m_random.SetSeed(m_seed);
-
-        for (int i = 0; i < 3; ++i) {
-            // EnchantmentHelper.getEnchantmentCost (line 451-465), verbatim.
-            int selected = m_random.NextInt(8) + 1 + (m_power >> 1)
-                         + m_random.NextInt(m_power + 1);
-            int cost;
-            if (i == 0)      cost = std::max(selected / 3, 1);
-            else if (i == 1) cost = selected * 2 / 3 + 1;
-            else             cost = std::max(selected, m_power * 2);
-            // MC blanks a row whose cost can't cover its slot index.
-            if (cost < i + 1) cost = 0;
-            SetData(DATA_COST_0 + i, cost);
-
-            // The clue is one enchantment the roll would grant — MC shows it
-            // greyed in the row. Picked from the registry with the same RNG so
-            // client and server agree.
-            const auto& all = EnchantmentRegistry::All();
-            if (cost > 0 && !all.empty()) {
-                const int idx = m_random.NextInt(static_cast<int>(all.size()));
-                SetData(DATA_CLUE_ID_0 + i, idx);
-                SetData(DATA_CLUE_LVL_0 + i,
-                        std::max(1, std::min(all[static_cast<size_t>(idx)].maxLevel,
-                                             1 + cost / 10)));
-            } else {
-                SetData(DATA_CLUE_ID_0 + i, -1);
-                SetData(DATA_CLUE_LVL_0 + i, -1);
-            }
+            return;
         }
+
+        m_random.SetSeed(static_cast<int64_t>(GetData(DATA_SEED)));
+        int costs[3];
+        for (int i = 0; i < 3; ++i) {
+            // EnchantmentHelper.getEnchantmentCost, verbatim (the item always
+            // has ENCHANTABLE here — isEnchantable checked it).
+            const int selected = m_random.NextInt(8) + 1 + (m_power >> 1) + m_random.NextInt(m_power + 1);
+            if (i == 0)      costs[i] = std::max(selected / 3, 1);
+            else if (i == 1) costs[i] = selected * 2 / 3 + 1;
+            else             costs[i] = std::max(selected, m_power * 2);
+            if (costs[i] < i + 1) costs[i] = 0;
+            SetData(DATA_CLUE_ID_0 + i, -1);
+            SetData(DATA_CLUE_LVL_0 + i, -1);
+        }
+        for (int i = 0; i < 3; ++i) {
+            SetData(DATA_COST_0 + i, costs[i]);
+            if (costs[i] <= 0) continue;
+            const std::vector<EnchantmentInstance> list = GetEnchantmentList(item, i, costs[i]);
+            if (list.empty()) continue;
+            const EnchantmentInstance& clue =
+                list[static_cast<size_t>(m_random.NextInt(static_cast<int>(list.size())))];
+            SetData(DATA_CLUE_ID_0 + i, static_cast<int>(clue.id));
+            SetData(DATA_CLUE_LVL_0 + i, clue.level);
+        }
+    }
+
+    bool EnchantmentMenu::ClickMenuButton(int buttonId, bool /*mayBuild*/, ContainerClickResult& result) {
+        // MC: an out-of-range id is logged and refused.
+        if (buttonId < 0 || buttonId >= 3) return false;
+        m_performedCost = 0;
+        const ItemStack& item  = m_inputs.GetItem(SLOT_ITEM);
+        const ItemStack& lapis = m_inputs.GetItem(SLOT_LAPIS);
+        const int needed = buttonId + 1;
+        // The two refusals clickMenuButton answers false for.
+        if ((lapis.IsEmpty() || lapis.count < needed) && !m_infiniteMaterials) return false;
+        if (GetData(DATA_COST_0 + buttonId) <= 0 || item.IsEmpty() ||
+            ((m_playerLevel < needed || m_playerLevel < GetData(DATA_COST_0 + buttonId)) &&
+             !m_infiniteMaterials)) {
+            return false;
+        }
+        // access.execute is a no-op on the client: its copy only answers
+        // whether the press is worth sending (EnchantmentScreen.mouseClicked).
+        if (!m_serverSide) return true;
+        m_performedCost = TakeOffer(buttonId, m_playerLevel, m_infiniteMaterials, result);
+        return true;
     }
 
     int EnchantmentMenu::TakeOffer(int slot, int playerLevel, bool creative,
                                    ContainerClickResult& result) {
         if (slot < 0 || slot > 2) return 0;
         const int cost = GetData(DATA_COST_0 + slot);
-        if (cost <= 0) return 0;
-
+        const int enchantmentCost = slot + 1;
         ItemStack& item  = m_inputs.GetItem(SLOT_ITEM);
         ItemStack& lapis = m_inputs.GetItem(SLOT_LAPIS);
-        if (item.IsEmpty()) return 0;
-
-        // MC EnchantmentMenu.clickMenuButton: creative skips both checks;
-        // otherwise you need the LEVELS and (slot+1) lapis.
-        const int lapisNeeded = slot + 1;
+        if (cost <= 0 || item.IsEmpty()) return 0;
         if (!creative) {
-            if (playerLevel < cost || playerLevel < lapisNeeded) return 0;
-            if (lapis.itemId != Items::LapisLazuli || lapis.count < lapisNeeded) return 0;
+            if (lapis.IsEmpty() || lapis.itemId != Items::LapisLazuli || lapis.count < enchantmentCost) return 0;
+            if (playerLevel < enchantmentCost || playerLevel < cost) return 0;
         }
 
-        // Apply the clue as the granted enchantment. MC rolls a whole weighted
-        // set here (EnchantmentHelper.selectEnchantment); we grant the single
-        // clue enchantment, which is the same shape with one entry — enough for
-        // the table to work, and honest about not modelling weights yet.
-        const int clueId  = GetData(DATA_CLUE_ID_0 + slot);
-        const int clueLvl = GetData(DATA_CLUE_LVL_0 + slot);
-        if (clueId >= 0 && clueLvl > 0) {
-            ItemEnchantments enchants;
-            auto existing = item.get(DataComponents::STORED_ENCHANTMENTS);
-            if (existing.has_value()) enchants = *existing;
-            enchants.entries.push_back(
-                EnchantmentInstance{static_cast<EnchantmentId>(clueId), clueLvl});
-            item.components.set(DataComponents::STORED_ENCHANTMENTS, enchants);
+        // The access.execute body: the same roll the clue came from.
+        const std::vector<EnchantmentInstance> enchantments = GetEnchantmentList(item, slot, cost);
+        if (enchantments.empty()) return 0;
+
+        // (player.onEnchantmentPerformed is the caller's — see the header.)
+        if (item.itemId == Items::Book) {
+            // itemStack.transmuteCopy(ENCHANTED_BOOK): the book's components
+            // carried over.
+            ItemStack book(Items::EnchantedBook, item.count);
+            book.components = item.components;
+            item = book;
+        }
+        for (const EnchantmentInstance& e : enchantments) {
+            EnchantmentHelper::Enchant(item, e.id, e.level);
         }
 
+        // currency.consume(enchantmentCost, player): nothing in creative.
         if (!creative && !lapis.IsEmpty()) {
-            lapis.count -= lapisNeeded;
+            lapis.count -= enchantmentCost;
             if (lapis.count <= 0) lapis.Clear();
         }
-
-        // A fresh seed means fresh offers next time, exactly as MC does in
-        // onEnchantmentPerformed.
-        m_seed = m_random.NextInt(0x7FFFFFFF);
-        SetData(DATA_SEED, m_seed);
-        RollOffers();
+        // (awardStat ENCHANT_ITEM / ENCHANTED_ITEM trigger: no stats.)
 
         MarkChanged(result, SLOT_ITEM);
         MarkChanged(result, SLOT_LAPIS);
-        return cost;
+        return enchantmentCost;
     }
 
     void EnchantmentMenu::Removed(ContainerClickResult& result) {
+        // MC removed → clearContainer: both slots go back to the player, and
+        // what does not fit is dropped rather than lost.
         for (int i = 0; i < 2; ++i) {
             ItemStack& stack = m_inputs.GetItem(i);
             if (stack.IsEmpty()) continue;
-            (void)getInventory().AddStack(stack);
+            const int leftover = getInventory().AddStack(stack);
+            if (leftover > 0) {
+                ItemStack overflow = stack;
+                overflow.count = leftover;
+                result.extraDrops.push_back(overflow);
+            }
             stack.Clear();
             MarkChanged(result, i);
         }
     }
 
     void EnchantmentMenu::QuickMoveStack(int slotIndex, ContainerClickResult& result) {
+        // MC EnchantmentMenu.quickMoveStack.
         Slot& slot = GetSlot(slotIndex);
         if (!slot.HasItem()) return;
         ItemStack& stack = slot.GetItemMut();
         const ItemStack original = stack;
 
-        bool moved;
-        if (slotIndex < RESULT_END) {
-            moved = MoveItemStackTo(stack, MAIN_BEGIN, SLOT_COUNT, false, result);
+        if (slotIndex == SLOT_ITEM || slotIndex == SLOT_LAPIS) {
+            if (!MoveItemStackTo(stack, MAIN_BEGIN, SLOT_COUNT, true, result)) return;
         } else if (stack.itemId == Items::LapisLazuli) {
-            moved = MoveItemStackTo(stack, SLOT_LAPIS, SLOT_LAPIS + 1, false, result);
+            if (!MoveItemStackTo(stack, SLOT_LAPIS, SLOT_LAPIS + 1, true, result)) return;
         } else {
-            moved = MoveItemStackTo(stack, SLOT_ITEM, SLOT_ITEM + 1, false, result);
+            // One item into the (empty) item slot.
+            Slot& itemSlot = GetSlot(SLOT_ITEM);
+            if (itemSlot.HasItem() || !itemSlot.MayPlace(stack)) return;
+            ItemStack single = stack;
+            single.count = 1;
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
+            itemSlot.SetByPlayer(single);
+            MarkChanged(result, SLOT_ITEM);
         }
-        if (!moved) return;
-        if (stack.count != original.count) {
-            slot.SetChanged();
-            MarkChanged(result, slotIndex);
-        }
+        if (stack.count == original.count) return;
+        slot.SetChanged();
+        MarkChanged(result, slotIndex);
     }
 
     // ══════════════════ Brewing stand ═════════════════════════════════════

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <glm/glm.hpp>
 #include <string>
 #include <memory>
@@ -10,6 +11,7 @@
 #include <vector>
 #include <optional>
 #include <cstdint>
+#include <initializer_list>
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
@@ -27,6 +29,7 @@ namespace Game {
     class World;
     class Entity;
     class LivingEntity;
+    struct DamageSourceInfo;
 }
 
 namespace Server {
@@ -74,6 +77,8 @@ namespace Server {
         // MC DamageTypes.WITHER — the WITHER effect's tick (armor-bypassing
         // like MAGIC, but its own death message).
         WITHER,
+        // MC DamageTypes.THORNS — hurt back by the Thorns on what you hit.
+        THORNS,
     };
 
     // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
@@ -114,6 +119,12 @@ namespace Server {
             case DS::FALLING_ANVIL:      return victim + " was squashed by a falling anvil";
             case DS::FALLING_STALACTITE: return victim + " was skewered by a falling stalactite";
             case DS::STALAGMITE:         return victim + " was impaled on a stalagmite";
+            // MC death.attack.thorns: "%1$s was killed while trying to hurt %2$s".
+            case DS::THORNS:
+                if (!attackerName.empty()) {
+                    return victim + " was killed while trying to hurt " + attackerName;
+                }
+                return victim + " died";
             case DS::ENTITY_ATTACK:
                 if (!attackerName.empty()) {
                     return victim + " was slain by " + attackerName;
@@ -335,6 +346,16 @@ namespace Server {
         // have no combat tracker, so the caller passes it at the one site that
         // knows (PlayerEntityView::ActuallyHurt).
         void damage(float amount, DamageSource source, const std::string& attackerName);
+        // The view's form (PlayerEntityView::ActuallyHurt): the same hit plus
+        // MC's whole DamageSource — its damage type key and the causing and
+        // direct entities — which the enchantment effects read (Protection's
+        // #is_projectile, Breach through the attacker's weapon, Frost
+        // Walker's #burn_from_stepping immunity). A hit arriving without one
+        // is described from `source` alone (no entities).
+        void damage(float amount, DamageSource source, const std::string& attackerName,
+                    const Game::DamageSourceInfo& info);
+        // MC's damage type key for one of this port's sources.
+        static const char* damageTypeId(DamageSource source);
 
         // What killed this player, for the death broadcast. MC reads the
         // equivalent off the CombatTracker's last CombatEntry.
@@ -540,6 +561,24 @@ namespace Server {
         PlayerExperience&       getExperience()       { return m_experience; }
         const PlayerExperience& getExperience() const { return m_experience; }
 
+        // MC Player.enchantmentSeed — what the enchanting table seeds its
+        // offers with, so the same item on the same table shows the same three
+        // rows until an enchantment is performed. Saved as "XpSeed"; a 0 read
+        // back (never enchanted, or an old save) is replaced by a fresh roll,
+        // as Player.readAdditionalSaveData does.
+        int  getEnchantmentSeed() const { return m_enchantmentSeed; }
+        void setEnchantmentSeed(int seed);
+        // MC Player.onEnchantmentPerformed(stack, cost): `cost` levels come
+        // off (experienceLevel -= cost; below 0 clears the bar and total) and
+        // the seed rerolls.
+        void onEnchantmentPerformed(int enchantmentCost);
+
+        // MC LivingEntity.onEquippedItemBroken → breakItem, for the player:
+        // the stack's break sound (0.8 volume, 0.8..1.2 pitch) at the player
+        // for everyone nearby, the player included. (MC's five ITEM break
+        // particles have no particle type to draw them with here yet.)
+        void OnEquippedItemBroken(const Game::ItemStack& broken, Game::EquipmentSlot slot) override;
+
         // ── Sound ────────────────────────────────────────────────────────
         // The replay of this player's reported movement that other players
         // hear (footsteps, swimming, splashes — PlayerSession::
@@ -605,9 +644,12 @@ namespace Server {
         int  getRemainingFireTicks() const { return m_remainingFireTicks; }
         void setRemainingFireTicks(int ticks) { m_remainingFireTicks = ticks; }
         void igniteForSeconds(float seconds) {
-            const int ticks = static_cast<int>(seconds * 20.0f);
-            if (ticks > m_remainingFireTicks) m_remainingFireTicks = ticks;
+            igniteForTicks(static_cast<int>(std::floor(seconds * 20.0f)));
         }
+        // MC LivingEntity.igniteForTicks: the ticks scaled by BURNING_TIME
+        // (Fire Protection's -15 % per level, read off this player's view),
+        // rounded up, and the clock only ever grows.
+        void igniteForTicks(int ticks);
         void clearFire() { m_remainingFireTicks = 0; }
 
         // MC Entity.isSprinting. Client-authoritative here (movement is), and
@@ -794,12 +836,16 @@ namespace Server {
         bool  m_isDead = false;
         DamageSource m_lastDamageSource = DamageSource::GENERIC;
         std::string  m_lastAttackerName;   // empty = no identifiable killer
+        // The full source of the hit damage() is processing, when its caller
+        // had one (the four-argument overload); null otherwise.
+        const Game::DamageSourceInfo* m_hurtSourceInfo = nullptr;
         uint32_t m_damageCounter = 0;
         // Hunger/saturation/exhaustion — MC FoodData port (FoodData.hpp).
         FoodData m_foodData;
         // XP — MC Player's experienceLevel / experienceProgress /
         // totalExperience, with the level-curve arithmetic (PlayerExperience.hpp).
         PlayerExperience m_experience;
+        int m_enchantmentSeed = 0;   // set from the sound random in the constructor
         // MC LivingEntity.activeEffects — see activeEffects() above.
         std::vector<Game::MobEffectInstance> m_activeEffects;
         // MC Player DATA_PLAYER_ABSORPTION_ID.
@@ -904,6 +950,13 @@ namespace Server {
         
         // Calculate break time for block
         float calculateBreakTime(Game::BlockID block) const;
+
+        // MC LivingEntity.doHurtEquipment over `slots`: each worn piece that
+        // takes wear on hurt (EQUIPPABLE damageOnHurt, damageable, not
+        // resistant to the source) loses max(1, damage / 4). hurtArmor is the
+        // four armour slots (Player.hurtArmor), hurtHelmet the head alone.
+        void doHurtEquipment(const Game::DamageSourceInfo& source, float damage,
+                             std::initializer_list<Game::EquipmentSlot> slots);
         
         // Check collision at position
         bool checkCollision(Game::World* world, const glm::dvec3& pos) const;

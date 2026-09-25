@@ -230,7 +230,13 @@ namespace Game {
             } else {
                 success = false;
             }
-            // MC: hurtAndBreak(1) — durability is not modelled.
+            // MC FlintAndSteelDispenseItemBehavior: `if (isSuccess())
+            // dispensed.hurtAndBreak(1, level, null, item -> {})` — no player,
+            // so no creative exemption and no break effects; a stack that
+            // breaks just leaves the slot empty.
+            if (success && !level.IsClientSide()) {
+                if (JavaRandom* random = level.Random()) HurtAndBreak(dispensed, 1, *random, false, nullptr);
+            }
             return dispensed;
         }
 

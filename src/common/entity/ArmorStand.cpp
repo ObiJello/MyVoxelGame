@@ -82,6 +82,11 @@ namespace Game {
         return i < 0 ? kEmpty : m_equipment[static_cast<size_t>(i)];
     }
 
+    ItemStack* ArmorStand::EquipmentInSlot(EquipmentSlot slot) {
+        const int i = SlotIndex(slot);
+        return i < 0 ? nullptr : &m_equipment[static_cast<size_t>(i)];
+    }
+
     void ArmorStand::SetItemSlot(EquipmentSlot slot, const ItemStack& stack) {
         const int i = SlotIndex(slot);
         if (i < 0) return;
@@ -222,10 +227,12 @@ namespace Game {
     }
 
     void ArmorStand::BrokenByPlayer(Entity* attacker) {
-        // MC: the stand item (with the custom name it had — no custom names
-        // on this port's mobs) popped at the feet, then everything it wore.
+        // MC: the stand item, carrying the stand's custom name as its
+        // CUSTOM_NAME, popped at the feet, then everything it wore.
+        ItemStack result = PickResult();
+        if (const auto& name = GetCustomName()) result.components.set(DataComponents::CUSTOM_NAME, *name);
         if (m_level) m_level->SpawnItemStackDrop(glm::dvec3(BlockPosition()) + glm::dvec3(0.5, 0.0, 0.5),
-                                                 PickResult());
+                                                 result);
         BrokenByAnything(attacker);
     }
 

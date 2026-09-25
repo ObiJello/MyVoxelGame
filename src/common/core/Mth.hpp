@@ -153,4 +153,27 @@ namespace Game::Mth {
         return WrapDegrees(-(std::atan2(dir.y, horizontal) * kRadToDeg));
     }
 
+    // MC Mth.hsvToArgb / hsvToRgb (alpha 0): the six-sector HSV conversion,
+    // each channel truncated to 0..255. Returns 0xAARRGGBB.
+    inline uint32_t HsvToArgb(float hue, float saturation, float value, uint32_t alpha = 0) {
+        const int   h = static_cast<int>(hue * 6.0f) % 6;
+        const float f = hue * 6.0f - static_cast<float>(h);
+        const float p = value * (1.0f - saturation);
+        const float q = value * (1.0f - f * saturation);
+        const float t = value * (1.0f - (1.0f - f) * saturation);
+        float r = value, g = t, b = p;   // case 0
+        switch (h) {
+            case 1: r = q;     g = value; b = p;     break;
+            case 2: r = p;     g = value; b = t;     break;
+            case 3: r = p;     g = q;     b = value; break;
+            case 4: r = t;     g = p;     b = value; break;
+            case 5: r = value; g = p;     b = q;     break;
+            default: break;
+        }
+        const auto channel = [](float c) {
+            return static_cast<uint32_t>(Clamp(static_cast<int>(c * 255.0f), 0, 255));
+        };
+        return (alpha << 24) | (channel(r) << 16) | (channel(g) << 8) | channel(b);
+    }
+
 } // namespace Game::Mth

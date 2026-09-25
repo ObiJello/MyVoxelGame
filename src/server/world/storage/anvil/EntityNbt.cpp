@@ -4,6 +4,9 @@
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/decoration/Painting.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/decoration/PaintingVariants.hpp"
 #include "common/world/block/FallingBlock.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
@@ -185,6 +188,13 @@ namespace Game::Anvil {
             if (e.IsNoGravity()) w.Bool("NoGravity", true);
             // MC Entity.saveWithoutId: "Silent" only when set.
             if (e.IsSilent()) w.Bool("Silent", true);
+            // MC Entity.saveWithoutId: "CustomName" (a text component — a
+            // bare string for plain text) and "CustomNameVisible", only when
+            // there is a name / the flag is set.
+            if (const auto& name = e.GetCustomName()) {
+                WriteTextComponent(w, "CustomName", Text::Component::Literal(*name));
+            }
+            if (e.IsCustomNameVisible()) w.Bool("CustomNameVisible", true);
         }
 
         void ReadEntityBase(const CT& tag, Entity& e) {
@@ -208,6 +218,15 @@ namespace Game::Anvil {
             e.SetInvulnerable(tag.GetValue<int8_t>("Invulnerable", 0) != 0);
             e.SetNoGravity(tag.GetValue<int8_t>("NoGravity", 0) != 0);
             e.SetSilent(tag.GetValue<int8_t>("Silent", 0) != 0);
+            // MC Entity.load: CustomName through ComponentSerialization (a
+            // string or the compound form); the engine keeps its plain text.
+            if (const auto nameTag = tag.GetTag("CustomName")) {
+                if (auto component = ReadTextComponent(*nameTag)) {
+                    std::string name = Text::GetString(*component);
+                    if (!name.empty()) e.SetCustomName(std::move(name));
+                }
+            }
+            e.SetCustomNameVisible(tag.GetValue<int8_t>("CustomNameVisible", 0) != 0);
             // Without this an entity saved mid-portal reloads with a zero
             // cooldown and teleports straight back on its first tick.
             e.portal.SetCooldown(tag.GetValue<int32_t>("PortalCooldown", 0));
@@ -629,16 +648,23 @@ namespace Game::Anvil {
             p.SetLeftOwner(tag.GetValue<int8_t>("LeftOwner", 0) != 0);
         }
 
-        // AbstractArrow. `pickup`, `crit`, `PierceLevel`, `SoundEvent`,
-        // `item` and `weapon` are vanilla keys this engine models no state
-        // for, so they are not invented — a reader that wants them gets
-        // vanilla's own defaults (DISALLOWED / false / 0 / the type's default
-        // pickup item), which is exactly what an arrow fired by a mob has.
+        // AbstractArrow. `pickup`, `PierceLevel` and `SoundEvent` are
+        // vanilla keys this engine models no state for, so they are not
+        // invented — a reader that wants them gets vanilla's own defaults
+        // (DISALLOWED / 0 / the type's sound). `crit` and `weapon` (the
+        // launcher whose enchantments the hit reads) are written as vanilla
+        // writes them.
         void WriteArrowLayer(Nbt::Writer& w, const Arrow& a) {
             w.Short ("life",   static_cast<int16_t>(a.GetLife()));
             w.Byte  ("shake",  static_cast<int8_t>(a.GetShakeTime()));
             w.Bool  ("inGround", a.IsInGroundArrow());
             w.Double("damage", a.GetBaseDamage());
+            w.Bool  ("crit",   a.IsCritArrow());
+            if (!a.GetFiredFromWeapon().IsEmpty()) {
+                w.BeginCompound("weapon");
+                WriteItemStackBody(w, a.GetFiredFromWeapon());
+                w.EndCompound();
+            }
             // Engine-only: vanilla re-derives its equivalent from inGround.
             // Without it a trident that has already dealt its damage becomes
             // able to hit again on the tick it loads.
@@ -669,6 +695,11 @@ namespace Game::Anvil {
             a.SetInGround    (tag.GetValue<int8_t>("inGround", 0) != 0);
             a.SetBaseDamage  (tag.GetValue<double>("damage", Arrow::kArrowBaseDamage));
             a.SetInGroundTime(tag.GetValue<int32_t>("obey_in_ground_time", 0));
+            a.SetCritArrow   (tag.GetValue<int8_t>("crit", 0) != 0);
+            if (auto weapon = As<CT>(tag.GetTag("weapon"))) {
+                const ItemStack launcher = ReadItemStack(*weapon);
+                if (!launcher.IsEmpty()) a.SetFiredFromWeapon(launcher);
+            }
             if (auto item = As<CT>(tag.GetTag("item"))) {
                 const ItemStack pickup = ReadItemStack(*item);
                 if (!pickup.IsEmpty()) a.SetPotionFromPickupStack(pickup);
@@ -1054,6 +1085,39 @@ namespace Game::Anvil {
                     // MC DRAGON_DEATH_TIME_KEY — a save mid-cinematic resumes
                     // the float-up rather than restarting a live dragon.
                     w.Int("DragonDeathTime", d->deathTime);
+                }
+                break;
+            case EntityTypeId::Painting:
+                if (const auto* p = dynamic_cast<const Painting*>(&mob)) {
+                    // MC Painting.addAdditionalSaveData: "facing" as the 2D
+                    // data value (Direction.LEGACY_ID_CODEC_2D), then
+                    // BlockAttachedEntity's "block_pos" (BlockPos.CODEC, an
+                    // int array), then the variant's id (VariantUtils).
+                    w.Byte("facing", static_cast<int8_t>(ToYRot(p->GetDirection()) / 90.0f));
+                    const int32_t cell[3] = { p->HangingPos().x, p->HangingPos().y, p->HangingPos().z };
+                    w.IntArray("block_pos", cell, 3);
+                    if (const PaintingVariant* v = p->Variant()) w.String("variant", v->id);
+                }
+                break;
+            case EntityTypeId::ItemFrame:
+            case EntityTypeId::GlowItemFrame:
+                if (const auto* f = dynamic_cast<const ItemFrame*>(&mob)) {
+                    // MC ItemFrame.addAdditionalSaveData, after
+                    // BlockAttachedEntity's "block_pos". "Facing" is the 3D
+                    // data value (Direction.LEGACY_ID_CODEC) — the engine's
+                    // Direction order is the same.
+                    const int32_t cell[3] = { f->HangingPos().x, f->HangingPos().y, f->HangingPos().z };
+                    w.IntArray("block_pos", cell, 3);
+                    if (!f->GetItem().IsEmpty()) {
+                        w.BeginCompound("Item");
+                        WriteItemStackBody(w, f->GetItem());
+                        w.EndCompound();
+                    }
+                    w.Byte ("ItemRotation", static_cast<int8_t>(f->GetRotation()));
+                    w.Float("ItemDropChance", f->GetDropChance());
+                    w.Byte ("Facing", static_cast<int8_t>(f->GetDirection()));
+                    w.Bool ("Invisible", f->IsInvisible());
+                    w.Bool ("Fixed", f->IsFixed());
                 }
                 break;
             case EntityTypeId::ArmorStand:
@@ -1573,6 +1637,55 @@ namespace Game::Anvil {
                             tag.GetValue<int32_t>("DragonPhase", 0)));
                     }
                     d->deathTime = tag.GetValue<int32_t>("DragonDeathTime", 0);
+                }
+                break;
+            case EntityTypeId::Painting:
+                if (auto* p = dynamic_cast<Painting*>(&mob)) {
+                    // MC Painting.readAdditionalSaveData. The cell is only
+                    // trusted within 16 blocks of the saved position (MC
+                    // BlockAttachedEntity: "Block-attached entity at invalid
+                    // position"); otherwise the painting keeps the cell its
+                    // position lies in.
+                    static constexpr Direction kFrom2D[4] = {
+                        Direction::South, Direction::West, Direction::North, Direction::East };
+                    // Direction.from2DDataValue: BY_2D_DATA[abs(value % 4)].
+                    const int facing = tag.GetValue<int8_t>("facing", 0) % 4;
+                    const Direction direction = kFrom2D[facing < 0 ? -facing : facing];
+                    glm::ivec3 cell = p->BlockPosition();
+                    if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("block_pos")); arr && arr->value.size() == 3) {
+                        const glm::ivec3 stored(arr->value[0], arr->value[1], arr->value[2]);
+                        const glm::dvec3 d = glm::dvec3(stored) - glm::dvec3(p->BlockPosition());
+                        if (glm::dot(d, d) < 16.0 * 16.0) cell = stored;
+                    }
+                    if (const std::string id = tag.GetValue<std::string>("variant", ""); !id.empty()) {
+                        const int index = PaintingVariants::IndexOf(id);
+                        if (index >= 0) p->SetVariant(index);
+                    }
+                    p->SetHangingPos(cell);
+                    p->SetDirection(direction);
+                }
+                break;
+            case EntityTypeId::ItemFrame:
+            case EntityTypeId::GlowItemFrame:
+                if (auto* f = dynamic_cast<ItemFrame*>(&mob)) {
+                    // MC ItemFrame.readAdditionalSaveData (and
+                    // BlockAttachedEntity's cell, trusted within 16 blocks).
+                    glm::ivec3 cell = f->BlockPosition();
+                    if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("block_pos")); arr && arr->value.size() == 3) {
+                        const glm::ivec3 stored(arr->value[0], arr->value[1], arr->value[2]);
+                        const glm::dvec3 d = glm::dvec3(stored) - glm::dvec3(f->BlockPosition());
+                        if (glm::dot(d, d) < 16.0 * 16.0) cell = stored;
+                    }
+                    if (auto item = As<CT>(tag.GetTag("Item"))) f->SetItemSilently(ReadItemStack(*item));
+                    f->SetRotation(tag.GetValue<int8_t>("ItemRotation", 0), /*updateNeighbours=*/false);
+                    f->SetDropChance(tag.GetValue<float>("ItemDropChance", 1.0f));
+                    // Direction.from3DDataValue: BY_3D_DATA[abs(value % 6)];
+                    // default DOWN.
+                    const int facing = tag.GetValue<int8_t>("Facing", 0) % 6;
+                    f->SetHangingPos(cell);
+                    f->SetDirection(static_cast<Direction>(facing < 0 ? -facing : facing));
+                    f->SetInvisible(tag.GetValue<int8_t>("Invisible", 0) != 0);
+                    f->SetFixed(tag.GetValue<int8_t>("Fixed", 0) != 0);
                 }
                 break;
             case EntityTypeId::ArmorStand:

@@ -374,6 +374,21 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // MC ServerboundRenameItemPacket (AnvilPackets.hpp).
+    class RenameItemC2SPacketImpl : public IC2SPacket {
+    private:
+        RenameItemC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit RenameItemC2SPacketImpl(RenameItemC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onRenameItemC2S(m_data); }
+        const RenameItemC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::RenameItemC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PickItemC2SPacketImpl : public IC2SPacket {
     private:
         PickItemC2SPacket m_data;

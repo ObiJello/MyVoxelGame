@@ -919,6 +919,8 @@ Hush biome (densest underground); the portal sheds teal particles.
   (assets/sound_overlays/obeycraft/), so they are re-pitched vanilla, not original audio.
 - No block light engine: glowing blocks are full-bright but do not light their
   surroundings.
-- Tools and armor carry no enchantments (no ENCHANTMENTS component); enchanted books
-  from loot do.
+- The resonite tools wear (1800 durability) and can hold enchantments, but every
+  enchantment picks its items through the vanilla #minecraft:enchantable/... tags, which
+  do not list the Hush's tools — so neither the enchanting table nor a survival anvil
+  puts one on them.
 - Armor is not rendered on player bodies, so the Hush ships no armor set.

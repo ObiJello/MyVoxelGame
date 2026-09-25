@@ -22,6 +22,8 @@
 
 namespace Game {
 
+    class AbstractContainerMenu;
+
     struct ContainerClickResult;   // AbstractContainerMenu.hpp — see OnTake
 
     class Slot {
@@ -120,6 +122,14 @@ namespace Game {
         using Slot::Slot;
         bool MayPlace(const ItemStack& stack) const override;
         int  GetMaxStackSize() const override { return 1; }
+        // MC ArmorSlot.mayPickup(player): a piece carrying
+        // prevent_armor_change (Curse of Binding) cannot be taken off except
+        // by a creative player — the owning menu's `creative`.
+        bool MayPickup() const override;
+
+        // The menu this slot belongs to (for its `creative` flag). Set by
+        // InventoryMenu, which owns the slot and outlives it.
+        const AbstractContainerMenu* owner = nullptr;
     };
 
     // The crafting output square lives in AbstractCraftingMenu.hpp as

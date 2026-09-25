@@ -142,11 +142,81 @@ namespace Game {
             Game::Attribute::MaxHealth, 20.0, activeEffects));
     }
 
+    double ClientPlayer::EnchantedAttributeValue(Game::Attribute attribute, double base) {
+        return Game::EnchantmentHelper::PlayerAttributeValue(attribute, base, inventory, activeEffects,
+                                                             &enchantmentLocationAttributes);
+    }
+
+    float ClientPlayer::GetMiningEfficiency() {
+        return static_cast<float>(EnchantedAttributeValue(Game::Attribute::MiningEfficiency, 0.0));
+    }
+
+    float ClientPlayer::GetSubmergedMiningSpeed() {
+        return static_cast<float>(EnchantedAttributeValue(Game::Attribute::SubmergedMiningSpeed, 0.2));
+    }
+
+    void ClientPlayer::UpdateEnchantmentLocationEffects(IBlockAccess* blockAccess) {
+        // The facts the location conditions read (EntityPredicate on the
+        // local player): where it stands, how it moves, whether it flies.
+        Game::EnchantmentEntityFacts facts;
+        facts.typeId        = "minecraft:player";
+        facts.position      = physics.position;
+        facts.knownMovement = glm::dvec3(physics.velocity) / 20.0;
+        facts.tickCount     = tickCount;
+        facts.onGround      = physics.isOnGround;
+        facts.crouching     = physics.isSneaking;
+        facts.sprinting     = physics.isSprinting;
+        facts.flying        = physics.isFlying;
+        facts.inWater       = physics.isInWater;
+
+        Game::EnchantmentEquipment equipment = Game::EnchantmentEquipment::OfInventory(inventory);
+        equipment.attributes = &enchantmentLocationAttributes;
+        equipment.facts = &facts;
+
+        // collectEquipmentChanges: a changed slot's location effects stop,
+        // and the new item's run.
+        static constexpr Game::EquipmentSlot kSlots[] = {
+            Game::EquipmentSlot::MAINHAND, Game::EquipmentSlot::OFFHAND, Game::EquipmentSlot::FEET,
+            Game::EquipmentSlot::LEGS, Game::EquipmentSlot::CHEST, Game::EquipmentSlot::HEAD,
+        };
+        for (const Game::EquipmentSlot slot : kSlots) {
+            Game::ItemStack& last = enchantmentLastEquipment[static_cast<size_t>(slot)];
+            const Game::ItemStack* now = equipment.itemBySlot(slot);
+            const Game::ItemStack current = now ? *now : Game::ItemStack{};
+            if (Game::ItemStacksMatch(current, last)) continue;
+            Game::EnchantmentHelper::StopLocationBasedEffectsInSlot(equipment, enchantmentLocationState, slot);
+            last = current;
+            if (!current.IsEmpty() && !Game::IsBrokenItem(current)) {
+                Game::EnchantmentHelper::RunLocationChangedEffectsInSlot(
+                    nullptr, blockAccess, enchantmentRandom, equipment, enchantmentLocationState, slot);
+            }
+        }
+
+        // onChangedBlock: a new block position re-evaluates everything worn.
+        const glm::ivec3 blockPos(static_cast<int>(std::floor(physics.position.x)),
+                                  static_cast<int>(std::floor(physics.position.y)),
+                                  static_cast<int>(std::floor(physics.position.z)));
+        if (!enchantmentHasLastBlockPos || blockPos != enchantmentLastBlockPos) {
+            enchantmentLastBlockPos = blockPos;
+            enchantmentHasLastBlockPos = true;
+            Game::EnchantmentHelper::RunLocationChangedEffects(nullptr, blockAccess, enchantmentRandom,
+                                                               equipment, enchantmentLocationState);
+        }
+    }
+
     void ClientPlayer::ApplyEffectPhysics() {
-        // MOVEMENT_SPEED's effect factors — the attribute's ADD_MULTIPLIED_TOTAL
-        // pass over a base of 1 (clamped at the attribute's 0 floor).
-        physics.effectSpeedFactor = static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::MovementSpeed, 1.0, activeEffects));
+        // MOVEMENT_SPEED's factors over the walk — the attribute at the
+        // player's base 0.1 with the effect templates and Soul Speed's
+        // location bonus, relative to that base (the walk constants already
+        // are the 0.1).
+        physics.effectSpeedFactor = static_cast<float>(
+            EnchantedAttributeValue(Game::Attribute::MovementSpeed, 0.1) / 0.1);
+        physics.sneakingSpeed = static_cast<float>(
+            EnchantedAttributeValue(Game::Attribute::SneakingSpeed, Game::PlayerPhysics::SNEAKING_SPEED));
+        physics.waterMovementEfficiency = static_cast<float>(
+            EnchantedAttributeValue(Game::Attribute::WaterMovementEfficiency, 0.0));
+        physics.movementEfficiency = static_cast<float>(
+            EnchantedAttributeValue(Game::Attribute::MovementEfficiency, 0.0));
         const Game::MobEffectInstance* jump = GetEffect(Game::MobEffectId::JumpBoost);
         physics.effectJumpBoost = jump ? 0.1f * static_cast<float>(jump->amplifier + 1) : 0.0f;
         const Game::MobEffectInstance* levitation = GetEffect(Game::MobEffectId::Levitation);
@@ -307,7 +377,10 @@ namespace Game {
         // forbids sprinting outright — and stops a sprint already running.
         if (IsMobilityRestricted() && !physics.noclip) physics.isSprinting = false;
         // The local status effects the step reads (speed, jump boost,
-        // levitation, slow falling, dolphin's grace).
+        // levitation, slow falling, dolphin's grace), and the enchantment
+        // attributes (Swift Sneak, Depth Strider, Soul Speed) after the
+        // location effects have caught up with where the player stands.
+        UpdateEnchantmentLocationEffects(blockAccess);
         ApplyEffectPhysics();
 
         // Create physics context with block access (World, ClientBlockAccess, etc.)

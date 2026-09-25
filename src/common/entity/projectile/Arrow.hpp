@@ -28,10 +28,13 @@
 #pragma once
 
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/entity/Item.hpp"
 #include "common/entity/alchemy/Potions.hpp"
 #include "common/sound/SoundEvents.hpp"
 
 namespace Game {
+
+    struct DamageSourceInfo;
 
     class Arrow : public Projectile {
     public:
@@ -67,6 +70,24 @@ namespace Game {
             m_potion = contents;
             m_potionDurationScale = durationScale;
         }
+
+        // MC AbstractArrow.firedFromWeapon — a copy of the launcher, which
+        // the arrow's hit reads its enchantments off: Power through
+        // modifyDamage, Punch through modifyKnockback, the post_attack
+        // effects. Mob-fired arrows carry none (mobs hold no equipment here).
+        void SetFiredFromWeapon(const ItemStack& weapon) { m_firedFromWeapon = weapon; }
+        const ItemStack& GetFiredFromWeapon() const { return m_firedFromWeapon; }
+        // MC AbstractArrow.getWeaponItem: the launcher, or null.
+        ItemStack* GetWeaponItem() override {
+            return m_firedFromWeapon.IsEmpty() ? nullptr : &m_firedFromWeapon;
+        }
+        // MC AbstractArrow.onItemBreak: an effect wore the launcher copy out.
+        void OnItemBreak(const ItemStack&) { m_firedFromWeapon = ItemStack{}; }
+
+        // MC AbstractArrow.setCritArrow / isCritArrow — a fully drawn bow's
+        // shot, which adds nextInt(damage / 2 + 2) on the hit.
+        void SetCritArrow(bool crit) { m_critArrow = crit; }
+        bool IsCritArrow() const { return m_critArrow; }
 
         bool IsInGroundArrow() const { return m_inGround; }
         // MC AbstractArrow.isPushedByFluid: an arrow stuck in a block is
@@ -115,6 +136,11 @@ namespace Game {
         virtual void OnHitBlockArrow(const glm::dvec3& hitPos,
                                      const glm::ivec3& blockPos);
 
+        // MC AbstractArrow.doKnockback: the launcher's `minecraft:knockback`
+        // effects (Punch) from 0, applied along the flight as a push of
+        // knockback * 0.6 scaled by the target's KNOCKBACK_RESISTANCE.
+        void DoKnockback(LivingEntity& target, const DamageSourceInfo& source);
+
         void ApplyInertia(float inertia);
         bool ShouldFall() const;
         void StartFalling();
@@ -126,6 +152,8 @@ namespace Game {
         // ticks in the ground, as MC swaps the pickup for a plain arrow).
         PotionContents m_potion;
         float          m_potionDurationScale = 1.0f;
+        ItemStack      m_firedFromWeapon;
+        bool           m_critArrow = false;
         bool    m_inGround = false;
         int     m_inGroundTime = 0;
         int     m_life = 0;

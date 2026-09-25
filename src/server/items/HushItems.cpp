@@ -31,6 +31,7 @@
 #include "common/entity/Item.hpp"
 #include "common/entity/projectile/Arrow.hpp"
 #include "common/entity/projectile/ResonanceArrow.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/packets/game/HushSignalS2CPacket.hpp"
 #include "common/physics/Physics.hpp"
@@ -557,48 +558,107 @@ namespace Game::HushItems {
         const float power = Server::HushItems::PowerForTime(timeHeld);
         if (power < 0.1f) return;
 
+        // Player.getProjectile(bow): the first arrow found, else — only with
+        // infinite materials (creative) — a plain arrow.
         const int arrowSlot = Server::HushItems::FindArrowSlot(*player);
         if (arrowSlot < 0 && !player->isCreative()) return;
 
         auto session = Server::HushItems::SessionOf(*player);
         Server::ServerLevel* level = server->GetLevel(DimensionFromRaw(player->getDimensionId()));
         if (!session || !level || !level->MobLevel()) return;
-        Server::PlayerEntityView* view = level->MobLevel()->GetPlayerView(session->GetConnectionId());
+        Server::ServerLevelBridge& bridge = *level->MobLevel();
+        Server::PlayerEntityView* view = bridge.GetPlayerView(session->GetConnectionId());
         if (!view) return;
 
-        const bool resonance = bow.itemId == Items::ResonanceBow;
-        std::unique_ptr<Arrow> arrow = resonance
-            ? std::make_unique<ResonanceArrow>(level->MobLevel())
-            : std::make_unique<Arrow>(level->MobLevel());
-        arrow->SetOwner(view);
-        // ArrowItem.createArrow → new Arrow(level, owner, ammo.copyWithCount(1),
-        // weapon): a tipped arrow's POTION_CONTENTS (and its 0.125 duration
-        // scale) become the shot's payload.
-        if (arrowSlot >= 0) {
-            const ItemStack& ammoStack = player->getInventory().GetSlot(arrowSlot);
-            if (ammoStack.itemId == Items::TippedArrow) arrow->SetPotionFromPickupStack(ammoStack);
+        ItemStack creativeArrow(Items::Arrow, 1);
+        ItemStack& projectile = arrowSlot >= 0 ? player->getInventory().MutableSlot(arrowSlot) : creativeArrow;
+
+        // ProjectileWeaponItem.draw: processProjectileCount projectiles
+        // (Multishot's +2), the first drawn from the real stack and the rest
+        // from a copy with forced infinity. useAmmo: nothing is spent by
+        // infinite materials, and processAmmoUse lets the bow's ammo_use
+        // effects rewrite the cost (Infinity: a plain arrow costs 0). A shot
+        // that cost nothing is MC's INTANGIBLE_PROJECTILE (creative-only
+        // pickup — arrows are never picked up here, so there is no flag).
+        const int count = EnchantmentHelper::ProcessProjectileCount(bridge, bow, *view, 1);
+        const ItemStack projectileCopy = projectile;
+        std::vector<ItemStack> drawn;
+        for (int i = 0; i < count; ++i) {
+            const bool forceInfinite = i > 0;
+            const ItemStack& source = i == 0 ? projectile : projectileCopy;
+            const int ammoToUse = (!forceInfinite && !player->isCreative())
+                ? EnchantmentHelper::ProcessAmmoUse(bridge, bow, source, 1) : 0;
+            if (ammoToUse > source.count) continue;
+            ItemStack used = source;
+            if (ammoToUse == 0) {
+                used.count = 1;
+            } else {
+                // projectile.split(ammoToUse) from the inventory's stack.
+                used.count = ammoToUse;
+                if (i == 0 && arrowSlot >= 0) {
+                    projectile.count -= ammoToUse;
+                    if (projectile.count <= 0) projectile.Clear();
+                    player->markSlotDirty(arrowSlot);
+                }
+            }
+            drawn.push_back(std::move(used));
         }
+        if (drawn.empty()) return;
+
+        // ProjectileWeaponItem.shoot(level, player, hand, bow, drawn, power *
+        // 3, 1, isCrit = power == 1): a fan of processProjectileSpread
+        // degrees, each arrow fired from its launcher (the arrow keeps a copy
+        // — Power, Punch and Flame read it) and the bow worn once per arrow.
+        const EquipmentSlot handSlot = player->getUsedItemHand() == 1 ? EquipmentSlot::OFFHAND
+                                                                      : EquipmentSlot::MAINHAND;
+        const bool resonance = bow.itemId == Items::ResonanceBow;
+        const int n = static_cast<int>(drawn.size());
+        const float maxAngle = EnchantmentHelper::ProcessProjectileSpread(bridge, bow, *view, 0.0f);
+        const float angleStep = n == 1 ? 0.0f : 2.0f * maxAngle / static_cast<float>(n - 1);
+        const float angleOffset = static_cast<float>((n - 1) % 2) * angleStep / 2.0f;
+        float direction = 1.0f;
         const glm::dvec3 pos = player->getPosition();
-        arrow->position = glm::dvec3(pos.x, pos.y + player->getEyeHeight() - 0.1, pos.z);
-        // shootFromRotation(player, xRot, yRot, 0, power * 3, 1).
-        arrow->ShootFromRotation(*view, player->getPitch(), player->getYaw(), 0.0f,
-                                 power * 3.0f, 1.0f);
-        level->MobLevel()->AddFreshEntity(std::move(arrow));
-        // MC BowItem.releaseUsing:46 — playSound(null, player, ARROW_SHOOT,
-        // PLAYERS, 1.0, 1 / (nextFloat * 0.4 + 1.2) + power * 0.5).
-        {
-            JavaRandom& r = level->MobLevel()->Random();
-            level->MobLevel()->PlaySound(nullptr, pos, SoundEvents::ARROW_SHOOT, SoundSource::Players, 1.0f,
-                                         1.0f / (r.NextFloat() * 0.4f + 1.2f) + power * 0.5f);
+        for (int i = 0; i < n; ++i) {
+            const ItemStack& ammo = drawn[static_cast<size_t>(i)];
+            const float angle = angleOffset + direction * static_cast<float>((i + 1) / 2) * angleStep;
+            direction = -direction;
+
+            std::unique_ptr<Arrow> arrow = resonance
+                ? std::make_unique<ResonanceArrow>(&bridge)
+                : std::make_unique<Arrow>(&bridge);
+            arrow->SetOwner(view);
+            // ArrowItem.createArrow → new Arrow(level, owner, ammo.copyWithCount(1),
+            // weapon): a tipped arrow's POTION_CONTENTS (and its 0.125
+            // duration scale) become the shot's payload; the launcher is
+            // copied onto the arrow; a full draw is a crit.
+            if (ammo.itemId == Items::TippedArrow) arrow->SetPotionFromPickupStack(ammo);
+            arrow->SetFiredFromWeapon(bow);
+            if (power == 1.0f) arrow->SetCritArrow(true);
+            arrow->position = glm::dvec3(pos.x, pos.y + player->getEyeHeight() - 0.1, pos.z);
+            // BowItem.shootProjectile: shootFromRotation(player, xRot, yRot +
+            // angle, 0, power * 3, 1).
+            arrow->ShootFromRotation(*view, player->getPitch(), player->getYaw() + angle, 0.0f,
+                                     power * 3.0f, 1.0f);
+            Arrow* spawned = arrow.get();
+            bridge.AddFreshEntity(std::move(arrow));
+            // Projectile.applyOnProjectileSpawned: the launcher's
+            // projectile_spawned effects on the new arrow (Flame's 100 s
+            // ignite), a worn-out launcher copy dropping off the arrow.
+            if (ItemStack* launcher = spawned->GetWeaponItem(); launcher && launcher->itemId != ammo.itemId) {
+                EnchantmentHelper::OnProjectileSpawned(bridge, *launcher, *spawned, view,
+                    [spawned](const ItemStack& broken) { spawned->OnItemBreak(broken); });
+            }
+            // weapon.hurtAndBreak(getDurabilityUse(projectile) — 1 for an
+            // arrow, shooter, hand); a broken bow stops the volley.
+            HurtAndBreak(bow, 1, *view, handSlot);
+            if (bow.IsEmpty()) break;
         }
 
-        // useAmmo: one arrow, unless creative (hasInfiniteMaterials).
-        if (!player->isCreative() && arrowSlot >= 0) {
-            ItemStack& ammo = player->getInventory().MutableSlot(arrowSlot);
-            ammo.count -= 1;
-            if (ammo.count <= 0) ammo.Clear();
-            player->markSlotDirty(arrowSlot);
-        }
+        // MC BowItem.releaseUsing:46 — playSound(null, player, ARROW_SHOOT,
+        // PLAYERS, 1.0, 1 / (nextFloat * 0.4 + 1.2) + power * 0.5).
+        JavaRandom& r = bridge.Random();
+        bridge.PlaySound(nullptr, pos, SoundEvents::ARROW_SHOOT, SoundSource::Players, 1.0f,
+                         1.0f / (r.NextFloat() * 0.4f + 1.2f) + power * 0.5f);
     }
 
     void BroadcastSonicBurst(DimensionId dimension, const glm::dvec3& at, float radius) {

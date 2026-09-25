@@ -113,6 +113,72 @@ namespace Game::Anvil {
             return tag;
         }
 
+        // ItemEnchantments.CODEC at DataVersion 4764+: Codec.unboundedMap(
+        // Enchantment.CODEC, LEVEL_CODEC) — a FLAT compound of name -> level.
+        // The `{levels: {...}}` wrapper older notes describe was
+        // 1.20.5..1.21.4 only.
+        void WriteEnchantments(Nbt::Writer& w, std::string_view name, const ItemEnchantments& e) {
+            w.BeginCompound(name);
+            for (const EnchantmentInstance& entry : e.entries) {
+                const Enchantment& def = EnchantmentRegistry::Get(entry.id);
+                if (def.slug.empty()) continue;
+                w.Int(std::string(kNamespace) + def.slug, std::clamp(entry.level, 1, 255));
+            }
+            w.EndCompound();
+        }
+
+        // The reverse; an enchantment this build lacks is dropped, as is a
+        // level outside LEVEL_CODEC's 1..255.
+        ItemEnchantments ReadEnchantments(const ::World::NBTTagCompound& c) {
+            ItemEnchantments out;
+            for (const auto& [key, value] : c.value) {
+                if (!value) continue;
+                const std::optional<double> level = NumberOf(*value);
+                if (!level) continue;
+                const auto found = EnchantmentRegistry::ByName(StripNamespace(key));
+                if (!found) continue;
+                const int lvl = static_cast<int>(*level);
+                if (lvl >= 1 && lvl <= 255) out.Set(*found, lvl);
+            }
+            return out;
+        }
+
+        // A HolderSet<T> as RegistryCodecs.holderSet writes it: a "#tag"
+        // string, a single id string, or a list of ids.
+        void WriteHolderSet(Nbt::Writer& w, std::string_view name, const std::vector<std::string>& entries) {
+            if (entries.size() == 1) {
+                w.String(name, entries.front());
+                return;
+            }
+            auto list = w.BeginList(name, Nbt::TagType::String);
+            for (const std::string& e : entries) w.ListString(list, e);
+            w.EndList(list);
+        }
+
+        std::vector<std::string> ReadHolderSet(const ::World::NBTTag* tag) {
+            std::vector<std::string> out;
+            if (!tag) return out;
+            if (auto str = dynamic_cast<const ::World::NBTTagString*>(tag)) {
+                out.push_back(str->value);
+            } else if (auto list = dynamic_cast<const ::World::NBTTagList*>(tag)) {
+                for (const auto& e : list->value) {
+                    if (!e) continue;
+                    if (auto str = dynamic_cast<const ::World::NBTTagString*>(Unwrap(e.get()))) {
+                        out.push_back(str->value);
+                    }
+                }
+            }
+            return out;
+        }
+
+        std::optional<int32_t> IntComponent(const ::World::NBTTagCompound& components, const char* key) {
+            auto tag = components.GetTag(key);
+            if (!tag) return std::nullopt;
+            const std::optional<double> v = NumberOf(*tag);
+            if (!v) return std::nullopt;
+            return static_cast<int32_t>(*v);
+        }
+
         // The NBT tree as the JSON tree the component codec is written
         // against (Text::FromJson): numbers stay numbers — the codec reads a
         // byte 1b as a boolean exactly as NbtOps hands one to Codec.BOOL.
@@ -399,6 +465,23 @@ namespace Game::Anvil {
         const auto customName = stack.components.get(DataComponents::CUSTOM_NAME);
         const auto stored     = stack.components.get(DataComponents::STORED_ENCHANTMENTS);
         const bool hasEnchants = stored.has_value() && !stored->entries.empty();
+        // Durability / enchanting (the stack's patch over its item: MC saves
+        // only components that differ from the prototype, which is exactly
+        // what stack.components holds).
+        const auto enchantments   = stack.components.get(DataComponents::ENCHANTMENTS);
+        const bool hasItemEnchants = enchantments.has_value() && !enchantments->IsEmpty();
+        const auto damage         = stack.components.get(DataComponents::DAMAGE);
+        const auto maxDamage      = stack.components.get(DataComponents::MAX_DAMAGE);
+        const bool unbreakable    = stack.components.get(DataComponents::UNBREAKABLE).has_value();
+        const auto repairCost     = stack.components.get(DataComponents::REPAIR_COST);
+        const auto repairable     = stack.components.get(DataComponents::REPAIRABLE);
+        const auto enchantable    = stack.components.get(DataComponents::ENCHANTABLE);
+        const auto weapon         = stack.components.get(DataComponents::WEAPON);
+        const auto breakSound     = stack.components.get(DataComponents::BREAK_SOUND);
+        const auto resistant      = stack.components.get(DataComponents::DAMAGE_RESISTANT);
+        const bool hasDurabilityData = hasItemEnchants || damage || maxDamage || unbreakable ||
+                                       repairCost || repairable || enchantable || weapon ||
+                                       breakSound || resistant;
 #if ENABLE_PORTAL_GUN
         // The gun's pair is keyed by this id (PortalRegistry); losing it on
         // save orphaned the saved pair from the reloaded gun.
@@ -422,11 +505,13 @@ namespace Game::Anvil {
         // MC DataComponents.DYED_COLOR — DyedItemColor.CODEC is the bare
         // RGB int (ExtraCodecs.RGB_COLOR_CODEC).
         const auto dyedColor     = stack.components.get(DataComponents::DYED_COLOR);
+        // MC DataComponents.PAINTING_VARIANT — the variant holder's id.
+        const auto paintingVariant = stack.components.get(DataComponents::PAINTING_VARIANT);
 
         if (!customName.has_value() && !hasEnchants && !gunInstance.has_value() &&
             !sulfurBucket.has_value() && !potion.has_value() && !durationScale.has_value() &&
             !stew.has_value() && !writtenBook.has_value() && !writableBook.has_value() &&
-            !dyedColor.has_value()) return;
+            !dyedColor.has_value() && !hasDurabilityData && !paintingVariant.has_value()) return;
 
         w.BeginCompound("components");
         if (potion.has_value()) {
@@ -441,6 +526,9 @@ namespace Game::Anvil {
         }
         if (dyedColor.has_value()) {
             w.Int("minecraft:dyed_color", *dyedColor);
+        }
+        if (paintingVariant.has_value()) {
+            w.String("minecraft:painting/variant", *paintingVariant);
         }
         if (stew.has_value()) {
             // SuspiciousStewEffects.CODEC: a list of {id, duration}.
@@ -511,17 +599,48 @@ namespace Game::Anvil {
             // exactly what we store.
             w.String("minecraft:custom_name", *customName);
         }
-        if (hasEnchants) {
-            // At DataVersion 4764 ItemEnchantments.CODEC is
-            // Codec.unboundedMap(Enchantment.CODEC, LEVEL_CODEC) — a FLAT
-            // compound of name -> level. The `{levels: {...}}` wrapper older
-            // notes describe was 1.20.5..1.21.4 only.
-            w.BeginCompound("minecraft:stored_enchantments");
-            for (const EnchantmentInstance& e : stored->entries) {
-                const Enchantment& def = EnchantmentRegistry::Get(e.id);
-                if (def.slug.empty()) continue;
-                w.Int(std::string(kNamespace) + def.slug, std::clamp(e.level, 1, 255));
+        if (hasEnchants) WriteEnchantments(w, "minecraft:stored_enchantments", *stored);
+        if (hasItemEnchants) WriteEnchantments(w, "minecraft:enchantments", *enchantments);
+        // DAMAGE / MAX_DAMAGE / REPAIR_COST: bare ints (NON_NEGATIVE_INT /
+        // POSITIVE_INT codecs). UNBREAKABLE: Unit.CODEC, an empty compound.
+        if (damage) w.Int("minecraft:damage", std::max(0, *damage));
+        if (maxDamage && *maxDamage > 0) w.Int("minecraft:max_damage", *maxDamage);
+        if (unbreakable) {
+            w.BeginCompound("minecraft:unbreakable");
+            w.EndCompound();
+        }
+        if (repairCost) w.Int("minecraft:repair_cost", std::max(0, *repairCost));
+        if (repairable && !repairable->items.empty()) {
+            // Repairable.CODEC: {items: HolderSet<Item>}.
+            w.BeginCompound("minecraft:repairable");
+            WriteHolderSet(w, "items", repairable->items);
+            w.EndCompound();
+        }
+        if (enchantable && *enchantable > 0) {
+            // Enchantable.CODEC: {value: POSITIVE_INT}.
+            w.BeginCompound("minecraft:enchantable");
+            w.Int("value", *enchantable);
+            w.EndCompound();
+        }
+        if (weapon) {
+            // Weapon.CODEC: both fields optional with defaults 1 / 0.0.
+            w.BeginCompound("minecraft:weapon");
+            if (weapon->itemDamagePerAttack != 1) w.Int("item_damage_per_attack", weapon->itemDamagePerAttack);
+            if (weapon->disableBlockingForSeconds != 0.0f) {
+                w.Float("disable_blocking_for_seconds", weapon->disableBlockingForSeconds);
             }
+            w.EndCompound();
+        }
+        if (breakSound && !breakSound->empty()) {
+            // SoundEvent.CODEC — the registry id form.
+            const std::string& sound = *breakSound;
+            w.String("minecraft:break_sound",
+                     sound.find(':') == std::string::npos ? std::string(kNamespace) + sound : sound);
+        }
+        if (resistant && !resistant->empty()) {
+            // DamageResistant.CODEC: {types: TagKey<DamageType>} ("#ns:tag").
+            w.BeginCompound("minecraft:damage_resistant");
+            w.String("types", *resistant);
             w.EndCompound();
         }
         w.EndCompound();
@@ -588,6 +707,10 @@ namespace Game::Anvil {
                                      static_cast<int32_t>((rgb[0] << 16) | (rgb[1] << 8) | rgb[2]));
             }
         }
+        if (auto variant = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:painting/variant"))) {
+            stack.components.set(DataComponents::PAINTING_VARIANT, variant->value);
+        }
         if (auto list = std::dynamic_pointer_cast<::World::NBTTagList>(
                 components->GetTag("minecraft:suspicious_stew_effects"))) {
             SuspiciousStewEffects effects;
@@ -652,16 +775,62 @@ namespace Game::Anvil {
 
         if (auto ench = std::dynamic_pointer_cast<::World::NBTTagCompound>(
                 components->GetTag("minecraft:stored_enchantments"))) {
-            ItemEnchantments out;
-            for (const auto& [key, value] : ench->value) {
-                auto levelTag = std::dynamic_pointer_cast<::World::NBTTagInt>(value);
-                if (!levelTag) continue;
-                const auto found = EnchantmentRegistry::ByName(StripNamespace(key));
-                if (!found) continue;              // an enchantment this build lacks
-                out.entries.push_back({*found, levelTag->value});
+            ItemEnchantments out = ReadEnchantments(*ench);
+            if (!out.IsEmpty()) stack.components.set(DataComponents::STORED_ENCHANTMENTS, std::move(out));
+        }
+        if (auto ench = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:enchantments"))) {
+            ItemEnchantments out = ReadEnchantments(*ench);
+            if (!out.IsEmpty()) stack.components.set(DataComponents::ENCHANTMENTS, std::move(out));
+        }
+
+        // Durability. MAX_DAMAGE first: SetDamageValue-style clamping reads
+        // it, and a save may override both.
+        if (auto maxDamage = IntComponent(*components, "minecraft:max_damage"); maxDamage && *maxDamage > 0) {
+            stack.components.set(DataComponents::MAX_DAMAGE, *maxDamage);
+        }
+        if (auto damage = IntComponent(*components, "minecraft:damage")) {
+            // A value equal to the item's own default is no patch (MC never
+            // writes one); keeping it would stop the stack matching a fresh one.
+            const int32_t value = std::max(0, *damage);
+            const auto prototype = ItemRegistry::Get(stack.itemId).defaultComponents.get(DataComponents::DAMAGE);
+            if (!prototype || *prototype != value) stack.components.set(DataComponents::DAMAGE, value);
+        }
+        if (components->GetTag("minecraft:unbreakable")) {
+            stack.components.set(DataComponents::UNBREAKABLE, true);
+        }
+        if (auto repairCost = IntComponent(*components, "minecraft:repair_cost")) {
+            stack.components.set(DataComponents::REPAIR_COST, std::max(0, *repairCost));
+        }
+        if (auto rep = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:repairable"))) {
+            Repairable repairable;
+            repairable.items = ReadHolderSet(rep->GetTag("items").get());
+            if (!repairable.items.empty()) stack.components.set(DataComponents::REPAIRABLE, std::move(repairable));
+        }
+        if (auto ench = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:enchantable"))) {
+            if (auto value = IntComponent(*ench, "value"); value && *value > 0) {
+                stack.components.set(DataComponents::ENCHANTABLE, *value);
             }
-            if (!out.entries.empty()) {
-                stack.components.set(DataComponents::STORED_ENCHANTMENTS, out);
+        }
+        if (auto wpn = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:weapon"))) {
+            Weapon weapon;
+            weapon.itemDamagePerAttack = std::max(0, IntComponent(*wpn, "item_damage_per_attack").value_or(1));
+            if (auto t = wpn->GetTag("disable_blocking_for_seconds")) {
+                weapon.disableBlockingForSeconds = static_cast<float>(std::max(0.0, NumberOf(*t).value_or(0.0)));
+            }
+            stack.components.set(DataComponents::WEAPON, weapon);
+        }
+        if (auto sound = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:break_sound"))) {
+            stack.components.set(DataComponents::BREAK_SOUND, std::string(StripNamespace(sound->value)));
+        }
+        if (auto res = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:damage_resistant"))) {
+            if (auto types = std::dynamic_pointer_cast<::World::NBTTagString>(res->GetTag("types"))) {
+                stack.components.set(DataComponents::DAMAGE_RESISTANT, types->value);
             }
         }
         return stack;

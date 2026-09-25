@@ -13,6 +13,7 @@
 #include "common/text/TextComponent.hpp"
 #include "client/entity/Player.hpp"
 #include "common/entity/Item.hpp"        // IsSameItemSameComponents (Ctrl+Shift+Q)
+#include "common/entity/decoration/PaintingVariants.hpp"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -676,8 +677,9 @@ namespace Render {
         // "Potion of Swiftness" — inside GetItemStackItemName.)
         std::string name = Game::GetItemStackHoverName(stack);
         if (name.empty()) return;
+        // ItemStack.getRarity: an enchanted item shows one tier up.
         const uint32_t nameColor = Game::RarityColorARGB(
-            stack.get(Game::DataComponents::RARITY).value_or(Game::Rarity::COMMON));
+            static_cast<Game::Rarity>(Game::GetStackRarity(stack)));
 
         // Build the line list: name first, then per-component annotations.
         // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips chain —
@@ -714,6 +716,36 @@ namespace Render {
             for (auto& l : potionLines) lines.push_back({std::move(l.text), l.colorARGB});
         }
 
+        // PAINTING_VARIANT — HangingEntityItem.appendHoverText: the canvas's
+        // title and author (each in the colour its variant JSON gives), then
+        // "painting.dimensions"; a plain painting says "Random variant", in
+        // grey, to a creative player only (tooltipFlag.isCreative()).
+        if (stack.itemId == Game::Items::Painting) {
+            const Game::PaintingVariant* variant = nullptr;
+            if (auto id = stack.get(Game::DataComponents::PAINTING_VARIANT)) {
+                variant = Game::PaintingVariants::Get(Game::PaintingVariants::IndexOf(*id));
+            }
+            const auto colorOf = [](const std::string& name) {
+                const auto parsed = Game::Text::TextColor::Parse(name);
+                return parsed ? (0xFF000000u | parsed->rgb) : 0xFFFFFFFFu;
+            };
+            if (variant) {
+                for (const auto* line : { &variant->title, &variant->author }) {
+                    if (!*line) continue;
+                    lines.push_back({Game::Language::GetOrDefault((*line)->translate, (*line)->translate),
+                                     colorOf((*line)->color)});
+                }
+                std::string dims = Game::Language::GetOrDefault("painting.dimensions", "%sx%s");
+                for (int value : { variant->width, variant->height }) {
+                    const size_t at = dims.find("%s");
+                    if (at != std::string::npos) dims.replace(at, 2, std::to_string(value));
+                }
+                lines.push_back({dims, 0xFFFFFFFFu});
+            } else if (Player() && Player()->IsCreative()) {
+                lines.push_back({Game::Language::GetOrDefault("painting.random", "Random variant"), 0xFFAAAAAAu});
+            }
+        }
+
         // JUKEBOX_PLAYABLE — JukeboxPlayable.addToTooltip: the song's
         // description in grey ("C418 - 13"), before the enchantment lines.
         if (const std::string& song = Game::ItemRegistry::Get(stack.itemId).jukeboxSongDescription; !song.empty()) {
@@ -723,6 +755,13 @@ namespace Render {
         if (auto stored = stack.get(Game::DataComponents::STORED_ENCHANTMENTS)) {
             std::vector<Game::Enchantment::FormattedLine> ench;
             stored->AddToTooltip(ench);
+            for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
+        }
+        // ENCHANTMENTS — right after STORED_ENCHANTMENTS in
+        // addDetailsToTooltip, the same ItemEnchantments.addToTooltip.
+        if (auto enchantments = stack.get(Game::DataComponents::ENCHANTMENTS)) {
+            std::vector<Game::Enchantment::FormattedLine> ench;
+            enchantments->AddToTooltip(ench);
             for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
         }
 
@@ -811,6 +850,12 @@ namespace Render {
             }
         }
 
+        // UNBREAKABLE — addUnitComponentToTooltip(UNBREAKABLE,
+        // "item.unbreakable" in BLUE), after the attribute lines.
+        if (stack.get(Game::DataComponents::UNBREAKABLE)) {
+            lines.push_back({Game::Language::Get("item.unbreakable"), 0xFF5555FFu});   // BLUE
+        }
+
         // SUSPICIOUS_STEW_EFFECTS — SuspiciousStewEffects.addToTooltip lists
         // its effects only when flag.isCreative() (the creative player's
         // tooltip); a survival player sees a plain stew.
@@ -827,6 +872,16 @@ namespace Render {
         // F3+H — MC ItemStack.getTooltipLines with TooltipFlag.ADVANCED: the
         // registry name in dark grey and the component count.
         if (Platform::g_gameSettings.GetAdvancedItemTooltips()) {
+            // "Durability: remaining / max" — only while damaged
+            // (`isDamaged() && display.shows(DAMAGE)`), in the default colour.
+            if (Game::IsDamaged(stack)) {
+                const int maxDamage = Game::GetMaxDamage(stack);
+                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                     "item.durability",
+                                     {Game::Text::Component::Literal(std::to_string(maxDamage - Game::GetDamageValue(stack))),
+                                      Game::Text::Component::Literal(std::to_string(maxDamage))})),
+                                 0xFFFFFFFFu});
+            }
             std::string slug;
             if (stack.itemId >= Game::PURE_ITEM_BASE) {
                 const size_t idx = static_cast<size_t>(stack.itemId - Game::PURE_ITEM_BASE);

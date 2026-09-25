@@ -462,11 +462,13 @@ namespace Game {
                 return UseResult::Success;
             }
         }
-        // IShearable (NeoForge's shears hook): ready -> shear.
+        // IShearable (NeoForge's shears hook): ready -> shear, and the
+        // shears wear as on a vanilla sheep (hurtAndBreak(1, player, hand)).
         if (held.itemId == Items::Shears) {
             if (m_level && m_level->IsClientSide()) return UseResult::Consume;
             if (!ReadyForShearing()) return UseResult::Consume;
             Shear();
+            HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
             return UseResult::Success;
         }
         return Animal::MobInteract(player, held);

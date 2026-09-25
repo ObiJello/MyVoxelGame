@@ -33,6 +33,8 @@
 
 namespace Game {
     class Mob;
+    struct ItemStack;
+    struct DamageSourceInfo;
     class ILevelWrite;
     class ClientPlayer;
     class MyTerrainGenerator;
@@ -1114,6 +1116,16 @@ namespace Server {
         // item). Server-side for the same reason as the end crystal.
         bool PlaceArmorStandFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
                                     float playerYaw);
+        // MC HangingEntityItem.useOn for the painting: hung on the clicked
+        // wall face (never a floor or ceiling), the variant MC's
+        // Painting.create picks for that wall. Returns whether one was
+        // hung (the caller consumes the item).
+        bool PlacePaintingFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
+                                  const Game::ItemStack& used);
+        // MC HangingEntityItem.useOn for (glow) item frames (ItemFrameItem):
+        // on any face of the clicked block, inside the build height.
+        bool PlaceItemFrameFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
+                                   const Game::ItemStack& used, bool glow);
 
         // MC PlayerList.broadcastSystemMessage(component, false): a server
         // message with no sender, delivered to every connected client. Used for
@@ -1123,15 +1135,23 @@ namespace Server {
         // MC's post-hit visuals: entity event 4 for the swing, plus the crit
         // particle burst. Sent to every watcher of the target's chunk IN
         // `dimension`, not just the attacker.
+        // `magicCrit` is MC Player.magicCrit — the ENCHANTED_HIT burst a hit
+        // whose weapon's damage enchantments added anything shows.
         void BroadcastAttackEffects(Game::DimensionId dimension,
-                                    const Game::LivingEntity& target, bool crit);
+                                    const Game::LivingEntity& target, bool crit,
+                                    bool magicCrit = false);
 
         // MC Player.doSweepAttack — the sword arc that clips everything living
         // standing next to what was hit. Split out of HandleInteract for the
         // same reason MC splits it: the conditions that decide whether it
         // happens are already a paragraph on their own.
+        // `baseDamage` is the hit's scaled, pre-enchantment damage and
+        // `source` its DamageSource: each swept entity takes
+        // (1 + SWEEPING_DAMAGE_RATIO * baseDamage) run through the weapon's
+        // damage enchantments, times the attack strength.
         void DoSweepAttack(Server::PlayerEntityView& attacker,
-                           Game::LivingEntity& target, float strengthScale);
+                           Game::LivingEntity& target, float baseDamage,
+                           const Game::DamageSourceInfo& source, float strengthScale);
 
         // MC Entity.onClimbable, reduced to the block the feet are in — this
         // port has no block tags at runtime, so BlockTags.CLIMBABLE is a switch.
@@ -1146,6 +1166,9 @@ namespace Server {
         // yet, so the event exists to carry the signal and the client draws
         // what it can. Numbered clear of MC's own 2/3/10/18/60.
         static constexpr uint8_t kEntityEventCrit = 200;
+        // MC ClientboundAnimatePacket(entity, MAGIC_CRITICAL_HIT) — the
+        // enchanted-hit burst, same stand-in as the crit above.
+        static constexpr uint8_t kEntityEventMagicCrit = 201;
 
         // Spawn `count` mobs of `type` at `pos`, for /summon. Returns how many
         // were actually created. Scattered slightly so a stack of them does not
@@ -1268,6 +1291,13 @@ namespace Server {
         void SendToChunkWatchersAt(Game::DimensionId dimension, Game::Math::ChunkPos chunk,
                                    Network::PacketId packetId,
                                    const std::vector<uint8_t>& data);
+
+        // MC ChunkMap.resendBiomesForChunks: after a runtime biome edit, send
+        // each player watching any of these chunks (in `dimension`) one
+        // ChunksBiomesS2C holding the biome columns of the ones they watch.
+        // Server thread.
+        void ResendBiomesForChunks(Game::DimensionId dimension,
+                                   const std::vector<std::shared_ptr<Game::Chunk>>& chunks);
 
     private:
 

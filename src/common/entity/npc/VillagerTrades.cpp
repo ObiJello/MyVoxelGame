@@ -550,7 +550,7 @@ namespace Game::VillagerTrades {
                         ctx.random.NextInt(static_cast<int>(compatible.size())))];
                     const int maxLevel = std::max(1, EnchantmentDefinitions::Get(id).maxLevel);
                     const int level = ctx.random.NextInt(1, maxLevel);   // Mth.nextInt(min 1, max)
-                    if (targetIsBook) stack = ItemStack(Items::EnchantedBook, stack.count);
+                    if (targetIsBook) stack = ItemStack(Items::EnchantedBook, 1);   // new ItemStack(ENCHANTED_BOOK)
                     EnchantmentHelper::Enchant(stack, id, level);
                     if (fn.includeAdditionalCost) {
                         // 2 + nextInt(5 + level * 10) + 3 * level.
@@ -573,9 +573,10 @@ namespace Game::VillagerTrades {
                     bool pass = fn.filterItems.empty() ||
                                 std::find(fn.filterItems.begin(), fn.filterItems.end(), stack.itemId) !=
                                     fn.filterItems.end();
-                    // minecraft:enchantments — the ENCHANTMENTS component,
-                    // which gear does not carry in this engine: never met.
-                    if (pass && fn.needsEnchantments) pass = false;
+                    // minecraft:enchantments — every use is `[{}]` (one
+                    // EnchantmentPredicate with no id or level): the item
+                    // carries at least one enchantment in ENCHANTMENTS.
+                    if (pass && fn.needsEnchantments) pass = IsEnchanted(stack);
                     if (pass && fn.needsStoredEnchantments) pass = HasStoredEnchantments(stack);
                     if (pass && fn.needsDyedColor) pass = stack.get(DataComponents::DYED_COLOR).has_value();
                     // minecraft:map_id — no filled-map system: never met.

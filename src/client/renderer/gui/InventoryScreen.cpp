@@ -3,6 +3,8 @@
 #include "EffectsInInventory.hpp"
 #include "ContainerScreen.hpp"
 #include "FurnaceScreen.hpp"
+#include "AnvilScreen.hpp"
+#include "EnchantmentScreen.hpp"
 #include "MerchantScreen.hpp"
 #include "CreativeModeInventoryScreen.hpp"
 #include "CraftingScreen.hpp"
@@ -35,6 +37,8 @@ namespace Render {
             GetContainerScreen().CloseSilently();
             GetFurnaceScreen().CloseSilently();
             GetMerchantScreen().CloseSilently();
+            GetAnvilScreen().CloseSilently();
+            GetEnchantmentScreen().CloseSilently();
             // The lectern's book view is a ScreenManager screen, not a slot
             // grid, but it is just as bound to the menu going away.
             CloseLecternScreen();
@@ -59,6 +63,8 @@ namespace Render {
         if (GetContainerScreen().IsOpen())         return GetContainerScreen();
         if (GetFurnaceScreen().IsOpen())           return GetFurnaceScreen();
         if (GetMerchantScreen().IsOpen())          return GetMerchantScreen();
+        if (GetAnvilScreen().IsOpen())             return GetAnvilScreen();
+        if (GetEnchantmentScreen().IsOpen())       return GetEnchantmentScreen();
         if (GetCreativeInventoryScreen().IsOpen()) return GetCreativeInventoryScreen();
         return GetSurvivalInventoryScreen();
     }
@@ -73,6 +79,8 @@ namespace Render {
         if (GetContainerScreen().IsOpen()) { GetContainerScreen().Close(); return; }
         if (GetFurnaceScreen().IsOpen())   { GetFurnaceScreen().Close();   return; }
         if (GetMerchantScreen().IsOpen())  { GetMerchantScreen().Close();  return; }
+        if (GetAnvilScreen().IsOpen())     { GetAnvilScreen().Close();     return; }
+        if (GetEnchantmentScreen().IsOpen()) { GetEnchantmentScreen().Close(); return; }
         if (s_player && s_player->IsCreative()) GetCreativeInventoryScreen().Open();
         else                                    GetSurvivalInventoryScreen().Open();
     }
@@ -89,6 +97,12 @@ namespace Render {
         GetSurvivalInventoryScreen().SetPlayer(player);
         GetCreativeInventoryScreen().SetPlayer(player);
         GetCraftingScreen().SetPlayer(player);
+        // The anvil reads the player's level and game mode (mayPickup, the
+        // cost colour).
+        GetAnvilScreen().SetPlayer(player);
+        // The enchanting table reads the level and game mode (the rows'
+        // enabled state, the tooltip, the click check).
+        GetEnchantmentScreen().SetPlayer(player);
     }
 
     // ─── Server-driven menu changes ──────────────────────────────
@@ -154,12 +168,21 @@ namespace Render {
                 break;
             }
 
+            case Game::MenuType::Anvil: {
+                // MC AnvilScreen: its own screen for the name box and cost.
+                auto menu = std::make_unique<Game::AnvilMenu>(&s_player->inventory);
+                menu->containerId = containerId;
+                SetClientContainerMenu(std::move(menu), type);
+                GetAnvilScreen().Configure(title);
+                GetAnvilScreen().Open();
+                break;
+            }
+
             case Game::MenuType::Stonecutter:
             case Game::MenuType::Grindstone:
             case Game::MenuType::CartographyTable:
             case Game::MenuType::Loom:
-            case Game::MenuType::Smithing:
-            case Game::MenuType::Anvil: {
+            case Game::MenuType::Smithing: {
                 std::unique_ptr<Game::AbstractContainerMenu> menu;
                 switch (type) {
                     case Game::MenuType::Stonecutter:
@@ -170,10 +193,8 @@ namespace Render {
                         menu = std::make_unique<Game::CartographyTableMenu>(&s_player->inventory); break;
                     case Game::MenuType::Loom:
                         menu = std::make_unique<Game::LoomMenu>(&s_player->inventory); break;
-                    case Game::MenuType::Smithing:
-                        menu = std::make_unique<Game::SmithingMenu>(&s_player->inventory); break;
                     default:
-                        menu = std::make_unique<Game::AnvilMenu>(&s_player->inventory); break;
+                        menu = std::make_unique<Game::SmithingMenu>(&s_player->inventory); break;
                 }
                 menu->containerId = containerId;
                 SetClientContainerMenu(std::move(menu), type);
@@ -184,14 +205,23 @@ namespace Render {
                 break;
             }
 
-            case Game::MenuType::Enchantment:
+            case Game::MenuType::Enchantment: {
+                // MC EnchantmentScreen: the three offer rows over the client's
+                // EnchantmentMenu, whose costs / seed / clues are the server's
+                // data slots.
+                auto menu = std::make_unique<Game::EnchantmentMenu>(&s_player->inventory);
+                menu->containerId = containerId;
+                SetClientContainerMenu(std::move(menu), type);
+                GetEnchantmentScreen().Configure(title);
+                GetEnchantmentScreen().Open();
+                break;
+            }
+
             case Game::MenuType::BrewingStand:
             case Game::MenuType::Beacon:
             case Game::MenuType::Crafter3x3: {
                 std::unique_ptr<Game::AbstractContainerMenu> menu;
                 switch (type) {
-                    case Game::MenuType::Enchantment:
-                        menu = std::make_unique<Game::EnchantmentMenu>(&s_player->inventory); break;
                     case Game::MenuType::BrewingStand:
                         menu = std::make_unique<Game::BrewingStandMenu>(&s_player->inventory); break;
                     case Game::MenuType::Beacon:

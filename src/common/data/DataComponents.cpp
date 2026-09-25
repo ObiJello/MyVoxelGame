@@ -65,23 +65,66 @@ namespace Game::DataComponents {
                 EnchantmentInstance inst;
                 inst.id    = static_cast<EnchantmentId>(r.ReadVarInt());
                 inst.level = static_cast<int>(r.ReadVarInt());
-                v.entries.push_back(inst);
+                if (inst.id >= EnchantmentRegistry::All().size()) {
+                    throw std::runtime_error("enchantment id out of range: " + std::to_string(inst.id));
+                }
+                v.Set(inst.id, inst.level);
             }
             return v;
         }
 
         // Our Tool collapses MC Tool.java's rules list to (type, tier, speed) —
         // wire matches the struct, not MC's rules list.
+        // damagePerBlock is MC Tool.STREAM_CODEC's VAR_INT.
         void SerTool(Network::PacketBuffer& b, const Tool& v) {
             b.WriteByte(static_cast<uint8_t>(v.type));
             b.WriteByte(static_cast<uint8_t>(v.tier));
             b.WriteFloat(v.miningSpeed);
+            b.WriteVarInt(static_cast<uint32_t>(v.damagePerBlock));
         }
         Tool DeTool(Network::PacketReader& r) {
             Tool v;
-            v.type        = static_cast<ToolType>(r.ReadByte());
-            v.tier        = static_cast<MiningTier>(r.ReadByte());
-            v.miningSpeed = r.ReadFloat();
+            v.type           = static_cast<ToolType>(r.ReadByte());
+            v.tier           = static_cast<MiningTier>(r.ReadByte());
+            v.miningSpeed    = r.ReadFloat();
+            v.damagePerBlock = static_cast<int>(r.ReadVarInt());
+            return v;
+        }
+
+        // DAMAGE / MAX_DAMAGE / REPAIR_COST / ENCHANTABLE — MC
+        // ByteBufCodecs.VAR_INT (Enchantable.STREAM_CODEC is its one field).
+        void SerVarInt(Network::PacketBuffer& b, const int32_t& v) { b.WriteVarInt(static_cast<uint32_t>(v)); }
+        int32_t DeVarInt(Network::PacketReader& r)                 { return static_cast<int32_t>(r.ReadVarInt()); }
+
+        // UNBREAKABLE — Unit.STREAM_CODEC writes nothing; presence is the value.
+        void SerUnit(Network::PacketBuffer&, const bool&) {}
+        bool DeUnit(Network::PacketReader&)               { return true; }
+
+        // Mirrors Weapon.STREAM_CODEC: VAR_INT itemDamagePerAttack, FLOAT
+        // disableBlockingForSeconds.
+        void SerWeapon(Network::PacketBuffer& b, const Weapon& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.itemDamagePerAttack));
+            b.WriteFloat(v.disableBlockingForSeconds);
+        }
+        Weapon DeWeapon(Network::PacketReader& r) {
+            Weapon v;
+            v.itemDamagePerAttack       = static_cast<int>(r.ReadVarInt());
+            v.disableBlockingForSeconds = r.ReadFloat();
+            return v;
+        }
+
+        // Repairable.STREAM_CODEC is ByteBufCodecs.holderSet(ITEM) — a tag
+        // key or a list of registry ids. Ours carries the raw entries.
+        void SerRepairable(Network::PacketBuffer& b, const Repairable& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.items.size()));
+            for (const std::string& e : v.items) b.WriteString(e);
+        }
+        Repairable DeRepairable(Network::PacketReader& r) {
+            Repairable v;
+            const uint32_t count = r.ReadVarInt();
+            if (count > r.Remaining()) throw std::runtime_error("repairable entry count out of range");
+            v.items.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) v.items.push_back(r.ReadString());
             return v;
         }
 
@@ -183,17 +226,20 @@ namespace Game::DataComponents {
         }
 
         // Field order mirrors Equippable.STREAM_CODEC (Equippable.java:106) —
-        // restricted to the fields we model: slot, equipSound, swappable.
+        // restricted to the fields we model: slot, equipSound, swappable,
+        // damageOnHurt.
         void SerEquippable(Network::PacketBuffer& b, const Equippable& v) {
             b.WriteByte(static_cast<uint8_t>(v.slot));
             b.WriteString(v.equipSound);
             b.WriteByte(v.swappable ? 1 : 0);
+            b.WriteByte(v.damageOnHurt ? 1 : 0);
         }
         Equippable DeEquippable(Network::PacketReader& r) {
             Equippable v;
-            v.slot       = static_cast<EquipmentSlot>(r.ReadByte());
-            v.equipSound = r.ReadString();
-            v.swappable  = r.ReadByte() != 0;
+            v.slot         = static_cast<EquipmentSlot>(r.ReadByte());
+            v.equipSound   = r.ReadString();
+            v.swappable    = r.ReadByte() != 0;
+            v.damageOnHurt = r.ReadByte() != 0;
             return v;
         }
 
@@ -453,6 +499,17 @@ namespace Game::DataComponents {
     const DataComponentType<WrittenBookContent> WRITTEN_BOOK_CONTENT  {"written_book_content",      18, &SerWrittenBook, &DeWrittenBook};
     const DataComponentType<WritableBookContent> WRITABLE_BOOK_CONTENT {"writable_book_content",     19, &SerWritableBook, &DeWritableBook};
     const DataComponentType<int32_t>          DYED_COLOR                {"dyed_color",                20, &SerI32,          &DeI32};
+    const DataComponentType<int32_t>          DAMAGE                    {"damage",                    21, &SerVarInt,       &DeVarInt};
+    const DataComponentType<int32_t>          MAX_DAMAGE                {"max_damage",                22, &SerVarInt,       &DeVarInt};
+    const DataComponentType<bool>             UNBREAKABLE               {"unbreakable",               23, &SerUnit,         &DeUnit};
+    const DataComponentType<int32_t>          REPAIR_COST               {"repair_cost",               24, &SerVarInt,       &DeVarInt};
+    const DataComponentType<ItemEnchantments> ENCHANTMENTS              {"enchantments",              25, &SerEnchantments, &DeEnchantments};
+    const DataComponentType<Repairable>       REPAIRABLE                {"repairable",                26, &SerRepairable,   &DeRepairable};
+    const DataComponentType<int32_t>          ENCHANTABLE               {"enchantable",               27, &SerVarInt,       &DeVarInt};
+    const DataComponentType<Weapon>           WEAPON                    {"weapon",                    28, &SerWeapon,       &DeWeapon};
+    const DataComponentType<std::string>      BREAK_SOUND               {"break_sound",               29, &SerString,       &DeString};
+    const DataComponentType<std::string>      DAMAGE_RESISTANT          {"damage_resistant",          30, &SerString,       &DeString};
+    const DataComponentType<std::string>      PAINTING_VARIANT          {"painting/variant",          40, &SerString,       &DeString};
 
 #if ENABLE_PORTAL_GUN
     const DataComponentType<uint8_t>  PORTAL_GUN_NEXT_COLOR  {"portal_gun_next_color",  100, &SerU8,  &DeU8};

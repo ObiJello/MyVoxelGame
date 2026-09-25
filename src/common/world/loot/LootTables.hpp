@@ -81,14 +81,18 @@ namespace Game {
         // catalyst 5, spawner 15 + nextInt(15) + nextInt(15)).
         //
         // Callers gate exactly like MC does: only on a player break that
-        // passed hasCorrectToolForDrops, never in creative. The Silk Touch
-        // zeroing (EnchantmentHelper.processBlockExperience) is applied here
-        // through the same EnchantmentLevel hook the loot conditions use, so
-        // it starts working the moment tools can carry enchantments — except
-        // for the spawner, whose SpawnerBlock.spawnAfterBreak pays
+        // passed hasCorrectToolForDrops, never in creative. The sample then
+        // runs through the tool's block_experience effects
+        // (EnchantmentHelper.processBlockExperience — Silk Touch's set 0),
+        // except for the spawner, whose SpawnerBlock.spawnAfterBreak pays
         // unconditionally.
         static int RollBlockBreakExperience(BlockID block, const ItemStack* tool,
                                             JavaRandom& rng);
+
+    private:
+        // The block's xpRange sample (DropExperienceBlock / the sculk
+        // family's constants), before any enchantment.
+        static int SampleBlockBreakExperience(BlockID block, JavaRandom& rng);
     };
 
 } // namespace Game

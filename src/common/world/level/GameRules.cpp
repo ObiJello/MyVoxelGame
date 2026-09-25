@@ -54,6 +54,7 @@ namespace Game::Rules {
             // Misc
             Id::AllowEnteringNetherUsingPortals,  // PortalTravel + immersive crossing
             Id::MaxCommandForks,                  // ExecuteCommand fork limit
+            Id::MaxBlockModifications,            // FillBiomeCommand volume limit
             Id::SpawnerBlocksWork,                // SpawnerBlockEntity::Tick, the spawn egg's spawner branch
             Id::ReducedDebugInfo,                 // mirrored to clients, F3 reduced view
         };

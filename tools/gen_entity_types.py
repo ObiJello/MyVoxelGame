@@ -205,6 +205,13 @@ MISC_KEEP = {
     # The armor stand (2026-09-21): a LivingEntity, not a Mob, that rides
     # the mob pipeline like the block-shaped entities do (ArmorStand.hpp).
     "armor_stand",
+    # The painting (2026-09-24): a HangingEntity, not a Mob — the same
+    # pipeline again (Painting.hpp).
+    "painting",
+    # Item frames (2026-09-24): hanging entities like the painting
+    # (ItemFrame.hpp).
+    "item_frame",
+    "glow_item_frame",
 }
 
 CATEGORY_CPP = {

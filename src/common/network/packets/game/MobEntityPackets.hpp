@@ -23,6 +23,8 @@
 #include <glm/glm.hpp>
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace Network {
@@ -99,6 +101,10 @@ namespace Network {
         // invisible / glowing shared flags). Absent = none.
         uint8_t              effectFlags = 0;
         std::vector<uint8_t> effectParticles;
+        // APPENDED FIELD: MC DATA_CUSTOM_NAME / DATA_CUSTOM_NAME_VISIBLE (a
+        // name tag's name, as plain text). Absent = unnamed, not visible.
+        std::optional<std::string> customName;
+        bool                       customNameVisible = false;
     };
 
     // MC ClientboundMoveEntityPacket.Pos / .Rot / .PosRot, merged into one
@@ -181,6 +187,10 @@ namespace Network {
         // APPENDED: the synched effect visuals, as on AddEntity.
         uint8_t              effectFlags = 0;
         std::vector<uint8_t> effectParticles;
+        // APPENDED: the custom name and its always-visible flag, as on
+        // AddEntity — a name tag used on a tracked mob resends it here.
+        std::optional<std::string> customName;
+        bool                       customNameVisible = false;
     };
 
     // MC ClientboundEntityEventPacket. One byte: 3 death, 60 poof, 10 eat,
@@ -233,6 +243,37 @@ namespace Network {
 
     namespace Serialization {
 
+        // The custom-name tail shared by AddEntity and SetEntityData: one
+        // flags byte (bit0 has a name, bit1 CustomNameVisible), then the name
+        // when bit0 is set. Its absence (an older peer) reads as unnamed.
+        inline constexpr size_t kMaxCustomNameBytes = 1024;
+
+        inline void WriteCustomName(PacketBuffer& b, const std::optional<std::string>& name,
+                                    bool visible) {
+            b.WriteByte(static_cast<uint8_t>((name ? 0x01 : 0x00) | (visible ? 0x02 : 0x00)));
+            if (!name) return;
+            // A name loaded from NBT can be longer than the reader accepts,
+            // which would make the whole packet fail to decode: cut it to the
+            // cap, backing off to a UTF-8 lead byte.
+            if (name->size() <= kMaxCustomNameBytes) {
+                b.WriteString(*name);
+                return;
+            }
+            size_t cut = kMaxCustomNameBytes;
+            while (cut > 0 && (static_cast<uint8_t>((*name)[cut]) & 0xC0) == 0x80) --cut;
+            b.WriteString(name->substr(0, cut));
+        }
+
+        inline void ReadCustomName(PacketReader& r, std::optional<std::string>& name,
+                                   bool& visible) {
+            name.reset();
+            visible = false;
+            if (r.Remaining() < 1) return;
+            const uint8_t bits = r.ReadByte();
+            visible = (bits & 0x02) != 0;
+            if (bits & 0x01) name = r.ReadString(kMaxCustomNameBytes);
+        }
+
         // ── AddEntity ──────────────────────────────────────────────────────
         inline std::vector<uint8_t> Serialize(const AddEntityS2CPacket& p) {
             Network::PacketBuffer b;
@@ -258,6 +299,7 @@ namespace Network {
             b.WriteInt(p.blockStateRaw);
             b.WriteFloat(p.scale);
             WriteEffectVisuals(b, p.effectFlags, p.effectParticles);
+            WriteCustomName(b, p.customName, p.customNameVisible);
             return b.GetData();
         }
 
@@ -289,6 +331,7 @@ namespace Network {
             if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             ReadEffectVisuals(r, p.effectFlags, p.effectParticles);
+            ReadCustomName(r, p.customName, p.customNameVisible);
             return p;
         }
 
@@ -457,6 +500,7 @@ namespace Network {
             b.WriteFloat(p.scale);
             b.WriteInt(p.blockStateRaw);
             WriteEffectVisuals(b, p.effectFlags, p.effectParticles);
+            WriteCustomName(b, p.customName, p.customNameVisible);
             return b.GetData();
         }
 
@@ -479,6 +523,7 @@ namespace Network {
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             if (r.Remaining() >= 4) p.blockStateRaw = r.ReadInt();
             ReadEffectVisuals(r, p.effectFlags, p.effectParticles);
+            ReadCustomName(r, p.customName, p.customNameVisible);
             return p;
         }
 

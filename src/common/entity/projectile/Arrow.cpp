@@ -6,6 +6,8 @@
 #include "common/physics/Physics.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -77,12 +79,58 @@ namespace Game {
         needsSync = true;
         // MC onHitBlock: the thunk, 1.2 / (0.9..1.1).
         PlaySound(GetHitGroundSound(), 1.0f, 1.2f / (m_level->Random().NextFloat() * 0.2f + 0.9f));
+        // MC AbstractArrow.onHitBlock: the launcher's hit_block effects
+        // (Channeling on a lightning rod), a worn-out launcher dropping the
+        // copy (onItemBreak).
+        if (ItemStack* weapon = GetWeaponItem(); weapon && !m_level->IsClientSide()) {
+            LivingEntity* owner = GetOwner() ? GetOwner()->AsLiving() : nullptr;
+            EnchantmentHelper::OnHitBlock(*m_level, *weapon, owner, *this, hitPos,
+                                          m_level->Blocks()->GetBlockState(blockPos.x, blockPos.y, blockPos.z),
+                                          [this](const ItemStack& broken) { OnItemBreak(broken); });
+        }
+    }
+
+    void Arrow::DoKnockback(LivingEntity& target, const DamageSourceInfo& source) {
+        float knockback = 0.0f;
+        if (ItemStack* weapon = GetWeaponItem(); weapon && m_level && !m_level->IsClientSide()) {
+            knockback = EnchantmentHelper::ModifyKnockback(*m_level, *weapon, target, source, 0.0f);
+        }
+        if (knockback <= 0.0f) return;
+        const double resistance =
+            std::max(0.0, 1.0 - target.GetAttributeValue(Attribute::KnockbackResistance));
+        // deltaMovement.multiply(1, 0, 1).normalize().scale(kb * 0.6 * res).
+        glm::dvec3 flight(velocity.x, 0.0, velocity.z);
+        const double len = glm::length(flight);
+        if (len < 1.0e-4) return;   // Vec3.normalize's zero for a vertical shot
+        flight *= static_cast<double>(knockback) * 0.6 * resistance / len;
+        if (flight.x * flight.x + flight.z * flight.z > 0.0) {
+            // Entity.push(x, 0.1, z).
+            target.AddDeltaMovement(glm::dvec3(flight.x, 0.1, flight.z));
+        }
     }
 
     void Arrow::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         const double speed = glm::length(velocity);
-        const int damage = static_cast<int>(std::ceil(
-            std::clamp(speed * m_baseDamage, 0.0, 2.147483647e9)));
+        // damageSources().arrow(this, owner ?: this).
+        Entity* const owner = GetOwner();
+        const DamageSourceInfo source =
+            DamageSourceInfo::Of(MobDamageSource::Projectile, owner ? owner : this, this);
+        // MC AbstractArrow.onHitEntity: the launcher's `minecraft:damage`
+        // effects rewrite the base damage (Power's +1, +0.5 a level) before
+        // the speed multiplies it.
+        double arrowDamage = m_baseDamage;
+        ItemStack* const weapon = GetWeaponItem();
+        if (weapon && m_level && !m_level->IsClientSide()) {
+            arrowDamage = static_cast<double>(EnchantmentHelper::ModifyDamage(
+                *m_level, *weapon, target, source, static_cast<float>(arrowDamage)));
+        }
+        int damage = static_cast<int>(std::ceil(
+            std::clamp(speed * arrowDamage, 0.0, 2.147483647e9)));
+        // A crit arrow (a fully drawn bow): + nextInt(damage / 2 + 2).
+        if (m_critArrow && m_level) {
+            const long long bonus = m_level->Random().NextInt(damage / 2 + 2);
+            damage = static_cast<int>(std::min<long long>(bonus + damage, 2147483647LL));
+        }
 
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
             livingOwner->SetLastHurtMob(&target);
@@ -100,6 +148,13 @@ namespace Game {
         if (DealHitDamage(target, hit, MobDamageSource::Projectile,
                           static_cast<float>(damage),
                           GetOwner() ? GetOwner() : this)) {
+            // MC: doKnockback (Punch), then
+            // EnchantmentHelper.doPostAttackEffectsWithItemSource — the
+            // target's Thorns and the launcher's post_attack effects.
+            DoKnockback(target, source);
+            if (m_level && !m_level->IsClientSide()) {
+                EnchantmentHelper::DoPostAttackEffectsWithItemSource(*m_level, target, source, weapon);
+            }
             // MC AbstractArrow.doPostHurtEffects → Arrow.doPostHurtEffects:
             // potionContents.forEachEffect(mob.addEffect(effect, source),
             // durationScale) — every effect, instant ones included, scaled

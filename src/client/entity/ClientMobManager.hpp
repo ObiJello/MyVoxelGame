@@ -32,6 +32,8 @@
 #include <memory>
 #include <unordered_map>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace Game { struct IBlockAccess; }
@@ -320,6 +322,8 @@ namespace Client {
         // Armor stand poses + equipment (ArmorStandDataS2C). No-op for
         // anything that is not an armor stand.
         void SetArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
+        // ItemFrameDataS2C: the frame's framed item (MC DATA_ITEM).
+        void SetItemFrameItem(int32_t id, const Game::ItemStack& item);
         // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
         // DragonPackets.hpp. No-op for anything that is not an End crystal.
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
@@ -428,6 +432,15 @@ namespace Client {
                 v.flags = flags;
                 v.particles = particles;
                 cm->mob->SetSyncedEffectVisuals(std::move(v));
+            }
+        }
+        // The synched custom name (MC DATA_CUSTOM_NAME / DATA_CUSTOM_NAME_VISIBLE),
+        // on add and on every data update: the nametag pass and the name-driven
+        // easter eggs (rainbow sheep, Dinnerbone) read the client mob's copy.
+        void SetCustomName(int32_t id, const std::optional<std::string>& name, bool visible) {
+            if (ClientMob* cm = Find(id); cm && cm->mob) {
+                cm->mob->SetCustomName(name);
+                cm->mob->SetCustomNameVisible(visible);
             }
         }
 

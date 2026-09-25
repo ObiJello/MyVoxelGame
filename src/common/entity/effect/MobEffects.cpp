@@ -522,16 +522,21 @@ namespace Game {
     double ComputeAttributeWithEffects(Attribute attribute, double base,
                                        const std::vector<MobEffectInstance>& effects) {
         AttributeInstance inst(attribute, base);
+        AddEffectAttributeModifiers(inst, effects);
+        return inst.GetValue();
+    }
+
+    void AddEffectAttributeModifiers(AttributeInstance& instance,
+                                     const std::vector<MobEffectInstance>& effects) {
         for (const MobEffectInstance& e : effects) {
             const MobEffectInfo& info = GetEffectInfo(e.effect);
-            if (info.modifierCount == 0 || info.modifier.attribute != attribute) continue;
+            if (info.modifierCount == 0 || info.modifier.attribute != instance.GetAttribute()) continue;
             AttributeModifier mod;
             mod.id = static_cast<uint32_t>(info.modifier.id);
             mod.amount = info.modifier.amount * static_cast<double>(e.amplifier + 1);
             mod.operation = info.modifier.operation;
-            inst.AddModifier(mod);
+            instance.AddModifier(mod);
         }
-        return inst.GetValue();
     }
 
     // ── Undead membership ──────────────────────────────────────────────────

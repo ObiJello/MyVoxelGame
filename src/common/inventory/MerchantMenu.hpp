@@ -121,6 +121,9 @@ namespace Game {
         void SlotsChanged(ContainerClickResult& result) override;
         void Removed(ContainerClickResult& result) override;
         int  MenuIndexForInventorySlot(int inventoryIndex) const override;
+        // MC MerchantMenu.canTakeItemForPickAll: false — pick-all skips the
+        // result slot's OnTake, which is what pays for the trade.
+        bool CanTakeItemForPickAll(int /*slotIndex*/) const override { return false; }
         // BUTTON_REROLL_TRADES: re-roll the trader's offers when they are not
         // locked yet (Merchant::RerollTrades) and select the first trade.
         bool ClickMenuButton(int buttonId, bool mayBuild, ContainerClickResult& result) override;

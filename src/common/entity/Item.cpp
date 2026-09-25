@@ -32,6 +32,9 @@ namespace PlatformMain { std::string GetAssetPath(const std::string& relativePat
 namespace Game {
     // Implemented in ItemBehaviors.cpp — wires up FlintAndSteel/Hoe/Shovel etc.
     void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems);
+    // Implemented in ItemDurability.cpp — MAX_DAMAGE / DAMAGE / ENCHANTABLE /
+    // REPAIRABLE / WEAPON / TOOL damage_per_block from GeneratedItemDurability.
+    void ItemRegistry_RegisterDurability(std::unordered_map<ItemID, Item>& pureItems);
 
 #if ENABLE_PORTAL_GUN
     // Implemented in PortalGunBehavior.cpp — the right-click handler that
@@ -548,6 +551,11 @@ namespace Game {
         // Mirrors MC's per-Item-subclass override pattern — see ItemBehaviors.cpp.
         ItemRegistry_RegisterBehaviors(g_pureItems);
 
+        // Durability and enchanting defaults (Item.Properties.durability /
+        // enchantable / repairable, the tool materials' WEAPON). After the
+        // behaviours: it amends the TOOL components they set.
+        ItemRegistry_RegisterDurability(g_pureItems);
+
 #if ENABLE_PORTAL_GUN
         // ── Portal Gun (custom non-MC item, behind compile-time feature flag) ──
         // Registered AFTER the MC-table loop so it picks up an ItemID safely
@@ -715,13 +723,9 @@ namespace Game {
         if (auto override = get(DataComponents::ENCHANTMENT_GLINT_OVERRIDE)) {
             return *override;
         }
-        // Item.isFoil default behaviour: stack glints iff it has any
-        // stored enchantments. ENCHANTMENTS (on tools) lands in a future PR;
-        // for now only STORED_ENCHANTMENTS (on enchanted_book) counts.
-        if (auto stored = get(DataComponents::STORED_ENCHANTMENTS)) {
-            return !stored->entries.empty();
-        }
-        return false;
+        // Item.isFoil: itemStack.isEnchanted() — a non-empty ENCHANTMENTS.
+        // (An enchanted book glints through its default GLINT_OVERRIDE.)
+        return IsEnchanted(*this);
     }
 
     uint32_t ResolveItemLayerTint(const ItemStack& stack, size_t layer) {

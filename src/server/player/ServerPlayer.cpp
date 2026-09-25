@@ -20,6 +20,8 @@
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -37,6 +39,11 @@ namespace Server {
         // m_inventoryMenu is built over m_inventory by its member initialiser;
         // only the game-mode-dependent flag needs setting here.
         m_inventoryMenu.creative = (m_gameMode == GameMode::CREATIVE);
+
+        // MC rolls the enchantment seed when a save has none; a player with
+        // no save at all gets one here (a returning player's comes from
+        // PlayerDataStore, which replaces it).
+        m_enchantmentSeed = m_soundRandom.Next(32);   // random.nextInt()
 
         Log::Info("ServerPlayer: Created player %u '%s' at (%.1f, %.1f, %.1f)",
                  m_playerId, m_name.c_str(), m_position.x, m_position.y, m_position.z);
@@ -661,6 +668,50 @@ namespace Server {
         damage(amount, source);
     }
 
+    void ServerPlayer::damage(float amount, DamageSource source, const std::string& attackerName,
+                              const Game::DamageSourceInfo& info) {
+        const Game::DamageSourceInfo* previous = m_hurtSourceInfo;
+        m_hurtSourceInfo = &info;
+        damage(amount, source, attackerName);
+        m_hurtSourceInfo = previous;
+    }
+
+    const char* ServerPlayer::damageTypeId(DamageSource source) {
+        // MC DamageTypes keys. FIRE is the on-fire tick (the common case —
+        // see bypassesArmor); ENTITY_ATTACK is a mob's melee.
+        switch (source) {
+            case DamageSource::GENERIC:            return "minecraft:generic";
+            case DamageSource::GENERIC_KILL:       return "minecraft:generic_kill";
+            case DamageSource::FALL:               return "minecraft:fall";
+            case DamageSource::FIRE:               return "minecraft:on_fire";
+            case DamageSource::LAVA:               return "minecraft:lava";
+            case DamageSource::DROWNING:           return "minecraft:drown";
+            case DamageSource::STARVATION:         return "minecraft:starve";
+            case DamageSource::VOID_DAMAGE:        return "minecraft:out_of_world";
+            case DamageSource::EXPLOSION:          return "minecraft:explosion";
+            case DamageSource::ENTITY_ATTACK:      return "minecraft:mob_attack";
+            case DamageSource::MAGIC:              return "minecraft:magic";
+            case DamageSource::FALLING_BLOCK:      return "minecraft:falling_block";
+            case DamageSource::FALLING_ANVIL:      return "minecraft:falling_anvil";
+            case DamageSource::FALLING_STALACTITE: return "minecraft:falling_stalactite";
+            case DamageSource::STALAGMITE:         return "minecraft:stalagmite";
+            case DamageSource::WITHER:             return "minecraft:wither";
+            case DamageSource::THORNS:             return "minecraft:thorns";
+        }
+        return "minecraft:generic";
+    }
+
+    void ServerPlayer::igniteForTicks(int ticks) {
+        // MC LivingEntity.igniteForTicks: ceil(ticks * BURNING_TIME), then
+        // Entity.igniteForTicks — the clock only grows.
+        double burningTime = 1.0;
+        if (Game::LivingEntity* view = effectEntity()) {
+            burningTime = view->GetAttributeValue(Game::Attribute::BurningTime);
+        }
+        const int scaled = static_cast<int>(std::ceil(static_cast<double>(ticks) * burningTime));
+        if (m_remainingFireTicks < scaled) m_remainingFireTicks = scaled;
+    }
+
     void ServerPlayer::damage(float amount, DamageSource source) {
         // Already dead — nothing left to kill (the death screen is up and
         // the body is frozen until PERFORM_RESPAWN).
@@ -697,32 +748,86 @@ namespace Server {
                                                  && !Game::Rules::GetBool(Id::FireDamage))     return;
             if (source == DamageSource::DROWNING && !Game::Rules::GetBool(Id::DrowningDamage)) return;
         }
+
+        // The hit as MC's DamageSource: the caller's when it had one (the
+        // view's hits carry the causing and direct entities), else the type
+        // alone. The enchantment effects below all read this.
+        Game::DamageSourceInfo info;
+        if (m_hurtSourceInfo) {
+            info = *m_hurtSourceInfo;
+        } else {
+            info.type = damageTypeId(source);
+        }
+        Game::LivingEntity* view = effectEntity();
+        Game::EntityLevel* level = view ? view->Level() : nullptr;
+        const Game::EnchantmentEquipment equipment = view ? Game::EnchantmentEquipment::Of(*view)
+                                                          : Game::EnchantmentEquipment{};
+
+        // MC LivingEntity.isInvulnerableTo → EnchantmentHelper
+        // .isImmuneToDamage: a worn enchantment's damage_immunity refuses
+        // the hit outright (Frost Walker boots against #burn_from_stepping).
+        if (view && level && Game::EnchantmentHelper::IsImmuneToDamage(*level, *view, info, equipment)) {
+            return;
+        }
         
-        // TODO: Apply armor reduction
-        // amount = m_armor.reduceDamage(amount, source);
-        
+        // MC LivingEntity.hurtServer: a #damages_helmet source (a falling
+        // block, anvil or stalactite) wears the helmet and loses a quarter
+        // when one is worn.
+        if ((source == DamageSource::FALLING_BLOCK || source == DamageSource::FALLING_ANVIL ||
+             source == DamageSource::FALLING_STALACTITE) &&
+            !m_inventory.GetSlot(Game::InventoryIndexFor(Game::EquipmentSlot::HEAD)).IsEmpty()) {
+            doHurtEquipment(info, amount, {Game::EquipmentSlot::HEAD});
+            amount *= 0.75f;
+        }
+
         // MC LivingEntity.actuallyHurt → getDamageAfterArmorAbsorb: worn
         // armor takes its share of anything not in BYPASSES_ARMOR
         // (CombatRules.getDamageAfterAbsorb — toughness widens the band,
-        // and armor never blocks more than 80% or 20 points).
+        // and armor never blocks more than 80% or 20 points). Player.hurtArmor
+        // wears the four pieces first, on the damage before absorption.
         if (!bypassesArmor(source)) {
+            doHurtEquipment(info, amount, {Game::EquipmentSlot::FEET, Game::EquipmentSlot::LEGS,
+                                             Game::EquipmentSlot::CHEST, Game::EquipmentSlot::HEAD});
             const float armor = getArmorValue();
             if (armor > 0.0f) {
                 const float toughness = getArmorToughness();
                 const float f = 2.0f + toughness / 4.0f;
                 const float g = std::clamp(armor - amount / f, armor * 0.2f, 20.0f);
-                amount *= (1.0f - g / 25.0f);
+                float armorFraction = g / 25.0f;
+                // CombatRules.getDamageAfterAbsorb: the source's weapon
+                // rewrites the armor fraction through its armor_effectiveness
+                // (Breach), clamped to [0, 1].
+                if (Game::ItemStack* weapon = info.GetWeaponItem(); weapon && view && level) {
+                    armorFraction = std::clamp(Game::EnchantmentHelper::ModifyArmorEffectiveness(
+                                                   *level, *weapon, *view, info, armorFraction),
+                                               0.0f, 1.0f);
+                }
+                amount *= (1.0f - armorFraction);
             }
         }
 
-        // MC getDamageAfterMagicAbsorb: RESISTANCE takes 5/25 per level off
-        // everything but #bypasses_effects (starvation) and
-        // #bypasses_resistance (the void, /kill).
-        if (source != DamageSource::STARVATION && source != DamageSource::VOID_DAMAGE &&
-            source != DamageSource::GENERIC_KILL) {
-            if (const Game::MobEffectInstance* res = getEffect(Game::MobEffectId::Resistance)) {
-                const int absorbValue = (res->amplifier + 1) * 5;
-                amount = std::max(amount * static_cast<float>(25 - absorbValue) / 25.0f, 0.0f);
+        // MC getDamageAfterMagicAbsorb: nothing at all for #bypasses_effects
+        // (starvation); RESISTANCE takes 5/25 per level off everything but
+        // #bypasses_resistance (the void, /kill); then, unless
+        // #bypasses_enchantments (the warden's sonic boom), the worn
+        // enchantments' damage_protection — the Protection family and
+        // Feather Falling — capped at 20 (CombatRules.getDamageAfterMagicAbsorb:
+        // at most 80 % off).
+        if (!info.Is("minecraft:bypasses_effects")) {
+            if (!info.Is("minecraft:bypasses_resistance")) {
+                if (const Game::MobEffectInstance* res = getEffect(Game::MobEffectId::Resistance)) {
+                    const int absorbValue = (res->amplifier + 1) * 5;
+                    amount = std::max(amount * static_cast<float>(25 - absorbValue) / 25.0f, 0.0f);
+                }
+            }
+            if (amount <= 0.0f) {
+                amount = 0.0f;
+            } else if (!info.Is("minecraft:bypasses_enchantments") && view && level) {
+                const float protection =
+                    Game::EnchantmentHelper::GetDamageProtection(*level, *view, info, equipment);
+                if (protection > 0.0f) {
+                    amount *= 1.0f - std::clamp(protection, 0.0f, 20.0f) / 25.0f;
+                }
             }
         }
 
@@ -750,7 +855,8 @@ namespace Server {
         // MC LivingEntity.hurtServer: makeSound(getDeathSound()) on the fatal
         // hit (unless a totem saves it), else playHurtSound(source) — Player
         // .getHurtSound picks by the damage type's effects (BURNING → on
-        // fire, DROWNING → drown, else the plain hurt). Volume 1, the voice
+        // fire, DROWNING → drown, THORNS → the thorns prick, else the plain
+        // hurt). Volume 1, the voice
         // pitch (random ± 0.2). DEVIATION: sent to everyone, the hurt player
         // included; MC's own client plays its copy from the damage event
         // packet (LivingEntity.handleDamageEvent), and this engine's hurt
@@ -773,6 +879,7 @@ namespace Server {
             const char* hurt = Game::SoundEvents::PLAYER_HURT;
             if (source == DamageSource::FIRE || source == DamageSource::LAVA) hurt = Game::SoundEvents::PLAYER_HURT_ON_FIRE;
             else if (source == DamageSource::DROWNING)                        hurt = Game::SoundEvents::PLAYER_HURT_DROWN;
+            else if (source == DamageSource::THORNS)                          hurt = Game::SoundEvents::THORNS_HIT;
             playVoice(hurt);
         }
 
@@ -788,6 +895,72 @@ namespace Server {
             stopUsingItem();
             Log::Info("ServerPlayer: Player %u died (source %d)",
                       m_playerId, static_cast<int>(source));
+        }
+    }
+
+    void ServerPlayer::setEnchantmentSeed(int seed) {
+        // Player.readAdditionalSaveData: `if (enchantmentSeed == 0)
+        // enchantmentSeed = random.nextInt()`.
+        m_enchantmentSeed = seed != 0 ? seed : m_soundRandom.Next(32);   // random.nextInt()
+    }
+
+    void ServerPlayer::onEnchantmentPerformed(int enchantmentCost) {
+        // MC Player.onEnchantmentPerformed: experienceLevel -= cost; going
+        // below 0 clears the level, the bar and the total.
+        const int level = m_experience.Level() - enchantmentCost;
+        if (level < 0) {
+            m_experience.SetLevel(0);
+            m_experience.SetProgress(0.0f);
+            m_experience.SetTotal(0);
+        } else {
+            m_experience.SetLevel(level);
+        }
+        m_enchantmentSeed = m_soundRandom.Next(32);   // random.nextInt()
+    }
+
+    void ServerPlayer::OnEquippedItemBroken(const Game::ItemStack& broken, Game::EquipmentSlot slot) {
+        // MC LivingEntity.onEquippedItemBroken broadcasts the slot's entity
+        // event and every client's breakItem plays the stack's BREAK_SOUND
+        // locally (volume 0.8, pitch 0.8 + rand * 0.4, the entity's sound
+        // source) and throws five ITEM particles. A player's view is not a
+        // tracked entity here, so the event has no route; the sound goes out
+        // from the server instead, to everyone the player included, which
+        // is what every client would have played.
+        (void)slot;
+        if (broken.IsEmpty()) return;
+        if (Game::World* w = soundWorld()) {
+            const float pitch = 0.8f + m_soundRandom.NextFloat() * 0.4f;
+            w->PlaySound(nullptr, m_position, Game::GetBreakSound(broken), Game::SoundSource::Players,
+                         0.8f, pitch);
+        }
+        // stopLocationBasedEffects: armour and attack attributes are read
+        // from the slots on demand, so the empty slot already stops them;
+        // the enchantments' modifiers and location effects come off at the
+        // view's next equipment diff (PlayerEntityView::TickEnchantments).
+    }
+
+    void ServerPlayer::doHurtEquipment(const Game::DamageSourceInfo& source, float damage,
+                                       std::initializer_list<Game::EquipmentSlot> slots) {
+        // MC LivingEntity.doHurtEquipment.
+        if (damage <= 0.0f) return;
+        const int durabilityDamage = static_cast<int>(std::max(1.0f, damage / 4.0f));
+        for (const Game::EquipmentSlot slot : slots) {
+            const int index = Game::InventoryIndexFor(slot);
+            if (index < 0) continue;
+            Game::ItemStack& stack = m_inventory.MutableSlot(index);
+            const auto equippable = stack.get(Game::DataComponents::EQUIPPABLE);
+            if (!equippable || !equippable->damageOnHurt || !Game::IsDamageableItem(stack)) continue;
+            // ItemStack.canBeHurtBy: a DAMAGE_RESISTANT piece (netherite,
+            // #minecraft:is_fire) is untouched by the sources it resists.
+            if (const auto resistant = stack.get(Game::DataComponents::DAMAGE_RESISTANT);
+                resistant && source.Is(*resistant)) continue;
+            // itemStack.hurtAndBreak(durabilityDamage, this, slot): this is
+            // the server's player, so hasInfiniteMaterials is creative (which
+            // damage() has already turned away) and a break is ours to show.
+            Game::HurtAndBreak(stack, durabilityDamage, m_soundRandom, isCreative(),
+                               [this, slot](const Game::ItemStack& broken) {
+                                   OnEquippedItemBroken(broken, slot);
+                               });
         }
     }
 

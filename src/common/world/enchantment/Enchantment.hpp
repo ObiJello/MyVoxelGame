@@ -1,10 +1,10 @@
 // File: src/common/world/enchantment/Enchantment.hpp
 //
-// Mirrors net/minecraft/world/item/enchantment/Enchantment.java — minimal
-// public surface used by the inventory rendering & tooltip path. The full MC
-// class also tracks weight, anvil cost, cost curves, equipment slots, and
-// effect components — not needed for this PR (deferred until in-game enchanting
-// mechanics land).
+// Mirrors net/minecraft/world/item/enchantment/Enchantment.java — the baked
+// identity (slug, name, level range) the inventory rendering & tooltip path
+// uses. The rest of MC's record — weight, anvil cost, cost curves, equipment
+// slots and the effect components — is loaded from the data pack by
+// EnchantmentDefinitions (EnchantmentEffects.hpp for the effects).
 //
 // MC stores enchantments in a runtime-built registry (loaded from JSON
 // datapacks). For our purposes we hand-extract the static list from MC's

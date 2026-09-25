@@ -151,4 +151,30 @@ namespace Render {
         {  21,  21,  24 },  // black
     };
 
+    // MC ColorLerper.getLerpedColor(ColorLerper.Type.SHEEP, tick) — the
+    // rainbow sheep's wool. SHEEP cycles every DyeColor in ordinal order
+    // (DyeColor.values(), the order of the table above), 25 ticks per
+    // colour, and each step is ARGB.srgbLerp — Mth.lerpInt per channel, in
+    // sRGB — between two of the SHEEP colours above (white's hardcoded
+    // 0xE6E6E6 included). SheepRenderState.getWoolColor feeds it the
+    // sheep's ageInTicks with no per-entity offset, so every rainbow sheep
+    // in view changes in step.
+    inline SheepWoolColor SheepLerpedWoolColor(float tick) {
+        constexpr int kColorDuration = 25;
+        constexpr int kColorCount = 16;
+        const float floored = std::floor(tick);
+        const int tickCount = static_cast<int>(floored);
+        const int value = tickCount / kColorDuration;
+        const SheepWoolColor& c1 = kSheepWoolColors[value % kColorCount];
+        const SheepWoolColor& c2 = kSheepWoolColors[(value + 1) % kColorCount];
+        const float subStep = (static_cast<float>(tickCount % kColorDuration) + (tick - floored)) /
+                              static_cast<float>(kColorDuration);
+        // Mth.lerpInt: p0 + floor(alpha * (p1 - p0)).
+        const auto lerpInt = [subStep](uint8_t p0, uint8_t p1) {
+            return static_cast<uint8_t>(
+                p0 + static_cast<int>(std::floor(subStep * static_cast<float>(p1 - p0))));
+        };
+        return { lerpInt(c1.r, c2.r), lerpInt(c1.g, c2.g), lerpInt(c1.b, c2.b) };
+    }
+
 } // namespace Render

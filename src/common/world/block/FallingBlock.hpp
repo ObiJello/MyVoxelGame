@@ -149,6 +149,9 @@ namespace Game {
     // MC AnvilBlock.damage — anvil -> chipped -> damaged -> gone (Air means the
     // anvil is destroyed outright, which is MC returning null).
     BlockID AnvilDamaged(BlockID anvil);
+    // MC AnvilBlock.damage(BlockState): the same step as a state, FACING kept
+    // (a chipped anvil must point the way the anvil did). Air when destroyed.
+    BlockState AnvilDamaged(BlockState anvil);
 
     // MC ConcretePowderBlock's `concrete` field — the solid block this powder
     // becomes. Air for anything that is not concrete powder.

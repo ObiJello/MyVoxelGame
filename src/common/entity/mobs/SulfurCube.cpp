@@ -881,14 +881,16 @@ namespace Game {
             if (client) return UseResult::SuccessServer;
             if (!m_level->TntExplodes()) return UseResult::Pass;
             PrimeTime(false);
-            // Flint and steel would hurtAndBreak — no durability yet (see the
-            // sheep's shears note); a fire charge is consumed.
-            if (held.itemId == Items::FireCharge) Animal::UsePlayerItem(held);
+            // MC: flint and steel hurtAndBreak(1, player, hand); a fire
+            // charge is consumed.
+            if (held.itemId == Items::FlintAndSteel) HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
+            else Animal::UsePlayerItem(held);
             return UseResult::SuccessServer;
         }
         if (held.itemId == Items::Shears && ReadyForShearing()) {
             if (client) return UseResult::Success;
             Shear();
+            HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);   // MC hurtAndBreak(1, player, hand)
             return UseResult::Success;
         }
         if (IsSwallowable(held.itemId)) {

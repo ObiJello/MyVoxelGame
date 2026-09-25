@@ -107,6 +107,14 @@ namespace Render {
         // Zero while alive; see MobRenderer::DeathFlipDegrees for the curve.
         float deathFlipDeg = 0.0f;
 
+        // MC LivingEntityRenderState.isUpsideDown (isEntityUpsideDown: a mob
+        // named "Dinnerbone" or "Grumm") and boundingBoxHeight: setupRotations
+        // lifts the body boundingBoxHeight + 0.1 and rolls it 180° about Z.
+        // Cleared by the renderer while the death topple or the sleeping
+        // pose owns setupRotations' else-if chain instead.
+        bool  isUpsideDown = false;
+        float boundingBoxHeight = 0.0f;
+
         // MC LivingEntityRenderer.scale(state, poseStack) — the per-renderer
         // hook a few mobs override to resize the whole model. Only the creeper
         // uses it here (CreeperRenderer.scale: the fuse swell and its wobble).
@@ -130,6 +138,9 @@ namespace Render {
         // Sheep grazing.
         float headEatPositionScale = 0.0f;
         float headEatAngleScale = 0.0f;
+        // MC SheepRenderState.isJebSheep — the rainbow wool (see
+        // MobRenderer.cpp's kRainbowSheepName for the name that sets it).
+        bool isJebSheep = false;
 
         // Chicken wing flap.
         float flap = 0.0f;

@@ -28,7 +28,8 @@
 //     clearCopperOnLightningStrike (the copper de-oxidation walk);
 //   * the per-type thunderHit overrides — creeper powering, pig → zombified
 //     piglin, villager → witch, mooshroom recolour, turtle bowl drop, copper
-//     golem de-oxidation, armor stand / cushion / hanging-entity handling.
+//     golem de-oxidation, armor stand / cushion handling (the hanging
+//     entities' — paintings, item frames — is: their thunderHit does nothing).
 //     Every entity gets Entity.thunderHit's base behaviour (ThunderHit below);
 //   * the LIGHTNING_STRIKE / CHANNELED_LIGHTNING advancement triggers, the
 //     `cause` player (trident channeling) and the hitEntities set that only

@@ -2,7 +2,6 @@
 #include "EnchantmentDefinitions.hpp"
 
 #include "common/core/Log.hpp"
-#include "common/world/tags/DataTags.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -10,6 +9,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <unordered_map>
@@ -39,6 +39,7 @@ namespace Game::EnchantmentDefinitions {
             bool loaded = false;
             std::vector<Definition> byId;                 // indexed by EnchantmentId
             std::vector<EnchantmentId> all;
+            std::vector<EnchantmentId> tooltipOrder;      // #minecraft:tooltip_order, tag order
             // enchantment tag ("minecraft:on_random_loot") -> raw entries
             std::unordered_map<std::string, std::vector<std::string>> rawTags;
         };
@@ -95,6 +96,31 @@ namespace Game::EnchantmentDefinitions {
             }
         }
 
+        // A named HolderSet<Enchantment> in its own order: the tag file's
+        // entries first to last, a nested #tag expanded in place, each
+        // enchantment once (MC HolderSet.Named iterates its resolved
+        // contents, which is tag order — not registry order).
+        std::vector<EnchantmentId> OrderedTag(const Index& index, const std::string& tag) {
+            std::vector<EnchantmentId> out;
+            std::set<std::string> seen;
+            std::function<void(const std::string&)> walk = [&](const std::string& entry) {
+                if (entry.empty()) return;
+                if (entry[0] == '#') {
+                    const std::string t = WithNamespace(entry.substr(1));
+                    if (!seen.insert(t).second) return;
+                    auto it = index.rawTags.find(t);
+                    if (it == index.rawTags.end()) return;
+                    for (const std::string& child : it->second) walk(child);
+                    return;
+                }
+                if (auto id = EnchantmentRegistry::ByName(StripNamespace(WithNamespace(entry)))) {
+                    if (std::find(out.begin(), out.end(), *id) == out.end()) out.push_back(*id);
+                }
+            };
+            walk("#" + WithNamespace(tag));
+            return out;
+        }
+
         void Load(Index& index) {
             index.loaded = true;
             const auto& registry = EnchantmentRegistry::All();
@@ -120,6 +146,11 @@ namespace Game::EnchantmentDefinitions {
                 d.maxCost  = ReadCost(j.contains("max_cost") ? j["max_cost"] : nlohmann::json(), Cost{50, 0});
                 if (j.contains("supported_items")) d.supportedItems = ReadSet(j["supported_items"]);
                 if (j.contains("primary_items"))   d.primaryItems   = ReadSet(j["primary_items"]);
+                d.anvilCost = j.value("anvil_cost", 0);
+                if (j.contains("slots")) d.slots = ReadSet(j["slots"]);
+                if (j.contains("effects") && j["effects"].is_object()) {
+                    d.effects = EnchantmentEffectComponents::Parse(j["effects"], registry[i].slug);
+                }
                 index.byId[i] = std::move(d);
                 index.all.push_back(static_cast<EnchantmentId>(i));
                 ++loaded;
@@ -139,19 +170,21 @@ namespace Game::EnchantmentDefinitions {
                 std::set<std::string> seen;
                 std::vector<std::string> work(entries.begin(), entries.end());
                 while (!work.empty()) {
-                    std::string e = WithNamespace(std::move(work.back()));
+                    std::string e = std::move(work.back());
                     work.pop_back();
-                    if (!e.empty() && e[0] == '#') {
+                    if (e.empty()) continue;
+                    if (e[0] == '#') {
                         const std::string tag = WithNamespace(e.substr(1));
                         if (!seen.insert("#" + tag).second) continue;
                         auto it = index.rawTags.find(tag);
                         if (it != index.rawTags.end()) work.insert(work.end(), it->second.begin(), it->second.end());
                         continue;
                     }
-                    if (auto id = EnchantmentRegistry::ByName(StripNamespace(e))) ids.push_back(*id);
+                    if (auto id = EnchantmentRegistry::ByName(StripNamespace(WithNamespace(e)))) ids.push_back(*id);
                 }
                 index.byId[i].exclusiveSet = std::move(ids);
             }
+            index.tooltipOrder = OrderedTag(index, "minecraft:tooltip_order");
             Log::Info("[Enchantments] %zu of %zu enchantment definitions loaded from %s",
                       loaded, registry.size(), dir.string().c_str());
         }
@@ -163,20 +196,31 @@ namespace Game::EnchantmentDefinitions {
 
         // MC HolderSet.contains(item.typeHolder()) over a raw entry list.
         bool SetContainsItem(const std::vector<std::string>& entries, ItemID item) {
-            if (entries.empty()) return false;
-            const std::string slug = std::string(ItemRegistry::Slug(item));
-            if (slug.empty()) return false;
-            const std::string id = "minecraft:" + slug;
-            const std::vector<std::string>* tags = nullptr;   // fetched lazily
-            for (const std::string& e : entries) {
-                if (e.empty()) continue;
-                if (e[0] == '#') {
-                    if (!tags) tags = &DataTags::TagsFor(DataTags::Registry::Item, id);
-                    const std::string tag = "#" + WithNamespace(e.substr(1));
-                    if (std::find(tags->begin(), tags->end(), tag) != tags->end()) return true;
-                } else if (WithNamespace(e) == id) {
-                    return true;
-                }
+            return ItemHolderSetContains(entries, item);
+        }
+
+        // MC EquipmentSlotGroup.test(slot) for one group name.
+        bool SlotGroupContains(std::string_view group, EquipmentSlot slot) {
+            group = StripNamespace(group);
+            switch (slot) {
+                case EquipmentSlot::MAINHAND:
+                    return group == "any" || group == "hand" || group == "mainhand";
+                case EquipmentSlot::OFFHAND:
+                    return group == "any" || group == "hand" || group == "offhand";
+                case EquipmentSlot::FEET:
+                    return group == "any" || group == "armor" || group == "feet";
+                case EquipmentSlot::LEGS:
+                    return group == "any" || group == "armor" || group == "legs";
+                case EquipmentSlot::CHEST:
+                    return group == "any" || group == "armor" || group == "chest";
+                case EquipmentSlot::HEAD:
+                    return group == "any" || group == "armor" || group == "head";
+                // EquipmentSlot.isArmor: BODY is ANIMAL_ARMOR, so "armor"
+                // holds it too; "any" holds every slot, the saddle included.
+                case EquipmentSlot::BODY:
+                    return group == "any" || group == "armor" || group == "body";
+                case EquipmentSlot::SADDLE:
+                    return group == "any" || group == "saddle";
             }
             return false;
         }
@@ -209,6 +253,40 @@ namespace Game::EnchantmentDefinitions {
             && std::find(eb.begin(), eb.end(), a) == eb.end();
     }
 
+    void ModifyDurabilityChange(EnchantmentId id, int level, const ItemStack& item,
+                                JavaRandom& random, float& value) {
+        const Definition& d = Get(id);
+        if (!d.loaded) return;
+        // Enchantment.itemContext: TOOL + ENCHANTMENT_LEVEL.
+        EnchantmentContext ctx;
+        ctx.random = &random;
+        ctx.enchantmentLevel = level;
+        ctx.tool = &item;
+        for (const ConditionalValueEffect& effect : d.effects.itemDamage) {
+            if (effect.Matches(ctx)) value = effect.effect.Process(level, random, value);
+        }
+    }
+
+    bool MatchingSlot(EnchantmentId id, EquipmentSlot slot) {
+        const Definition& d = Get(id);
+        for (const std::string& group : d.slots) {
+            if (SlotGroupContains(group, slot)) return true;
+        }
+        return false;
+    }
+
+    std::vector<EnchantmentId> ResolveTagOrdered(std::string_view tag) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        std::string t(tag);
+        if (!t.empty() && t[0] == '#') t.erase(0, 1);
+        return OrderedTag(Loaded(), t);
+    }
+
+    const std::vector<EnchantmentId>& TooltipOrder() {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        return Loaded().tooltipOrder;
+    }
+
     std::vector<EnchantmentId> ResolveSet(const std::vector<std::string>& entries) {
         std::lock_guard<std::mutex> lock(g_mutex);
         Index& index = Loaded();
@@ -227,7 +305,7 @@ namespace Game::EnchantmentDefinitions {
                 continue;
             }
             if (auto id = EnchantmentRegistry::ByName(StripNamespace(WithNamespace(e)))) {
-                if (id < index.byId.size() && index.byId[*id].loaded
+                if (*id < index.byId.size() && index.byId[*id].loaded
                     && std::find(ids.begin(), ids.end(), *id) == ids.end()) {
                     ids.push_back(*id);
                 }

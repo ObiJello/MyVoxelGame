@@ -340,6 +340,17 @@ namespace Game {
         return BlockID::Air;
     }
 
+    BlockState AnvilDamaged(BlockState anvil) {
+        const BlockID next = AnvilDamaged(anvil.Block());
+        if (next == BlockID::Air) return BlockState{};
+        const auto& oldDef = BlockRegistry::GetStateDefinition(anvil.Block());
+        const auto& newDef = BlockRegistry::GetStateDefinition(next);
+        BlockRegistry::BlockStateDefinition::PropertyMap props;
+        const std::string_view facing = oldDef.ValueOf(anvil.Index(), "facing");
+        if (!facing.empty()) props["facing"] = std::string(facing);
+        return BlockStates::FromIndex(next, newDef.IndexOf(props));
+    }
+
     // ── Dust ───────────────────────────────────────────────────────────────
 
     uint32_t FallingBlockDustColor(BlockState state) {

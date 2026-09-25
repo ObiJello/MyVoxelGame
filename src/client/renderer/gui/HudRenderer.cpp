@@ -418,9 +418,9 @@ namespace Render {
             // CUSTOM_NAME → Item.getName(stack), which for the potion items
             // is the POTION_CONTENTS name ("Splash Potion of Healing").
             name = Game::GetItemStackHoverName(stack);
-            nameRGB = Game::RarityColorARGB(
-                          stack.get(Game::DataComponents::RARITY)
-                              .value_or(Game::Rarity::COMMON))
+            // ItemStack.getStyledHoverName → getRarity: an enchanted item
+            // shows one tier up.
+            nameRGB = Game::RarityColorARGB(static_cast<Game::Rarity>(Game::GetStackRarity(stack)))
                       & 0x00FFFFFFu;
         }
         if (name.empty()) {

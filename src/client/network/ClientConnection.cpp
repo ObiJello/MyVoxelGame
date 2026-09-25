@@ -698,6 +698,11 @@ namespace Client {
                 auto data = Serialization::DeserializeLightUpdateS2C(payload);
                 return std::make_unique<LightUpdateS2CPacketImpl>(std::move(data));
             }
+
+            case PacketId::ChunksBiomesS2C: {
+                auto data = Serialization::DeserializeChunksBiomesS2C(payload);
+                return std::make_unique<ChunksBiomesS2CPacketImpl>(std::move(data));
+            }
             
             case PacketId::BlockChangeS2C: {
                 auto data = Serialization::DeserializeBlockChangeS2C(payload);
@@ -875,6 +880,10 @@ namespace Client {
             case PacketId::ArmorStandDataS2C: {
                 auto data = Serialization::DeserializeArmorStandDataS2C(payload);
                 return std::make_unique<ArmorStandDataS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::ItemFrameDataS2C: {
+                auto data = Serialization::DeserializeItemFrameDataS2C(payload);
+                return std::make_unique<ItemFrameDataS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::Disconnect: {

@@ -27,6 +27,12 @@
 #include "common/entity/TamableAnimal.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/decoration/Painting.hpp"
+#include "common/entity/decoration/ItemFrame.hpp"
+#include "common/world/block/BlockModel.hpp"
+#include "client/renderer/viewmodel/ItemMeshBuilder.hpp"
+#include "common/entity/decoration/PaintingVariants.hpp"
+#include "client/renderer/entity/EntityLighting.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/GeneratedItemAttributes.hpp"
@@ -46,13 +52,16 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <cassert>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
@@ -64,6 +73,23 @@ namespace Render {
         // MC EntityModel.MODEL_Y_OFFSET. In BLOCKS, applied after the 1/16
         // scale. See the header for why it is 1.501 and not 1.5.
         constexpr float kModelYOffset = -1.501f;
+
+        // MC MobRenderer.checkMagicName: the custom name, whole and exact.
+        bool HasMagicName(const Game::Entity& entity, std::string_view magicName) {
+            const std::optional<std::string>& name = entity.GetCustomName();
+            return name && *name == magicName;
+        }
+
+        // MC LivingEntityRenderer.isEntityUpsideDown / isUpsideDownName.
+        bool IsEntityUpsideDown(const Game::Entity& entity) {
+            return HasMagicName(entity, "Dinnerbone") || HasMagicName(entity, "Grumm");
+        }
+
+        // The rainbow sheep's magic name. This REPLACES MC's "jeb_"
+        // (SheepRenderer.extractRenderState: checkMagicName(entity, "jeb_")):
+        // here a sheep named "obey_" cycles its wool, and "jeb_" is an
+        // ordinary name.
+        constexpr std::string_view kRainbowSheepName = "obey_";
 
         // ── Light, invisibility and the outline, per batch ────────────────
         //
@@ -819,6 +845,141 @@ namespace Render {
         }
     }
 
+    MobRenderer::PaintingGeometry MobRenderer::AppendPainting(const Game::Mob& mob,
+                                                              const glm::dvec3& centerWorld,
+                                                              std::vector<ModelVertex>& verts,
+                                                              std::vector<uint32_t>& idx) {
+        PaintingGeometry out;
+        const auto* painting = dynamic_cast<const Game::Painting*>(&mob);
+        const Game::PaintingVariant* variant = painting ? painting->Variant() : nullptr;
+        if (!variant) return out;
+        out.front = LoadTexture(Game::PaintingVariants::TexturePath(*variant));
+        out.back  = LoadTexture("assets/textures/painting/back.png");
+        if (out.front == INVALID_TEXTURE || out.back == INVALID_TEXTURE) return out;
+
+        const Game::Direction direction = painting->GetDirection();
+        const int width  = variant->width;
+        const int height = variant->height;
+
+        // MC PaintingRenderer.extractRenderState: the light of the cell each
+        // 1x1 segment covers, walking along the wall the way the canvas runs.
+        std::vector<int> light(static_cast<size_t>(width * height));
+        {
+            const float offsetX = -static_cast<float>(width) / 2.0f;
+            const float offsetY = -static_cast<float>(height) / 2.0f;
+            const int blockX = static_cast<int>(std::floor(centerWorld.x));
+            const int blockZ = static_cast<int>(std::floor(centerWorld.z));
+            for (int segY = 0; segY < height; ++segY) {
+                for (int segX = 0; segX < width; ++segX) {
+                    const float sx = static_cast<float>(segX) + offsetX + 0.5f;
+                    const float sy = static_cast<float>(segY) + offsetY + 0.5f;
+                    int x = blockX;
+                    const int y = static_cast<int>(std::floor(centerWorld.y + sy));
+                    int z = blockZ;
+                    switch (direction) {
+                        case Game::Direction::North: x = static_cast<int>(std::floor(centerWorld.x + sx)); break;
+                        case Game::Direction::West:  z = static_cast<int>(std::floor(centerWorld.z - sx)); break;
+                        case Game::Direction::South: x = static_cast<int>(std::floor(centerWorld.x - sx)); break;
+                        case Game::Direction::East:  z = static_cast<int>(std::floor(centerWorld.z + sx)); break;
+                        default: break;
+                    }
+                    light[static_cast<size_t>(segX + segY * width)] = EntityEnvironment::PackedLightAt(x, y, z);
+                }
+            }
+        }
+
+        // poseStack.rotate(YP, 180 - 2D×90): the canvas's local -Z (its
+        // front) turns to face `direction`. Axis.YP.rotationDegrees(θ):
+        // x' = x cosθ + z sinθ, z' = -x sinθ + z cosθ.
+        const float theta = glm::radians(180.0f - Game::ToYRot(direction));
+        const float c = std::cos(theta), s = std::sin(theta);
+        const glm::vec3 origin = Render::ToRender(centerWorld);
+        const auto toWorld = [&](float x, float y, float z) {
+            return origin + glm::vec3(x * c + z * s, y, -x * s + z * c);
+        };
+        const auto rotateNormal = [&](float nx, float ny, float nz) {
+            return glm::vec3(nx * c + nz * s, ny, -nx * s + nz * c);
+        };
+        const EntityLighting::LightSet lightSet = EntityLighting::Current();
+
+        // One quad, MC's four vertex() calls in order; its colour is the
+        // segment's lightmap colour times the face's diffuse shade (the
+        // batch draws at kEmissive, so nothing multiplies it again).
+        const auto quad = [&](std::vector<uint32_t>& into, int lightCoords, glm::vec3 normal,
+                              const std::array<glm::vec3, 4>& p, const std::array<glm::vec2, 4>& uv) {
+            const glm::vec3 lit = EntityEnvironment::LightColor(lightCoords) *
+                                  EntityLighting::Shade(rotateNormal(normal.x, normal.y, normal.z), lightSet);
+            const auto channel = [](float v) {
+                return static_cast<uint8_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f);
+            };
+            const uint8_t r = channel(lit.r), g = channel(lit.g), b = channel(lit.b);
+            const auto base = static_cast<uint32_t>(verts.size());
+            for (int i = 0; i < 4; ++i) {
+                const glm::vec3 w = toWorld(p[static_cast<size_t>(i)].x, p[static_cast<size_t>(i)].y,
+                                            p[static_cast<size_t>(i)].z);
+                verts.push_back({ w.x, w.y, w.z, uv[static_cast<size_t>(i)].x, uv[static_cast<size_t>(i)].y,
+                                  r, g, b, 255 });
+            }
+            into.insert(into.end(), { base, base + 1, base + 2, base, base + 2, base + 3 });
+        };
+
+        // MC renderPainting. The back sprite's sub-rects: the whole sheet for
+        // the back, its top 1/16 for the top and bottom edges, its left 1/16
+        // for the sides.
+        constexpr float kEdge = 0.03125f;
+        const float offsetX = -static_cast<float>(width) / 2.0f;
+        const float offsetY = -static_cast<float>(height) / 2.0f;
+        const float deltaU = 1.0f / static_cast<float>(width);
+        const float deltaV = 1.0f / static_cast<float>(height);
+        std::vector<uint32_t> frontIdx, backIdx;
+        for (int segX = 0; segX < width; ++segX) {
+            for (int segY = 0; segY < height; ++segY) {
+                const float x0 = offsetX + static_cast<float>(segX + 1);
+                const float x1 = offsetX + static_cast<float>(segX);
+                const float y0 = offsetY + static_cast<float>(segY + 1);
+                const float y1 = offsetY + static_cast<float>(segY);
+                const int lc = light[static_cast<size_t>(segX + segY * width)];
+                const float fu0 = deltaU * static_cast<float>(width - segX);
+                const float fu1 = deltaU * static_cast<float>(width - (segX + 1));
+                const float fv0 = deltaV * static_cast<float>(height - segY);
+                const float fv1 = deltaV * static_cast<float>(height - (segY + 1));
+                quad(frontIdx, lc, {0, 0, -1},
+                     {{ {x0, y1, -kEdge}, {x1, y1, -kEdge}, {x1, y0, -kEdge}, {x0, y0, -kEdge} }},
+                     {{ {fu1, fv0}, {fu0, fv0}, {fu0, fv1}, {fu1, fv1} }});
+                quad(backIdx, lc, {0, 0, 1},
+                     {{ {x0, y0, kEdge}, {x1, y0, kEdge}, {x1, y1, kEdge}, {x0, y1, kEdge} }},
+                     {{ {1.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 1.0f}, {1.0f, 1.0f} }});
+                if (segY == height - 1) {
+                    quad(backIdx, lc, {0, 1, 0},
+                         {{ {x0, y0, -kEdge}, {x1, y0, -kEdge}, {x1, y0, kEdge}, {x0, y0, kEdge} }},
+                         {{ {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0625f}, {0.0f, 0.0625f} }});
+                }
+                if (segY == 0) {
+                    quad(backIdx, lc, {0, -1, 0},
+                         {{ {x0, y1, kEdge}, {x1, y1, kEdge}, {x1, y1, -kEdge}, {x0, y1, -kEdge} }},
+                         {{ {0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.0625f}, {0.0f, 0.0625f} }});
+                }
+                if (segX == width - 1) {
+                    quad(backIdx, lc, {-1, 0, 0},
+                         {{ {x0, y0, kEdge}, {x0, y1, kEdge}, {x0, y1, -kEdge}, {x0, y0, -kEdge} }},
+                         {{ {0.0625f, 0.0f}, {0.0625f, 1.0f}, {0.0f, 1.0f}, {0.0f, 0.0f} }});
+                }
+                if (segX == 0) {
+                    quad(backIdx, lc, {1, 0, 0},
+                         {{ {x1, y0, -kEdge}, {x1, y1, -kEdge}, {x1, y1, kEdge}, {x1, y0, kEdge} }},
+                         {{ {0.0625f, 0.0f}, {0.0625f, 1.0f}, {0.0f, 1.0f}, {0.0f, 0.0f} }});
+                }
+            }
+        }
+        out.frontFirst = idx.size();
+        idx.insert(idx.end(), frontIdx.begin(), frontIdx.end());
+        out.frontCount = frontIdx.size();
+        out.backFirst = idx.size();
+        idx.insert(idx.end(), backIdx.begin(), backIdx.end());
+        out.backCount = backIdx.size();
+        return out;
+    }
+
     void MobRenderer::AppendDragonRays(const glm::dvec3& centerWorld,
                                        float deathTime01,
                                        const glm::vec3& cameraPos,
@@ -1062,7 +1223,9 @@ namespace Render {
                                         const glm::vec3& modelScale,
                                         float swimPitchDeg,
                                         float swimPivotY,
-                                        const glm::vec3& modelOffset) {
+                                        const glm::vec3& modelOffset,
+                                        bool upsideDown,
+                                        float boundingBoxHeight) {
         // The MC transform chain — see the header. The translation is RENDER
         // space (RenderOrigin.hpp): the entity's double position minus the
         // view's INTEGER origin, subtracted in double. That keeps float
@@ -1082,6 +1245,14 @@ namespace Render {
         // continues to be animated underneath it.
         if (deathFlipDeg != 0.0f) {
             m = glm::rotate(m, glm::radians(deathFlipDeg), glm::vec3(0.0f, 0.0f, 1.0f));
+        }
+        // MC setupRotations' isUpsideDown arm: translate (boundingBoxHeight +
+        // 0.1) / entityScale in the scaled frame — the same lift in blocks
+        // here, where the scale comes after — then roll 180° about Z, so the
+        // head hangs a tenth of a block off the ground and the feet point up.
+        if (upsideDown) {
+            m = glm::translate(m, glm::vec3(0.0f, boundingBoxHeight + 0.1f, 0.0f));
+            m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         }
         // MC DrownedRenderer.setupRotations:33-42 — the swim tilt: after the
         // base rotations (super.setupRotations, death flip included) and
@@ -1123,7 +1294,8 @@ namespace Render {
         const glm::mat4 m = EntityMatrix(renderPos, cameraPos, bodyRot, state.scale,
                                          state.deathFlipDeg, state.modelScale,
                                          state.swimPitchDeg, state.swimPivotY,
-                                         state.modelOffset);
+                                         state.modelOffset,
+                                         state.isUpsideDown, state.boundingBoxHeight);
         model.Root().Build(m, model.TexWidth(), model.TexHeight(), verts, idx,
                            model.CullBackFaces());
         return m;
@@ -1328,6 +1500,105 @@ namespace Render {
         }
         for (uint32_t i : entry->indices) idx.push_back(base + i);
         return entry->texture;
+    }
+
+    MobRenderer::ItemFrameGeometry MobRenderer::AppendItemFrame(const Game::Mob& mob,
+                                                                const glm::dvec3& centerWorld,
+                                                                std::vector<ModelVertex>& verts,
+                                                                std::vector<uint32_t>& idx) {
+        ItemFrameGeometry out;
+        const auto* frame = dynamic_cast<const Game::ItemFrame*>(&mob);
+        if (!frame) return out;
+        const Game::Direction direction = frame->GetDirection();
+
+        // MC ItemFrameRenderer.submit: from the entity's position (the render
+        // offset it adds is taken straight back off), 0.46875 out along the
+        // facing — the centre of the cell it hangs in — then turned so the
+        // model's +Z points into the wall.
+        float xRotDeg = 0.0f, yRotDeg = 180.0f;
+        if (Game::IsHorizontal(direction)) {
+            yRotDeg = 180.0f - Game::ToYRot(direction);
+        } else {
+            xRotDeg = -90.0f * static_cast<float>(Game::StepY(direction));
+        }
+        const glm::vec3 step(static_cast<float>(Game::StepX(direction)),
+                             static_cast<float>(Game::StepY(direction)),
+                             static_cast<float>(Game::StepZ(direction)));
+        glm::mat4 pose = glm::translate(glm::mat4(1.0f),
+                                        Render::ToRender(centerWorld) + step * 0.46875f);
+        pose = glm::rotate(pose, glm::radians(xRotDeg), glm::vec3(1.0f, 0.0f, 0.0f));
+        pose = glm::rotate(pose, glm::radians(yRotDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+
+        const auto appendCube = [&](const std::vector<ItemCubeVert>& bv, const std::vector<uint32_t>& bi,
+                                    const glm::mat4& m) {
+            const auto base = static_cast<uint32_t>(verts.size());
+            for (const ItemCubeVert& v : bv) {
+                const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
+                verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
+            }
+            for (const uint32_t i : bi) idx.push_back(base + i);
+        };
+
+        // The frame: its block model centred on the cell (translate -0.5).
+        // Not drawn for an invisible frame.
+        if (!frame->IsInvisible() && g_atlasBuilder) {
+            std::vector<ItemCubeVert> bv;
+            std::vector<uint32_t> bi;
+            const Game::BlockModel& model = Game::BlockModelRegistry::GetModel(
+                frame->IsGlow() ? "glow_item_frame" : "item_frame");
+            if (BuildBlockModelMeshFrom(model, bv, bi) && !bv.empty()) {
+                out.frameTex = g_atlasBuilder->GetBackendTextureHandle();
+                out.frameFirst = idx.size();
+                appendCube(bv, bi, glm::translate(pose, glm::vec3(-0.5f)));
+                out.frameCount = idx.size() - out.frameFirst;
+            }
+        }
+
+        // The item: against the back (deeper when the frame is invisible),
+        // turned 45° per rotation step, at half size, then its FIXED display.
+        const Game::ItemStack& item = frame->GetItem();
+        if (item.IsEmpty()) return out;
+        glm::mat4 m = glm::translate(pose, glm::vec3(0.0f, 0.0f, frame->IsInvisible() ? 0.5f : 0.4375f));
+        m = glm::rotate(m, glm::radians(static_cast<float>(frame->GetRotation()) * 360.0f / 8.0f),
+                        glm::vec3(0.0f, 0.0f, 1.0f));
+        m = glm::scale(m, glm::vec3(0.5f));
+
+        const Game::BlockID block = BlockShownBy(item.itemId);
+        if (block != Game::BlockID::Air) {
+            if (!g_atlasBuilder) return out;
+            std::vector<ItemCubeVert> bv;
+            std::vector<uint32_t> bi;
+            BlockCubeEntityRenderer::BuildStateMesh(Game::BlockStates::Default(block), bv, bi);
+            if (bv.empty()) return out;
+            // models/block/block.json's `fixed`: scale 0.5, then centred.
+            m = glm::scale(m, glm::vec3(0.5f));
+            m = glm::translate(m, glm::vec3(-0.5f));
+            out.itemTex = g_atlasBuilder->GetBackendTextureHandle();
+            out.itemFirst = idx.size();
+            appendCube(bv, bi, m);
+            out.itemCount = idx.size() - out.itemFirst;
+            return out;
+        }
+
+        const std::string sprite = SpriteNameFor(item.itemId);
+        if (sprite.empty()) return out;
+        SpriteEntry* entry = EnsureSpriteGeometry(sprite);
+        if (!entry) return out;
+        // models/item/generated.json's `fixed`: a half turn about Y, scale 1;
+        // then the flat sprite centred (its depth is already centred on 0).
+        m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, 0.0f));
+        m = glm::scale(m, glm::vec3(1.0f / 16.0f));
+        out.itemTex = entry->texture;
+        out.itemFirst = idx.size();
+        const auto base = static_cast<uint32_t>(verts.size());
+        for (const ModelVertex& v : entry->verts) {
+            const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
+            verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
+        }
+        for (uint32_t i : entry->indices) idx.push_back(base + i);
+        out.itemCount = idx.size() - out.itemFirst;
+        return out;
     }
 
     void MobRenderer::AppendArmorStandLayers(const Game::ArmorStand& stand, const ArmorStandModel& model,
@@ -1676,6 +1947,84 @@ namespace Render {
             // there. The dragon gets the same exemption while its healing
             // beam is live or its death rays are playing — its geometry
             // extends far outside the body box in exactly the same way.
+            // MC PaintingRenderer — no model at all: the canvas and its frame,
+            // built here and culled on the canvas's own box (its position is
+            // the box's centre, not feet).
+            if (type == Game::EntityTypeId::Painting) {
+                const Game::AABBd box = mob.GetAABBd();
+                const glm::dvec3 size = box.max - box.min;
+                const glm::vec3 delta(renderPos.x - cameraPos.x, renderPos.y - cameraPos.y,
+                                      renderPos.z - cameraPos.z);
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > maxDistSq) continue;
+                const glm::dvec3 feet(renderPos.x, box.min.y, renderPos.z);
+                const float footprint = static_cast<float>(std::max(size.x, size.z));
+                if (EntityCulling::g_crossingFilter &&
+                    !EntityCulling::PassesCrossingFilter(glm::vec3(box.min), glm::vec3(box.max))) {
+                    continue;
+                }
+                if (!EntityCulling::ShouldRenderAtSqrDistance(distSq, footprint, static_cast<float>(size.y)) ||
+                    !EntityCulling::ShouldRender(frustum, glm::vec3(feet), footprint, static_cast<float>(size.y))) {
+                    ++culledCount;
+                    continue;
+                }
+                ++EntityCulling::g_renderedThisFrame;
+                const PaintingGeometry geo = AppendPainting(mob, renderPos, m_verts, m_indices);
+                if (geo.frontCount > 0) {
+                    batches.push_back({ geo.front, glm::vec4(0.0f), geo.frontFirst, geo.frontCount });
+                    batches.back().light = BatchLight::Emissive;   // light baked per segment
+                }
+                if (geo.backCount > 0) {
+                    batches.push_back({ geo.back, glm::vec4(0.0f), geo.backFirst, geo.backCount });
+                    batches.back().light = BatchLight::Emissive;
+                }
+                // The loop's buffer guard, which these early exits skip.
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
+
+            // MC ItemFrameRenderer — the frame model and the framed item,
+            // culled on the frame's own box like the painting.
+            if (type == Game::EntityTypeId::ItemFrame || type == Game::EntityTypeId::GlowItemFrame) {
+                const Game::AABBd box = mob.GetAABBd();
+                const glm::dvec3 size = box.max - box.min;
+                const glm::vec3 delta(renderPos.x - cameraPos.x, renderPos.y - cameraPos.y,
+                                      renderPos.z - cameraPos.z);
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > maxDistSq) continue;
+                if (EntityCulling::g_crossingFilter &&
+                    !EntityCulling::PassesCrossingFilter(glm::vec3(box.min), glm::vec3(box.max))) {
+                    continue;
+                }
+                const float footprint = static_cast<float>(std::max(size.x, size.z));
+                if (!EntityCulling::ShouldRender(frustum, glm::vec3(renderPos.x, box.min.y, renderPos.z),
+                                                 footprint, static_cast<float>(size.y))) {
+                    ++culledCount;
+                    continue;
+                }
+                ++EntityCulling::g_renderedThisFrame;
+                namespace LC = Game::Lighting::LightCoords;
+                const int packedLight = EntityEnvironment::PackedLightAt(renderPos);
+                const bool glow = type == Game::EntityTypeId::GlowItemFrame;
+                const ItemFrameGeometry geo = AppendItemFrame(mob, renderPos, m_verts, m_indices);
+                if (geo.frameCount > 0) {
+                    // GlowItemFrame: getBlockLightLevel = max(5, the cell's).
+                    batches.push_back({ geo.frameTex, glm::vec4(0.0f), geo.frameFirst, geo.frameCount });
+                    batches.back().light = BatchLight::Lit;
+                    batches.back().packedLight =
+                        glow ? LC::WithBlock(packedLight, std::max(5, LC::Block(packedLight))) : packedLight;
+                }
+                if (geo.itemCount > 0) {
+                    // A glow frame's item draws at full brightness (15728880).
+                    batches.push_back({ geo.itemTex, glm::vec4(0.0f), geo.itemFirst, geo.itemCount });
+                    batches.back().light = BatchLight::Lit;
+                    batches.back().packedLight = glow ? LC::kFullBright : packedLight;
+                }
+                // The loop's buffer guard, which these early exits skip.
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
+
             bool beamExempt = false;
             if (type == Game::EntityTypeId::EndCrystal) {
                 const auto* c = MobAs<Game::EndCrystal>(
@@ -1782,6 +2131,21 @@ namespace Render {
             // absolute yaw makes every mob look permanently over its shoulder.
             state.yRot = Game::Mth::WrapDegrees(headRot - bodyRot);
             state.xRot = Game::Mth::Lerp(partialTick, entry.renderPrevXRot, mob.xRot);
+            // MC LivingEntityRenderer.extractRenderState: a Dinnerbone mob's
+            // head angles are mirrored so it still looks where it looks once
+            // the body is rolled over. The dragon, the crystal and the arrow
+            // are plain EntityRenderers there, and ArmorStandRenderer's own
+            // setupRotations never rolls, so none of them take it.
+            if (mob.HasCustomName() && IsEntityUpsideDown(mob) &&
+                type != Game::EntityTypeId::EnderDragon &&
+                type != Game::EntityTypeId::EndCrystal &&
+                type != Game::EntityTypeId::Arrow &&
+                type != Game::EntityTypeId::ArmorStand) {
+                state.isUpsideDown = true;
+                state.xRot = -state.xRot;
+                state.yRot = -state.yRot;
+            }
+            state.boundingBoxHeight = mob.GetBbHeight();
             state.walkAnimationPos = mob.walkAnimation.PositionAt(partialTick);
             state.walkAnimationSpeed = mob.walkAnimation.SpeedAt(partialTick);
             state.ageInTicks = static_cast<float>(mob.tickCount) + partialTick;
@@ -2063,6 +2427,15 @@ namespace Render {
                     renderPos.z -= static_cast<double>(stepZ) * headOffset;
                 }
             }
+            // setupRotations is an else-if chain: a dying body (deathTime >
+            // 0 — a mob playing a death clip has it zeroed, as the creaking
+            // does) topples, and a sleeper lies in its bed, instead of the
+            // upside-down roll. The mirrored head angles stay either way.
+            if (state.isUpsideDown) {
+                const bool dying = mob.deathTime > 0 && !mob.Anim(Game::MobAnim::Death).IsStarted();
+                const auto* sleeper = MobAs<Game::Villager>(mob, type, Game::EntityTypeId::Villager);
+                if (dying || (sleeper && sleeper->IsSleeping())) state.isUpsideDown = false;
+            }
             if (const auto* panda = MobAs<Game::Panda>(mob, type, Game::EntityTypeId::Panda)) {
                 state.sitAmount = panda->GetSitAmount(partialTick);
                 state.lieOnBackAmount = panda->GetLieOnBackAmount(partialTick);
@@ -2141,6 +2514,7 @@ namespace Render {
             if (const auto* sheep = MobAs<Game::Sheep>(mob, type, Game::EntityTypeId::Sheep)) {
                 state.headEatPositionScale = sheep->GetHeadEatPositionScale(partialTick);
                 state.headEatAngleScale = sheep->GetHeadEatAngleScale(partialTick);
+                state.isJebSheep = HasMagicName(*sheep, kRainbowSheepName);
             }
             if (const auto* chicken = MobAs<Game::Chicken>(mob, type, Game::EntityTypeId::Chicken)) {
                 state.flap = chicken->GetFlap(partialTick);
@@ -2828,7 +3202,8 @@ namespace Render {
                 entityMatrix = EntityMatrix(renderPos, cameraPos, bodyRot, state.scale,
                                             state.deathFlipDeg, state.modelScale,
                                             state.swimPitchDeg, state.swimPivotY,
-                                            state.modelOffset);
+                                            state.modelOffset,
+                                            state.isUpsideDown, state.boundingBoxHeight);
             } else {
                 entityMatrix =
                     AppendMob(*model, state, renderPos, bodyRot,
@@ -3426,20 +3801,23 @@ namespace Render {
             // coloured sheep shows. MC draws it for every non-white sheep
             // (under the wool when not sheared); a tinted copy of the body's
             // own vertex range is the same geometry at the same pose, and
-            // the later equal-depth draw wins under LessEqual. (The jeb
-            // rainbow case is skipped with the rest of the jeb system.)
+            // the later equal-depth draw wins under LessEqual. A rainbow
+            // sheep (isJebSheep) draws it even when white, in the lerped
+            // colour — MC's `(state.isJebSheep || woolColor != WHITE)`.
             // MC 26.1 SheepWoolUndercoatLayer skips babies (`!state.isBaby`)
             // — the baby sheet has no undercoat region — so the New look
             // does too; the classic baby keeps drawing it as it always has.
             if (type == Game::EntityTypeId::Sheep &&
                 bodyIndexCount > 0 && !(state.isBaby && NewBabies())) {
                 const auto* sheep = static_cast<const Game::Sheep*>(&mob);
-                if ((sheep->GetColor() & 0x0F) != 0) {
+                if (state.isJebSheep || (sheep->GetColor() & 0x0F) != 0) {
                     const TextureHandle tex = LoadTexture(
                         "assets/textures/entity/sheep/sheep_wool_undercoat.png");
                     if (tex != INVALID_TEXTURE) {
-                        const SheepWoolColor tint =
-                            kSheepWoolColors[sheep->GetColor() & 0x0F];
+                        // MC SheepRenderState.getWoolColor.
+                        const SheepWoolColor tint = state.isJebSheep
+                            ? SheepLerpedWoolColor(state.ageInTicks)
+                            : kSheepWoolColors[sheep->GetColor() & 0x0F];
                         const size_t f = m_indices.size();
                         AppendTintedCopy(m_verts, m_indices,
                                          firstVert, bodyVertCount,
@@ -3554,7 +3932,10 @@ namespace Render {
                             overlayTexPath =
                                 "assets/textures/entity/sheep/sheep_wool.png";
                             tinted = true;
-                            tint = kSheepWoolColors[sheep->GetColor() & 0x0F];
+                            // MC SheepRenderState.getWoolColor.
+                            tint = state.isJebSheep
+                                ? SheepLerpedWoolColor(state.ageInTicks)
+                                : kSheepWoolColors[sheep->GetColor() & 0x0F];
                         }
                         break;
                     }
