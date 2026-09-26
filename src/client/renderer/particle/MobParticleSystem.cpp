@@ -1534,14 +1534,22 @@ void main() {
         // PortalParticleSystem documents.)
         // This call's own buffer (see StreamSlot), grown if it must be.
         StreamSlot& slot = AcquireSlot(totalVerts, 4096);
+        {
+        PROFILE_ZONE_N("MobParticles.Upload");
+        // Streaming: the slots are a ring reused kStreamSlots calls later, so
+        // GL can write unsynchronized once that use's frame is done — a
+        // synchronised write here waited for the GPU (UpdateBufferStreaming).
         size_t offset = 0;
         for (const auto& b : buckets) {
             if (b.empty()) continue;
-            g_renderBackend->UpdateBuffer(slot.vb, offset * 24,
-                                          b.size() * 24, b.data());
+            g_renderBackend->UpdateBufferStreaming(slot.vb, offset * 24,
+                                                   b.size() * 24, b.data());
             offset += b.size();
         }
+        }
 
+        {
+        PROFILE_ZONE_N("MobParticles.Setup");
         g_renderBackend->BindShader(m_shader);
         const glm::mat4 mvp = projection * view;
         g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
@@ -1551,6 +1559,7 @@ void main() {
         // Each particle's light is in its vertex colour (see the build
         // above); the draw's own is 1.
         EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
+        }
 
         // MC SingleQuadParticle.Layer — the particle engine draws OPAQUE and
         // TRANSLUCENT as two separate passes with different pipeline state,
@@ -1596,8 +1605,8 @@ void main() {
                 first += static_cast<uint32_t>(b.size());
             }
         };
-        drawPass(/*opaquePass=*/true);
-        drawPass(/*opaquePass=*/false);
+        { PROFILE_ZONE_N("MobParticles.DrawOpaque");      drawPass(/*opaquePass=*/true); }
+        { PROFILE_ZONE_N("MobParticles.DrawTranslucent"); drawPass(/*opaquePass=*/false); }
         g_renderBackend->UnbindMesh();
 
         // Restore the default pipeline.

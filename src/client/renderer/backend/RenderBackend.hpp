@@ -113,6 +113,22 @@ namespace Render {
                                                 size_t size, const void* data) {
             UpdateBuffer(handle, offset, size, data);
         }
+
+        // A write into one buffer of a RING of per-use stream buffers (each
+        // written and drawn in one frame, and reused several frames later —
+        // the particle slots). GL: waits for the fence of the frame that
+        // last wrote this buffer (normally long signalled) and then writes
+        // through an UNSYNCHRONIZED map. A plain glBufferSubData made Apple's
+        // driver wait for the GPU on every such upload — MobParticles.Upload,
+        // 7.5 ms in 6% of frames (2026-09-25) — and orphaning did not help
+        // (Apple's driver waits on that too). Not for a single buffer
+        // rewritten every frame: that would wait for the previous frame.
+        // Default: the plain write (Vulkan's streaming buffers are written
+        // without waiting; the ring is the caller's).
+        virtual void UpdateBufferStreaming(BufferHandle handle, size_t offset,
+                                           size_t size, const void* data) {
+            UpdateBuffer(handle, offset, size, data);
+        }
         virtual void DestroyBuffer(BufferHandle handle) = 0;
 
         // Deferred destroy — delays destruction until GPU is done with the resource.

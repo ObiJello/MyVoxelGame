@@ -378,6 +378,18 @@ A/B (GL 96 fps vs Vulkan 128) put it at `AnimFrameUpload` (median 12 us,
 - Rule for new code: never CPU-write a texture or buffer the previous frames
   still read on GL; draw into it on the GPU, rotate, or map unsynchronized
   (`UpdateBufferUnsynchronized`).
+- **Stream buffers on GL** (2026-09-25): a plain `glBufferSubData` into a
+  buffer with draws still queued makes Apple's driver wait for the GPU, and
+  so does orphaning (`glBufferData(nullptr)` + write — measured, no gain).
+  What works is an UNSYNCHRONIZED map guarded by a fence: GLBackend keeps one
+  `GLsync` per frame (placed in `EndFrame`, 8 deep) and
+  `RenderBackend::UpdateBufferStreaming` waits for the fence of the frame that
+  last wrote the buffer (normally long signalled — `GL.StreamFenceWait` never
+  fired) before writing unsynchronized. For RINGS of per-use buffers only (the
+  particle slots): a single buffer rewritten every frame would wait for the
+  previous frame. MobParticles.Upload went from 7-15 ms stalls in 4-6% of GL
+  frames to none; `OBEY_GL_SYNC_STREAM=1` restores the old write. Vulkan uses
+  the plain write (its streaming buffers never wait).
 
 ## Frame overlap on MoltenVK (2026-09-25)
 

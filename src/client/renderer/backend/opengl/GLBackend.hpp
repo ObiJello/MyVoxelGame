@@ -34,6 +34,8 @@ namespace Render {
         // Buffers
         BufferHandle CreateBuffer(BufferUsage usage, size_t size,
                                  const void* data, BufferAccess access) override;
+        void UpdateBufferStreaming(BufferHandle handle, size_t offset,
+                                   size_t size, const void* data) override;
         void UpdateBufferUnsynchronized(BufferHandle handle, size_t offset,
                                         size_t size, const void* data) override;
         void UpdateBuffer(BufferHandle handle, size_t offset,
@@ -173,6 +175,7 @@ namespace Render {
             GLuint glId = 0;
             GLenum target = GL_ARRAY_BUFFER;
             size_t size = 0;
+            uint64_t lastStreamFrame = 0;   // UpdateBufferStreaming: the frame that last wrote it
         };
         std::unordered_map<uint32_t, GLBufferInfo> m_buffers;
 
@@ -307,6 +310,17 @@ namespace Render {
         bool       m_uploadSlotReady = false;   // this frame's region waited on
         void EndUploadFrame();
         void DestroyUploadBuffer();
+
+        // Frame fences (UpdateBufferStreaming): one GLsync per frame, placed
+        // at EndFrame, kept for kFrameFences frames — the proof that a
+        // frame's draws have run. Frame f's is m_frameFences[f % kFrameFences];
+        // m_frameNumber is the frame being recorded. A frame older than the
+        // ring is taken as complete: GL cannot queue 8 frames ahead of the
+        // GPU here (the swapchain holds three).
+        static constexpr int kFrameFences = 8;
+        GLsync   m_frameFences[kFrameFences] = {};
+        uint64_t m_frameNumber = 1;
+        void WaitFrameComplete(uint64_t frame);
 
         // Shared block vertex format (GL_ARB_vertex_attrib_binding)
         GLuint m_sharedBlockVAO = 0;

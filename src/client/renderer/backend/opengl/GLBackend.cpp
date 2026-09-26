@@ -154,6 +154,10 @@ namespace Render {
         m_timers.clear();
 
         DestroyUploadBuffer();
+        for (GLsync& fence : m_frameFences) {
+            if (fence) glDeleteSync(fence);
+            fence = nullptr;
+        }
 
         m_memStats = {};
         Log::Info("GLBackend: Shutdown complete");
@@ -173,7 +177,37 @@ namespace Render {
 
     void GLBackend::EndFrame(GLFWwindow* window) {
         EndUploadFrame();   // fence this frame's staged uploads
+        // This frame's fence (UpdateBufferStreaming), replacing the one from
+        // kFrameFences frames ago.
+        GLsync& fence = m_frameFences[m_frameNumber % kFrameFences];
+        if (fence) glDeleteSync(fence);
+        fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        ++m_frameNumber;
         glfwSwapBuffers(window);
+    }
+
+    void GLBackend::WaitFrameComplete(uint64_t frame) {
+        if (frame == 0 || frame >= m_frameNumber || m_frameNumber - frame >= kFrameFences) return;
+        GLsync fence = m_frameFences[frame % kFrameFences];
+        if (!fence) return;
+        PROFILE_ZONE_N("GL.StreamFenceWait");
+        glClientWaitSync(fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1'000'000'000ull);
+    }
+
+    void GLBackend::UpdateBufferStreaming(BufferHandle handle, size_t offset,
+                                          size_t size, const void* data) {
+        auto it = m_buffers.find(handle);
+        if (it == m_buffers.end() || size == 0) return;
+        // OBEY_GL_SYNC_STREAM=1: A/B switch back to the synchronised write.
+        static const bool s_sync = std::getenv("OBEY_GL_SYNC_STREAM") != nullptr;
+        if (s_sync) { UpdateBuffer(handle, offset, size, data); return; }
+        // The frame that last wrote (and drew) this buffer must be done with
+        // it; its later writes this frame are already covered.
+        if (it->second.lastStreamFrame != m_frameNumber) {
+            WaitFrameComplete(it->second.lastStreamFrame);
+            it->second.lastStreamFrame = m_frameNumber;
+        }
+        UpdateBufferUnsynchronized(handle, offset, size, data);
     }
 
     void GLBackend::SetClearColor(float r, float g, float b, float a) {

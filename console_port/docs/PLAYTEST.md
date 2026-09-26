@@ -6,7 +6,7 @@ Nether portal trip are not playable yet. Crafting has all 222 original recipes.
 
 ## Start
 
-From `/Users/obey/Desktop/MyVoxelGame`, run:
+From `/Users/obey/Developer/MyVoxelGame`, run:
 
 ```sh
 bash console_port/run.command
@@ -198,4 +198,3 @@ eats grass, which turns the grass to dirt), milk a cow with an empty bucket, and
 chicken for eggs. A saddle goes on a pig (you cannot ride it yet) and dye colours a
 sheep. Note anything that moves oddly, gets stuck, or breeds when it
 should not.
-
