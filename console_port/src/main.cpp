@@ -18,6 +18,7 @@
 #include "ConsoleStrings.h"
 #include "ItemDescriptions.h"
 #include "ConsoleMenus.h"
+#include "ConsoleUiAnimation.h"
 #include "ConsoleCredits.h"
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -28,6 +29,8 @@
 #include <chrono>
 #include <cstdlib>
 #include <future>
+#include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -217,6 +220,8 @@ struct App {
     bool scripted=false,screenshotRequested=false;
     bool mouseReady=false;
     std::string seedText,toast;
+    std::vector<std::string> splashes;
+    std::string splash;
     std::unique_ptr<ConsoleSeedSearch> seedSearch;
     std::future<LoadResult> loadJob;
     std::optional<LoadResult> loadReady;
@@ -230,6 +235,12 @@ struct App {
     GameSettings settings;
     // The front-end and pause menus (UIScene_*).
     ConsoleMenus menus{settings};
+    double panoramaStartedAt=0,menuSceneStartedAt=0,buttonPressedAt=-1;
+    MenuScene animatedMenuScene=MenuScene::MainMenu,buttonPressedScene=MenuScene::MainMenu;
+    int buttonPressedId=-1;
+    int loadListTop=0,howToListTop=0,scrollArrowDirection=0;
+    MenuScene scrollArrowScene=MenuScene::MainMenu;
+    double scrollArrowStartedAt=-1;
     float howToPlayScroll=0;
     int howToPlayShown=-1;
     bool tutorialPaused=false;
@@ -387,6 +398,12 @@ struct App {
         MenuContext context;
         context.inGame=loaded;context.creative=loaded && !world.survival();
         if(root==MenuScene::MainMenu){
+            panoramaStartedAt=glfwGetTime();
+            loadListTop=howToListTop=0;
+            if(splashes.size()>5){
+                const auto ticks=std::chrono::steady_clock::now().time_since_epoch().count();
+                splash=splashes[5+std::size_t(ticks)%(splashes.size()-5)];
+            }
             try{savedWorlds=listSavedWorlds(dataDir);}catch(const std::exception& e){message(e.what());savedWorlds.clear();}
             for(const auto& saved:savedWorlds)context.saves.push_back(saved.name.substr(0,25));
         }
@@ -811,8 +828,17 @@ struct App {
     }
     void menuInput(MenuInput input){
         if(!menus.active())return;
+        const MenuScene before=menus.scene();
+        const int focused=menus.focus();
+        const auto& controls=menus.controls();
+        const bool press=input==MenuInput::Accept && focused>=0 && focused<int(controls.size()) &&
+            (controls[focused].kind==MenuControlKind::Button || controls[focused].kind==MenuControlKind::ListItem);
+        const int pressedId=press?controls[focused].id:-1;
         // The pause menu's Back resumes; the death menu has none.
         handleMenuEvent(menus.input(input));
+        if(press && screen==Screen::Menu && menus.active() && menus.scene()==before){
+            buttonPressedScene=before;buttonPressedId=pressedId;buttonPressedAt=glfwGetTime();
+        }
         if(screen==Screen::Menu && !menus.active() && loaded)change(Screen::Playing);
     }
     void look(double x,double y){
@@ -1316,58 +1342,117 @@ struct App {
     // Control rectangles of the current menu scene in UI units (half the
     // PS3's 1280x720 canvas), shared by drawing and the mouse. `panel` is
     // the scene's backing panel (zero width when it has none).
-    std::vector<Box> menuLayout(Box* panelOut=nullptr)const{
+    std::vector<Box> menuLayout(Box* panelOut=nullptr){
         std::vector<Box> boxes;Box panel;
         if(!menus.active() || !renderer){if(panelOut)*panelOut=panel;return boxes;}
         const float cw=renderer->uiWidth(),cx=cw/2;
         const auto& controls=menus.controls();
         const int n=int(controls.size());
         auto column=[&](float top){for(int i=0;i<n;++i)boxes.push_back({cx-112.5f,top+i*25,225,20});};
-        auto rowHeight=[&](const MenuControl& c){return c.kind==MenuControlKind::Checkbox?17.f:c.kind==MenuControlKind::TextField?36.f:25.f;};
         switch(menus.scene()){
-        case MenuScene::MainMenu:column(150);break;
-        case MenuScene::Pause:case MenuScene::Death:case MenuScene::HelpAndOptions:case MenuScene::Settings:
-            column(std::max(95.f,205-n*12.5f));break;
+        // xuiscene_main.xui and xuiscene_helpandoptions.xui place the
+        // 450x40 buttons at y=250,300,... on the 1280x720 canvas.
+        case MenuScene::MainMenu:case MenuScene::HelpAndOptions:case MenuScene::Settings:
+        case MenuScene::Pause:column(125);break;
+        case MenuScene::Death:
+            for(int i=0;i<n;++i)boxes.push_back({cx-100,200+i*25.f,200,20});
+            break;
         case MenuScene::LoadOrJoin:case MenuScene::HowToPlayMenu:{
-            const int visible=std::min(n,10);const float step=22;
-            panel={cx-150,72,300,visible*step+14};
-            const int first=std::clamp(menus.focus()-visible/2,0,std::max(0,n-visible));
+            // The PS3 list scenes begin below the 138px base logo. The
+            // How To Play XUI list is 480x396 at (400,200), in full pixels.
+            const bool howTo=menus.scene()==MenuScene::HowToPlayMenu;
+            const int visible=std::min(n,howTo?7:5);
+            const float step=howTo?25.f:33.f;
+            panel=howTo?Box{cx-120,100,240,200}:Box{cx-260,103,520,213};
+            // FJ_ButtonList::ScrollList only moves its top item when focus
+            // crosses a visible edge; it does not centre every selection.
+            int& first=howTo?howToListTop:loadListTop;
+            first=std::clamp(first,0,std::max(0,n-visible));
+            const int before=first;
+            if(menus.focus()<first)first=menus.focus();
+            else if(menus.focus()>=first+visible)first=menus.focus()-visible+1;
+            if(first!=before){
+                scrollArrowDirection=first>before?1:-1;
+                scrollArrowScene=menus.scene();
+                scrollArrowStartedAt=glfwGetTime();
+            }
             for(int i=0;i<n;++i){
                 if(i<first || i>=first+visible)boxes.push_back({});
-                else boxes.push_back({panel.x+8,panel.y+8+(i-first)*step,panel.w-16,20});
+                else if(howTo)boxes.push_back({panel.x+7.5f,panel.y+7.5f+(i-first)*step,225,20});
+                else boxes.push_back({panel.x+20,panel.y+31+(i-first)*step,227.5f,30});
             }
             break;
         }
-        case MenuScene::CreateWorld:case MenuScene::MoreOptions:case MenuScene::SettingsOptions:case MenuScene::SettingsAudio:
-        case MenuScene::SettingsControl:case MenuScene::SettingsGraphics:case MenuScene::SettingsUI:{
-            float total=16;
-            for(const auto& c:controls)total+=rowHeight(c);
-            const float top=menus.scene()==MenuScene::CreateWorld || menus.scene()==MenuScene::MoreOptions?62.f:std::max(62.f,170-total/2);
-            panel={cx-150,top,300,total};
-            float y=panel.y+8;
+        case MenuScene::CreateWorld:{
+            // CreateWorldMenu720.swf: MainPanel at (395.9,110), with the
+            // controls inside it. The unused texture-pack selector occupies
+            // the gap between game mode and difficulty in the source movie.
+            panel={cx-122,55,244,250};
+            const float x=cx-108.5f;
+            boxes={{x,79.5f,200,18},{x,115.5f,200,18},{x,152.5f,200,20},
+                   {x,228.5f,200,20},{x,249,200,20},{x,274,200,20}};
+            break;
+        }
+        case MenuScene::MoreOptions:{
+            // LaunchMoreOptionsMenu720.swf positions these checkboxes at
+            // (438,68+34i) and the world options at x=448 below them.
+            panel={cx-112.5f,27,225,216};
             for(const auto& c:controls){
-                if(c.kind==MenuControlKind::TextField)boxes.push_back({panel.x+12,y+11,panel.w-24,18});
-                else boxes.push_back({panel.x+12,y,panel.w-24,c.kind==MenuControlKind::Checkbox?14.f:20.f});
-                y+=rowHeight(c);
+                const int id=c.id;
+                if(id<=7)boxes.push_back({cx-101,34+17.f*id,202,14});
+                else boxes.push_back({cx-96,184.5f+17.f*(id-9),192,14});
+            }
+            break;
+        }
+        case MenuScene::SettingsOptions:case MenuScene::SettingsAudio:case MenuScene::SettingsControl:
+        case MenuScene::SettingsGraphics:case MenuScene::SettingsUI:{
+            // The original 720p Iggy movies place each setting explicitly;
+            // these coordinates are their pixel positions divided by two.
+            const float dx=cx-320.f;
+            auto fixed=[&](std::initializer_list<std::pair<float,float>> positions,float width){
+                int i=0;
+                for(const auto [x,y]:positions){
+                    if(i>=n)break;
+                    boxes.push_back({dx+x,y,width,controls[i].kind==MenuControlKind::Slider?20.f:14.f});
+                    ++i;
+                }
+            };
+            switch(menus.scene()){
+            case MenuScene::SettingsOptions:
+                panel={dx+238,125,169.5f,133};
+                fixed({{246,133},{246,148},{246,163},{246,178},{245.5f,211.6f},{245.5f,233.45f}},150);
+                break;
+            case MenuScene::SettingsAudio:case MenuScene::SettingsControl:
+                panel={dx+237,124.5f,165,53};
+                fixed({{244.5f,132},{244.5f,154}},150);
+                break;
+            case MenuScene::SettingsGraphics:
+                panel={dx+237,124.5f,165,111};
+                fixed({{245,132.5f},{245,150.5f},{245,168.5f},{244.5f,188},{244.5f,210}},150);
+                break;
+            case MenuScene::SettingsUI:
+                panel={dx+227.5f,107,191.5f,164};
+                fixed({{235.5f,115},{235.5f,133},{235.5f,151},{235.5f,169},
+                    {235.5f,187},{235.5f,203},{234.5f,223.5f},{234.5f,245}},175);
+                break;
+            default:break;
             }
             break;
         }
         case MenuScene::Controls:{
-            const float top=270;
-            for(int i=0;i<3;++i)boxes.push_back({cx-105+i*72.f,top,66,20});
-            boxes.push_back({cx-110,top+27,220,14});
-            boxes.push_back({cx-110,top+44,220,14});
+            // Controls720.swf: the panel begins at (400,194); layout
+            // buttons at (420,235), (570,235), (720,235), then the two
+            // checkboxes at (422,286) and (645,286).
+            panel={cx-120,97,240,220};
+            for(int i=0;i<3;++i)boxes.push_back({cx-110+i*75.f,117.5f,66,20});
+            boxes.push_back({cx-109,143,110,14});
+            boxes.push_back({cx+2.5f,143,110,14});
             break;
         }
         case MenuScene::MessageBox:{
-            const auto* message=menus.message();
-            const float width=320;
-            const float textHeight=richLines(messageText(),width-24,.8f,10).size()*11.f;
-            const float titleHeight=message && message->title>=0?18.f:0.f;
-            const float height=16+titleHeight+textHeight+8+n*25;
-            panel={cx-width/2,std::max(20.f,185-height/2),width,height};
-            const float y=panel.y+8+titleHeight+textHeight+8;
-            for(int i=0;i<n;++i)boxes.push_back({cx-110,y+i*25,220,20});
+            // MessageBox720.swf: fixed background and four button slots.
+            panel={cx-115,77.5f,230,215};
+            for(int i=0;i<n;++i)boxes.push_back({cx-100,186.5f+i*22.5f,200,20});
             break;
         }
         default:break;
@@ -1443,7 +1528,13 @@ struct App {
                 const double thumb=boxes[i].x+4+at*(boxes[i].w-8);
                 menuInput(x<thumb?MenuInput::Left:MenuInput::Right);
             }else{
+                const MenuScene before=menus.scene();
+                const int pressedId=control.id;
+                const bool press=control.kind==MenuControlKind::Button || control.kind==MenuControlKind::ListItem;
                 handleMenuEvent(menus.click(i));
+                if(press && screen==Screen::Menu && menus.active() && menus.scene()==before){
+                    buttonPressedScene=before;buttonPressedId=pressedId;buttonPressedAt=glfwGetTime();
+                }
                 if(screen==Screen::Menu && !menus.active() && loaded)change(Screen::Playing);
             }
             return;
@@ -1558,7 +1649,7 @@ struct App {
         const float cw=r.uiWidth(),cx=cw/2;
         const int layout=menus.controlsLayout();
         const bool creative=menus.context().creative,southpaw=settings.get(GameSetting::ControlSouthPaw)!=0;
-        r.centered(consoleText(("IDS_CONTROLS_SCHEME"+std::to_string(layout)).c_str()),44,1.2f);
+        r.centered(consoleText(("IDS_CONTROLS_SCHEME"+std::to_string(layout)).c_str()),101,.9f,{.25f,.25f,.25f,1});
         std::vector<std::pair<const char*,int>> lines{
             {creative?"IDS_CONTROLS_JUMPFLY":"IDS_CONTROLS_JUMP",S::Jump},{"IDS_CONTROLS_INVENTORY",S::InventoryAction},
             {"IDS_CONTROLS_PAUSE",S::PauseMenu},{creative?"IDS_CONTROLS_SNEAKFLY":"IDS_CONTROLS_SNEAK",S::SneakToggle},
@@ -1580,19 +1671,23 @@ struct App {
             const unsigned bits=consoleJoypadButtons(action,layout);
             for(std::size_t i=0;i<std::size(pads);++i)if(bits&pads[i].bits)labels[i]=consoleText(text);
         }
-        r.rect(cx-230,60,460,200,{0,0,0,.55f});
-        float left=70,right=70;
+        // FJ_Controller is embedded in skinPS3.swf and placed at (430,356)
+        // in Controls720.swf. Its first frame is a 418x283 bitmap.
+        r.sprite("controller_ps3",cx-105,178,209,141.5f);
+        float left=179,right=179;
         for(std::size_t i=0;i<std::size(pads);++i){
             if(labels[i].empty())continue;
             float& y=pads[i].left?left:right;
             if(pads[i].left){
-                r.padGlyph(pads[i].glyph,cx-34,y-2,12);
-                r.text(labels[i],cx-40-r.textWidth(labels[i],.85f),y,.85f);
+                r.padGlyph(pads[i].glyph,cx-62,y-2,10);
+                const float scale=std::min(.6f,50.f/std::max(1.f,r.textWidth(labels[i])));
+                r.text(labels[i],cx-68-r.textWidth(labels[i],scale),y,scale);
             }else{
-                r.padGlyph(pads[i].glyph,cx+22,y-2,12);
-                r.text(labels[i],cx+40,y,.85f);
+                r.padGlyph(pads[i].glyph,cx+51,y-2,10);
+                const float scale=std::min(.6f,50.f/std::max(1.f,r.textWidth(labels[i])));
+                r.text(labels[i],cx+64,y,scale);
             }
-            y+=17;
+            y+=15;
         }
     }
     // The UIScene_* menus: the scene's panel and controls, its description,
@@ -1600,26 +1695,59 @@ struct App {
     void drawMenu(Renderer& r,bool inWorld){
         const float cw=r.uiWidth(),cx=cw/2;
         const MenuScene scene=menus.scene(),root=menus.root();
+        if(scene!=animatedMenuScene){animatedMenuScene=scene;menuSceneStartedAt=glfwGetTime();}
         const glm::vec4 ink{.25f,.25f,.25f,1},white{1,1,1,1},focusText{1,1,.63f,1},disabled{.55f,.55f,.55f,1};
         if(root==MenuScene::Death)r.rect(0,0,cw,360,{.45f,.05f,.05f,.55f});
         else if(inWorld)r.rect(0,0,cw,360,{0,0,0,.55f});
         const bool overMain=scene==MenuScene::MainMenu || (scene==MenuScene::MessageBox && menus.below()==MenuScene::MainMenu);
-        if(overMain || scene==MenuScene::HelpAndOptions || scene==MenuScene::Settings){
-            // The loose PS3 title image includes an Xbox subtitle; use only its common wordmark.
-            r.sprite("logo",cx-142.75f,38,285.5f,40,{0,0,1,80/138.f});
-            if(overMain)r.centered("PLAYSTATION 3 EDITION",88,1.35f,{.82,.82,.82,1});
+        const bool showLogo=overMain || scene==MenuScene::Pause || scene==MenuScene::LoadOrJoin || scene==MenuScene::HowToPlayMenu ||
+            scene==MenuScene::HelpAndOptions || scene==MenuScene::Settings ||
+            scene==MenuScene::SettingsOptions || scene==MenuScene::SettingsAudio || scene==MenuScene::SettingsControl ||
+            scene==MenuScene::SettingsGraphics || scene==MenuScene::SettingsUI;
+        if(showLogo){
+            // ComponentLogo720.swf places the skinPS3.swf MenuTitle bitmap
+            // (571x138) at (355,56) on its 1280x720 canvas.
+            r.sprite("logo_ps3",cx-142.75f,28,285.5f,69);
+        }
+        if(overMain && !splash.empty()){
+            // UIScene_MainMenu::customDrawSplash: yellow, tilted and gently pulsing.
+            const auto millis=std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count()%1000;
+            const float pulse=1.8f-std::abs(std::sin(float(millis)*6.2831853f/1000.f))*.1f;
+            // At 1280x720 ScreenSizeCalculator uses GUI scale 3; the
+            // source's physical-pixel scale becomes 3/2 in our half-size UI.
+            const float scale=pulse*150.f/(r.textWidth(splash)+32.f);
+            // MainMenu720.swf places the 500x50 custom-draw splash region at
+            // (612,126); UIScene_MainMenu draws near its bottom centre.
+            r.tiltedText(splash,cx+111,80,scale,-17,{1,1,0,1});
         }
         const int titleId=menus.title();
-        if(scene==MenuScene::Death)r.centered(consoleString(titleId),90,2);
-        else if(titleId>=0 && scene!=MenuScene::MessageBox)r.centered(consoleString(titleId),44,1.4f);
+        if(scene==MenuScene::Death)r.centered(consoleString(titleId),103,2);
+        else if(titleId>=0 && scene!=MenuScene::MessageBox && scene!=MenuScene::LoadOrJoin &&
+                scene!=MenuScene::CreateWorld && scene!=MenuScene::MoreOptions)
+            r.centered(consoleString(titleId),44,1.4f);
         Box panel;
         const auto boxes=menuLayout(&panel);
         if(scene==MenuScene::MessageBox)r.rect(0,0,cw,360,{0,0,0,.45f});
         if(panel.w>0)r.panel(panel.x,panel.y,panel.w,panel.h);
+        if(scene==MenuScene::LoadOrJoin && titleId>=0){
+            // LoadOrJoinMenu720.swf: 1040x426 outer panel at (120,206),
+            // recessed Save/Join columns at (140,230) and (646,230).
+            r.recessPanel(panel.x+10,panel.y+12,248,188,
+                console_ui_animation::savePanelFadeIn(glfwGetTime()-menuSceneStartedAt));
+            r.recessPanel(panel.x+263,panel.y+12,248,188,
+                console_ui_animation::unfocusedPanelAlpha);
+            const std::string title=consoleString(titleId);
+            r.text(title,panel.x+20,panel.y+16,1,ink,false);
+            r.text(consoleText("IDS_JOIN_GAME"),panel.x+272.5f,panel.y+16,1,disabled,false);
+        }
+        if(scene==MenuScene::MoreOptions){
+            r.rect(cx-101,180,202,57,{0,0,0,.2f});
+            r.text(consoleText("IDS_WORLD_OPTIONS"),cx-101,168,.85f,ink,false);
+        }
         if(const auto* message=menus.message()){
-            float y=panel.y+8;
-            if(message->title>=0){const std::string title=consoleString(message->title);r.text(title,cx-r.textWidth(title)/2,y,1,ink,false);y+=18;}
-            drawRichLines(r,richLines(messageText(),panel.w-24,.8f,10,0x383838),panel.x+12,y,.8f,11,10,false);
+            if(message->title>=0)r.text(consoleString(message->title),cx-100,88.5f,1,ink,false);
+            drawRichLines(r,richLines(messageText(),panel.w-30,.8f,10,0x383838),cx-100,109.5f,.8f,11,10,false);
         }
         if(scene==MenuScene::Controls)drawControlsDiagram(r);
         if(scene==MenuScene::HowToPlay){
@@ -1664,17 +1792,26 @@ struct App {
             const auto& c=controls[i];const Box& b=boxes[i];
             if(b.w<=0)continue;
             const bool focused=i==menus.focus();
+            const bool pressed=focused && scene==buttonPressedScene && c.id==buttonPressedId &&
+                console_ui_animation::buttonPressed(glfwGetTime()-buttonPressedAt);
             switch(c.kind){
             case MenuControlKind::Button:{
                 const bool chosen=scene==MenuScene::Controls && c.id==settings.get(GameSetting::ControlScheme);
-                r.sprite(focused?"button_focus":"button",b.x,b.y,b.w,b.h,{0,0,1,1},c.enabled?glm::vec4(1):glm::vec4(.6f,.6f,.6f,1));
+                r.sprite(focused && !pressed?"button_focus":"button",b.x,b.y,b.w,b.h,{0,0,1,1},c.enabled?glm::vec4(1):glm::vec4(.6f,.6f,.6f,1));
                 const float scale=std::min(1.f,(b.w-10)/std::max(1.f,r.textWidth(c.label)));
-                r.text(c.label,b.x+(b.w-r.textWidth(c.label,scale))/2,b.y+6,scale,!c.enabled?disabled:focused || chosen?focusText:white);
+                r.text(c.label,b.x+(b.w-r.textWidth(c.label,scale))/2,b.y+6,scale,!c.enabled?disabled:(focused && !pressed) || chosen?focusText:white);
                 break;
             }
             case MenuControlKind::ListItem:
-                r.rect(b.x,b.y,b.w,b.h,focused?glm::vec4(1,1,1,.6f):glm::vec4(0,0,0,.1f));
-                r.text(c.label,b.x+6,b.y+6,1,ink,false);
+                if(scene==MenuScene::HowToPlayMenu){
+                    r.sprite(focused && !pressed?"button_focus":"button",b.x,b.y,b.w,b.h);
+                    r.text(c.label,b.x+(b.w-r.textWidth(c.label))/2,b.y+6,1,
+                        focused && !pressed?focusText:white);
+                }else{
+                    r.sprite(focused && !pressed?"list_button_focus":"list_button",b.x,b.y,b.w,b.h);
+                    const float scale=std::min(1.f,(b.w-12)/std::max(1.f,r.textWidth(c.label)));
+                    r.text(c.label,b.x+6,b.y+11,scale,focused && !pressed?focusText:white);
+                }
                 break;
             case MenuControlKind::TextField:{
                 const bool editing=editingField==c.id;
@@ -1685,13 +1822,15 @@ struct App {
                 else r.text(c.text+(editing && std::fmod(glfwGetTime(),1.0)<.5?"_":""),b.x+4,b.y+5,1,white);
                 break;
             }
-            case MenuControlKind::Checkbox:
+            case MenuControlKind::Checkbox:{
                 if(focused)r.rect(b.x-3,b.y-2,b.w+6,b.h+4,{1,1,1,.5f});
                 r.rect(b.x,b.y+1,12,12,{.2f,.2f,.2f,1});
                 r.rect(b.x+1,b.y+2,10,10,c.enabled?glm::vec4(.92f,.92f,.92f,1):glm::vec4(.6f,.6f,.6f,1));
                 if(c.checked)r.rect(b.x+3,b.y+4,6,6,c.enabled?glm::vec4(.15f,.55f,.15f,1):glm::vec4(.35f,.35f,.35f,1));
-                r.text(c.label,b.x+18,b.y+3,.85f,c.enabled?ink:disabled,false);
+                const float labelScale=std::min(.85f,(b.w-22)/std::max(1.f,r.textWidth(c.label)));
+                r.text(c.label,b.x+18,b.y+3,labelScale,c.enabled?ink:disabled,false);
                 break;
+            }
             case MenuControlKind::Slider:{
                 const float at=float(c.value-c.min)/std::max(1,c.max-c.min);
                 r.sprite(focused?"button_focus":"button",b.x,b.y,b.w,b.h);
@@ -1702,6 +1841,20 @@ struct App {
                 r.text(c.label,b.x+(b.w-r.textWidth(c.label,scale))/2,b.y+6,scale,focused?focusText:white);
                 break;
             }
+            }
+        }
+        if(scene==MenuScene::LoadOrJoin || scene==MenuScene::HowToPlayMenu){
+            const bool howTo=scene==MenuScene::HowToPlayMenu;
+            const int visible=std::min(int(controls.size()),howTo?7:5);
+            const int first=howTo?howToListTop:loadListTop;
+            if(int(controls.size())>visible && visible>0){
+                const Box& last=boxes[first+visible-1];
+                const float x=last.x+last.w-24,y=last.y+last.h+3;
+                const double age=scene==scrollArrowScene?glfwGetTime()-scrollArrowStartedAt:-1;
+                if(first>0)r.sprite("scroll_up",x,y,16,11,{0,0,1,1},
+                    {1,1,1,scrollArrowDirection<0?console_ui_animation::scrollArrowAlpha(age,false):1.f});
+                if(first<int(controls.size())-visible)r.sprite("scroll_down",x+16,y,16,11,{0,0,1,1},
+                    {1,1,1,scrollArrowDirection>0?console_ui_animation::scrollArrowAlpha(age,true):1.f});
             }
         }
         if(const int description=menus.focusedDescription();description>=0 && scene!=MenuScene::MessageBox && panel.w>0){
@@ -1724,8 +1877,12 @@ struct App {
         else {glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);}
         r.beginUI();
         if(!inWorld){
-            const float shift=std::fmod(float(glfwGetTime())*.004f,1.f);
-            r.sprite("panorama_n",0,0,cw,360,{shift,0,shift+.62f,1});
+            // XuiBackgroundPan scales the 820x144 panorama fivefold on the
+            // 1280x720 canvas, then scrolls across its 4100-pixel width.
+            // UI coordinates are half-size, so the visible UV span is cw/2050.
+            const float shift=console_ui_animation::panoramaU(glfwGetTime()-panoramaStartedAt);
+            const bool day=!loaded || world.dayTime()%24000<=14000;
+            r.sprite(day?"panorama_s":"panorama_n",0,0,cw,360,{shift,0,shift+cw/2050.f,1});
             r.rect(0,0,cw,360,{0,0,0,.12});
         }
         if(screen==Screen::Playing){
@@ -2008,6 +2165,13 @@ int main(int argc,char** argv){
     try{
         App app;app.window=window;app.scripted=!smokeDir.empty();app.dataDir=smokeDir.empty()?data:smokeDir/"test-data";
         app.renderer=std::make_unique<Renderer>(assets);glfwSetWindowUserPointer(window,&app);
+        {
+            std::ifstream source(assets/"splashes.txt");
+            for(std::string line;std::getline(source,line);){
+                if(!line.empty() && line.back()=='\r')line.pop_back();
+                if(!line.empty())app.splashes.push_back(std::move(line));
+            }
+        }
         // The profile's GAME_SETTINGS (options and tutorial progress).
         try{app.settings.load(app.settingsPath());}catch(const std::exception& e){app.message(e.what());}
         app.openMenu(MenuScene::MainMenu);

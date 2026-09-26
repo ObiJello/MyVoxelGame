@@ -1,6 +1,7 @@
 // File: src/client/renderer/backend/opengl/GLBackend.cpp
 #include "GLBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <glm/gtc/type_ptr.hpp>
@@ -152,6 +153,8 @@ namespace Render {
         }
         m_timers.clear();
 
+        DestroyUploadBuffer();
+
         m_memStats = {};
         Log::Info("GLBackend: Shutdown complete");
     }
@@ -169,6 +172,7 @@ namespace Render {
     }
 
     void GLBackend::EndFrame(GLFWwindow* window) {
+        EndUploadFrame();   // fence this frame's staged uploads
         glfwSwapBuffers(window);
     }
 
@@ -507,6 +511,101 @@ namespace Render {
         glTexSubImage2D(GL_TEXTURE_2D, level, x, y, width, height,
                         it->second.dataFormat, it->second.dataType, data);
         glBindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    void GLBackend::DestroyUploadBuffer() {
+        for (UploadSlot& slot : m_uploadSlots) {
+            if (slot.fence) glDeleteSync(slot.fence);
+            slot = UploadSlot{};
+        }
+        if (m_uploadPbo != 0) glDeleteBuffers(1, &m_uploadPbo);
+        m_uploadPbo = 0;
+        m_uploadSlotSize = 0;
+        m_uploadSlot = 0;
+        m_uploadSlotReady = false;
+    }
+
+    void GLBackend::EndUploadFrame() {
+        UploadSlot& slot = m_uploadSlots[m_uploadSlot];
+        if (slot.used > 0) {
+            // The GPU is done reading this region once everything submitted
+            // so far has run; the region is reused kUploadSlots frames on.
+            if (slot.fence) glDeleteSync(slot.fence);
+            slot.fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+            m_uploadSlot = (m_uploadSlot + 1) % kUploadSlots;
+            m_uploadSlotReady = false;
+        }
+    }
+
+    void GLBackend::UpdateTexture2DLevelStaged(TextureHandle handle, int level, int x, int y,
+                                               int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data || width <= 0 || height <= 0) return;
+        // RGBA8 only (4 bytes a texel); anything else takes the plain path.
+        if (it->second.dataFormat != GL_RGBA || it->second.dataType != GL_UNSIGNED_BYTE) {
+            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            return;
+        }
+        const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
+        const size_t aligned = (bytes + 255u) & ~static_cast<size_t>(255u);
+
+        // One region must hold a frame's uploads: grow (re-specify the whole
+        // buffer — the driver hands back fresh storage, so no fence is
+        // needed for the old contents) when this one alone would not fit.
+        if (m_uploadPbo == 0 || aligned > m_uploadSlotSize) {
+            const size_t want = std::max<size_t>(size_t(2) << 20, aligned * 2);
+            if (m_uploadPbo == 0) glGenBuffers(1, &m_uploadPbo);
+            for (UploadSlot& slot : m_uploadSlots) {
+                if (slot.fence) glDeleteSync(slot.fence);
+                slot = UploadSlot{};
+            }
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_uploadPbo);
+            glBufferData(GL_PIXEL_UNPACK_BUFFER, static_cast<GLsizeiptr>(want * kUploadSlots), nullptr, GL_STREAM_DRAW);
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            m_uploadSlotSize = want;
+            m_uploadSlotReady = true;   // fresh storage: nothing to wait for
+        }
+        UploadSlot& slot = m_uploadSlots[m_uploadSlot];
+        if (!m_uploadSlotReady) {
+            // First write this frame into a region last used kUploadSlots
+            // frames ago: normally long finished, so this returns at once.
+            if (slot.fence) {
+                PROFILE_ZONE_N("GL.UploadFenceWait");
+                glClientWaitSync(slot.fence, 0, 1'000'000'000ull);
+                glDeleteSync(slot.fence);
+                slot.fence = nullptr;
+            }
+            slot.used = 0;
+            m_uploadSlotReady = true;
+        }
+        if (slot.used + aligned > m_uploadSlotSize) {
+            // The region is full this frame: fall back to the direct path.
+            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            return;
+        }
+
+        const size_t offset = static_cast<size_t>(m_uploadSlot) * m_uploadSlotSize + slot.used;
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, m_uploadPbo);
+        // Unsynchronized: the fence above proved no queued command reads
+        // this range any more.
+        void* dst = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, static_cast<GLintptr>(offset),
+                                     static_cast<GLsizeiptr>(bytes),
+                                     GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (!dst) {
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            return;
+        }
+        std::memcpy(dst, data, bytes);
+        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        // With a pixel-unpack buffer bound the "pointer" is a byte offset
+        // into it: the copy into the texture is queued, not done here.
+        glTexSubImage2D(GL_TEXTURE_2D, level, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                        reinterpret_cast<const void*>(offset));
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        slot.used += aligned;
     }
 
     void GLBackend::ReserveTextureMipLevels(TextureHandle handle, int maxLevel) {

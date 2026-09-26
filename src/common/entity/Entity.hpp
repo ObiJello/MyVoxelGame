@@ -835,6 +835,10 @@ namespace Game {
         // primed TNT or light the next one in a row behind it. See their
         // overrides.
         virtual bool IsPickable() const { return true; }
+        // MC Entity.getPickRadius: how far past its bounding box the
+        // crosshair (and a projectile's entity sweep) still finds this
+        // entity. 0 for everything but a pickable projectile (Projectile).
+        virtual float GetPickRadius() const { return 0.0f; }
         // MC Entity.skipAttackInteraction(source): true when a player's
         // attack on this entity is handled here and must not go on to the
         // ordinary hit (damage, knockback, sweep, crit, the weapon's wear).

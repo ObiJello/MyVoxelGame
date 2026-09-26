@@ -55,6 +55,9 @@ namespace Game {
         // of the wall behind solid (isSolid, or a repeater / comparator), and
         // canCoexist(false).
         virtual bool Survives() const;
+        // The 100-tick re-check of a hanging entity already in place (MC
+        // runs survives() here too). A painting overrides it — see Painting.
+        virtual bool StillHangs() const;
 
         // MC dropItem(level, causedBy): the break sound and the drops.
         virtual void DropItem(Entity* causedBy) = 0;
@@ -94,6 +97,9 @@ namespace Game {
         // in the pop box facing the same way — nor, unless allowed, any of
         // this one's own type.
         bool CanCoexist(bool allowIntersectingSameType) const;
+        // HangingEntity.survives with the support rule chosen: every cell
+        // behind solid (MC), or at least one.
+        bool SurvivesWith(bool requireFullSupport) const;
         // MC hasLevelCollision(popBox).
         bool HasLevelCollision(const AABBd& box) const;
         // MC HangingEntity.spawnAtLocation: nudged 0.15 off the wall.

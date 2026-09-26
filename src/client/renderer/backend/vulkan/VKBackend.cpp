@@ -189,6 +189,7 @@ namespace Render {
         m_buffers.clear();
 
         for (auto& [h, tex] : m_textures) {
+            DestroyFrameCopies(h, tex);
             if (tex.sampler != VK_NULL_HANDLE) vkDestroySampler(m_device, tex.sampler, nullptr);
             if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, tex.imageView, nullptr);
             if (tex.image != VK_NULL_HANDLE) vkDestroyImage(m_device, tex.image, nullptr);
@@ -205,9 +206,9 @@ namespace Render {
         DestroyAllPipelines();
 
         // Destroy core resources
-        if (m_timestampPool != VK_NULL_HANDLE) {
-            vkDestroyQueryPool(m_device, m_timestampPool, nullptr);
-            m_timestampPool = VK_NULL_HANDLE;
+        for (VkQueryPool& pool : m_timestampPools) {
+            if (pool != VK_NULL_HANDLE) vkDestroyQueryPool(m_device, pool, nullptr);
+            pool = VK_NULL_HANDLE;
         }
         m_gpuTimers.clear();
         if (m_pipelineCache != VK_NULL_HANDLE) vkDestroyPipelineCache(m_device, m_pipelineCache, nullptr);
@@ -351,7 +352,7 @@ namespace Render {
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         renderPassInfo.renderPass = m_renderPass;
-        renderPassInfo.framebuffer = m_framebuffers[m_currentImageIndex];
+        renderPassInfo.framebuffer = FrameFramebuffer();
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = m_swapchainExtent;
 
@@ -370,13 +371,17 @@ namespace Render {
 
         // Reclaim this frame slot's timestamp queries. MUST be outside the
         // render pass (vkCmdResetQueryPool is forbidden inside one), and only
-        // this slot's partition may be touched — the other slot's queries can
+        // this slot's pool may be touched — the other slot's queries can
         // still be in flight, and resetting those would lose their results.
-        // The fence wait above guarantees this partition's previous use is done.
-        if (m_timestampPool != VK_NULL_HANDLE) {
-            const uint32_t base = m_currentFrame * kTimersPerFrame * 2;
+        // The fence wait above guarantees this pool's previous use is done.
+        // A pool no timer wrote since its last reset is left alone: with the
+        // timers off (the normal case) no frame records a query command at
+        // all (see m_timestampPools).
+        m_timersUsedThisFrame = 0;
+        if (m_timestampPools[m_currentFrame] != VK_NULL_HANDLE && m_timestampPoolDirty[m_currentFrame]) {
+            VkQueryPool pool = m_timestampPools[m_currentFrame];
 
-            // Every timer still holding a slot in THIS partition is from this
+            // Every timer still holding a slot in THIS pool is from this
             // slot's previous use, and the fence wait above proves the GPU has
             // finished it — so its queries are readable right now. Resolve them
             // into resultMs BEFORE the reset destroys the queries.
@@ -395,7 +400,7 @@ namespace Render {
                 }
                 if (it->second.ended) {
                     uint64_t stamps[2] = {0, 0};
-                    if (vkGetQueryPoolResults(m_device, m_timestampPool, it->second.begin, 2,
+                    if (vkGetQueryPoolResults(m_device, pool, it->second.begin, 2,
                                               sizeof(stamps), stamps, sizeof(uint64_t),
                                               VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
                         const uint64_t d = (stamps[1] >= stamps[0]) ? (stamps[1] - stamps[0]) : 0;
@@ -409,9 +414,8 @@ namespace Render {
                 it = m_gpuTimers.erase(it);
             }
 
-            vkCmdResetQueryPool(m_commandBuffers[m_currentFrame], m_timestampPool,
-                                base, kTimersPerFrame * 2);
-            m_timersUsedThisFrame = 0;
+            vkCmdResetQueryPool(m_commandBuffers[m_currentFrame], pool, 0, kTimersPerFrame * 2);
+            m_timestampPoolDirty[m_currentFrame] = false;
         }
 
         vkCmdBeginRenderPass(m_commandBuffers[m_currentFrame], &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -675,7 +679,7 @@ namespace Render {
         VkRenderPassBeginInfo resume{};
         resume.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         resume.renderPass = m_renderPassLoad;
-        resume.framebuffer = m_framebuffers[m_currentImageIndex];
+        resume.framebuffer = FrameFramebuffer();
         resume.renderArea.offset = {0, 0};
         resume.renderArea.extent = m_swapchainExtent;
         std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
@@ -705,6 +709,10 @@ namespace Render {
         value = std::clamp(value, 1.0f, std::max(1.0f, m_deviceProperties.limits.maxSamplerAnisotropy));
         if (it->second.maxAnisotropy == value) return;
         it->second.maxAnisotropy = value;
+        // A descriptor in a pending command buffer must not be rewritten nor
+        // its sampler destroyed (see SetTextureFilter) — the options screen
+        // changes the atlas's anisotropy mid-game.
+        if (it->second.everBound) vkDeviceWaitIdle(m_device);
         RecreateSamplerFromCache(m_device, it->second);
     }
 
@@ -791,8 +799,11 @@ namespace Render {
         }
 
         if (access == BufferAccess::Static && data != nullptr) {
-            // Staging copy + queue drain. Fine at load; a mid-game caller
-            // should be using Dynamic (this zone is how a capture finds it).
+            // Staging copy as a DETACHED submit, like texture creation: the
+            // copy is queued ahead of this frame's draws and the staging
+            // memory is freed when its fence signals. It used to drain the
+            // queue — 5-6 ms each time a sign's text mesh or the held-item
+            // mesh was built mid-game (Tracy 2026-09-25).
             PROFILE_ZONE_N("Vk.CreateBuffer.StaticUpload");
             // Use staging buffer for static data
             vkUsage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -817,15 +828,31 @@ namespace Render {
                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                           deviceBuffer, deviceMemory);
 
-            // Copy staging → device
-            CopyBuffer(stagingBuffer, deviceBuffer, size);
-
-            // Cleanup staging
-            vkDestroyBuffer(m_device, stagingBuffer, nullptr);
-            vkFreeMemory(m_device, stagingMemory, nullptr);
+            // Copy staging → device, then make the copy visible to every
+            // later use of the buffer (vertex / index / uniform / shader reads
+            // in later submissions on this queue).
+            VkCommandBuffer cmd = BeginSingleTimeCommands();
+            VkBufferCopy copyRegion{};
+            copyRegion.size = size;
+            vkCmdCopyBuffer(cmd, stagingBuffer, deviceBuffer, 1, &copyRegion);
+            VkBufferMemoryBarrier barrier{};
+            barrier.sType               = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask       = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                                          VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer              = deviceBuffer;
+            barrier.offset              = 0;
+            barrier.size                = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 0, 0, nullptr, 1, &barrier, 0, nullptr);
+            EndSingleTimeCommandsDetached(cmd, stagingBuffer, stagingMemory);   // frees the staging copy later
+            const VkFence uploadFence = m_detachedSubmits.empty() ? VK_NULL_HANDLE : m_detachedSubmits.back().fence;
 
             uint32_t handle = AllocHandle();
             m_buffers[handle] = {deviceBuffer, deviceMemory, size, usage};
+            m_buffers[handle].uploadFence = uploadFence;
             m_memStats.bufferMemory += size;
             m_memStats.totalAllocated += size;
             m_memStats.bufferCount++;
@@ -939,6 +966,17 @@ namespace Render {
         }
         if (m_recorded.indexBuffer == it->second.buffer) m_recorded.indexBuffer = VK_NULL_HANDLE;
 
+        // Its detached staging copy may still be pending: wait for that one
+        // copy (not the device) before the memory goes.
+        if (it->second.uploadFence != VK_NULL_HANDLE) {
+            for (const DetachedSubmit& d : m_detachedSubmits) {
+                if (d.fence == it->second.uploadFence) {
+                    vkWaitForFences(m_device, 1, &d.fence, VK_TRUE, UINT64_MAX);
+                    break;
+                }
+            }
+        }
+
         if (it->second.mapped) vkUnmapMemory(m_device, it->second.memory);
         vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         vkFreeMemory(m_device, it->second.memory, nullptr);
@@ -1030,8 +1068,10 @@ namespace Render {
         // Create image
         VkImage image;
         VkDeviceMemory imageMemory;
+        // TRANSFER_SRC: PromoteToFrameCopies seeds a texture's per-frame
+        // copies from it.
         CreateVkImage(width, height, mipLevels, vkFormat, VK_IMAGE_TILING_OPTIMAL,
-                     VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory);
 
         // Transition + copy + transition in ONE submit: three separate
@@ -1128,10 +1168,10 @@ namespace Render {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data) return;
         it->second.lastUsedFrame = m_frameNumber;
-        QueueTextureUpdate(it->second.image, 0, x, y, width, height, data);
+        QueueTextureUpdate(handle, 0, x, y, width, height, data);
     }
 
-    void VKBackend::QueueTextureUpdate(VkImage image, uint32_t mipLevel, int x, int y,
+    void VKBackend::QueueTextureUpdate(uint32_t texture, uint32_t mipLevel, int x, int y,
                                        int width, int height, const void* data) {
         if (width <= 0 || height <= 0) return;
         const size_t dataSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
@@ -1145,7 +1185,7 @@ namespace Render {
         std::memcpy(dst, data, dataSize);
 
         PendingTextureUpdate update;
-        update.image         = image;
+        update.texture       = texture;
         update.x             = x;
         update.y             = y;
         update.width         = width;
@@ -1206,23 +1246,130 @@ namespace Render {
     void VKBackend::FlushPendingTextureUpdates(VkCommandBuffer cmd) {
         // BeginFrame advanced m_frameNumber before calling; this is the slot
         // writers were targeting as "pending" until that moment.
-        TexStagingSlot& slot = m_texStaging[static_cast<size_t>(m_frameNumber % kTexStagingSlots)];
-        if (m_pendingTextureUpdates.empty()) {
+        const uint32_t stagingIndex = static_cast<uint32_t>(m_frameNumber % kTexStagingSlots);
+        TexStagingSlot& slot = m_texStaging[stagingIndex];
+        const size_t frameSlot = static_cast<size_t>(m_currentFrame);
+
+        // A texture that has been drawn with gets its per-frame copies on its
+        // first queued update: writing its one image in place would touch
+        // what the frame still on the GPU is sampling, and Metal would hold
+        // this whole frame until that one finished (see
+        // VKTextureInfo::frameCopies).
+        for (const PendingTextureUpdate& u : m_pendingTextureUpdates) {
+            auto it = m_textures.find(u.texture);
+            if (it == m_textures.end()) continue;
+            VKTextureInfo& tex = it->second;
+            if (tex.frameCopies.empty() && tex.everBound && tex.bufferView == VK_NULL_HANDLE &&
+                PromoteToFrameCopies(cmd, tex)) {
+                m_frameCopyTextures.push_back(u.texture);
+            }
+        }
+        if (m_pendingTextureUpdates.empty() && m_frameCopyTextures.empty()) {
             slot.used = 0;
             return;
         }
 
-        // Collect unique images for barrier deduplication (typically just the atlas)
-        std::vector<VkImage> uniqueImages;
-        for (const auto& update : m_pendingTextureUpdates) {
-            bool found = false;
-            for (VkImage img : uniqueImages) {
-                if (img == update.image) { found = true; break; }
+        struct Copy { VkImage image; VkBuffer buffer; VkBufferImageCopy region; };
+        std::vector<Copy> copies;
+        auto region = [](size_t offset, uint32_t level, int x, int y, int w, int h) {
+            VkBufferImageCopy r{};
+            r.bufferOffset = offset;
+            r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            r.imageSubresource.mipLevel   = level;
+            r.imageSubresource.layerCount = 1;
+            r.imageOffset = {x, y, 0};
+            r.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+            return r;
+        };
+
+        // 1. Each per-frame texture's copy for this slot replays the frames
+        //    it missed while the other slots were current — oldest first,
+        //    before this frame's own updates land on top.
+        for (uint32_t handle : m_frameCopyTextures) {
+            auto it = m_textures.find(handle);
+            if (it == m_textures.end()) continue;
+            VKTextureInfo& tex = it->second;
+            VKTextureInfo::FrameCopy& copy = tex.frameCopies[frameSlot];
+            for (const auto& [frame, list] : tex.carried) {
+                if (frame <= copy.syncedFrame) continue;
+                // Frame slots alternate strictly, so a copy is never more than
+                // MAX_FRAMES_IN_FLIGHT - 1 frames behind and its bytes are
+                // still in the ring (kTexStagingSlots). Reaching here otherwise
+                // means that invariant broke.
+                if (frame + kTexStagingSlots - 1 - MAX_FRAMES_IN_FLIGHT < m_frameNumber) {
+                    static bool s_warned = false;
+                    if (!s_warned) {
+                        s_warned = true;
+                        Log::Error("VKBackend: per-frame texture copy fell %llu frames behind — "
+                                   "its staged updates are gone",
+                                   static_cast<unsigned long long>(m_frameNumber - frame));
+                    }
+                    continue;
+                }
+                for (const auto& c : list) {
+                    copies.push_back({copy.image, m_texStaging[c.stagingSlot].buffer,
+                                      region(c.stagingOffset, c.mipLevel, c.x, c.y, c.width, c.height)});
+                }
             }
-            if (!found) uniqueImages.push_back(update.image);
         }
 
-        // Transition all target images: SHADER_READ_ONLY → TRANSFER_DST (one barrier per image)
+        // 2. This frame's updates: into the slot's copy of a per-frame
+        //    texture (and carried for the others), in place otherwise.
+        bool writesInUseImage = false;
+        for (const PendingTextureUpdate& u : m_pendingTextureUpdates) {
+            auto it = m_textures.find(u.texture);
+            if (it == m_textures.end()) continue;
+            VKTextureInfo& tex = it->second;
+            if (tex.frameCopies.empty()) {
+                // Never drawn with (nothing can be sampling it), or a
+                // promotion that failed — then this frame waits, as before.
+                if (tex.everBound) writesInUseImage = true;
+                copies.push_back({tex.image, slot.buffer,
+                                  region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height)});
+                continue;
+            }
+            copies.push_back({tex.frameCopies[frameSlot].image, slot.buffer,
+                              region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height)});
+            if (tex.carried.empty() || tex.carried.back().first != m_frameNumber)
+                tex.carried.push_back({m_frameNumber, {}});
+            tex.carried.back().second.push_back({stagingIndex, u.stagingOffset, u.mipLevel,
+                                                 u.x, u.y, u.width, u.height});
+        }
+
+        // The slot's copy now holds everything through this frame; records
+        // every copy has taken are dropped.
+        for (uint32_t handle : m_frameCopyTextures) {
+            auto it = m_textures.find(handle);
+            if (it == m_textures.end()) continue;
+            VKTextureInfo& tex = it->second;
+            tex.frameCopies[frameSlot].syncedFrame = m_frameNumber;
+            uint64_t oldest = m_frameNumber;
+            for (const auto& c : tex.frameCopies) oldest = std::min(oldest, c.syncedFrame);
+            while (!tex.carried.empty() && tex.carried.front().first <= oldest)
+                tex.carried.erase(tex.carried.begin());
+        }
+
+        m_pendingTextureUpdates.clear();
+        // The slot's bytes are now owned by this frame's command buffer and
+        // the replays of the next MAX_FRAMES_IN_FLIGHT - 1 frames; the next
+        // writer to land on this slot is frame + kTexStagingSlots - 1, which
+        // starts from an empty cursor (see kTexStagingSlots).
+        slot.used = 0;
+        if (copies.empty()) return;
+
+        // Transition every target: SHADER_READ_ONLY → TRANSFER_DST (one
+        // barrier per image). No target is being sampled by a frame still on
+        // the GPU — a per-frame copy was last read MAX_FRAMES_IN_FLIGHT frames
+        // ago, whose fence BeginFrame waited on — so only earlier transfers
+        // need to be ordered before the writes, not earlier shader reads.
+        // Waiting on those (VERTEX|FRAGMENT) is what used to tie every frame
+        // to the previous one's pixels; it is kept only for an in-place write
+        // to an image in use.
+        std::vector<VkImage> uniqueImages;
+        for (const Copy& c : copies) {
+            if (std::find(uniqueImages.begin(), uniqueImages.end(), c.image) == uniqueImages.end())
+                uniqueImages.push_back(c.image);
+        }
         std::vector<VkImageMemoryBarrier> barriers(uniqueImages.size());
         for (size_t i = 0; i < uniqueImages.size(); i++) {
             barriers[i] = {};
@@ -1232,32 +1379,24 @@ namespace Render {
             barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             barriers[i].image = uniqueImages[i];
-            // All levels, not just 0: an animated sprite now uploads its whole
+            // All levels, not just 0: an animated sprite uploads its whole
             // mip chain, so every level of the atlas is a transfer target here.
             barriers[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT,
                                             0, VK_REMAINING_MIP_LEVELS, 0, 1};
-            barriers[i].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barriers[i].srcAccessMask = writesInUseImage ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
             barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         }
         // Vertex stage too: the lightmap is read by the terrain VERTEX shader.
+        const VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
         vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            writesInUseImage ? shaderStages : VK_PIPELINE_STAGE_TRANSFER_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT,
             0, 0, nullptr, 0, nullptr,
             static_cast<uint32_t>(barriers.size()), barriers.data());
 
-        // Record all buffer-to-image copies
-        for (const auto& update : m_pendingTextureUpdates) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = update.stagingOffset;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel   = update.mipLevel;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = {update.x, update.y, 0};
-            region.imageExtent = {static_cast<uint32_t>(update.width),
-                                  static_cast<uint32_t>(update.height), 1};
-            vkCmdCopyBufferToImage(cmd, slot.buffer, update.image,
-                                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        for (const Copy& c : copies) {
+            vkCmdCopyBufferToImage(cmd, c.buffer, c.image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c.region);
         }
 
         // Transition all images back: TRANSFER_DST → SHADER_READ_ONLY
@@ -1268,16 +1407,171 @@ namespace Render {
             barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         }
         vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, shaderStages,
             0, 0, nullptr, 0, nullptr,
             static_cast<uint32_t>(barriers.size()), barriers.data());
+    }
 
-        m_pendingTextureUpdates.clear();
-        // The slot's bytes are now owned by this frame's command buffer; the
-        // next writer to land on this slot is frame + kTexStagingSlots, which
-        // starts from an empty cursor.
-        slot.used = 0;
+    bool VKBackend::PromoteToFrameCopies(VkCommandBuffer cmd, VKTextureInfo& tex) {
+        const size_t n = MAX_FRAMES_IN_FLIGHT;
+        const size_t current = static_cast<size_t>(m_currentFrame);
+        const size_t previous = (current + n - 1) % n;
+
+        // The texture's own image stays with the previous frame's slot — that
+        // frame may be sampling it right now, and it holds every update
+        // flushed so far. The other slots get new images seeded from it.
+        std::vector<VKTextureInfo::FrameCopy> made(n);
+        made[previous] = {tex.image, VK_NULL_HANDLE, tex.imageView, tex.descriptorSet, m_frameNumber - 1};
+        bool ok = true;
+        for (size_t s = 0; s < n && ok; ++s) {
+            if (s == previous) continue;
+            VKTextureInfo::FrameCopy& c = made[s];
+            c.syncedFrame = m_frameNumber - 1;
+            ok = CreateVkImage(static_cast<uint32_t>(tex.width), static_cast<uint32_t>(tex.height),
+                               tex.mipLevels, tex.format, VK_IMAGE_TILING_OPTIMAL,
+                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                               VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, c.image, c.memory);
+            if (ok) {
+                c.view = CreateImageView(c.image, tex.format, VK_IMAGE_ASPECT_COLOR_BIT, tex.mipLevels);
+                ok = c.view != VK_NULL_HANDLE;
+            }
+            if (ok) {
+                if (!m_spareTextureSets.empty()) {
+                    c.set = m_spareTextureSets.back();
+                    m_spareTextureSets.pop_back();
+                } else {
+                    VkDescriptorSetAllocateInfo allocInfo{};
+                    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+                    allocInfo.descriptorPool = m_descriptorPool;
+                    allocInfo.descriptorSetCount = 1;
+                    allocInfo.pSetLayouts = &m_textureDescriptorLayout;
+                    ok = vkAllocateDescriptorSets(m_device, &allocInfo, &c.set) == VK_SUCCESS;
+                    if (!ok) c.set = VK_NULL_HANDLE;
+                }
+            }
+            if (ok) WriteTextureDescriptor(m_device, c.set, c.view, tex.sampler);
+        }
+        if (!ok) {
+            for (size_t s = 0; s < n; ++s) {
+                if (s == previous) continue;
+                VKTextureInfo::FrameCopy& c = made[s];
+                if (c.set != VK_NULL_HANDLE) m_spareTextureSets.push_back(c.set);
+                if (c.view != VK_NULL_HANDLE) vkDestroyImageView(m_device, c.view, nullptr);
+                if (c.image != VK_NULL_HANDLE) vkDestroyImage(m_device, c.image, nullptr);
+                if (c.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, c.memory, nullptr);
+            }
+            static bool s_warned = false;
+            if (!s_warned) {
+                s_warned = true;
+                Log::Warning("VKBackend: could not create per-frame texture copies — updates "
+                             "stay in place (frames will not overlap on the GPU)");
+            }
+            return false;
+        }
+
+        // Seed the new images with every level of the original. This one
+        // barrier does wait for the frame still sampling the original — once,
+        // at promotion.
+        std::vector<VkImageMemoryBarrier> barriers;
+        auto transition = [&](VkImage image, VkImageLayout from, VkImageLayout to,
+                              VkAccessFlags srcAccess, VkAccessFlags dstAccess) {
+            VkImageMemoryBarrier b{};
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.oldLayout = from;
+            b.newLayout = to;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1};
+            b.srcAccessMask = srcAccess;
+            b.dstAccessMask = dstAccess;
+            barriers.push_back(b);
+        };
+        const VkPipelineStageFlags shaderStages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        transition(tex.image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        for (size_t s = 0; s < n; ++s) {
+            if (s == previous) continue;
+            transition(made[s].image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                       0, VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        vkCmdPipelineBarrier(cmd, shaderStages | VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        std::vector<VkImageCopy> levels(tex.mipLevels);
+        for (uint32_t level = 0; level < tex.mipLevels; ++level) {
+            VkImageCopy& r = levels[level];
+            r = {};
+            r.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+            r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+            r.extent = {std::max(1u, static_cast<uint32_t>(tex.width) >> level),
+                        std::max(1u, static_cast<uint32_t>(tex.height) >> level), 1};
+        }
+        for (size_t s = 0; s < n; ++s) {
+            if (s == previous) continue;
+            vkCmdCopyImage(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           made[s].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           static_cast<uint32_t>(levels.size()), levels.data());
+        }
+
+        barriers.clear();
+        transition(tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+        for (size_t s = 0; s < n; ++s) {
+            if (s == previous) continue;
+            transition(made[s].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, shaderStages | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        tex.frameCopies = std::move(made);
+        const size_t extra = tex.memorySize * (n - 1);
+        m_memStats.textureMemory  += extra;
+        m_memStats.totalAllocated += extra;
+        if (m_memStats.totalAllocated > m_memStats.peakUsage) m_memStats.peakUsage = m_memStats.totalAllocated;
+        Log::Info("[VKBackend] %dx%d texture (%u levels) updated while in use: %zu per-frame copies (+%.1f MB)",
+                  tex.width, tex.height, tex.mipLevels, n, static_cast<double>(extra) / (1024.0 * 1024.0));
+        return true;
+    }
+
+    void VKBackend::DestroyFrameCopies(uint32_t handle, VKTextureInfo& tex) {
+        if (tex.frameCopies.empty()) return;
+        size_t freed = 0;
+        for (VKTextureInfo::FrameCopy& c : tex.frameCopies) {
+            if (c.memory == VK_NULL_HANDLE) continue;   // the texture's own image
+            if (c.set != VK_NULL_HANDLE) m_spareTextureSets.push_back(c.set);
+            if (c.view != VK_NULL_HANDLE) vkDestroyImageView(m_device, c.view, nullptr);
+            if (c.image != VK_NULL_HANDLE) vkDestroyImage(m_device, c.image, nullptr);
+            vkFreeMemory(m_device, c.memory, nullptr);
+            freed += tex.memorySize;
+        }
+        m_memStats.textureMemory  -= freed;
+        m_memStats.totalAllocated -= freed;
+        tex.frameCopies.clear();
+        tex.carried.clear();
+        m_frameCopyTextures.erase(std::remove(m_frameCopyTextures.begin(), m_frameCopyTextures.end(), handle),
+                                  m_frameCopyTextures.end());
+    }
+
+    void VKBackend::WriteTextureDescriptor(VkDevice device, VkDescriptorSet set,
+                                           VkImageView view, VkSampler sampler) {
+        if (set == VK_NULL_HANDLE) return;
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfo.imageView   = view;
+        imageInfo.sampler     = sampler;
+
+        VkWriteDescriptorSet write{};
+        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet          = set;
+        write.dstBinding      = 0;
+        write.dstArrayElement = 0;
+        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.descriptorCount = 1;
+        write.pImageInfo      = &imageInfo;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
     // Recreate the sampler from the texture's cached state and rewrite the
@@ -1310,20 +1604,11 @@ namespace Render {
         VkSampler oldSampler = tex.sampler;
         tex.sampler          = newSampler;
 
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        imageInfo.imageView   = tex.imageView;
-        imageInfo.sampler     = newSampler;
-
-        VkWriteDescriptorSet write{};
-        write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet          = tex.descriptorSet;
-        write.dstBinding      = 0;
-        write.dstArrayElement = 0;
-        write.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        write.descriptorCount = 1;
-        write.pImageInfo      = &imageInfo;
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        WriteTextureDescriptor(device, tex.descriptorSet, tex.imageView, newSampler);
+        // Every per-frame copy samples through the same sampler.
+        for (const VKTextureInfo::FrameCopy& c : tex.frameCopies) {
+            if (c.memory != VK_NULL_HANDLE) WriteTextureDescriptor(device, c.set, c.view, newSampler);
+        }
 
         if (oldSampler != VK_NULL_HANDLE) {
             vkDestroySampler(device, oldSampler, nullptr);
@@ -1333,7 +1618,11 @@ namespace Render {
     void VKBackend::SetTextureFilter(TextureHandle handle, TextureFilter min, TextureFilter mag) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
-        vkDeviceWaitIdle(m_device);
+        // The descriptor rewrite and the old sampler's destruction need no
+        // command buffer to hold them — true for a texture never bound. A
+        // fresh texture's filter + wrap were two full GPU drains, the whole
+        // of a mob's first-sight hitch (Tracy 2026-09-25: 6-8 ms).
+        if (it->second.everBound) vkDeviceWaitIdle(m_device);
         // Vulkan splits what GL packs into one enum: the *_MIPMAP_* modes carry
         // BOTH the in-level filter and the between-level one. Collapsing them
         // to a bare NEAREST — as this did before — silently dropped every
@@ -1365,7 +1654,7 @@ namespace Render {
     void VKBackend::SetTextureWrap(TextureHandle handle, TextureWrap s, TextureWrap t) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
-        vkDeviceWaitIdle(m_device);
+        if (it->second.everBound) vkDeviceWaitIdle(m_device);   // see SetTextureFilter
         it->second.addressModeU = ToVkWrap(s);
         it->second.addressModeV = ToVkWrap(t);
         RecreateSamplerFromCache(m_device, it->second);
@@ -1397,7 +1686,7 @@ namespace Render {
         VkDeviceMemory newMemory = VK_NULL_HANDLE;
         if (!CreateVkImage(static_cast<uint32_t>(tex.width), static_cast<uint32_t>(tex.height),
                            wanted, tex.format, VK_IMAGE_TILING_OPTIMAL,
-                           VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
                            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, newImage, newMemory)) {
             Log::Error("Vulkan: failed to reallocate texture for %u mip levels", wanted);
             return;
@@ -1422,8 +1711,11 @@ namespace Render {
         // Anything queued against the old image would write into freed memory.
         m_pendingTextureUpdates.erase(
             std::remove_if(m_pendingTextureUpdates.begin(), m_pendingTextureUpdates.end(),
-                           [&](const PendingTextureUpdate& u) { return u.image == tex.image; }),
+                           [&](const PendingTextureUpdate& u) { return u.texture == handle; }),
             m_pendingTextureUpdates.end());
+        // The copies go with the old image (the device is idle); the new one
+        // is single again until its next in-use update.
+        DestroyFrameCopies(handle, tex);
 
         if (tex.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, tex.imageView, nullptr);
         if (tex.image != VK_NULL_HANDLE)     vkDestroyImage(m_device, tex.image, nullptr);
@@ -1483,41 +1775,47 @@ namespace Render {
 
         // One submit for transition + copy + transition. This runs at load time
         // (and on the debug UI's mipmap toggle), never per frame, so a
-        // single-time command buffer is the right tool.
+        // single-time command buffer is the right tool. A texture with
+        // per-frame copies takes the pixels in every copy.
         VkCommandBuffer cmd = BeginSingleTimeCommands();
 
-        VkImageMemoryBarrier barrier{};
-        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image               = tex.image;
-        barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT,
-                                        static_cast<uint32_t>(level), 1, 0, 1 };
+        std::vector<VkImage> images;
+        if (tex.frameCopies.empty()) images.push_back(tex.image);
+        for (const VKTextureInfo::FrameCopy& c : tex.frameCopies) images.push_back(c.image);
+        for (VkImage image : images) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image               = image;
+            barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT,
+                                            static_cast<uint32_t>(level), 1, 0, 1 };
 
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+            barrier.oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel   = static_cast<uint32_t>(level);
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = { x, y, 0 };
-        region.imageExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
-        vkCmdCopyBufferToImage(cmd, staging, tex.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel   = static_cast<uint32_t>(level);
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = { x, y, 0 };
+            region.imageExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+            vkCmdCopyBufferToImage(cmd, staging, image,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &barrier);
+            barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
 
         // Detached: the caller's pixels are already in the staging buffer,
         // which is freed when the copy's fence signals.
@@ -1534,7 +1832,7 @@ namespace Render {
         // Same deferred path as UpdateTexture2D: animated sprites call this
         // mid-frame, so the copy has to ride the frame's command buffer rather
         // than stall the queue.
-        QueueTextureUpdate(it->second.image, static_cast<uint32_t>(level), x, y, width, height, data);
+        QueueTextureUpdate(handle, static_cast<uint32_t>(level), x, y, width, height, data);
     }
 
     void VKBackend::DestroyTexture(TextureHandle handle) {
@@ -1558,8 +1856,9 @@ namespace Render {
         // easily so: an animated sprite queues one update per mip level.
         m_pendingTextureUpdates.erase(
             std::remove_if(m_pendingTextureUpdates.begin(), m_pendingTextureUpdates.end(),
-                           [&](const PendingTextureUpdate& u) { return u.image == it->second.image; }),
+                           [&](const PendingTextureUpdate& u) { return u.texture == handle; }),
             m_pendingTextureUpdates.end());
+        DestroyFrameCopies(handle, it->second);
         if (it->second.bufferView != VK_NULL_HANDLE) {
             vkDestroyBufferView(m_device, it->second.bufferView, nullptr);
         }
@@ -1578,7 +1877,10 @@ namespace Render {
         if (slot < kMaxTextureSlots) {
             m_boundTextures[slot] = handle;
         }
-        if (auto it = m_textures.find(handle); it != m_textures.end()) it->second.lastUsedFrame = m_frameNumber;
+        if (auto it = m_textures.find(handle); it != m_textures.end()) {
+            it->second.lastUsedFrame = m_frameNumber;
+            it->second.everBound = true;
+        }
         // Maintain the legacy single-texture alias for any code path that
         // still reads m_boundTexture directly (block draw paths bind the
         // texture's per-texture descriptor set using this).
@@ -1588,7 +1890,9 @@ namespace Render {
     uintptr_t VKBackend::GetNativeTextureID(TextureHandle handle) const {
         auto it = m_textures.find(handle);
         if (it != m_textures.end() && it->second.descriptorSet != VK_NULL_HANDLE) {
-            return reinterpret_cast<uintptr_t>(it->second.descriptorSet);
+            it->second.everBound = true;   // ImGui draws with the set from here on
+            // ImGui records the draw in this frame — its slot's copy.
+            return reinterpret_cast<uintptr_t>(FrameSet(it->second));
         }
         return 0;
     }
@@ -2183,10 +2487,11 @@ namespace Render {
         // this one — hence the reset above).
         auto texIt = m_textures.find(m_boundTexture);
         if (texIt == m_textures.end() || texIt->second.descriptorSet == VK_NULL_HANDLE) return false;
-        if (m_recorded.textureSet != texIt->second.descriptorSet) {
+        const VkDescriptorSet texSet = FrameSet(texIt->second);
+        if (m_recorded.textureSet != texSet) {
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pl,
-                                    0, 1, &texIt->second.descriptorSet, 0, nullptr);
-            m_recorded.textureSet = texIt->second.descriptorSet;
+                                    0, 1, &texSet, 0, nullptr);
+            m_recorded.textureSet = texSet;
         }
         return true;
     }
@@ -2366,11 +2671,20 @@ namespace Render {
         VkQueryPoolCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        info.queryCount = kTimersPerFrame * 2 * MAX_FRAMES_IN_FLIGHT;
-        if (vkCreateQueryPool(m_device, &info, nullptr, &m_timestampPool) != VK_SUCCESS) {
-            Log::Warning("VKBackend: failed to create timestamp query pool");
-            m_timestampPeriodNs = 0.0f;
-            return true;
+        info.queryCount = kTimersPerFrame * 2;
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (vkCreateQueryPool(m_device, &info, nullptr, &m_timestampPools[i]) != VK_SUCCESS) {
+                Log::Warning("VKBackend: failed to create timestamp query pool");
+                for (VkQueryPool& pool : m_timestampPools) {
+                    if (pool != VK_NULL_HANDLE) vkDestroyQueryPool(m_device, pool, nullptr);
+                    pool = VK_NULL_HANDLE;
+                }
+                m_timestampPeriodNs = 0.0f;
+                return true;
+            }
+            // A new pool's queries are undefined until reset: the slot's
+            // first BeginFrame resets it.
+            m_timestampPoolDirty[i] = true;
         }
 
         m_timestampPeriodNs = props.limits.timestampPeriod;
@@ -2380,17 +2694,24 @@ namespace Render {
     }
 
     GPUTimerHandle VKBackend::BeginGPUTimer(const std::string& /*name*/) {
-        if (m_timestampPool == VK_NULL_HANDLE || !m_frameActive) return INVALID_GPU_TIMER;
+        VkQueryPool pool = m_timestampPools[m_currentFrame];
+        if (pool == VK_NULL_HANDLE || !m_frameActive) return INVALID_GPU_TIMER;
+        // Reset at this slot's BeginFrame only if it was dirty then; a pool
+        // written for the first time since that reset is fine, one written
+        // before it without a reset since is not — skip rather than record
+        // a query into an unreset slot (the next frame of this slot resets).
+        if (m_timersUsedThisFrame == 0 && m_timestampPoolDirty[m_currentFrame]) return INVALID_GPU_TIMER;
         if (m_timersUsedThisFrame >= kTimersPerFrame) return INVALID_GPU_TIMER;
 
         const uint32_t local = m_timersUsedThisFrame++;
-        const uint32_t base  = m_currentFrame * kTimersPerFrame * 2 + local * 2;
+        const uint32_t base  = local * 2;
+        m_timestampPoolDirty[m_currentFrame] = true;
 
         // BOTTOM_OF_PIPE: stamp once everything queued so far has finished, so
         // the pair brackets exactly the work issued between Begin and End.
         vkCmdWriteTimestamp(m_commandBuffers[m_currentFrame],
                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            m_timestampPool, base);
+                            pool, base);
 
         const uint32_t handle = AllocHandle();
         GPUTimer t;
@@ -2403,11 +2724,13 @@ namespace Render {
     void VKBackend::EndGPUTimer(GPUTimerHandle handle) {
         auto it = m_gpuTimers.find(handle);
         if (it == m_gpuTimers.end() || it->second.ended) return;
-        if (m_timestampPool == VK_NULL_HANDLE || !m_frameActive) return;
+        if (!m_frameActive || it->second.frameSlot != m_currentFrame) return;
+        VkQueryPool pool = m_timestampPools[m_currentFrame];
+        if (pool == VK_NULL_HANDLE) return;
 
         vkCmdWriteTimestamp(m_commandBuffers[m_currentFrame],
                             VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            m_timestampPool, it->second.begin + 1);
+                            pool, it->second.begin + 1);
         it->second.ended = true;
     }
 
@@ -2428,7 +2751,7 @@ namespace Render {
         // GPU has not reached those commands yet; the caller polls again next
         // frame and the timer stays alive until then.
         const VkResult r = vkGetQueryPoolResults(
-            m_device, m_timestampPool, it->second.begin, 2,
+            m_device, m_timestampPools[it->second.frameSlot], it->second.begin, 2,
             sizeof(stamps), stamps, sizeof(uint64_t),
             VK_QUERY_RESULT_64_BIT);
         if (r != VK_SUCCESS) return -1.0f;
@@ -2530,6 +2853,7 @@ namespace Render {
         // which on macOS is the difference between our frame and Minecraft's
         // looking the same on a wide-gamut display. Optional — a driver
         // without it just keeps the sRGB-tagged surface.
+        bool hasLayerSettings = false;
         {
             uint32_t count = 0;
             vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
@@ -2539,8 +2863,13 @@ namespace Render {
                 if (std::strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
                     extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
                     m_hasSwapchainColorSpaceExt = true;
-                    break;
                 }
+#ifdef VK_EXT_layer_settings
+                if (std::strcmp(e.extensionName, VK_EXT_LAYER_SETTINGS_EXTENSION_NAME) == 0) {
+                    extensions.push_back(VK_EXT_LAYER_SETTINGS_EXTENSION_NAME);
+                    hasLayerSettings = true;
+                }
+#endif
             }
         }
 
@@ -2552,6 +2881,53 @@ namespace Render {
 
 #ifdef __APPLE__
         createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
+
+        // MoltenVK settings that let the GPU overlap one frame's geometry
+        // with the previous frame's pixels. Two defaults forbid it outright,
+        // whatever the app records (Metal System Trace 2026-09-25: 0.0%
+        // vertex/fragment overlap on Vulkan vs 19-33% on GL — see
+        // docs/engineering-notes.md "Frame overlap on MoltenVK"):
+        //  - Metal argument buffers. With them (and a residency set, macOS
+        //    15+) MoltenVK orders every command buffer after the previous
+        //    one with stage fences: MVKCommandEncodingContext::syncFences
+        //    publishes each stage's fence at the end of a command buffer, and
+        //    the next render encoder waits for the FRAGMENT fence before its
+        //    VERTEX stage. Without them resources are bound directly and
+        //    Metal's own hazard tracking orders exactly what conflicts (the
+        //    Intel path in Initialize already had to turn them off).
+        //  - MTLEvent semaphores. The present's wait and the next submit's
+        //    wait on an event hold the queue until the previous frame has
+        //    completed. SINGLE_QUEUE (0) relies on Metal's in-queue ordering
+        //    instead, which is exact here: one VkQueue does the graphics,
+        //    the uploads and the present (checked after device creation).
+        // Passed per instance (VK_EXT_layer_settings) rather than setenv:
+        // MoltenVK reads its environment once, on the first Vulkan call —
+        // GLFW's, long before this. An explicit MVK_CONFIG_* environment
+        // variable still wins, for A/B runs.
+#if defined(__APPLE__) && defined(VK_EXT_layer_settings)
+        const VkBool32 kArgumentBuffers = VK_FALSE;
+        const int32_t  kSingleQueueSemaphores = 0;   // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE_SINGLE_QUEUE
+        std::vector<VkLayerSettingEXT> mvkSettings;
+        if (!std::getenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS"))
+            mvkSettings.push_back({"MoltenVK", "MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS",
+                                   VK_LAYER_SETTING_TYPE_BOOL32_EXT, 1, &kArgumentBuffers});
+        if (!std::getenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE"))
+            mvkSettings.push_back({"MoltenVK", "MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE",
+                                   VK_LAYER_SETTING_TYPE_INT32_EXT, 1, &kSingleQueueSemaphores});
+        VkLayerSettingsCreateInfoEXT layerSettings{};
+        layerSettings.sType = VK_STRUCTURE_TYPE_LAYER_SETTINGS_CREATE_INFO_EXT;
+        layerSettings.settingCount = static_cast<uint32_t>(mvkSettings.size());
+        layerSettings.pSettings = mvkSettings.data();
+        if (hasLayerSettings && !mvkSettings.empty()) {
+            layerSettings.pNext = createInfo.pNext;
+            createInfo.pNext = &layerSettings;
+        } else if (!hasLayerSettings) {
+            Log::Warning("VKBackend: VK_EXT_layer_settings unavailable — MoltenVK keeps its default "
+                         "argument buffers and semaphores (frames will not overlap on the GPU)");
+        }
+#else
+        (void)hasLayerSettings;
 #endif
 
         if (s_enableValidation) {
@@ -2761,6 +3137,13 @@ namespace Render {
 
         vkGetDeviceQueue(m_device, m_queueFamilies.graphicsFamily.value(), 0, &m_graphicsQueue);
         vkGetDeviceQueue(m_device, m_queueFamilies.presentFamily.value(), 0, &m_presentQueue);
+#ifdef __APPLE__
+        // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=0 (Initialize) makes
+        // semaphores no-ops that rely on submission order within ONE queue.
+        if (m_graphicsQueue != m_presentQueue)
+            Log::Warning("[VKBackend] graphics and present are different queues — "
+                         "single-queue semaphores cannot order the present after the frame");
+#endif
         return true;
     }
 
@@ -2880,20 +3263,26 @@ namespace Render {
 
     bool VKBackend::CreateDepthResources() {
         m_depthFormat = FindDepthFormat();
-        if (!CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
-                     m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
-                     VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                     VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImage, m_depthMemory)) {
-            Log::Error("VKBackend: Failed to create depth image");
-            return false;
-        }
         // Aspect mask must include STENCIL_BIT when the format actually has a
         // stencil component, otherwise the validation layer warns and (on
         // some drivers) reading the stencil aspect via this view fails.
         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
         if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
-        m_depthImageView = CreateImageView(m_depthImage, m_depthFormat, aspect, 1);
-        return m_depthImageView != VK_NULL_HANDLE;
+        // One per frame slot (see m_depthImages): consecutive frames never
+        // write the same depth image, so nothing ties frame N+1's pass to
+        // frame N's.
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (!CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
+                               m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImages[i], m_depthMemory[i])) {
+                Log::Error("VKBackend: Failed to create depth image");
+                return false;
+            }
+            m_depthImageViews[i] = CreateImageView(m_depthImages[i], m_depthFormat, aspect, 1);
+            if (m_depthImageViews[i] == VK_NULL_HANDLE) return false;
+        }
+        return true;
     }
 
     bool VKBackend::CreateRenderPass() {
@@ -2974,9 +3363,12 @@ namespace Render {
     }
 
     bool VKBackend::CreateFramebuffers() {
-        m_framebuffers.resize(m_swapchainImageViews.size());
-        for (size_t i = 0; i < m_swapchainImageViews.size(); i++) {
-            std::array<VkImageView, 2> attachments = {m_swapchainImageViews[i], m_depthImageView};
+        // Every (frame slot, swapchain image) pair — see FrameFramebuffer().
+        const size_t images = m_swapchainImageViews.size();
+        m_framebuffers.assign(images * MAX_FRAMES_IN_FLIGHT, VK_NULL_HANDLE);
+        for (size_t i = 0; i < m_framebuffers.size(); i++) {
+            std::array<VkImageView, 2> attachments = {m_swapchainImageViews[i % images],
+                                                      m_depthImageViews[i / images]};
 
             VkFramebufferCreateInfo fbInfo{};
             fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
@@ -3378,7 +3770,7 @@ namespace Render {
             }
         } else {
             begin.renderPass  = m_renderPassLoad;
-            begin.framebuffer = m_framebuffers[m_currentImageIndex];
+            begin.framebuffer = FrameFramebuffer();
             begin.renderArea.extent = m_swapchainExtent;
         }
         vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
@@ -3900,11 +4292,12 @@ namespace Render {
         TextureHandle tex1Handle = m_boundTextures[1] != INVALID_TEXTURE
                                  ? m_boundTextures[1] : tex;
         auto tex1It = m_textures.find(tex1Handle);
+        // FrameSet: the current frame slot's copy of a per-frame texture.
         VkDescriptorSet tex1Set = (tex1It != m_textures.end() && tex1It->second.descriptorSet != VK_NULL_HANDLE)
-                                ? tex1It->second.descriptorSet
-                                : tex0It->second.descriptorSet;
+                                ? FrameSet(tex1It->second)
+                                : FrameSet(tex0It->second);
         VkDescriptorSet sets[3] = {
-            tex0It->second.descriptorSet,
+            FrameSet(tex0It->second),
             fb.descriptorSet,
             tex1Set,
         };
@@ -3939,8 +4332,9 @@ namespace Render {
             auto lmIt = m_textures.find(m_boundTextures[3]);
             if (lmIt != m_textures.end() && lmIt->second.bufferView == VK_NULL_HANDLE &&
                 lmIt->second.descriptorSet != VK_NULL_HANDLE) {
+                const VkDescriptorSet lmSet = FrameSet(lmIt->second);
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        m_portalPipelineLayout, 5, 1, &lmIt->second.descriptorSet,
+                                        m_portalPipelineLayout, 5, 1, &lmSet,
                                         0, nullptr);
             }
         }
@@ -4334,17 +4728,19 @@ namespace Render {
 
     void VKBackend::CleanupSwapchain() {
         // Deliberately leaves m_renderPass alone — see RecreateSwapchain.
-        if (m_depthImageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthImageView, nullptr);
-        if (m_depthImage != VK_NULL_HANDLE) vkDestroyImage(m_device, m_depthImage, nullptr);
-        if (m_depthMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, m_depthMemory, nullptr);
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (m_depthImageViews[i] != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthImageViews[i], nullptr);
+            if (m_depthImages[i] != VK_NULL_HANDLE) vkDestroyImage(m_device, m_depthImages[i], nullptr);
+            if (m_depthMemory[i] != VK_NULL_HANDLE) vkFreeMemory(m_device, m_depthMemory[i], nullptr);
+            m_depthImageViews[i] = VK_NULL_HANDLE;
+            m_depthImages[i] = VK_NULL_HANDLE;
+            m_depthMemory[i] = VK_NULL_HANDLE;
+        }
         for (auto fb : m_framebuffers) vkDestroyFramebuffer(m_device, fb, nullptr);
         for (auto iv : m_swapchainImageViews) vkDestroyImageView(m_device, iv, nullptr);
         if (m_swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(m_device, m_swapchain, nullptr);
         m_framebuffers.clear();
         m_swapchainImageViews.clear();
-        m_depthImageView = VK_NULL_HANDLE;
-        m_depthImage = VK_NULL_HANDLE;
-        m_depthMemory = VK_NULL_HANDLE;
         m_swapchain = VK_NULL_HANDLE;
     }
 

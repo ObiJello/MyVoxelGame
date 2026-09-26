@@ -937,6 +937,7 @@ namespace Render {
         // Translucent per-slab run buckets (SubmitOrderedRuns) — reused
         // allocations, one bucket per slab.
         std::vector<std::vector<int32_t>> m_slabRunCounts;
+        std::vector<uint32_t> m_slabOrder;   // SubmitOrderedRuns: slabs in first-seen order
         std::vector<std::vector<size_t>>  m_slabRunOffsets;
         // Slab indices are absolute, so every sub-draw has baseVertex 0; the
         // backend API still wants an array of them. Grown, never shrunk.

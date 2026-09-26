@@ -27,6 +27,10 @@ namespace Game {
 
     class Projectile : public Mob {
     public:
+        // MC Projectile.getPickRadius: 1 for a projectile the player can
+        // punch back (isPickable: #minecraft:redirectable_projectile — the
+        // fireball and the wind charges), else 0.
+        float GetPickRadius() const override;
         // Projectiles ARE serialized. The base Entity default (true) applies:
         // the owner reference that used to make this impossible now round-trips
         // as a UUID through EntityRef, resolved lazily like every other

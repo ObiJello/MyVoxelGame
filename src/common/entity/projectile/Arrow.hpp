@@ -88,6 +88,10 @@ namespace Game {
         // shot, which adds nextInt(damage / 2 + 2) on the hit.
         void SetCritArrow(bool crit) { m_critArrow = crit; }
         bool IsCritArrow() const { return m_critArrow; }
+        // MC AbstractArrow ID_FLAGS bit 1 (the crit flag) rides the variant
+        // byte — the client needs it for the flight trail.
+        uint8_t GetVariantByte() const override { return m_critArrow ? 1 : 0; }
+        void    SetVariantByte(uint8_t v) override { m_critArrow = (v & 1) != 0; }
 
         bool IsInGroundArrow() const { return m_inGround; }
         // MC AbstractArrow.isPushedByFluid: an arrow stuck in a block is

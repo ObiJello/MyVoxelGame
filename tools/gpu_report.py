@@ -38,6 +38,8 @@ all verified on the 2026-09-04 trace:
     below 100% is time blocked in the fence / drawable / vsync waits.
 """
 import csv, os, re, sys, subprocess, statistics as st, bisect, collections, shutil, glob, tempfile
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tracy_tools
 import xml.etree.ElementTree as ET
 
 # ── xctrace export ──────────────────────────────────────────────────────────
@@ -113,14 +115,6 @@ def corr(xs, ys):
     sxx = sum((x - mx) ** 2 for x in xs); syy = sum((y - my) ** 2 for y in ys)
     if sxx == 0 or syy == 0: return 0.0, 0.0, my
     return sxy / (sxx * syy) ** 0.5, sxy / sxx, my - (sxy / sxx) * mx
-
-def find_csvexport():
-    p = os.environ.get("TRACY_CSVEXPORT")
-    if p and os.path.exists(p): return p
-    w = shutil.which("tracy-csvexport")
-    if w: return w
-    hits = glob.glob("/private/tmp/claude-501/*/*/scratchpad/csvexport-build/tracy-csvexport")
-    return hits[0] if hits else None
 
 # ── main ────────────────────────────────────────────────────────────────────
 def main():
@@ -235,23 +229,21 @@ def main():
     # ── TRACY ALIGNMENT ────────────────────────────────────────────────
     tr = None
     if tracy:
-        exe = find_csvexport()
-        if not exe: sys.exit("tracy-csvexport not found; set TRACY_CSVEXPORT")
-        tmp = tempfile.mkdtemp(prefix="gpu_report_")
-        def tracy_rows(name, plot=False):
-            out = os.path.join(tmp, re.sub(r"[^A-Za-z0-9]", "_", name) + ".csv")
-            with open(out, "w") as f:
-                subprocess.run([exe, "-u"] + (["-p"] if plot else []) + ["-f", name, tracy],
-                               stdout=f, stderr=subprocess.DEVNULL)
-            res = []
-            with open(out) as f:
-                rd = csv.reader(f); next(rd, None)
-                for row in rd:
-                    if row and row[0] == name:
-                        res.append((int(row[3]) / 1e6, float(row[6]) if plot else int(row[4]) / 1e6))
-            res.sort(); return res
-        tframes = [t for t, _ in tracy_rows("Render")]
-        if not tframes: sys.exit("no 'Render' zones in the Tracy capture")
+        ex = tracy_tools.export(tracy)
+        main_tid = next((t["tid"] for t in ex.threads if t["name"] == "Main thread"), None)
+        frames = ex.frames("Frames")
+        if main_tid is None or not frames: sys.exit("no main thread / FrameMark frames in the Tracy capture")
+        # Main-thread time per frame (ms) of a zone, stamped with the frame's start (ms).
+        wanted = {"Vk.FenceWait", "Present", "ImmersivePortalRender", "ChunkPass.Main"}
+        per = collections.defaultdict(dict)
+        for r in ex.rows("frame_zones"):
+            if r["frame_set"] == "Frames" and r["name"] in wanted and int(r["thread"]) == main_tid:
+                per[r["name"]][int(r["frame"])] = int(r["total_ns"]) / 1e6
+        def tracy_rows(name):
+            return [(s / 1e6, per[name].get(i, 0.0)) for i, (s, _) in enumerate(frames)]
+        plots = {k: [(t / 1e6, v) for t, v in pts] for k, pts in
+                 ex.plots(["Sections/Visible", "Geom/Vertices", "Geom/Indices"]).items()}
+        tframes = [s / 1e6 for s, _ in frames]
         B = 50.0
         span = max(tframes[-1], starts[-1]) + 60000
         def bins(ts):
@@ -269,10 +261,11 @@ def main():
         print("=" * W)
         print(f"TRACY ALIGNMENT — {os.path.basename(tracy)}: Tracy time = GPU time + {off / 1000:.2f}s (frame-rate correlation {c:.3f}; below 0.8 = not the same session)")
         tr = {"off": off,
-              "fence": tracy_rows("Vk.FenceWait"), "portal": tracy_rows("ImmersivePortalRender"),
+              "fence": tracy_rows("Vk.FenceWait" if per.get("Vk.FenceWait") else "Present"),
+              "portal": tracy_rows("ImmersivePortalRender"),
               "chunk": tracy_rows("ChunkPass.Main"), "frames": tframes,
-              "vis": tracy_rows("Sections/Visible", True), "verts": tracy_rows("Geom/Vertices", True),
-              "idx": tracy_rows("Geom/Indices", True)}
+              "vis": plots.get("Sections/Visible", []), "verts": plots.get("Geom/Vertices", []),
+              "idx": plots.get("Geom/Indices", [])}
         # per Tracy frame: first Sections/Visible point is the main view (ChunkPass.Main runs before the portal pass)
         def per_frame(points):
             d = collections.defaultdict(list)
@@ -314,7 +307,6 @@ def main():
             for j in range(4):
                 part = q[j * k:(j + 1) * k] if j < 3 else q[j * k:]
                 print(f"      {label} {part[0][0]:8.0f}..{part[-1][0]:8.0f}/frame  vertex {st.mean(p[1] for p in part):5.2f} ms  fragment {st.mean(p[2] for p in part):5.2f} ms")
-        shutil.rmtree(tmp, ignore_errors=True)
 
     # ── PER SECOND ─────────────────────────────────────────────────────
     print("=" * W)

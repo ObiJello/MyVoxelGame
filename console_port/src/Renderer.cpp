@@ -15,6 +15,7 @@
 #include <stb_image_write.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <iterator>
@@ -39,7 +40,7 @@ Renderer::Renderer(const std::filesystem::path& assets) {
     glGenTextures(1,&white_);glBindTexture(GL_TEXTURE_2D,white_);unsigned char white[]={255,255,255,255};
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,white);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
-    for(auto name:{"terrain","items","xporb","art_kz","book","chest","largechest","enderchest","font","icons","gui","logo","panorama_n","panorama_s","button","button_focus","button_down","sun","moon_phases","clouds","mob_zombie","mob_skeleton","mob_skeleton_wither","mob_char","mob_spider","mob_cavespider","mob_silverfish","mob_pigzombie","mob_villager","mob_villager_farmer","mob_villager_librarian","mob_villager_priest","mob_villager_smith","mob_villager_butcher","mob_ozelot","mob_cat_black","mob_cat_red","mob_cat_siamese","mob_wolf","mob_wolf_angry","mob_wolf_tame","mob_wolf_collar","mob_creeper","mob_cow","mob_redcow","mob_pig","mob_sheep","mob_sheep_fur","mob_chicken","mob_slime","mob_lava","mob_ghast","mob_blaze","mob_squid","mob_enderman","mob_enderman_eyes","panel_tl","panel_tm","panel_tr","panel_ml","panel_mm","panel_mr","panel_bl","panel_bm","panel_br","icon_holder","brewing_stand","brewing_arrow_on","brewing_arrow_off","brewing_bubbles_on","brewing_bubbles_off","flame_on","flame_off","arrow_on","arrow_off"})
+    for(auto name:{"terrain","items","xporb","art_kz","book","chest","largechest","enderchest","font","icons","gui","logo_ps3","controller_ps3","panorama_n","panorama_s","button","button_focus","button_down","list_button","list_button_focus","scroll_up","scroll_down","sun","moon_phases","clouds","mob_zombie","mob_skeleton","mob_skeleton_wither","mob_char","mob_spider","mob_cavespider","mob_silverfish","mob_pigzombie","mob_villager","mob_villager_farmer","mob_villager_librarian","mob_villager_priest","mob_villager_smith","mob_villager_butcher","mob_ozelot","mob_cat_black","mob_cat_red","mob_cat_siamese","mob_wolf","mob_wolf_angry","mob_wolf_tame","mob_wolf_collar","mob_creeper","mob_cow","mob_redcow","mob_pig","mob_sheep","mob_sheep_fur","mob_chicken","mob_slime","mob_lava","mob_ghast","mob_blaze","mob_squid","mob_enderman","mob_enderman_eyes","panel_tl","panel_tm","panel_tr","panel_ml","panel_mm","panel_mr","panel_bl","panel_bm","panel_br","recess_top_l","recess_top_m","recess_top_r","recess_mid_l","recess_mid_m","recess_mid_r","recess_bot_l","recess_bot_m","recess_bot_r","icon_holder","brewing_stand","brewing_arrow_on","brewing_arrow_off","brewing_bubbles_on","brewing_bubbles_off","flame_on","flame_off","arrow_on","arrow_off"})
         textures_[name]=load(assets/(std::string(name)+".png"),std::string(name).starts_with("panorama"));
     int w,h,n;unsigned char* font=stbi_load((assets/"font.png").string().c_str(),&w,&h,&n,4);
     if(!font)throw std::runtime_error("Cannot read font metrics");
@@ -490,6 +491,19 @@ void Renderer::panel(float x,float y,float w,float h){
         yy+=heights[row];
     }
 }
+void Renderer::recessPanel(float x,float y,float w,float h,float alpha){
+    constexpr float edge=8;
+    const float widths[3]={edge,std::max(0.f,w-2*edge),edge};
+    const float heights[3]={edge,std::max(0.f,h-2*edge),edge};
+    static constexpr const char* names[3][3]={{"recess_top_l","recess_top_m","recess_top_r"},
+        {"recess_mid_l","recess_mid_m","recess_mid_r"},{"recess_bot_l","recess_bot_m","recess_bot_r"}};
+    float yy=y;
+    for(int row=0;row<3;++row){
+        float xx=x;
+        for(int col=0;col<3;++col){sprite(names[row][col],xx,yy,widths[col],heights[row],{0,0,1,1},{1,1,1,alpha});xx+=widths[col];}
+        yy+=heights[row];
+    }
+}
 void Renderer::sprite(const std::string& name,float x,float y,float w,float h,glm::vec4 uv,glm::vec4 color){quad(textures_.at(name).id,x,y,w,h,uv,color);}
 // font.png is laid out in code page 437 (128 = \u00c7, 129 = \u00fc, ...); the
 // console strings are UTF-8, so decode each character and find its cell.
@@ -535,6 +549,28 @@ void Renderer::text(const std::string& s,float x,float y,float scale,glm::vec4 c
         x+=glyphWidths_[c]*scale;
     }
     draw(v,textures_.at("font").id);
+}
+void Renderer::tiltedText(const std::string& s,float centerX,float y,float scale,float degrees,glm::vec4 color){
+    const float radians=degrees*3.14159265358979323846f/180.f;
+    const float cs=std::cos(radians),sn=std::sin(radians);
+    const float width=textWidth(s,scale);
+    auto layer=[&](float offset,glm::vec4 tint){
+        std::vector<Vertex> vertices;vertices.reserve(s.size()*6);
+        float pen=-width/2+offset;
+        for(unsigned char c:fontCells(s)){
+            const float u=(c%16)/16.f,v=(c/16)/16.f;
+            for(auto p:{glm::vec4(pen,offset,u,v),glm::vec4(pen+8*scale,offset,u+1/16.f,v),
+                glm::vec4(pen+8*scale,offset+8*scale,u+1/16.f,v+1/16.f),
+                glm::vec4(pen,offset,u,v),glm::vec4(pen+8*scale,offset+8*scale,u+1/16.f,v+1/16.f),
+                glm::vec4(pen,offset+8*scale,u,v+1/16.f)})
+                vertices.push_back({centerX+p.x*cs-p.y*sn,y+p.x*sn+p.y*cs,0,p.z,p.w,
+                    tint.r,tint.g,tint.b,tint.a});
+            pen+=glyphWidths_[c]*scale;
+        }
+        draw(vertices,textures_.at("font").id);
+    };
+    layer(scale,{color.r*.25f,color.g*.25f,color.b*.25f,color.a});
+    layer(0,color);
 }
 void Renderer::centered(const std::string& s,float y,float scale,glm::vec4 color){text(s,(uiWidth()-textWidth(s,scale))/2,y,scale,color);}
 void Renderer::blockIcon(Block b,float x,float y,float size,int data) {

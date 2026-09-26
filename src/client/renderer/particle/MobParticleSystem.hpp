@@ -128,11 +128,15 @@ namespace Render {
         //   [46..53] geyser_base_01..08  (GeyserBaseParticle, GEYSER_BASE)
         //   [54..61] geyser_poof_01..08  (GeyserBaseParticle, GEYSER_POOF)
         //   [62..69] geyser_plume_01..08 (GeyserPlumeParticle)
+        //   [70]     critical_hit     (CritParticle, CRIT)
+        //   [71]     enchanted_hit    (CritParticle, ENCHANTED_HIT)
         //   [35]     the block atlas — BORROWED from AtlasBuilder for the
         //            block marker (MC Layer.OPAQUE_TERRAIN: the marker's
-        //            sprite is the block's `particle` texture, which lives
-        //            on the blocks atlas). Re-fetched every Render, never
-        //            destroyed here.
+        //            sprite is the block's `particle` texture). Re-fetched
+        //            every Render, never destroyed here.
+        //   [72]     the item atlas — borrowed the same way: the markers MC
+        //            actually shows (barrier, light_NN) take their particle
+        //            texture from item/, which MC 26 keeps on the item atlas.
         static constexpr int kTexHeart     = 0;
         static constexpr int kTexAngry     = 1;
         static constexpr int kTexGeneric0  = 2;   // 8 frames
@@ -146,8 +150,13 @@ namespace Render {
         static constexpr int kTexGeyserBase0  = 46;  // 8 frames
         static constexpr int kTexGeyserPoof0  = 54;  // 8 frames
         static constexpr int kTexGeyserPlume0 = 62;  // 8 frames
-        static constexpr int kTextureCount = 70;
-        static constexpr bool IsOwnedTexture(int texIndex) { return texIndex != kTexAtlas; }
+        static constexpr int kTexCriticalHit  = 70;  // critical_hit (particles/crit.json)
+        static constexpr int kTexEnchantedHit = 71;  // enchanted_hit (particles/enchanted_hit.json)
+        static constexpr int kTexItemAtlas = 72;
+        static constexpr int kTextureCount = 73;
+        static constexpr bool IsOwnedTexture(int texIndex) {
+            return texIndex != kTexAtlas && texIndex != kTexItemAtlas;
+        }
 
         // MC SingleQuadParticle.Layer.TRANSLUCENT — the spell sheet and the
         // noxious gas (NoxiousGasParticle.getLayer). Every other particle
@@ -236,6 +245,9 @@ namespace Render {
             // u0/u1/v0/v1). Whole texture for the one-file sprites; the
             // block marker's atlas cell otherwise.
             float u0 = 0.0f, v0 = 0.0f, u1 = 1.0f, v1 = 1.0f;
+            // The block marker's sheet: the atlas its sprite resolved on
+            // (Render::AtlasId — 0 blocks, 1 items).
+            uint8_t atlas = 0;
         };
 
         void SpawnFromRequest(

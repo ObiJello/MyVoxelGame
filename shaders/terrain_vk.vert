@@ -74,7 +74,7 @@ layout (location = 3) flat out int fragSprite;   // see the decode below; -1 = u
 layout (location = 4) flat out int fragRecord;   // face-mapped: texel index of the first record
 layout (location = 5) flat out int fragAux;      // two-sided: back mapping (alpha byte)
 layout (location = 6) flat out float fragVisibility;   // MC ChunkVisibility: the section's fade-in, 0..1
-layout (location = 7) out vec3 fragLight;              // a face-mapped rectangle's lightmap colour; 1 otherwise
+layout (location = 7) out vec3 fragLight;              // 1: face-mapped rectangles light per block in the fragment shader
 
 // Explicit gl_PerVertex redeclaration so gl_ClipDistance[0] actually lands —
 // see the long note in block_vk.vert.
@@ -154,12 +154,8 @@ void main() {
     fragWorldPos = worldPos;
     fragColor = aColor;
     // MC terrain.vsh: vertexColor = Color * sample_lightmap(Sampler2, UV2);
-    // a face-mapped rectangle's light rides fragLight (see terrain.vert).
-    vec3 lm = sampleLightmap(aLight.rg * 255.0);
-    if (mapped) {
-        fragLight = lm;
-    } else {
-        fragColor.rgb *= lm;
-        fragLight = vec3(1.0);
-    }
+    // a face-mapped rectangle lights per block in the fragment shader (see
+    // terrain.vert).
+    fragLight = vec3(1.0);
+    if (!mapped) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
 }

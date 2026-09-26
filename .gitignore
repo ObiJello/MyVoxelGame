@@ -65,8 +65,8 @@ tools/inspect/
 tools/litre/
 tools/quickbook/
 
-# Prebuilt Tracy CLI tools (tracy-capture, tracy-csvexport) — 15 MB of
-# binaries, rebuildable from cmake-build-tracy/_deps/tracy-src/{capture,csvexport}
+# Tracy CLI tools (tracy-export, tracy-capture, tracy-csvexport, tracy-update)
+# built at the pinned Tracy version by tools/build_tracy_tools.sh
 tools/tracy/
 
 # Instruments recordings from tools/play.sh --gpu-trace (hundreds of MB) and
@@ -87,3 +87,6 @@ mods_reference/
 # overlays (assets/sound_overlays/) ARE tracked.
 /assets/sounds/
 /assets/sounds.json
+
+# Python bytecode (tools/tracy_tools.py is imported by the report scripts)
+__pycache__/

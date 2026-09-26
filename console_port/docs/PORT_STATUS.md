@@ -555,8 +555,9 @@ establish complete dimension generation or visual parity.
    map/player loading and Sony packaging. The client now writes `world.inner` and
    migrates earlier prototype `.mcp` files without overwriting them.
 4. Connect original rendering, lighting, meshes, animation, HUD, crafting and tutorial
-   logic. Current menus are scaffolding, not the Iggy UI. Find actual packaged PS3
-   title/controller artwork before claiming visual parity.
+   logic. Current menus are scaffolding, not the Iggy UI. The original SWFs and
+   `MediaPS3.arc` are in `source_full/Minecraft.Client/Common/Media/`; use them
+   as the reference before claiming visual parity.
 5. Replace platform audio, profiles, split screen, network and storage services.
    Sony/4J runtime dependencies and online services require working replacements.
 
@@ -1508,8 +1509,9 @@ reconstruct is now taken from the source:
   selected layout and southpaw, the tutorial and the Controls menu show that
   layout's button images, and the in-game tooltips follow `Minecraft::tick`
   (swim up, crafting, inventory, and what Use and Action do to the target).
-- **Not exact:** the Iggy movies (`MediaPS3.arc`) are not supplied, so menu
-  geometry, fonts and the controller picture are approximations; audio,
+- **Not exact:** the Iggy movies and `MediaPS3.arc` are present in the full
+  source import but are not executed by this desktop client. Menu geometry,
+  fonts and the controller picture are approximations; audio,
   difficulty, gamma, clouds and bedrock fog settings are stored but unused.
 
 ### Random tile ticks and weather (September 25)
@@ -1740,3 +1742,67 @@ reconstruct is now taken from the source:
   breeding, a lamb eating grass, an egg; in the World, breeding by feeding, milking,
   shearing, a hit, and a calf across a save; the young model.
 
+
+### Menu/source review (September 25)
+
+The PS3 front-end was checked against `xuiscene_base.xui`, `xuiscene_main.xui`,
+`xuiscene_helpandoptions.xui`, `xuiscene_howtoplay_menu.xui`,
+`skin_Minecraft.xui`, `UIComponent_Panorama.cpp` and
+`UIScene_MainMenu::customDrawSplash`. The desktop menu now starts its main and
+Help & Options buttons at the XUI's 250-pixel row and places the logo at the
+base scene's 56-pixel top. The source's supplied `splashes.txt` feeds the yellow, tilted
+main-menu splash. The panorama starts in its source day variant when no world
+is loaded, switches at the source's 14,000-tick threshold, samples the source
+fivefold image scale, and scrolls at its XUI timeline rate. Start Game and How
+To Play list content starts below the logo, with How To Play using the source
+button art. The stale generated `COVERAGE.md` was refreshed.
+
+This is not a pixel-perfect UI port: the full source import contains the Iggy
+SWF movies and `MediaPS3.arc`, but the desktop client does not run them. Menu
+panel construction, fonts, some scene layouts and unported movie-specific
+animations are still approximations. The source
+coverage map is an inventory/lead, not proof of fidelity; many game classes
+remain unported even though the current nonvisual checks pass.
+
+### Original PS3 SWF artwork and placement (September 25)
+
+`source_full/Minecraft.Client/PS3Media/Media/skinPS3.swf` contains the real
+PlayStation 3 edition `MenuTitle` bitmap (symbol 178). It is extracted unchanged
+to `assets/logo_ps3.png`; `ComponentLogo720.swf` places its 571×138 image at
+(355,56) on a 1280×720 canvas. The earlier loose `PS3/Media/MenuTitle.png`
+actually carries an Xbox 360 subtitle and is no longer rendered. The client
+now draws the complete PS3 title bitmap instead of cropping the Xbox art and
+typesetting an edition line.
+
+`MainMenu720.swf`, `HelpAndOptionsMenu720.swf`, `SettingsMenu720.swf` and
+`PauseMenu720.swf` place their buttons at x=415, y=250+50i (full pixels).
+`HowToPlayMenu720.swf` places its panel at (400,200), with seven visible
+buttons and 10 pixels of spacing. `LoadOrJoinMenu720.swf` places its two-column
+panel at (120,206), with five visible save entries and a separate Join Game
+panel. The desktop layouts now use those positions and the supplied list
+button art. `DeathMenu720.swf` places Respawn/Exit at (440,400)/(440,450).
+
+The Controls screen now uses the `FJ_Controller` sprite extracted from
+`skinPS3.swf` and places it and its controls according to `Controls720.swf`.
+The five Settings subpages, Create World, More Options and Message Box also
+follow their SWF control positions. More Options omits the new-world Reset
+Nether checkbox because its original movie places it off the visible canvas.
+The splash text comes from the supplied `splashes.txt`.
+
+`src/ConsoleUiAnimation.h` transcribes the original 30 fps timelines: the
+`Panorama` and `Panorama_Night` sprites move one source pixel per frame for
+4,100 frames (five pixels per frame after the SWF's stage scaling), the
+`FJ_PanelRecessFade` save-list panel reaches full opacity on FadeIn frame 21,
+and the scroll arrows use their eight/nine-frame alpha sequences. The menu
+button's pressed frames 18–27 show its unhighlighted art before frame 28
+returns to selected. Lists now advance their visible range only when focus
+crosses an edge, as `FJ_ButtonList::ScrollList` does. The recess and scroll
+arrow artwork is extracted from the supplied SWFs. Standard scene navigation
+is immediate in `UILayer::NavigateToScene` and `NavigateBack`; the one-frame
+main/help/settings movies do not define a scene-transition timeline.
+
+These SWFs also contain ActionScript and expect Iggy host callbacks. The
+desktop client still renders its own controls. The Create World movie's
+38-frame texture-pack-detail slide is not reachable because that selector is
+not yet implemented; exact playback of every movie, font and host callback is
+still outstanding.

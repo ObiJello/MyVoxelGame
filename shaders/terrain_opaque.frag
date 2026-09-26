@@ -28,6 +28,14 @@ uniform sampler2D uSpriteTable;
 // Face map, texture unit 2: a buffer texture over the slab vertex buffer
 // holding the per-block records of face-mapped rectangles (Vertex.hpp).
 uniform samplerBuffer uFaceMap;
+// MC's lightmap (texture unit 3) — the vertex shader's, read here for
+// face-mapped rectangles, whose light is per block (the record's second
+// texel).
+uniform sampler2D uLightmap;
+// MC sample_lightmap.glsl: uv are the light coords (0..240 each).
+vec3 sampleLightmap(vec2 uv) {
+    return texture(uLightmap, clamp(uv / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0))).rgb;
+}
 uniform vec3 uCameraPos;            // World-space camera position (per view)
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
@@ -44,26 +52,31 @@ float linearFog(float d, float s, float e) {
     return (d - s) / (e - s);
 }
 
-// A face-mapped rectangle's per-block record, one RGBA16 texel: tint * face
-// shade (three bytes), the four 2-bit AO corner codes (a byte) and the
-// sprite id (16 bits). The block is found from the tile-space uv: floor(uv)
-// minus the rectangle's tile origin, row-major by the rectangle's width.
-// Clamped so an edge pixel whose interpolated uv lands exactly on the far
-// boundary reads its own rectangle's last record, never a neighbour's.
-struct FaceRecord { vec3 color; int aoCodes; int sprite; };
+// A face-mapped rectangle's per-block record, two RGBA16 texels. The first:
+// tint * face shade (three bytes), the four 2-bit AO corner codes (a byte)
+// and the sprite id (16 bits). The second: the block face's four corner
+// light words (MC light coords, block8 | sky8 << 8) in tile-corner order —
+// (0,0), (1,0), (0,1), (1,1) — so light varies per block like AO and does
+// not stop faces from merging. The block is found from the tile-space uv:
+// floor(uv) minus the rectangle's tile origin, row-major by the rectangle's
+// width. Clamped so an edge pixel whose interpolated uv lands exactly on the
+// far boundary reads its own rectangle's last record, never a neighbour's.
+struct FaceRecord { vec3 color; int aoCodes; int sprite; ivec4 light; };
 FaceRecord fetchFaceRecord(vec2 uv) {
     int w   = fragSprite & 0x1F;
     int h   = (fragSprite >> 5) & 0x1F;
     int tv0 = (fragSprite >> 10) & 0xF;
     int tu0 = (fragSprite >> 14) & 0xF;
     ivec2 cell = clamp(ivec2(floor(uv)) - ivec2(tu0, tv0), ivec2(0), ivec2(w - 1, h - 1));
-    // One RGBA16 texel per record: r = colour r | g << 8, g = colour b |
-    // AO codes << 8, b = sprite id (unorm16 -> integer is exact in fp32).
-    ivec4 t = ivec4(texelFetch(uFaceMap, fragRecord + cell.x + cell.y * w) * 65535.0 + 0.5);
+    int texel = fragRecord + 2 * (cell.x + cell.y * w);
+    // r = colour r | g << 8, g = colour b | AO codes << 8, b = sprite id
+    // (unorm16 -> integer is exact in fp32).
+    ivec4 t = ivec4(texelFetch(uFaceMap, texel) * 65535.0 + 0.5);
     FaceRecord r;
     r.color   = vec3(float(t.r & 0xFF), float(t.r >> 8), float(t.g & 0xFF)) / 255.0;
     r.aoCodes = t.g >> 8;
     r.sprite  = t.b;
+    r.light   = ivec4(texelFetch(uFaceMap, texel + 1) * 65535.0 + 0.5);
     return r;
 }
 
@@ -93,7 +106,8 @@ vec4 sampleTerrainAtlas(int sprite, vec2 uv) {
 // rectangle's record carries tint * face shade and the four corner AO levels
 // of THAT block's face (2 bits each, 0..3 = 1.0, 0.8, 0.6, 0.4; bits 0-1 =
 // tile corner (0,0), 2-3 = (1,0), 4-5 = (0,1), 6-7 = (1,1)). The gradient is
-// rebuilt from the fractional tile coordinate with exactly the interpolation
+// rebuilt — with the block's four corner lights — from the fractional tile
+// coordinate with exactly the interpolation
 // an unmerged quad gets from the GPU: two triangles split on the (1,0)-(0,1)
 // diagonal (the mesher's corner order puts vertices 0 and 2 there for every
 // face), linear inside each. Unmerged quads and fluid plates keep their
@@ -108,11 +122,19 @@ vec4 shadedVertexColor(bool mapped, FaceRecord rec, vec2 uv) {
         float a10 = 1.0 - 0.2 * float((codes >> 2) & 3);
         float a01 = 1.0 - 0.2 * float((codes >> 4) & 3);
         float a11 = 1.0 - 0.2 * float((codes >> 6) & 3);
+        // Each corner's colour is AO times the lightmap at its light — what
+        // an unmerged quad's vertices carry (MC terrain.vsh: vertexColor =
+        // Color * sample_lightmap(UV2)) — and the corners blend exactly as
+        // the GPU blends those vertex colours.
+        vec3 c00 = a00 * sampleLightmap(vec2(float(rec.light.x & 0xFF), float(rec.light.x >> 8)));
+        vec3 c10 = a10 * sampleLightmap(vec2(float(rec.light.y & 0xFF), float(rec.light.y >> 8)));
+        vec3 c01 = a01 * sampleLightmap(vec2(float(rec.light.z & 0xFF), float(rec.light.z >> 8)));
+        vec3 c11 = a11 * sampleLightmap(vec2(float(rec.light.w & 0xFF), float(rec.light.w >> 8)));
         vec2 f = fract(uv);
-        float ao = (f.x + f.y <= 1.0)
-            ? a00 + (a10 - a00) * f.x + (a01 - a00) * f.y
-            : a11 + (a10 - a11) * (1.0 - f.y) + (a01 - a11) * (1.0 - f.x);
-        c.rgb = rec.color * ao;
+        vec3 lit = (f.x + f.y <= 1.0)
+            ? c00 + (c10 - c00) * f.x + (c01 - c00) * f.y
+            : c11 + (c10 - c11) * (1.0 - f.y) + (c01 - c11) * (1.0 - f.x);
+        c.rgb = rec.color * lit;
         c.a = 1.0;
     }
     return c;
@@ -146,7 +168,7 @@ void main() {
             else if (mode == 1) uv.y = sum - uv.y;
         }
     }
-    FaceRecord rec = FaceRecord(vec3(1.0), 0, 0);
+    FaceRecord rec = FaceRecord(vec3(1.0), 0, 0, ivec4(0));
     if (mapped) rec = fetchFaceRecord(uv);
     vec4 textureColor = sampleTerrainAtlas(mapped ? rec.sprite : (fragSprite & 0xFFFF), uv);
     vec4 vcol = shadedVertexColor(mapped, rec, uv);

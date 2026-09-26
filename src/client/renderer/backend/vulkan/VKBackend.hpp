@@ -207,10 +207,17 @@ namespace Render {
         std::vector<VkImage> m_swapchainImages;
         std::vector<VkImageView> m_swapchainImageViews;
 
-        // Depth buffer
-        VkImage m_depthImage = VK_NULL_HANDLE;
-        VkDeviceMemory m_depthMemory = VK_NULL_HANDLE;
-        VkImageView m_depthImageView = VK_NULL_HANDLE;
+        // Depth buffers — one per frame slot. With a single shared depth
+        // image, frame N+1's pass writes the image frame N's pass is still
+        // writing, and Metal's hazard tracking holds N+1's whole render
+        // encoder (vertex stage included) until N's fragment work is done:
+        // the GPU never overlaps one frame's geometry with the previous
+        // frame's pixels. Measured 2026-09-25: this was one of five such
+        // serialisations — see docs/engineering-notes.md "Frame overlap on
+        // MoltenVK".
+        std::array<VkImage, MAX_FRAMES_IN_FLIGHT>        m_depthImages{};
+        std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT> m_depthMemory{};
+        std::array<VkImageView, MAX_FRAMES_IN_FLIGHT>    m_depthImageViews{};
         VkFormat m_depthFormat = VK_FORMAT_D32_SFLOAT;
 
         // ====================================================================
@@ -224,7 +231,13 @@ namespace Render {
         // compatibility ignores load/store ops and initial layouts).
         VkRenderPass m_renderPassLoad = VK_NULL_HANDLE;
         bool CreateRenderPassVariant(bool loadContents, VkRenderPass& out);
+        // One per (frame slot, swapchain image): the colour attachment is the
+        // acquired image, the depth attachment the frame slot's own (see
+        // m_depthImages). Index slot * imageCount + image — FrameFramebuffer().
         std::vector<VkFramebuffer> m_framebuffers;
+        VkFramebuffer FrameFramebuffer() const {
+            return m_framebuffers[static_cast<size_t>(m_currentFrame) * m_swapchainImageViews.size() + m_currentImageIndex];
+        }
         // Whether the swapchain images were created with TRANSFER_SRC (the
         // surface has to allow it); without it the read-back is refused.
         bool m_swapchainTransferSrc = false;
@@ -303,7 +316,7 @@ namespace Render {
         // records into the frame command buffer before the render pass starts
         // — zero vkQueueWaitIdle, one memcpy per update.
         struct PendingTextureUpdate {
-            VkImage image;
+            uint32_t texture = 0;       // TextureHandle; its image is resolved at flush
             int x, y, width, height;
             uint32_t mipLevel = 0;
             size_t stagingOffset = 0;   // byte offset into the staging ring slot
@@ -329,17 +342,19 @@ namespace Render {
         void EndSingleTimeCommandsDetached(VkCommandBuffer cmd, VkBuffer staging, VkDeviceMemory memory);
         void ReclaimDetachedSubmits(bool waitAll);
 
-        // Staging ring: MAX_FRAMES_IN_FLIGHT + 1 slots, indexed by the number
+        // Staging ring: 2 × MAX_FRAMES_IN_FLIGHT slots, indexed by the number
         // of the frame that will flush them. Frame N's BeginFrame flushes slot
         // N % slots; every update queued after that — during frame N's body or
         // in the gap before BeginFrame(N+1) — goes to slot (N+1) % slots.
         //
-        // Why +1 and not per frame slot: while frame N is being recorded,
-        // frames N and N-1 can both still be executing (two in flight), and
-        // each reads its own staging slot. A ring of exactly two would have
-        // the writer for N+1 racing frame N-1's reader. With three, slot
-        // (N+1) % 3 == (N-2) % 3 was last read by frame N-2, whose fence
-        // BeginFrame(N) already waited on.
+        // A slot's bytes are read by the frame that flushes them AND, for a
+        // per-frame texture (VKTextureInfo::frameCopies), replayed by each of
+        // the next MAX_FRAMES_IN_FLIGHT - 1 frames into their own copies —
+        // so slot G is last read by frame G + MAX - 1. It is next written
+        // during frame G + slots - 1, after BeginFrame waited for frame
+        // G + slots - 1 - MAX; that is at or past G + MAX - 1 exactly when
+        // slots >= 2 × MAX. (A growing slot is replaced in ReserveTexStaging
+        // at the same moment, so a replay never meets a destroyed buffer.)
         struct TexStagingSlot {
             VkBuffer       buffer   = VK_NULL_HANDLE;
             VkDeviceMemory memory   = VK_NULL_HANDLE;
@@ -347,7 +362,7 @@ namespace Render {
             uint8_t*       mapped   = nullptr;
             size_t         used     = 0;   // write cursor; reset after flush
         };
-        static constexpr uint32_t kTexStagingSlots = MAX_FRAMES_IN_FLIGHT + 1;
+        static constexpr uint32_t kTexStagingSlots = 2 * MAX_FRAMES_IN_FLIGHT;
         std::array<TexStagingSlot, kTexStagingSlots> m_texStaging;
         // The slot updates are written into = the one the NEXT BeginFrame flushes.
         TexStagingSlot& PendingTexStaging() {
@@ -355,11 +370,12 @@ namespace Render {
         }
 
         void FlushPendingTextureUpdates(VkCommandBuffer cmd);
+
         // Returns the write pointer for `bytes` more staging data in the current
         // slot (growing it, preserving what is already queued), or nullptr.
         uint8_t* ReserveTexStaging(size_t bytes, size_t& outOffset);
         void DestroyTexStaging();
-        void QueueTextureUpdate(VkImage image, uint32_t mipLevel, int x, int y,
+        void QueueTextureUpdate(uint32_t texture, uint32_t mipLevel, int x, int y,
                                 int width, int height, const void* data);
 
         // ====================================================================
@@ -461,6 +477,10 @@ namespace Render {
             // window size it was written for. See m_uniformBlockLayout.
             VkDescriptorSet uniformSet = VK_NULL_HANDLE;
             size_t uniformRange = 0;
+            // A Static buffer's staging copy runs as a detached submit; its
+            // fence until reclaimed (DestroyBuffer waits on it — the copy
+            // must not land in freed memory).
+            VkFence uploadFence = VK_NULL_HANDLE;
         };
         std::unordered_map<uint32_t, VKBufferInfo> m_buffers;
         // RenderBackend::BindUniformBuffer state, applied at draw time by
@@ -501,8 +521,54 @@ namespace Render {
             // frame still executing skips the device-wide wait: the fence
             // just passed proves the GPU is done with it.
             uint64_t             lastUsedFrame = 0;
+            // Ever bound for a draw (BindTexture) or handed to ImGui
+            // (GetNativeTextureID). Until then no command buffer can hold
+            // its descriptor set or sampler, so SetTextureFilter /
+            // SetTextureWrap may rewrite them without the device-wide wait.
+            mutable bool         everBound = false;
+            // Per-frame copies — empty until the texture takes a queued
+            // update after it has been drawn with (the animated atlases, the
+            // lightmap). Then one entry per frame slot: frame slot s samples
+            // and writes only frameCopies[s], so an update never lands in an
+            // image the frame still on the GPU is sampling. See
+            // PromoteToFrameCopies / FlushPendingTextureUpdates.
+            struct FrameCopy {
+                VkImage         image  = VK_NULL_HANDLE;
+                VkDeviceMemory  memory = VK_NULL_HANDLE;   // null: the texture's own image
+                VkImageView     view   = VK_NULL_HANDLE;
+                VkDescriptorSet set    = VK_NULL_HANDLE;
+                uint64_t syncedFrame = 0;   // holds every update flushed up to this frame
+            };
+            std::vector<FrameCopy> frameCopies;
+            // The updates of recent frames, kept (as staging-ring records)
+            // until every copy has taken them: a copy catches up by replaying
+            // the frames after its syncedFrame, straight from the staging ring
+            // (see kTexStagingSlots for why those bytes are still there).
+            struct CarriedUpdate {
+                uint32_t stagingSlot;
+                size_t   stagingOffset;
+                uint32_t mipLevel;
+                int x, y, width, height;
+            };
+            std::vector<std::pair<uint64_t, std::vector<CarriedUpdate>>> carried;   // (frame, updates), oldest first
         };
         std::unordered_map<uint32_t, VKTextureInfo> m_textures;
+        // The descriptor set a draw in the current frame binds for `tex`.
+        VkDescriptorSet FrameSet(const VKTextureInfo& tex) const {
+            return tex.frameCopies.empty() ? tex.descriptorSet
+                                           : tex.frameCopies[static_cast<size_t>(m_currentFrame)].set;
+        }
+        // Per-frame copies (see VKTextureInfo::frameCopies).
+        bool PromoteToFrameCopies(VkCommandBuffer cmd, VKTextureInfo& tex);
+        void DestroyFrameCopies(uint32_t handle, VKTextureInfo& tex);   // caller has idled the device
+        static void WriteTextureDescriptor(VkDevice device, VkDescriptorSet set,
+                                           VkImageView view, VkSampler sampler);
+        // Textures with frame copies, so every flush brings each one's slot
+        // copy up to date even in a frame that queued nothing for it.
+        std::vector<uint32_t> m_frameCopyTextures;
+        // Descriptor sets of destroyed frame copies, reused by the next
+        // promotion (the pool has no FREE_DESCRIPTOR_SET flag).
+        std::vector<VkDescriptorSet> m_spareTextureSets;
         // The shared body of DestroyTexture: `forceWait` = the immediate
         // form, which always drains; the deferred flush passes false and
         // waits only when the texture was used by the frame in flight.
@@ -860,15 +926,22 @@ namespace Render {
         //
         // Unlike GL's GL_TIME_ELAPSED these do not force a flush, so they are
         // far cheaper than the ~2.3ms/query the GL path costs on Apple.
+        //
+        // One pool PER FRAME SLOT, reset only when the slot's previous use
+        // wrote a timer: resetting one shared pool every frame made each
+        // frame's command buffer touch the Metal buffer the previous frame
+        // was still writing, which serialised the frames on the GPU even
+        // with every timer switched off (2026-09-25).
         static constexpr uint32_t kTimersPerFrame = 16;   // 32 query slots each
-        VkQueryPool m_timestampPool = VK_NULL_HANDLE;
+        std::array<VkQueryPool, MAX_FRAMES_IN_FLIGHT> m_timestampPools{};
+        std::array<bool, MAX_FRAMES_IN_FLIGHT> m_timestampPoolDirty{};   // written since its last reset
         float m_timestampPeriodNs = 0.0f;   // 0 = device has no usable timestamps
         struct GPUTimer {
             uint32_t begin = 0;             // query slot index of the begin stamp
             bool     ended = false;
             bool     resolved = false;      // resultMs is final; queries may be gone
             float    resultMs = -1.0f;
-            uint32_t frameSlot = 0;         // which partition it was allocated from
+            uint32_t frameSlot = 0;         // which frame slot's pool it was allocated from
         };
         std::unordered_map<uint32_t, GPUTimer> m_gpuTimers;
         uint32_t m_timersUsedThisFrame = 0;

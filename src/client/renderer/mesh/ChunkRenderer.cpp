@@ -666,6 +666,9 @@ namespace Render {
     }
 
     TextureHandle ChunkRenderer::ActiveTerrainTexture() {
+        // Fetched per pass: a rebuilt atlas (resource packs, the debug
+        // rendering-mode switch) comes back under a new handle.
+        if (g_atlasBuilder) m_backendAtlasTexture = g_atlasBuilder->GetBackendTextureHandle();
         if (!m_greedyMeshDebug) return m_backendAtlasTexture;
         if (m_whiteDebugTexture == INVALID_TEXTURE && g_renderBackend) {
             const unsigned char white[] = {255, 255, 255, 255};
@@ -2159,6 +2162,12 @@ namespace Render {
         // --tracy correlates them against the GPU timeline.
         PROFILE_PLOT("Geom/Vertices", static_cast<int64_t>(totalVerts));
         PROFILE_PLOT("Geom/Indices",  static_cast<int64_t>(totalIndices));
+        // Per layer, for per-layer A/Bs (the two above mix the three passes).
+        switch (layer) {
+            case RenderLayer::Opaque:      PROFILE_PLOT("Geom/VertsOpaque",      static_cast<int64_t>(totalVerts)); break;
+            case RenderLayer::Cutout:      PROFILE_PLOT("Geom/VertsCutout",      static_cast<int64_t>(totalVerts)); break;
+            case RenderLayer::Translucent: PROFILE_PLOT("Geom/VertsTranslucent", static_cast<int64_t>(totalVerts)); break;
+        }
 
         // Draws/Chunk: sections with geometry in this layer (one sub-draw each
         // before merging). Draws/Merged: sub-draws actually issued. The second
@@ -2530,8 +2539,15 @@ namespace Render {
             }
         }
         pushRun();
-        for (uint32_t s2 = 0; s2 < slabCount; ++s2) {
-            if (m_slabRunCounts[s2].empty()) continue;
+        // Slabs in first-seen order: the slab holding the list's first
+        // section goes first.
+        m_slabOrder.clear();
+        for (const DrawEntry& e : m_drawEntries) {
+            if (e.slab < slabCount && !m_slabRunCounts[e.slab].empty() &&
+                std::find(m_slabOrder.begin(), m_slabOrder.end(), e.slab) == m_slabOrder.end())
+                m_slabOrder.push_back(e.slab);
+        }
+        for (uint32_t s2 : m_slabOrder) {
             FlushSlabRuns(megaBuffer, s2, m_slabRunCounts[s2], m_slabRunOffsets[s2],
                           m_zeroBaseVertices, m_stats, subDraws);
         }

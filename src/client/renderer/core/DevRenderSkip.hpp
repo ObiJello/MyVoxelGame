@@ -14,17 +14,36 @@
 // fanless Mac throttles within a minute of sustained load, so two separate
 // runs are not comparable — interleaving gives both phases the same clock
 // state. Pair the per-second "[Harness]" fps lines with the phase log.
+// On macOS each transition is also a Points-of-Interest signpost ("DevSkip",
+// "on"/"off"), which a Metal System Trace records on its own clock — that is
+// what splits the GPU timeline into skip-on / skip-off frames exactly.
 //
 // Tokens: sky, opaque, cutout, translucent, players, items, mobs,
-//         blockentities, particles, clouds, helditem, hud
+//         blockentities, particles, clouds, helditem, outline, hud
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
 #include "common/core/Log.hpp"
+#ifdef __APPLE__
+#include <os/signpost.h>
+#endif
 
 namespace Render {
+    // One "Frame" Points-of-Interest signpost per presented frame while
+    // OBEY_SKIP is set — the frame count a Metal System Trace cannot give on
+    // GL (Apple's GL presents outside CAMetalLayer, so the trace has no
+    // per-frame present events there).
+    inline void DevSkipFrameMark() {
+#ifdef __APPLE__
+        static const bool s_active = std::getenv("OBEY_SKIP") != nullptr;
+        if (!s_active) return;
+        static os_log_t s_log = os_log_create("com.obeycraft.dev", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+        os_signpost_event_emit(s_log, OS_SIGNPOST_ID_EXCLUSIVE, "Frame");
+#endif
+    }
+
     inline bool DevSkip(const char* stage) {
         struct Cfg {
             std::vector<std::string> tokens;
@@ -62,6 +81,11 @@ namespace Render {
         if (on != cfg.lastPhase) {
             cfg.lastPhase = on;
             Log::Info("[DevSkip] phase=%s", on ? "on" : "off");
+#ifdef __APPLE__
+            static os_log_t s_log = os_log_create("com.obeycraft.dev", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+            if (on) os_signpost_event_emit(s_log, OS_SIGNPOST_ID_EXCLUSIVE, "DevSkip", "on");
+            else    os_signpost_event_emit(s_log, OS_SIGNPOST_ID_EXCLUSIVE, "DevSkip", "off");
+#endif
         }
         return on;
     }

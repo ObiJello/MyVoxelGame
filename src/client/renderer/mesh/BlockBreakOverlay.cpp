@@ -180,7 +180,10 @@ void main() {
         state.depthBiasSlope    = -2.0f;
         g_renderBackend->SetPipelineState(state);
         g_renderBackend->BindShader(m_shader);
-        g_renderBackend->BindTexture(m_atlasTexture, 0);
+        // Fetched per draw: AtlasBuilder::RebuildAtlas (debug rendering
+        // mode) recreates the atlas under a new handle without telling us.
+        g_renderBackend->BindTexture(g_atlasBuilder ? g_atlasBuilder->GetBackendTextureHandle()
+                                                    : m_atlasTexture, 0);
 
         // Translate to the block, then scale the unit-cube mesh by the shape
         // bounds so partial blocks (leaf litter, slabs, fences, …) get the

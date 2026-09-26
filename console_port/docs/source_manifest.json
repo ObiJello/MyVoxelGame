@@ -77,6 +77,21 @@
       "sha256": "41be866d07c16350ea3681202890e2c1f669cce8b7698596c06390d6c9e9bb5c"
     },
     {
+      "source": "Minecraft.Client/PS3Media/Media/skinPS3.swf#MenuTitle(178), extracted PNG",
+      "destination": "assets/logo_ps3.png",
+      "sha256": "e8c6c97cebe1b60fce2d1261128ecf117837d63c5a5b7e5e9c7f0b167fb27e87"
+    },
+    {
+      "source": "Minecraft.Client/PS3Media/Media/skinPS3.swf#FJ_Controller(129), frame 1 extracted PNG",
+      "destination": "assets/controller_ps3.png",
+      "sha256": "844c34f2ba3489301d2d45b9c3837a6cb49dde54e496a5533c0014b6b586b0d4"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/splashes.txt",
+      "destination": "assets/splashes.txt",
+      "sha256": "2ebfc92694fd1481a0099c5faf1ab073354a0a52bbe8efee2a577722cfc96aaf"
+    },
+    {
       "source": "Minecraft.Client/PS3/Media/Panorama_Background_N.png",
       "destination": "assets/panorama_n.png",
       "sha256": "b67f7aafe9c43770a4b16e47fc0ed1b40443deb6565103c7aff62b7ee54b0327"
@@ -90,6 +105,16 @@
       "source": "Minecraft.Client/PS3/Media/Graphics/MainMenuButton_Norm.png",
       "destination": "assets/button.png",
       "sha256": "d87be146345d7df9faf20b48182762f4ee84b5e132005da7b4749daef8f75a7e"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/ListButton_Norm.png",
+      "destination": "assets/list_button.png",
+      "sha256": "b1006fc5e3e91862def0a4dc5aa414734df057a05611225c4afef0f225b89030"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/ListButton_Over.png",
+      "destination": "assets/list_button_focus.png",
+      "sha256": "15824fccd53e1563089c6ac14f74ed69c7d5813871696bd74fdc72b3fc938f94"
     },
     {
       "source": "Minecraft.Client/PS3/Media/Graphics/MainMenuButton_Over.png",
@@ -3615,6 +3640,61 @@
       "source": "Minecraft.Client/Common/res/TitleUpdate/res/textures/blocks/fire_1.txt",
       "destination": "assets/animations/fire_1.txt",
       "sha256": "36a9e7f1c95b82ffb99743e0c5c4ce95d83c9a430aac59f84ef3cbfab6145068"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Top_L.png",
+      "destination": "assets/recess_top_l.png",
+      "sha256": "65735cc116c52c90d3e2da96ce29a975fab041b3e8c53f4b3cc6061bd9cf2dad"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Top_M.png",
+      "destination": "assets/recess_top_m.png",
+      "sha256": "3e3fccec8092857a250935858140afe13c61a1e2f59907378259a9ab53596535"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Top_R.png",
+      "destination": "assets/recess_top_r.png",
+      "sha256": "2d28495c952ce3f2896b6780f414398c8bb375637fd0b08e567ae59664a6b2df"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Mid_L.png",
+      "destination": "assets/recess_mid_l.png",
+      "sha256": "2d69716a3d74497f47b8c50db38fff8aad67d7dd005cfb7ddf228f1d02e29116"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Mid_M.png",
+      "destination": "assets/recess_mid_m.png",
+      "sha256": "a216ce74dc5c39180e2e54371affa111eede055ee20eddf03c6e3ded1396f119"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Mid_R.png",
+      "destination": "assets/recess_mid_r.png",
+      "sha256": "e2669b54e4d74e319542abc8b1ac2548c1920f88a01c8b18c76354111657d79c"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Bot_L.png",
+      "destination": "assets/recess_bot_l.png",
+      "sha256": "48f86bd263ee380ef4eb87feffa15c6c877faeeb9a7c47dad560adabecb26799"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Bot_M.png",
+      "destination": "assets/recess_bot_m.png",
+      "sha256": "15afc748756bb5ddecd287b47a5303c1add0ded7c1d46bab37fd409193dd91ce"
+    },
+    {
+      "source": "Minecraft.Client/PS3/Media/Graphics/Panel_Recess_Bot_R.png",
+      "destination": "assets/recess_bot_r.png",
+      "sha256": "1bf967f4dd98a84ca91d972fba413a1da8db925362a4e6a8cc035064c0332e1b"
+    },
+    {
+      "source": "Minecraft.Client/Common/Media/skinGraphics.swf#173_scrollUp, extracted PNG",
+      "destination": "assets/scroll_up.png",
+      "sha256": "f613e76c138a501828fb71d404248092713c12b4c0d6d13e77d49f066db8d35e"
+    },
+    {
+      "source": "Minecraft.Client/Common/Media/skinGraphics.swf#176_scrollDown, extracted PNG",
+      "destination": "assets/scroll_down.png",
+      "sha256": "a0f3209911e3dbd30fc1f5f690c503dd128b56e62b5e4703b89709a2d080e9f4"
     }
   ]
 }

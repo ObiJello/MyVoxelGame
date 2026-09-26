@@ -1,6 +1,7 @@
 // File: src/client/network/FriendsClient.cpp
 #include "FriendsClient.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 
@@ -87,6 +88,7 @@ namespace Client {
     }
 
     void FriendsClient::RunIOThread() {
+        PROFILE_THREAD("FriendsIO");
         try {
             m_ioContext.run();
         } catch (const std::exception& e) {

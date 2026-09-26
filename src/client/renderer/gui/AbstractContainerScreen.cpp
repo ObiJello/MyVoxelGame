@@ -14,6 +14,7 @@
 #include "client/entity/Player.hpp"
 #include "common/entity/Item.hpp"        // IsSameItemSameComponents (Ctrl+Shift+Q)
 #include "common/entity/decoration/PaintingVariants.hpp"
+#include "common/entity/GeneratedItemList.hpp"   // Items::Painting
 
 #include <GLFW/glfw3.h>
 #include <algorithm>

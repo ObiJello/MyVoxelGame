@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 
 namespace Server {
 
@@ -71,12 +72,36 @@ namespace Server {
     }
 
     std::vector<std::string> CommandDispatcher::Tokenize(const std::string& input) {
+        // Whitespace splits tokens, except inside a selector's [...] (MC's
+        // EntitySelectorParser reads options across spaces — `@e[type=cow,
+        // name="Two Words"]`), and inside a quoted string within one.
         std::vector<std::string> tokens;
-        std::istringstream iss(input);
         std::string token;
-        while (iss >> token) {
-            tokens.push_back(token);
+        int  depth = 0;
+        char quote = 0;
+        for (size_t i = 0; i < input.size(); ++i) {
+            const char c = input[i];
+            if (quote) {
+                token += c;
+                if (c == '\\' && i + 1 < input.size()) token += input[++i];
+                else if (c == quote) quote = 0;
+                continue;
+            }
+            if (depth > 0 && (c == '"' || c == '\'')) {
+                quote = c;
+                token += c;
+                continue;
+            }
+            if (c == '[') ++depth;
+            else if (c == ']' && depth > 0) --depth;
+            if (depth == 0 && std::isspace(static_cast<unsigned char>(c))) {
+                if (!token.empty()) tokens.push_back(std::move(token));
+                token.clear();
+                continue;
+            }
+            token += c;
         }
+        if (!token.empty()) tokens.push_back(std::move(token));
         return tokens;
     }
 

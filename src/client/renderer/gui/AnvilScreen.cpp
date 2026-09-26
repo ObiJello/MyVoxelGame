@@ -331,10 +331,10 @@ namespace Render {
     }
 
     void AnvilScreen::RenderNameBox(GuiGraphics& g, int leftPos, int topPos) {
+        // Unbordered EditBox.updateTextPosition: textX = getX(), textY =
+        // getY() — the (height - 8) / 2 centring is the BORDERED box's only.
         const int x = leftPos + NAME_X;
-        // Unbordered EditBox: text at the box's left edge, centred in its 12
-        // pixels ((height - 8) / 2).
-        const int y = topPos + NAME_Y + (NAME_H - 8) / 2;
+        const int y = topPos + NAME_Y;
         const bool editable = NameEditable();
 
         // A click in the box resolves here, where the font is at hand.
@@ -381,11 +381,18 @@ namespace Render {
         long long elapsed = NowMillis() - m_focusedAtMillis;
         if (elapsed < 0) elapsed = 0;
         if (!cursorVisible || ((elapsed / 300LL) % 2LL) != 0LL) return;
-        const int caretX = x + g.GetStringWidth(shown.substr(0, static_cast<size_t>(cursorInShown)));
-        if (m_cursorPos >= static_cast<int>(m_value.size())) {
+        // EditBox.renderWidget: drawX runs one pixel past the text before
+        // the cursor; the append cursor "_" sits there, the insert bar one
+        // pixel back. MC's `insert` is also true for a FULL box, so a
+        // 50-character name shows the bar, not the underscore.
+        const int caretX = x + g.GetStringWidth(shown.substr(0, static_cast<size_t>(cursorInShown))) + 1;
+        const bool insert = m_cursorPos < static_cast<int>(m_value.size()) ||
+                            static_cast<int>(m_value.size()) >= Game::AnvilMenu::MAX_NAME_LENGTH;
+        if (!insert) {
             g.DrawString("_", caretX, y, 0xFFFFFFFF, true);
         } else {
-            g.Fill(caretX, y - 1, caretX + 1, y + 1 + 9, 0xFFFFFFFF);
+            // TextCursorUtils.extractInsertCursor: (x, y - 1) to (x + 1, y + 10).
+            g.Fill(caretX - 1, y - 1, caretX, y + 9 + 1, 0xFFFFFFFF);
         }
     }
 

@@ -1582,7 +1582,17 @@ namespace Debug {
     }
 
     void DebugSystem::DrawAtlasBuilderDebug() {
-        auto& ab = *Render::g_atlasBuilder;
+        // MC's two sheets: the block atlas and the item atlas.
+        static int s_atlas = 0;
+        ImGui::RadioButton("Blocks", &s_atlas, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("Items", &s_atlas, 1);
+        Render::AtlasBuilder* selected = Render::GetAtlas(static_cast<Render::AtlasId>(s_atlas));
+        if (!selected) {
+            ImGui::TextDisabled("(not built)");
+            return;
+        }
+        auto& ab = *selected;
 
         ImGui::Text("Size: %dx%d  Textures: %zu  ID: %lu",
             ab.GetAtlasWidth(), ab.GetAtlasHeight(), ab.GetTextureCount(), ab.GetAtlasTextureID());

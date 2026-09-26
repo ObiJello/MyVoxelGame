@@ -62,7 +62,7 @@ namespace Render {
         // a second one for a portal's far-side frame (composed from that
         // frame, visible from the next frame on — portal frames are steady).
         TextureHandle TextureFor(const EnvironmentFrame& frame);
-        TextureHandle MainTexture() const { return m_texture[0]; }
+        TextureHandle MainTexture() const { return m_texture[0][m_current[0]]; }
 
         // CPU lookups on the main texture's texels, for per-draw lighting.
         // Integer levels (MC packed light): exactly one texel.
@@ -84,7 +84,20 @@ namespace Render {
         void Compute(const EnvironmentFrame& frame, std::array<uint8_t, 16 * 16 * 4>& out) const;
         void Upload(int slot);
 
-        TextureHandle m_texture[2] = {INVALID_TEXTURE, INVALID_TEXTURE};
+        // Each slot rotates through kRing textures: an upload writes the one
+        // the fewest recent frames have drawn with, then becomes current.
+        // Writing the texture the in-flight frames still sample made Apple's
+        // GL driver stall the CPU until the GPU finished them (Tracy
+        // 2026-09-25: Lightmap.Update >5 ms on 190 frames of 5,500). Four
+        // covers GL's queued frames plus the one being recorded. GL only:
+        // Vulkan stages its updates (no stall) and writes in place — see
+        // Upload. Callers must look the texture up per bind (TextureFor),
+        // never keep it.
+        static constexpr int kRing = 4;
+        TextureHandle m_texture[2][kRing] = {
+            {INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE},
+            {INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE}};
+        int m_current[2] = {0, 0};
         std::array<uint8_t, 16 * 16 * 4> m_texels[2]{};
         std::array<uint8_t, 16 * 16 * 4> m_uploaded[2]{};
         bool m_hasUploaded[2] = {false, false};

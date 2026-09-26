@@ -621,6 +621,44 @@ namespace Client {
         if (auto* frame = dynamic_cast<Game::ItemFrame*>(entry->mob.get())) frame->SetItemSilently(item);
     }
 
+    void ClientMobManager::CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind) {
+        TrackingEmitter emitter{entityId, kind, 0};
+        // The constructor ticks once: the first burst lands with the hit.
+        if (TickTrackingEmitter(emitter)) m_trackingEmitters.push_back(emitter);
+    }
+
+    bool ClientMobManager::TickTrackingEmitter(TrackingEmitter& emitter) {
+        // Where the entity is now and how big: a mob from this store, a
+        // player through the sound resolver at MC's standing player box.
+        glm::dvec3 pos;
+        double width = 0.6, height = 1.8;
+        if (const ClientMob* entry = Find(emitter.entityId); entry && entry->mob) {
+            pos = entry->mob->position;
+            width = entry->mob->GetBbWidth();
+            height = entry->mob->GetBbHeight();
+        } else {
+            SoundEntityState state;
+            if (!ResolveSoundEntity(emitter.entityId, state) || state.removed) return false;
+            pos = state.position;
+        }
+        // MC TrackingEmitter.tick: 16 tries at a point in the unit ball, kept
+        // when inside it, mapped into the box (getX(xa/4), getY(0.5 + ya/4),
+        // getZ(za/4)), sprayed outward with a 0.2 lift.
+        Game::JavaRandom& random = m_level.Random();
+        for (int i = 0; i < 16; ++i) {
+            const double xa = static_cast<double>(random.NextFloat() * 2.0f - 1.0f);
+            const double ya = static_cast<double>(random.NextFloat() * 2.0f - 1.0f);
+            const double za = static_cast<double>(random.NextFloat() * 2.0f - 1.0f);
+            if (xa * xa + ya * ya + za * za > 1.0) continue;
+            m_level.AddParticle(emitter.kind,
+                                pos.x + width * (xa / 4.0),
+                                pos.y + height * (0.5 + ya / 4.0),
+                                pos.z + width * (za / 4.0),
+                                xa, ya + 0.2, za);
+        }
+        return ++emitter.life < kTrackingEmitterLifeTime;
+    }
+
     void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,
                                              const glm::ivec3& target) {
         ClientMob* entry = Find(id);
@@ -857,6 +895,13 @@ namespace Client {
 
     void ClientMobManager::Tick() {
         PROFILE_ZONE_N("ClientMobTick");
+        // The particle engine's emitters (MC ParticleEngine.tick).
+        if (!m_trackingEmitters.empty()) {
+            m_trackingEmitters.erase(
+                std::remove_if(m_trackingEmitters.begin(), m_trackingEmitters.end(),
+                               [this](TrackingEmitter& e) { return !TickTrackingEmitter(e); }),
+                m_trackingEmitters.end());
+        }
         PROFILE_PLOT("ClientMob/Count", static_cast<int64_t>(m_mobs.size()));
 
         // ── Pass 1: the dense list, in parallel where it can be ────────────

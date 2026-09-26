@@ -68,11 +68,14 @@ label, description, tooltip and message box is the original text from `strings.r
 (`ported/ConsoleStrings.cpp`), How To Play shows the 22 original pages with their
 button images, and Credits rolls `UIScene_Credits`' PS3 list. There is no PlayStation
 Network, so the store says it has no offers and Leaderboards and Change Skin explain
-that they are unavailable. The Iggy SWF movies that drew these screens are not in the
-supplied files, so panels, positions and fonts are an approximation built from the
-supplied button, panel, logo and panorama art. The PS3 loose `MenuTitle.png`
-contains an Xbox subtitle; the renderer samples only its common Minecraft wordmark
-and draws a PlayStation subtitle with the supplied font.
+that they are unavailable. The source import includes the original Iggy movies
+under `source_full/Minecraft.Client/Common/Media/` (including `MainMenu720.swf`)
+and `MediaPS3.arc`. The desktop client does not execute those movies yet, so
+some panels and fonts are approximations built from the supplied art. The
+panorama, save-list fade, button press and scroll-arrow timings now follow
+the original SWF frames. The title and Controls screen use assets embedded in the PlayStation 3
+`skinPS3.swf`, while the principal menu control positions follow the original
+720p movies.
 
 ## Play
 

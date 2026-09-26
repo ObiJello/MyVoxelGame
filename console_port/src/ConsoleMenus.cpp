@@ -177,6 +177,9 @@ std::vector<MenuControl> ConsoleMenus::build(MenuScene scene)const{
                             newWorld_.trustPlayers,newWorld_.fireSpreads,newWorld_.tnt,newWorld_.hostPrivileges,
                             newWorld_.resetNether,newWorld_.structures,newWorld_.superflat,newWorld_.bonusChest};
         for(int i=0;i<=BonusChest;++i){
+            // LaunchMoreOptionsMenu720.swf leaves ResetNether outside the
+            // visible canvas in the new-world flow (at 40,-50).
+            if(i==ResetNether)continue;
             auto box=checkbox(i,text(kMoreOptionsLabels[i]),values[i]);
             box.description=ids(kMoreOptionsText[i]);
             // Not signed in to PSN: the online options are disabled.

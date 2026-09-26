@@ -69,7 +69,7 @@ flat out int fragSprite;   // see the decode below; -1 = untiled
 flat out int fragRecord;   // face-mapped: texel index of the first record
 flat out int fragAux;      // two-sided: back mapping (alpha byte)
 flat out float fragVisibility;   // MC ChunkVisibility: the section's fade-in, 0..1
-out vec3 fragLight;              // a face-mapped rectangle's lightmap colour; 1 otherwise
+out vec3 fragLight;              // 1: face-mapped rectangles light per block in the fragment shader
 
 void main() {
     int slotRaw = int(aPosSlot.w * 65535.0 + 0.5);
@@ -138,14 +138,9 @@ void main() {
     fragWorldPos = worldPos;
     fragColor = aColor;
     // MC terrain.vsh: vertexColor = Color * sample_lightmap(Sampler2, UV2).
-    // A face-mapped rectangle's colour is its per-block record (the
-    // fragment shader rebuilds it), so its light — one value for the whole
-    // rectangle — rides fragLight instead.
-    vec3 lm = sampleLightmap(aLight.rg * 255.0);
-    if (mapped) {
-        fragLight = lm;
-    } else {
-        fragColor.rgb *= lm;
-        fragLight = vec3(1.0);
-    }
+    // A face-mapped rectangle's colour — AO and light included — is rebuilt
+    // per block in the fragment shader from the face map, so its vertices
+    // carry no light of their own.
+    fragLight = vec3(1.0);
+    if (!mapped) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
 }

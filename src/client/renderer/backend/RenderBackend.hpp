@@ -203,6 +203,16 @@ namespace Render {
                                           int /*width*/, int /*height*/,
                                           const void* /*data*/) {}
 
+        // UpdateTexture2DLevel for a texture queued frames may still be
+        // sampling. GL copies through a rotating pixel-unpack buffer, so the
+        // write into the texture is the GPU's job, ordered after the frames
+        // that read it, instead of a CPU wait inside glTexSubImage2D; Vulkan
+        // already stages UpdateTexture2DLevel into the next frame.
+        virtual void UpdateTexture2DLevelStaged(TextureHandle handle, int level, int x, int y,
+                                                int width, int height, const void* data) {
+            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+        }
+
         virtual void DestroyTexture(TextureHandle handle) = 0;
         virtual void BindTexture(TextureHandle handle, uint32_t slot = 0) = 0;
 

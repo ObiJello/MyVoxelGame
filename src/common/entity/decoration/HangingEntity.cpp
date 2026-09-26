@@ -107,24 +107,38 @@ namespace Game {
     }
 
     bool HangingEntity::Survives() const {
+        return SurvivesWith(/*requireFullSupport=*/true);
+    }
+
+    bool HangingEntity::StillHangs() const {
+        return SurvivesWith(/*requireFullSupport=*/true);
+    }
+
+    bool HangingEntity::SurvivesWith(bool requireFullSupport) const {
         if (!m_level || !m_level->Blocks()) return false;
         if (HasLevelCollision(PopBox())) return false;
 
         // calculateSupportBox: the box pushed half a block into the wall and
-        // deflated by 1e-7; every cell it touches must be isSolid() or a diode.
+        // deflated by 1e-7; every cell it touches must be isSolid() or a diode
+        // (MC's allMatched) — or, with `requireFullSupport` off, just one of
+        // them (anyMatched).
         const IBlockAccess& blocks = *m_level->Blocks();
         const AABBd box = GetAABBd();
         const glm::dvec3 shift = -Step(m_direction) * 0.5;
         const glm::dvec3 lo = box.min + shift + glm::dvec3(1.0e-7);
         const glm::dvec3 hi = box.max + shift - glm::dvec3(1.0e-7);
+        bool anySupport = false;
         for (int x = static_cast<int>(std::floor(lo.x)); x <= static_cast<int>(std::floor(hi.x)); ++x) {
             for (int y = static_cast<int>(std::floor(lo.y)); y <= static_cast<int>(std::floor(hi.y)); ++y) {
                 for (int z = static_cast<int>(std::floor(lo.z)); z <= static_cast<int>(std::floor(hi.z)); ++z) {
                     const BlockState state = blocks.GetBlockState(x, y, z);
-                    if (!IsLegacySolid(state) && !IsDiodeBlock(state.Block())) return false;
+                    const bool supporting = IsLegacySolid(state) || IsDiodeBlock(state.Block());
+                    if (supporting) anySupport = true;
+                    else if (requireFullSupport) return false;
                 }
             }
         }
+        if (!anySupport) return false;
         return CanCoexist(false);
     }
 
@@ -140,7 +154,7 @@ namespace Game {
         }
         if (m_ticksSinceLastCheck++ >= kCheckInterval) {
             m_ticksSinceLastCheck = 0;
-            if (!IsRemoved() && !Survives()) {
+            if (!IsRemoved() && !StillHangs()) {
                 Remove(RemovalReason::Discarded);
                 DropItem(nullptr);
             }

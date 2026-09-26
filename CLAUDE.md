@@ -89,6 +89,7 @@ Things that must hold across the codebase; details and rationale in `docs/engine
 - **Terrain vertex format.** Chunk terrain uses the 20-byte packed `Render::TerrainVertex` (`src/client/renderer/core/Vertex.hpp`; the last word is the MC light coords), not the general 24-byte `Vertex`. Changing its layout touches the mesher, mega buffer, both backends, the `terrain*` shaders and their `_vk` twins — and the `.spv` files must be recompiled with glslc **and committed**.
 - **Hardware scaling.** Every machine-dependent budget reads `Core::HardwareProfile::Get()`. Rule for any new budget: a fast machine gets exactly the number it had; only weaker hardware scales down.
 - **Graphics settings.** `graphicsPreset` is a one-shot macro (`GameSettings::ApplyGraphicsPreset`); the engine reads individual options, and each setter flips the preset to custom. Mesh-time options reach workers via `Render::Mesher::SetMeshOptions`, never `g_gameSettings` directly.
+- **Frames overlap on the GPU (Vulkan).** Nothing a frame writes on the GPU may be an object the previous frame still uses — Metal holds the whole next render encoder (vertex stage included) on any such write. Per-frame-slot depth images, per-frame texture copies for textures updated while in use, per-slot query pools, and MoltenVK argument buffers off + single-queue semaphores (`VK_EXT_layer_settings` in `CreateInstance`) keep it that way. Details in `docs/engineering-notes.md` (Frame overlap on MoltenVK).
 - **Face-direction groups.** Every emitter of an opaque/cutout quad must push a facing (`GenerateQuad` does; fluid/greedy emitters push explicitly).
 - **Dirty sections.** Use `ClientChunk::AddDirty`/`RemoveDirty`; never touch `dirtySections` directly (`dirtyMask` mirrors it).
 - **Crash handler** (`CrashHandler.cpp`) uses only async-signal-safe calls; keep it that way. It must be installed after `sentry_init`.
@@ -103,15 +104,15 @@ Things that must hold across the codebase; details and rationale in `docs/engine
 
 ## Profiling
 
-Tracy is the profiler of record, pinned to **v0.14.0** via FetchContent. Three setup invariants that have all bitten us:
+Tracy is the profiler of record, pinned to **v0.14.1** via FetchContent — the `GIT_TAG` in `CMakeLists.txt` is the single pin for the game, the viewer and the command-line tools. Three setup invariants that have all bitten us:
 
-1. Client and viewer versions must match exactly (bump `GIT_TAG` and the `tracy-profiler` app together).
+1. Client and viewer versions must match exactly (bump `GIT_TAG` and the `tracy-profiler` app together). The CLI tools follow on their own: `tools/build_tracy_tools.sh` builds `tracy-export` (ours, `tools/tracy_export/`), `tracy-capture`, `tracy-csvexport` and `tracy-update` at the pinned tag into git-ignored `tools/tracy/`, and the report scripts run it whenever the pin moves.
 2. `TRACY_ENABLE` must be set as a CACHE var before `FetchContent_MakeAvailable`, not via `target_compile_definitions`.
 3. A stale `libTracyClient.a` survives a `GIT_TAG` bump — delete `cmake-build-tracy/_deps/tracy-*` and reconfigure if a bump doesn't take.
 
 Tracy on macOS has no context-switch capture; don't claim thread starvation from Tracy alone. Apple sampling is behind `option(TRACY_APPLE_SAMPLING)` (off by default) and a CMake patch that removes Tracy's root check.
 
-Tools: `tools/play.sh tracy --vulkan [--gpu-trace[=SEC]]`, `tools/tracy_report.py`, `tools/gpu_report.py`, `--record`/`--replay` for reproducible runs, `OBEY_SKIP=<stage>` with `OBEY_SKIP_PERIOD` for per-stage GPU A/B. Runtime `OBEY_*` env switches are the standard kill-switch pattern for A/B testing a change. `OBEY_SERVER_STATS=1` turns on the server's once-a-second load report (`Server::ServerStressStats`: tick phases, chunk streaming, per-player send backlog) in a normal hosted game. This MacBook Air throttles within ~40 s of GPU load — compare only back-to-back runs at the same temperature.
+Tools: `tools/play.sh tracy --vulkan [--gpu-trace[=SEC]]`, `tools/tracy_report.py capture.tracy [other.tracy]` (one capture, or an A/B of two; cut to the replayed path when the capture has one), `tools/analyze_trace.py`, `tools/gpu_report.py`, `--record`/`--replay` for reproducible runs, `OBEY_SKIP=<stage>` with `OBEY_SKIP_PERIOD` for per-stage GPU A/B. Runtime `OBEY_*` env switches are the standard kill-switch pattern for A/B testing a change. `OBEY_SERVER_STATS=1` turns on the server's once-a-second load report (`Server::ServerStressStats`: tick phases, chunk streaming, per-player send backlog) in a normal hosted game. This MacBook Air throttles within ~40 s of GPU load — compare only back-to-back runs at the same temperature.
 
 Full workflow, gotchas, and past measurements: `docs/engineering-notes.md`.
 

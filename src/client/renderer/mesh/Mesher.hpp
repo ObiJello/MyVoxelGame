@@ -49,9 +49,11 @@ namespace Render {
         float biomeTintStrength = 1.0f;
 
         // Performance settings
-        // Greedy face merging: coplanar full-cube faces with the same sprite
-        // and identical corner colors collapse into one quad per maximal
-        // rectangle (see Mesher::FlushGreedyQuads). Launch-time A/B kill
+        // Greedy face merging: coplanar full-cube faces collapse into one
+        // quad per maximal rectangle whatever their blocks, sprites, tints,
+        // AO or light — each block's look travels in its face-map record
+        // (see Mesher::FlushGreedyQuads, TryStashGreedyQuad for the few
+        // eligibility rules). Launch-time A/B kill
         // switch: OBEY_NO_GREEDY=1 disables merging at mesh time (a remesh —
         // i.e. a fresh world load — is needed for it to take effect).
         bool enableGreedyMeshing = true;
@@ -480,6 +482,12 @@ namespace Render {
         // worker thread, avoiding ResolveTexture string allocs + atlas hash lookups
         // on every mesh rebuild.
         static thread_local std::unordered_map<const Game::FaceDef*, SpriteRef> s_faceUVCache;
+        // Per model face: the layer MC gives the quad from the texels its UV
+        // rectangle covers (SectionCompiler -> ChunkSectionLayer.byTransparency
+        // of FaceBakery.computeMaterialTransparency). Cleared with s_faceUVCache.
+        static thread_local std::unordered_map<const Game::FaceDef*, RenderLayer> s_faceLayerCache;
+        RenderLayer FaceTexelLayer(const Game::BlockModel& model, const Game::FaceDef& faceDef,
+                                   RenderLayer fallback);
 
         // Core meshing functions
         void ProcessBlock(const Game::IBlockAccess& blocks, Game::Math::ChunkPos chunkPos,

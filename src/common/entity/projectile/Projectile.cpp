@@ -7,6 +7,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
+#include "common/world/tags/DataTags.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 
@@ -14,6 +15,12 @@
 #include <cmath>
 
 namespace Game {
+
+    float Projectile::GetPickRadius() const {
+        return DataTags::HasTag(DataTags::Registry::EntityType, TypeInfo().slug,
+                                "minecraft:redirectable_projectile") ? 1.0f : 0.0f;
+    }
+
 
     Entity* Projectile::GetOwner() {
         return Level() ? m_ownerRef.Get(*Level()) : nullptr;

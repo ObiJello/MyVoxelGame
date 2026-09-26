@@ -176,6 +176,9 @@ void main() {
         // the one `bubble_white` sprite; noxious_gas, geyser_base, geyser_poof
         // and geyser_plume.json list their eight frames _01.._08 ascending.
         m_textures[kTexBubbleWhite] = load("assets/textures/particle/bubble_white.png");
+        // MC particles/crit.json and enchanted_hit.json: one sprite each.
+        m_textures[kTexCriticalHit]  = load("assets/textures/particle/critical_hit.png");
+        m_textures[kTexEnchantedHit] = load("assets/textures/particle/enchanted_hit.png");
         const struct { int first; const char* name; } sheets[] = {
             { kTexNoxiousGas0,  "noxious_gas"  },
             { kTexGeyserBase0,  "geyser_base"  },
@@ -451,6 +454,29 @@ void main() {
                 p.hasPhysics = false;
                 break;
             }
+            case Game::ParticleKind::Crit:
+            case Game::ParticleKind::EnchantedHit: {
+                // MC CritParticle(level, x, y, z, xa, ya, za, sprite): the
+                // 7-arg base at rest (jittered, normalised velocity), damped
+                // to a tenth, plus 0.4 × the passed velocity; a 0.6..0.9 grey;
+                // friction 0.7, gravity 0.5, quad × 0.75, lifetime
+                // 6 / (rand*0.8 + 0.6), no collision. Its constructor ends
+                // with one tick() (run after the spawn below), and
+                // MagicProvider then tints it (r × 0.3, g × 0.8).
+                randomizeVelocity(0.0, 0.0, 0.0);
+                initQuadSize();
+                p.friction = 0.7f;
+                p.gravity = 0.5f;
+                p.xd *= 0.10000000149011612; p.yd *= 0.10000000149011612; p.zd *= 0.10000000149011612;
+                p.xd += q.vx * 0.4; p.yd += q.vy * 0.4; p.zd += q.vz * 0.4;
+                const float col = rng.NextFloat() * 0.3f + 0.6f;
+                p.rCol = col; p.gCol = col; p.bCol = col;
+                p.quadSize *= 0.75f;
+                p.lifetime = std::max(static_cast<int>(
+                    6.0 / (static_cast<double>(rng.NextFloat()) * 0.8 + 0.6)), 1);
+                p.hasPhysics = false;
+                break;
+            }
             case Game::ParticleKind::Poof: {
                 // MC ExplodeParticle(level, x, y, z, xa, ya, za, sprites):
                 // 4-arg base (no velocity jitter), then ±0.05 jitter around
@@ -593,18 +619,18 @@ void main() {
                 p.hasPhysics = false;
                 p.quadSize = 0.5f;
                 // The sprite: getBlockStateModelSet().getParticleMaterial
-                // (state).sprite() — the state model's `particle` texture on
-                // the blocks atlas (item/barrier for a barrier, item/light_NN
-                // for a light at level NN).
+                // (state).sprite() — the state model's `particle` texture,
+                // resolved like MC's MaterialBaker (item atlas, then blocks):
+                // item/barrier for a barrier, item/light_NN for a light.
                 const Game::BlockState state = Game::BlockState::FromRawId(q.blockState);
                 const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
-                AtlasUVRect rect;
-                if (!g_atlasBuilder ||
-                    !g_atlasBuilder->GetUVRect(model.ResolveTexture("particle"), rect)) {
+                AtlasSprite sprite;
+                if (!FindSprite(model.ResolveTexture("particle"), sprite)) {
                     return;   // no sprite for this state: nothing to show
                 }
-                p.u0 = rect.uvMin.x; p.v0 = rect.uvMin.y;
-                p.u1 = rect.uvMax.x; p.v1 = rect.uvMax.y;
+                p.u0 = sprite.rect.uvMin.x; p.v0 = sprite.rect.uvMin.y;
+                p.u1 = sprite.rect.uvMax.x; p.v1 = sprite.rect.uvMax.y;
+                p.atlas = static_cast<uint8_t>(sprite.atlas);
                 break;
             }
             case Game::ParticleKind::HushMote: {
@@ -826,6 +852,16 @@ void main() {
 
         p.xo = p.x; p.yo = p.y; p.zo = p.z;
         p.dimension = dimension;
+        if (p.kind == Game::ParticleKind::Crit || p.kind == Game::ParticleKind::EnchantedHit) {
+            // CritParticle's constructor tick(), then MagicProvider's tint.
+            std::vector<Client::ClientLevelBridge::QueuedParticle> none;
+            TickParticle(p, nullptr, none);
+            if (p.kind == Game::ParticleKind::EnchantedHit) {
+                p.rCol *= 0.3f;
+                p.gCol *= 0.8f;
+            }
+            if (p.removed) return;
+        }
         m_particles.push_back(p);
     }
 
@@ -1111,6 +1147,10 @@ void main() {
             p.zd = yProgressLinear * static_cast<double>(p.sprayZ);
             p.quadSize = p.sizeMin + static_cast<float>(yProgressLinear *
                                                         static_cast<double>(p.sizeMax - p.sizeMin));
+        } else if (p.kind == Game::ParticleKind::Crit || p.kind == Game::ParticleKind::EnchantedHit) {
+            // MC CritParticle.tick: the spark cools toward red as it dies.
+            p.gCol *= 0.96f;
+            p.bCol *= 0.9f;
         } else if (p.kind == Game::ParticleKind::NoxiousGas) {
             // MC NoxiousGasParticle.tick: fades out over the second half.
             if (static_cast<float>(p.age) > p.fadeStart) {
@@ -1276,7 +1316,7 @@ void main() {
                 // descending here for the same reason: the sheet's JSON order.
                 return kTexGeneric0 + (7 - a * 7 / life);
             case Game::ParticleKind::BlockMarker:
-                return kTexAtlas;
+                return p.atlas == static_cast<uint8_t>(AtlasId::Items) ? kTexItemAtlas : kTexAtlas;
             case Game::ParticleKind::PauseMobGrowth:
             case Game::ParticleKind::ResetMobGrowth:
             case Game::ParticleKind::HushMote:
@@ -1297,6 +1337,10 @@ void main() {
                 return kTexFlame;
             case Game::ParticleKind::SulfurBubbles:
                 return kTexBubbleWhite;
+            case Game::ParticleKind::Crit:
+                return kTexCriticalHit;
+            case Game::ParticleKind::EnchantedHit:
+                return kTexEnchantedHit;
             // The geyser sheets (setSpriteFromAge; their JSONs list _01.._08
             // ascending).
             case Game::ParticleKind::NoxiousGas:
@@ -1326,6 +1370,8 @@ void main() {
             case Game::ParticleKind::NoxiousGas:     // BaseAshSmokeParticle
             case Game::ParticleKind::GeyserBase:     // BaseAshSmokeParticle
             case Game::ParticleKind::GeyserPoof:     // BaseAshSmokeParticle
+            case Game::ParticleKind::Crit:           // CritParticle
+            case Game::ParticleKind::EnchantedHit:
                 // MC HeartParticle / BaseAshSmokeParticle / FallingDustParticle
                 // all share getQuadSize: ramp in over the first 1/32 of the
                 // lifetime, so a particle fades IN rather than popping.
@@ -1369,10 +1415,10 @@ void main() {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (m_particles.empty()) return;
 
-        // The blocks atlas, for the block marker. Fetched per draw because a
-        // resource-pack reload rebuilds it under a new handle.
-        m_textures[kTexAtlas] = g_atlasBuilder ? g_atlasBuilder->GetBackendTextureHandle()
-                                               : INVALID_TEXTURE;
+        // The atlases, for the block marker. Fetched per draw because a
+        // resource-pack reload rebuilds them under new handles.
+        m_textures[kTexAtlas] = GetAtlasTexture(AtlasId::Blocks);
+        m_textures[kTexItemAtlas] = GetAtlasTexture(AtlasId::Items);
 
         struct Vert {
             float x, y, z;

@@ -53,6 +53,8 @@ namespace Render {
                                    int width, int height, const void* data) override;
         void UpdateTexture2DLevel(TextureHandle handle, int level, int x, int y,
                                   int width, int height, const void* data) override;
+        void UpdateTexture2DLevelStaged(TextureHandle handle, int level, int x, int y,
+                                        int width, int height, const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
         TextureHandle CreateBufferTexture(BufferHandle buffer, TextureFormat format) override;
@@ -287,6 +289,24 @@ namespace Render {
 
         // Currently bound handles
         ShaderHandle m_boundShader = INVALID_SHADER;
+
+        // UpdateTexture2DLevelStaged: one pixel-unpack buffer split into
+        // kUploadSlots per-frame regions. A frame's writes fill its region
+        // (mapped unsynchronized — the fence proves the GPU is done with it)
+        // and each glTexSubImage2D reads from there; EndFrame fences the
+        // region and moves on.
+        static constexpr int kUploadSlots = 3;
+        struct UploadSlot {
+            GLsync fence = nullptr;
+            size_t used = 0;
+        };
+        GLuint     m_uploadPbo = 0;
+        size_t     m_uploadSlotSize = 0;
+        UploadSlot m_uploadSlots[kUploadSlots];
+        int        m_uploadSlot = 0;
+        bool       m_uploadSlotReady = false;   // this frame's region waited on
+        void EndUploadFrame();
+        void DestroyUploadBuffer();
 
         // Shared block vertex format (GL_ARB_vertex_attrib_binding)
         GLuint m_sharedBlockVAO = 0;

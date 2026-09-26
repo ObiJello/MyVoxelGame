@@ -13,6 +13,7 @@
 #include "common/entity/EntityType.hpp"
 #include "common/entity/ItemEntity.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/text/Language.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +26,50 @@
 namespace Server {
 
     namespace {
+
+        // MC StringReader.readString: `"..."` or `'...'` with backslash
+        // escapes of the quote and of the backslash itself; anything else is
+        // taken as it stands (readUnquotedString's word).
+        bool UnquoteString(const std::string& raw, std::string& out, std::string& error) {
+            out.clear();
+            if (raw.empty() || (raw[0] != '"' && raw[0] != '\'')) {
+                out = raw;
+                return true;
+            }
+            const char quote = raw[0];
+            bool escaped = false;
+            for (size_t i = 1; i < raw.size(); ++i) {
+                const char c = raw[i];
+                if (escaped) {
+                    if (c != quote && c != '\\') {
+                        error = std::string("Invalid escape sequence '") + c + "' in quoted string";
+                        return false;
+                    }
+                    out += c;
+                    escaped = false;
+                } else if (c == '\\') {
+                    escaped = true;
+                } else if (c == quote) {
+                    if (i + 1 != raw.size()) {
+                        error = "Unexpected text after quoted string: " + raw;
+                        return false;
+                    }
+                    return true;
+                } else {
+                    out += c;
+                }
+            }
+            error = "Unclosed quoted string: " + raw;
+            return false;
+        }
+
+        // MC Entity.getName().getString(): the custom name, else the type's
+        // name ("Cow") — what `name=` compares against.
+        std::string DisplayNameOf(const Game::Mob& mob) {
+            if (const auto& custom = mob.GetCustomName()) return *custom;
+            const std::string slug(mob.TypeInfo().slug);
+            return Game::Language::GetOrDefault("entity.minecraft." + slug, slug);
+        }
 
         // ── MinMaxBounds ────────────────────────────────────────────────────
         //
@@ -143,9 +188,26 @@ namespace Server {
         bool SplitOptions(const std::string& body,
                           std::vector<std::pair<std::string, std::string>>& out,
                           std::string& error) {
+            // The comma that ends a pair, skipping any inside a quoted
+            // string (MC readString: `name="Smith, Jr."`).
+            const auto nextComma = [&body](size_t from) {
+                char quote = 0;
+                for (size_t k = from; k < body.size(); ++k) {
+                    const char c = body[k];
+                    if (quote) {
+                        if (c == '\\' && k + 1 < body.size()) { ++k; continue; }
+                        if (c == quote) quote = 0;
+                    } else if (c == '"' || c == '\'') {
+                        quote = c;
+                    } else if (c == ',') {
+                        return k;
+                    }
+                }
+                return std::string::npos;
+            };
             size_t i = 0;
             while (i < body.size()) {
-                const size_t comma = body.find(',', i);
+                const size_t comma = nextComma(i);
                 const std::string pair = body.substr(i, comma == std::string::npos
                                                           ? std::string::npos : comma - i);
                 i = (comma == std::string::npos) ? body.size() : comma + 1;
@@ -318,7 +380,10 @@ namespace Server {
 
             if (key == "name") {
                 if (!once(sel.nameSeen)) return false;
-                const std::string want = value;
+                // MC readString: a quoted string (either quote, with \ and
+                // the quote escaped) or a bare word.
+                std::string want;
+                if (!UnquoteString(value, want, error)) return false;
                 sel.predicates.push_back([want, inverted](const SelectedEntity& e) {
                     return (e.name == want) != inverted;
                 });
@@ -420,7 +485,7 @@ namespace Server {
                 e.box      = mob->GetAABB();
                 e.dimension = src.dimension;
                 e.typeSlug = std::string(mob->TypeInfo().slug);
-                e.name     = e.typeSlug;
+                e.name     = DisplayNameOf(*mob);
                 out.push_back(std::move(e));
             }
         }
@@ -764,7 +829,7 @@ namespace Server {
         e.box       = mob->GetAABB();
         e.dimension = source.dimension;
         e.typeSlug  = std::string(mob->TypeInfo().slug);
-        e.name      = e.typeSlug;
+        e.name      = DisplayNameOf(*mob);
         out = std::move(e);
         return true;
     }

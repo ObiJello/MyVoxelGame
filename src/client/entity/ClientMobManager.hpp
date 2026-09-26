@@ -324,6 +324,13 @@ namespace Client {
         void SetArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
         // ItemFrameDataS2C: the frame's framed item (MC DATA_ITEM).
         void SetItemFrameItem(int32_t id, const Game::ItemStack& item);
+
+        // MC ParticleEngine.createTrackingEmitter(entity, type) — the crit /
+        // enchanted-hit burst on a struck entity (entity events 200 / 201):
+        // sixteen tries a tick at a random point inside the entity's box, for
+        // three ticks (the first at once), following it as it moves. Players
+        // are found through the sound resolver, so a hit player sparks too.
+        void CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind);
         // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
         // DragonPackets.hpp. No-op for anything that is not an End crystal.
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
@@ -453,6 +460,18 @@ namespace Client {
         void TickPassengerChain(Game::Entity& vehicle);
 
         ClientLevelBridge m_level;
+
+        // MC TrackingEmitter — see CreateTrackingEmitter.
+        struct TrackingEmitter {
+            int32_t            entityId = 0;
+            Game::ParticleKind kind{};
+            int                life = 0;
+        };
+        static constexpr int kTrackingEmitterLifeTime = 3;   // MC's default lifeTime
+        std::vector<TrackingEmitter> m_trackingEmitters;
+        // One TrackingEmitter.tick; false once the emitter is spent (or its
+        // entity is gone).
+        bool TickTrackingEmitter(TrackingEmitter& emitter);
         std::unordered_map<int32_t, ClientMob> m_mobs;
         std::unordered_map<int32_t, glm::dvec3> m_codecBase;
         // Deferred TNT ticks for the parallel batch; persistent for capacity.

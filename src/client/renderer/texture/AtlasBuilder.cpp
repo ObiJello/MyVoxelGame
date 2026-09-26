@@ -5,6 +5,7 @@
 #include "common/core/AssetLocator.hpp"
 #include "MipmapGenerator.hpp"
 #include "ConnectedTextures.hpp"
+#include "Stitcher.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
 #include "platform/GameDirectory.hpp"   // anisotropic filtering setting
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <cmath>
 #include <iterator>
+#include <regex>
 
 // Include stb_image for PNG loading
 #include "../../../ext/stb_image/stb_image.h"
@@ -24,20 +26,48 @@
 
 namespace Render {
 
-    // Global instance (optional)
     std::unique_ptr<AtlasBuilder> g_atlasBuilder = nullptr;
+    std::unique_ptr<AtlasBuilder> g_itemAtlasBuilder = nullptr;
 
-    AtlasBuilder::AtlasBuilder()
-        : atlasWidth(DEFAULT_ATLAS_SIZE)
-        , atlasHeight(DEFAULT_ATLAS_SIZE)
-        , mipmapEnabled(true)
-        , textureAnimator(nullptr) {
+    const AtlasConfig& GetAtlasConfig(AtlasId id) {
+        //                               name      definition                        mips   colormaps CTM    spriteTable
+        static const AtlasConfig kBlocks{"blocks", "assets/atlases/blocks.json", true,  true,     true,  true};
+        static const AtlasConfig kItems {"items",  "assets/atlases/items.json",  false, false,    false, false};
+        return id == AtlasId::Items ? kItems : kBlocks;
+    }
+
+    AtlasBuilder* GetAtlas(AtlasId id) {
+        return id == AtlasId::Items ? g_itemAtlasBuilder.get() : g_atlasBuilder.get();
+    }
+
+    TextureHandle GetAtlasTexture(AtlasId id) {
+        const AtlasBuilder* atlas = GetAtlas(id);
+        return atlas ? atlas->GetBackendTextureHandle() : INVALID_TEXTURE;
+    }
+
+    bool FindSprite(const std::string& textureKey, AtlasSprite& out) {
+        for (AtlasId id : {AtlasId::Items, AtlasId::Blocks}) {
+            const AtlasBuilder* atlas = GetAtlas(id);
+            if (atlas && atlas->GetUVRect(textureKey, out.rect)) {
+                out.atlas = id;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    AtlasBuilder::AtlasBuilder(AtlasId id)
+        : atlasWidth(0)
+        , atlasHeight(0)
+        , mipmapEnabled(GetAtlasConfig(id).createMipmaps)
+        , m_id(id)
+        , m_animator(std::make_unique<TextureAnimator>()) {
     }
 
     AtlasBuilder::~AtlasBuilder() {
+        m_animator.reset();   // its GPU frames go before the backend-owned atlas
         if (Render::g_renderBackend) {
-            if (m_atlasTexture != Render::INVALID_TEXTURE)
-                Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+            DestroyAtlasTextures();
             if (m_spriteTable != Render::INVALID_TEXTURE)
                 Render::g_renderBackend->DestroyTexture(m_spriteTable);
             if (m_grassColormap != Render::INVALID_TEXTURE)
@@ -74,8 +104,8 @@ namespace Render {
         }
         Log::Info("✓ Parsed atlas JSON - found %zu texture sources", textureSources.size());
 
-        // Step 2: Load biome colormaps
-        if (!LoadColormaps(texturesRootPath)) {
+        // Step 2: Load biome colormaps (the block atlas carries them)
+        if (GetConfig().colormaps && !LoadColormaps(texturesRootPath)) {
             Log::Warning("Failed to load colormaps - continuing without biome tinting");
         }
 
@@ -88,7 +118,7 @@ namespace Render {
         // Step 3b: Derive the connected-texture variants before packing, so
         // they are ordinary sources from here on (packed, mipmapped, animated
         // — all the same machinery).
-        GenerateConnectedTextureVariants(textureSources);
+        if (GetConfig().connectedTextures) GenerateConnectedTextureVariants(textureSources);
 
         // Step 4: Pack textures into atlas
         std::vector<PackRect> packedRects;
@@ -153,6 +183,28 @@ namespace Render {
                 ProcessDirectorySource(source, texturesRoot, sources);
             } else if (coreType == "single") {
                 ProcessSingleSource(source, texturesRoot, sources);
+            } else if (coreType == "filter") {
+                // MC SourceFilter: drop every sprite added so far whose id
+                // the pattern matches. IdentifierPattern compiles each part
+                // with Pattern.asPredicate — a regex FIND, not a full match;
+                // an absent part matches anything.
+                const nlohmann::json pattern = source.value("pattern", nlohmann::json::object());
+                const std::string nsPattern = pattern.value("namespace", std::string());
+                const std::string pathPattern = pattern.value("path", std::string());
+                try {
+                    const std::regex nsRe(nsPattern), pathRe(pathPattern);
+                    const size_t before = sources.size();
+                    sources.erase(std::remove_if(sources.begin(), sources.end(), [&](const TextureSource& t) {
+                        const auto colon = t.key.find(':');
+                        const std::string ns = colon == std::string::npos ? "minecraft" : t.key.substr(0, colon);
+                        const std::string path = colon == std::string::npos ? t.key : t.key.substr(colon + 1);
+                        return (nsPattern.empty() || std::regex_search(ns, nsRe)) &&
+                               (pathPattern.empty() || std::regex_search(path, pathRe));
+                    }), sources.end());
+                    Log::Debug("Filter source removed %zu sprite(s)", before - sources.size());
+                } catch (const std::regex_error& e) {
+                    Log::Warning("Filter source: bad pattern (%s)", e.what());
+                }
             } else {
                 Log::Warning("Unknown source type: %s", coreType.c_str());
             }
@@ -214,31 +266,29 @@ namespace Render {
     void AtlasBuilder::ProcessSingleSource(const nlohmann::json& source,
                                           const std::string& texturesRoot,
                                           std::vector<TextureSource>& sources) {
-        if (!source.contains("resource") || !source.contains("sprite")) {
-            Log::Warning("Single source missing required fields");
+        // MC SingleFile: `resource` names the texture file
+        // (textures/<resource>.png); `sprite`, optional, the sprite id it is
+        // registered under — the resource's own id when absent.
+        if (!source.contains("resource") || !source["resource"].is_string()) {
+            Log::Warning("Single source missing 'resource'");
             return;
         }
-
-        std::string resource = source["resource"];
-        std::string sprite = source["sprite"];
-
-        // Remove "minecraft:" prefix if present and add .png extension
-        if (sprite.find("minecraft:") == 0) {
-            sprite = sprite.substr(10); // Remove "minecraft:"
-        }
+        auto stripNamespace = [](std::string id) {
+            if (id.rfind("minecraft:", 0) == 0) id = id.substr(10);
+            return id;
+        };
+        const std::string resource = stripNamespace(source["resource"].get<std::string>());
+        const std::string sprite = source.contains("sprite") && source["sprite"].is_string()
+                                       ? stripNamespace(source["sprite"].get<std::string>())
+                                       : resource;
 
         // Build full path (a resource pack's copy when one is enabled)
-        std::string fullPath = Core::Assets::Locate(texturesRoot + "/" + sprite + ".png");
-
-        // Create texture source
         TextureSource texSource;
-        texSource.key = resource;
-        texSource.path = fullPath;
-
+        texSource.key = sprite;   // bare, like the directory sources' "block/stone"
+        texSource.path = Core::Assets::Locate(texturesRoot + "/" + resource + ".png");
         sources.push_back(texSource);
 
-        Log::Debug("Added single texture: %s -> %s",
-                  resource.c_str(), fullPath.c_str());
+        Log::Debug("Added single texture: %s -> %s", texSource.key.c_str(), texSource.path.c_str());
     }
 
     std::vector<std::pair<std::string, std::string>> AtlasBuilder::ScanDirectoryForPNGs(const std::string& dirPath) {
@@ -396,103 +446,42 @@ namespace Render {
     bool AtlasBuilder::PackTextures(const std::vector<TextureSource>& sources,
                                    std::vector<PackRect>& packedRects,
                                    int& outWidth, int& outHeight) {
-        // Start with default size
-        int currentSize = DEFAULT_ATLAS_SIZE;
-
-        while (currentSize <= MAX_ATLAS_SIZE) {
-            // Create root packing node
-            auto root = std::make_unique<PackNode>(0, 0, currentSize, currentSize);
-
-            packedRects.clear();
-            bool allPacked = true;
-
-            // Try to pack all textures
-            for (size_t i = 0; i < sources.size(); ++i) {
-                const auto& source = sources[i];
-
-                // Add MIPMAP_PADDING pixels on each side (32 total) for mipmap-safe padding
-                int paddedWidth = source.width + MIPMAP_PADDING * 2;
-                int paddedHeight = source.height + MIPMAP_PADDING * 2;
-
-                PackNode* node = InsertRect(root.get(), paddedWidth, paddedHeight, i);
-
-                if (node) {
-                    PackRect rect;
-                    rect.x = node->x + MIPMAP_PADDING; // Account for padding
-                    rect.y = node->y + MIPMAP_PADDING;
-                    rect.width = source.width;
-                    rect.height = source.height;
-                    rect.textureIndex = i;
-                    packedRects.push_back(rect);
-                } else {
-                    allPacked = false;
-                    break;
-                }
-            }
-
-            if (allPacked) {
-                outWidth = currentSize;
-                outHeight = currentSize;
-                Log::Info("Successfully packed %zu textures into %dx%d atlas",
-                         packedRects.size(), currentSize, currentSize);
-                return true;
-            }
-
-            // Try next power of 2
-            currentSize *= 2;
+        // MC SpriteLoader.stitch + Stitcher, exactly (texture/Stitcher.hpp):
+        // the mip level every sprite can halve to, padding 1 << that level,
+        // slots rounded to that grid so every level's `>> k` is exact.
+        std::vector<Stitcher::Entry> entries;
+        entries.reserve(sources.size());
+        for (const auto& source : sources) {
+            entries.push_back({source.key, std::max(1, source.width), std::max(1, source.height)});
         }
-
-        Log::Error("Failed to pack %zu textures even at max size %dx%d",
-                  sources.size(), MAX_ATLAS_SIZE, MAX_ATLAS_SIZE);
-        return false;
-    }
-
-    PackNode* AtlasBuilder::InsertRect(PackNode* node, int width, int height, int index) {
-        if (!node) {
-            return nullptr;
+        m_stitchMipLevel = Stitcher::ChooseMipLevel(
+            entries, GetConfig().createMipmaps ? kMaxMipLevels : 0, GetConfig().name);
+        const Stitcher::Result result = Stitcher::Stitch(entries, m_stitchMipLevel, kMaxAtlasSize);
+        if (!result.ok) {
+            Log::Error("Stitcher: %s atlas cannot fit '%s' within %dx%d",
+                       GetConfig().name, result.failedEntry.c_str(), kMaxAtlasSize, kMaxAtlasSize);
+            return false;
         }
-        if (node->used) {
-            // Try inserting into children
-            PackNode* newNode = InsertRect(node->left.get(), width, height, index);
-            if (newNode) return newNode;
+        m_padding = result.padding;
 
-            return InsertRect(node->right.get(), width, height, index);
+        // A placement is the slot's corner; the sprite sits `padding` in.
+        packedRects.clear();
+        packedRects.reserve(result.placements.size());
+        for (const Stitcher::Placement& place : result.placements) {
+            const auto& source = sources[place.entry];
+            PackRect rect;
+            rect.x = place.x + m_padding;
+            rect.y = place.y + m_padding;
+            rect.width = source.width;
+            rect.height = source.height;
+            rect.textureIndex = static_cast<int>(place.entry);
+            packedRects.push_back(rect);
         }
-
-        // If this node is too small, return
-        if (width > node->width || height > node->height) {
-            return nullptr;
-        }
-
-        // If it's a perfect fit, use this node
-        if (width == node->width && height == node->height) {
-            node->used = true;
-            return node;
-        }
-
-        // Otherwise, split this node
-        node->used = true;
-
-        // Decide which way to split
-        int dw = node->width - width;
-        int dh = node->height - height;
-
-        if (dw > dh) {
-            // Split vertically
-            node->left = std::make_unique<PackNode>(
-                node->x, node->y, width, node->height);
-            node->right = std::make_unique<PackNode>(
-                node->x + width, node->y, dw, node->height);
-        } else {
-            // Split horizontally
-            node->left = std::make_unique<PackNode>(
-                node->x, node->y, node->width, height);
-            node->right = std::make_unique<PackNode>(
-                node->x, node->y + height, node->width, dh);
-        }
-
-        // Insert into first child
-        return InsertRect(node->left.get(), width, height, index);
+        outWidth = std::max(1, result.width);
+        outHeight = std::max(1, result.height);
+        Log::Info("Stitched %zu sprites into the %dx%d %s atlas (mip level %d, padding %d)",
+                  packedRects.size(), outWidth, outHeight, GetConfig().name, m_stitchMipLevel, m_padding);
+        return true;
     }
 
     bool AtlasBuilder::CreateAtlasTexture(const std::vector<TextureSource>& sources,
@@ -523,7 +512,8 @@ namespace Render {
 
             textureKeyToUV[source.key] = uvRect;
         }
-        BuildSpriteTable();
+        if (GetConfig().spriteTable) BuildSpriteTable();
+        BuildSpriteAlpha(sources, packedRects);
         
         // Save original atlas data before any modifications
         originalAtlasData = atlasData;
@@ -558,9 +548,9 @@ namespace Render {
             return false;
         }
 
+        DestroyAtlasTextures();
         m_atlasTexture = Render::g_renderBackend->CreateTexture2D(
             atlasWidth, atlasHeight, Render::TextureFormat::RGBA8, atlasData.data());
-
         if (m_atlasTexture == Render::INVALID_TEXTURE) {
             Log::Error("Failed to create atlas texture via backend");
             return false;
@@ -575,27 +565,7 @@ namespace Render {
         Log::Info("Created atlas texture (%dx%d, mipmaps: %s)",
                  atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
 
-        // Register pending animations with texture animator
-        if (textureAnimator && !pendingAnimations.empty() && m_atlasTexture != Render::INVALID_TEXTURE) {
-            textureAnimator->Initialize(m_atlasTexture);
-
-            for (const auto& pending : pendingAnimations) {
-                auto uvIt = textureKeyToUV.find(pending.textureKey);
-                if (uvIt != textureKeyToUV.end()) {
-                    const AtlasUVRect& uvRect = uvIt->second;
-                    int atlasX = static_cast<int>(uvRect.uvMin.x * atlasWidth);
-                    int atlasY = static_cast<int>(uvRect.uvMin.y * atlasHeight);
-
-                    textureAnimator->RegisterAnimatedTexture(
-                        pending.textureKey, pending.animation, pending.frames,
-                        atlasX, atlasY,
-                        pending.mipmapStrategy, pending.alphaCutoffBias,
-                        (mipmapEnabled ? m_mipmapLevel : 0)
-                    );
-                }
-            }
-            Log::Info("Registered %zu animated textures", pendingAnimations.size());
-        }
+        RegisterAnimations();
 
         // Atlas is now on GPU — free the CPU copy to save 64-256MB of RAM.
         // RebuildAtlas() regenerates from source textures if ever needed.
@@ -609,28 +579,32 @@ namespace Render {
     }
 
     void AtlasBuilder::SetMipmapEnabled(bool enabled) {
+        enabled = enabled && GetConfig().createMipmaps;   // MC: only the block atlas is mipmapped
         if (mipmapEnabled == enabled) return;
         mipmapEnabled = enabled;
         if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            RegisterAnimations();   // the frames carry the new chain depth
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
         }
     }
 
     void AtlasBuilder::SetMipmapLevel(int level) {
-        m_mipmapLevel = std::max(0, std::min(4, level));
-        if (m_atlasTexture != Render::INVALID_TEXTURE) {
+        m_mipmapLevel = std::max(0, std::min(kMaxMipLevels, level));
+        if (m_atlasTexture != Render::INVALID_TEXTURE && GetConfig().createMipmaps) {
             UpdateTextureParameters();
             // The chain is CPU-authored, so a new level count means rebuilding
             // it — the driver is not going to fill the extra levels for us.
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            RegisterAnimations();
             Log::Info("Set mipmap level to %d", m_mipmapLevel);
         }
     }
 
     void AtlasBuilder::SetMipmapLevels(int levels) {
-        levels = std::max(0, std::min(4, levels));
+        if (!GetConfig().createMipmaps) return;   // items / portal gun: never mipmapped (MC)
+        levels = std::max(0, std::min(kMaxMipLevels, levels));
         const bool enabled = levels > 0;
         const int  level   = enabled ? levels : m_mipmapLevel;
         if (enabled == mipmapEnabled && level == m_mipmapLevel) return;
@@ -642,8 +616,13 @@ namespace Render {
             // chain has to be rebuilt; switching OFF only needs the sampler
             // change above, the unused levels can stay resident.
             if (enabled) BuildAndUploadMipChain(textureSources, m_packedRects);
+            RegisterAnimations();
             Log::Info("AtlasBuilder mipmap levels -> %d (%s)", levels, enabled ? "on" : "off");
         }
+    }
+
+    int AtlasBuilder::EffectiveMipLevels() const {
+        return mipmapEnabled ? std::min(m_mipmapLevel, m_stitchMipLevel) : 0;
     }
 
     void AtlasBuilder::UpdateTextureParameters() {
@@ -669,9 +648,17 @@ namespace Render {
             mipmapEnabled ? static_cast<float>(Platform::g_gameSettings.GetAnisotropicFiltering()) : 1.0f);
     }
 
+    void AtlasBuilder::DestroyAtlasTextures() {
+        if (Render::g_renderBackend && m_atlasTexture != Render::INVALID_TEXTURE) {
+            Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+        }
+        m_atlasTexture = Render::INVALID_TEXTURE;
+    }
+
     void AtlasBuilder::ReleaseGpuResources() {
         if (!Render::g_renderBackend) return;
-        for (Render::TextureHandle* t : {&m_atlasTexture, &m_spriteTable, &m_grassColormap, &m_foliageColormap}) {
+        DestroyAtlasTextures();
+        for (Render::TextureHandle* t : {&m_spriteTable, &m_grassColormap, &m_foliageColormap}) {
             if (*t != Render::INVALID_TEXTURE) { Render::g_renderBackend->DestroyTexture(*t); *t = Render::INVALID_TEXTURE; }
         }
     }
@@ -688,7 +675,7 @@ namespace Render {
         }
 
         // Destroy existing texture
-        Render::g_renderBackend->DestroyTexture(m_atlasTexture);
+        DestroyAtlasTextures();
 
         // If Minecraft style, apply solidify + border extrusion to a copy of the data
         const unsigned char* uploadData = originalAtlasData.data();
@@ -725,9 +712,7 @@ namespace Render {
         BuildAndUploadMipChain(textureSources, m_packedRects);
 
         // Update TextureAnimator with the new atlas handle
-        if (textureAnimator) {
-            textureAnimator->Initialize(m_atlasTexture);
-        }
+        RegisterAnimations();
 
         Log::Info("Atlas rebuilt with %s rendering mode",
                   useMinecraftStyle ? "Minecraft-style" : "Classic");
@@ -736,7 +721,7 @@ namespace Render {
     void AtlasBuilder::BuildAndUploadMipChain(const std::vector<TextureSource>& sources,
                                               const std::vector<PackRect>& packedRects) {
         if (m_atlasTexture == Render::INVALID_TEXTURE || !Render::g_renderBackend) return;
-        if (!mipmapEnabled || m_mipmapLevel <= 0) return;
+        if (EffectiveMipLevels() <= 0) return;
         if (packedRects.empty() || sources.empty()) return;
 
         // Level 0 is written back in here, so the CPU buffer has to exist. It
@@ -758,7 +743,7 @@ namespace Render {
         // 16-aligned and `>> level` is exact for all 4 levels. A sprite that
         // ever breaks that would land on a half-texel, so it is checked rather
         // than assumed.
-        const int levels = m_mipmapLevel;
+        const int levels = EffectiveMipLevels();
         const int align = 1 << levels;
 
         // One image buffer per level above 0. Level k is the atlas at half
@@ -846,14 +831,14 @@ namespace Render {
             if (!chain.empty()) {
                 blit(atlasData, atlasWidth, chain[0], rect.x, rect.y);
                 extrude(atlasData, atlasWidth, atlasHeight,
-                        rect.x, rect.y, chain[0].width, chain[0].height, MIPMAP_PADDING);
+                        rect.x, rect.y, chain[0].width, chain[0].height, m_padding);
             }
             for (size_t k = 1; k < chain.size(); ++k) {
                 const int kk = static_cast<int>(k);
                 blit(levelData[k], levelW[k], chain[k], rect.x >> kk, rect.y >> kk);
                 extrude(levelData[k], levelW[k], levelH[k],
                         rect.x >> kk, rect.y >> kk,
-                        chain[k].width, chain[k].height, MIPMAP_PADDING >> kk);
+                        chain[k].width, chain[k].height, m_padding >> kk);
             }
         }
 
@@ -901,11 +886,11 @@ namespace Render {
     
     void AtlasBuilder::ExtrudeTextureBorders(int textureX, int textureY,
                                             int textureWidth, int textureHeight) {
-        // Extrude edges by MIPMAP_PADDING pixels to prevent mipmap bleeding.
+        // Extrude edges by m_padding pixels to prevent mipmap bleeding.
         // Each edge pixel is repeated outward into the padding region (clamp-to-edge pattern).
 
         // Top edge - repeat top row upward
-        for (int p = 1; p <= MIPMAP_PADDING; ++p) {
+        for (int p = 1; p <= m_padding; ++p) {
             int dstY = textureY - p;
             if (dstY < 0) break;
             for (int x = 0; x < textureWidth; ++x) {
@@ -917,7 +902,7 @@ namespace Render {
         }
 
         // Bottom edge - repeat bottom row downward
-        for (int p = 0; p < MIPMAP_PADDING; ++p) {
+        for (int p = 0; p < m_padding; ++p) {
             int dstY = textureY + textureHeight + p;
             if (dstY >= atlasHeight) break;
             for (int x = 0; x < textureWidth; ++x) {
@@ -929,7 +914,7 @@ namespace Render {
         }
 
         // Left edge - repeat left column to the left
-        for (int p = 1; p <= MIPMAP_PADDING; ++p) {
+        for (int p = 1; p <= m_padding; ++p) {
             int dstX = textureX - p;
             if (dstX < 0) break;
             for (int y = 0; y < textureHeight; ++y) {
@@ -941,7 +926,7 @@ namespace Render {
         }
 
         // Right edge - repeat right column to the right
-        for (int p = 0; p < MIPMAP_PADDING; ++p) {
+        for (int p = 0; p < m_padding; ++p) {
             int dstX = textureX + textureWidth + p;
             if (dstX >= atlasWidth) break;
             for (int y = 0; y < textureHeight; ++y) {
@@ -953,13 +938,13 @@ namespace Render {
         }
 
         // Corner regions - fill the four rectangular corner padding areas
-        // Each corner extends MIPMAP_PADDING in both directions, filled with the nearest corner pixel
+        // Each corner extends m_padding in both directions, filled with the nearest corner pixel
 
         // Top-left corner block
-        for (int py = 1; py <= MIPMAP_PADDING; ++py) {
+        for (int py = 1; py <= m_padding; ++py) {
             int dstY = textureY - py;
             if (dstY < 0) continue;
-            for (int px = 1; px <= MIPMAP_PADDING; ++px) {
+            for (int px = 1; px <= m_padding; ++px) {
                 int dstX = textureX - px;
                 if (dstX < 0) continue;
                 int srcIdx = (textureY * atlasWidth + textureX) * 4;
@@ -970,10 +955,10 @@ namespace Render {
         }
 
         // Top-right corner block
-        for (int py = 1; py <= MIPMAP_PADDING; ++py) {
+        for (int py = 1; py <= m_padding; ++py) {
             int dstY = textureY - py;
             if (dstY < 0) continue;
-            for (int px = 0; px < MIPMAP_PADDING; ++px) {
+            for (int px = 0; px < m_padding; ++px) {
                 int dstX = textureX + textureWidth + px;
                 if (dstX >= atlasWidth) continue;
                 int srcIdx = (textureY * atlasWidth + (textureX + textureWidth - 1)) * 4;
@@ -984,10 +969,10 @@ namespace Render {
         }
 
         // Bottom-left corner block
-        for (int py = 0; py < MIPMAP_PADDING; ++py) {
+        for (int py = 0; py < m_padding; ++py) {
             int dstY = textureY + textureHeight + py;
             if (dstY >= atlasHeight) continue;
-            for (int px = 1; px <= MIPMAP_PADDING; ++px) {
+            for (int px = 1; px <= m_padding; ++px) {
                 int dstX = textureX - px;
                 if (dstX < 0) continue;
                 int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + textureX) * 4;
@@ -998,10 +983,10 @@ namespace Render {
         }
 
         // Bottom-right corner block
-        for (int py = 0; py < MIPMAP_PADDING; ++py) {
+        for (int py = 0; py < m_padding; ++py) {
             int dstY = textureY + textureHeight + py;
             if (dstY >= atlasHeight) continue;
-            for (int px = 0; px < MIPMAP_PADDING; ++px) {
+            for (int px = 0; px < m_padding; ++px) {
                 int dstX = textureX + textureWidth + px;
                 if (dstX >= atlasWidth) continue;
                 int srcIdx = ((textureY + textureHeight - 1) * atlasWidth + (textureX + textureWidth - 1)) * 4;
@@ -1160,6 +1145,65 @@ namespace Render {
         }
     }
 
+    void AtlasBuilder::BuildSpriteAlpha(const std::vector<TextureSource>& sources,
+                                        const std::vector<PackRect>& packedRects) {
+        m_spriteAlpha.clear();
+        auto code = [](unsigned char alpha) -> uint8_t {
+            return alpha == 0 ? kTexelTransparent : alpha != 255 ? kTexelTranslucent : 0;
+        };
+        for (const PackRect& rect : packedRects) {
+            if (rect.textureIndex < 0 || static_cast<size_t>(rect.textureIndex) >= sources.size()) continue;
+            const TextureSource& source = sources[static_cast<size_t>(rect.textureIndex)];
+            SpriteAlpha a;
+            a.width = source.width;
+            a.height = source.height;
+            const size_t texels = static_cast<size_t>(a.width) * static_cast<size_t>(a.height);
+            if (texels == 0 || source.data.size() < texels * 4) continue;
+            a.bits.assign(texels, 0);
+            const bool animated = std::any_of(pendingAnimations.begin(), pendingAnimations.end(),
+                [&](const PendingAnimation& p) { return p.textureKey == source.key; });
+            if (!animated)
+                for (size_t i = 0; i < texels; ++i) a.bits[i] = code(source.data[i * 4 + 3]);
+            // MC ORs every unique frame the animation shows
+            // (AnimatedTexture.uniqueFrames): the listed frames, or all of
+            // them when the .mcmeta lists none.
+            for (const PendingAnimation& anim : pendingAnimations) {
+                if (anim.textureKey != source.key) continue;
+                auto orFrame = [&](size_t index) {
+                    if (index >= anim.frames.size() || anim.frames[index].size() < texels * 4) return;
+                    const auto& frame = anim.frames[index];
+                    for (size_t i = 0; i < texels; ++i) a.bits[i] |= code(frame[i * 4 + 3]);
+                };
+                if (anim.animation.frames.empty()) {
+                    for (size_t f = 0; f < anim.frames.size(); ++f) orFrame(f);
+                } else {
+                    for (int f : anim.animation.frames) if (f >= 0) orFrame(static_cast<size_t>(f));
+                }
+            }
+            m_spriteAlpha[source.key] = std::move(a);
+        }
+    }
+
+    uint8_t AtlasBuilder::QuadTransparency(const std::string& textureKey,
+                                           float u0, float v0, float u1, float v1) const {
+        auto it = m_spriteAlpha.find(textureKey);
+        if (it == m_spriteAlpha.end()) return 0xFF;
+        const SpriteAlpha& a = it->second;
+        // SpriteContents.computeTransparency: floor the min corner, ceil the
+        // max corner, in texels.
+        const float lu = std::min(u0, u1), hu = std::max(u0, u1);
+        const float lv = std::min(v0, v1), hv = std::max(v0, v1);
+        const int x0 = std::clamp(static_cast<int>(std::floor(lu * static_cast<float>(a.width))), 0, a.width);
+        const int y0 = std::clamp(static_cast<int>(std::floor(lv * static_cast<float>(a.height))), 0, a.height);
+        const int x1 = std::clamp(static_cast<int>(std::ceil(hu * static_cast<float>(a.width))), 0, a.width);
+        const int y1 = std::clamp(static_cast<int>(std::ceil(hv * static_cast<float>(a.height))), 0, a.height);
+        uint8_t bits = 0;
+        for (int y = y0; y < y1; ++y)
+            for (int x = x0; x < x1; ++x)
+                bits |= a.bits[static_cast<size_t>(y) * static_cast<size_t>(a.width) + static_cast<size_t>(x)];
+        return bits;
+    }
+
     bool AtlasBuilder::GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const {
         auto it = textureKeyToUV.find(textureKey);
         if (it != textureKeyToUV.end()) {
@@ -1195,12 +1239,31 @@ namespace Render {
         }
     }
 
-    // **NEW**: Animation support methods
-    void AtlasBuilder::SetTextureAnimator(TextureAnimator* animator) {
-        textureAnimator = animator;
-        if (textureAnimator && m_atlasTexture != Render::INVALID_TEXTURE) {
-            textureAnimator->Initialize(m_atlasTexture);
+    void AtlasBuilder::RegisterAnimations() {
+        if (!m_animator) return;
+        // A fresh start on the (new) texture: drops the previous frames.
+        m_animator->Initialize(m_atlasTexture);
+        if (m_atlasTexture == Render::INVALID_TEXTURE) return;
+        size_t registered = 0;
+        for (const auto& pending : pendingAnimations) {
+            auto uvIt = textureKeyToUV.find(pending.textureKey);
+            if (uvIt == textureKeyToUV.end()) continue;
+            const AtlasUVRect& uvRect = uvIt->second;
+            // Rounded, not truncated: uvMin is x / atlasWidth in float, and
+            // x / w * w can land a hair under x.
+            const int atlasX = static_cast<int>(std::lround(uvRect.uvMin.x * atlasWidth));
+            const int atlasY = static_cast<int>(std::lround(uvRect.uvMin.y * atlasHeight));
+            m_animator->RegisterAnimatedTexture(pending.textureKey, pending.animation, pending.frames,
+                                                atlasX, atlasY, m_padding,
+                                                pending.mipmapStrategy, pending.alphaCutoffBias,
+                                                EffectiveMipLevels());
+            ++registered;
         }
+        if (registered > 0) Log::Info("Registered %zu animated textures in the %s atlas", registered, GetConfig().name);
+    }
+
+    void AtlasBuilder::UpdateAnimations(float deltaTime) {
+        if (m_animator) m_animator->UpdateAnimations(deltaTime);
     }
 
     namespace {

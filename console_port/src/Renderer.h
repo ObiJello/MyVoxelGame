@@ -35,9 +35,12 @@ public:
     void beginUI();
     void rect(float x,float y,float w,float h,glm::vec4 color);
     void panel(float x,float y,float w,float h);
+    void recessPanel(float x,float y,float w,float h,float alpha);
     void sprite(const std::string& name,float x,float y,float w,float h,
         glm::vec4 uv={0,0,1,1},glm::vec4 color={1,1,1,1});
     void text(const std::string& value,float x,float y,float scale=1,glm::vec4 color={1,1,1,1},bool shadow=true);
+    void tiltedText(const std::string& value,float centerX,float y,float scale,float degrees,
+        glm::vec4 color={1,1,1,1});
     float textWidth(const std::string& value,float scale=1) const;
     void centered(const std::string& value,float y,float scale=1,glm::vec4 color={1,1,1,1});
     void blockIcon(Block block,float x,float y,float size,int data=0);

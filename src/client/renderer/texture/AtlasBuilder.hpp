@@ -1,6 +1,7 @@
 // File: src/client/renderer/texture/AtlasBuilder.hpp
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -77,27 +78,45 @@ namespace Render {
         PackRect(int w, int h, int idx) : x(0), y(0), width(w), height(h), textureIndex(idx) {}
     };
 
-    // Simple bin packing node for texture atlas
-    struct PackNode {
-        int x, y, width, height;
-        bool used;
-        std::unique_ptr<PackNode> left;
-        std::unique_ptr<PackNode> right;
+    // The sprite atlases, as MC 26 splits them (AtlasManager.KNOWN_ATLASES):
+    // BLOCKS (block/ + a few entity sprites, mipmapped) and ITEMS (item/,
+    // never mipmapped). items.json filters out the engine's 1254 px portal
+    // gun icon: nothing samples it from an atlas (item icons, held and
+    // dropped items all draw their own PNG — HeldItemSpriteMesh,
+    // GuiGraphics::LoadItemTexture), and alone it would take the item sheet
+    // from 1024x512 to 2048x2048.
+    enum class AtlasId : uint8_t { Blocks = 0, Items = 1 };
+    constexpr int kAtlasCount = 2;
 
-        PackNode(int x, int y, int w, int h)
-            : x(x), y(y), width(w), height(h), used(false) {}
+    // MC AtlasManager.AtlasConfig plus what only the block atlas carries.
+    struct AtlasConfig {
+        const char* name = "blocks";                           // logs, debug dump name
+        const char* definition = "assets/atlases/blocks.json"; // the sources
+        bool createMipmaps = false;       // MC: blocks only
+        bool colormaps = false;           // grass / foliage colormaps (blocks)
+        bool connectedTextures = false;   // CTM variant sprites (blocks)
+        bool spriteTable = false;         // greedy terrain's sprite table (blocks)
     };
+    const AtlasConfig& GetAtlasConfig(AtlasId id);
 
     class AtlasBuilder {
     public:
-        // Configuration
-        static constexpr int DEFAULT_ATLAS_SIZE = 2048;  // 2048x2048 atlas
-        static constexpr int MIN_ATLAS_SIZE = 512;
-        static constexpr int MAX_ATLAS_SIZE = 8192;
-        static constexpr int MIPMAP_PADDING = 16;  // 16px padding on each side for mipmap safety
+        // MC's mipmap ceiling (Options.mipmapLevels max): the block atlas is
+        // stitched for it, whatever the option — padding 16 — so the option
+        // can change at run time without re-stitching (MC reloads instead).
+        static constexpr int kMaxMipLevels = 4;
+        // The largest atlas side the stitcher may grow to.
+        static constexpr int kMaxAtlasSize = 16384;
 
-        AtlasBuilder();
+        explicit AtlasBuilder(AtlasId id = AtlasId::Blocks);
         ~AtlasBuilder();
+
+        AtlasId GetId() const { return m_id; }
+        const AtlasConfig& GetConfig() const { return GetAtlasConfig(m_id); }
+        // The padding ring every sprite carries (MC 1 << stitched mip level).
+        int GetPadding() const { return m_padding; }
+        // The deepest mip level the stitched layout supports.
+        int GetStitchedMipLevel() const { return m_stitchMipLevel; }
 
         // Main build process - parses JSON and creates atlas
         bool BuildFromJSON(const std::string& atlasJsonPath,
@@ -122,6 +141,16 @@ namespace Render {
 
         // Look up UV coordinates for a texture key
         bool GetUVRect(const std::string& textureKey, AtlasUVRect& uvRect) const;
+        // MC SpriteContents.computeTransparency over the texels a quad's UV
+        // rectangle covers (u0..v1 as fractions of the sprite, any order),
+        // OR-ed over every frame of an animated sprite: bit 0 = some texel
+        // has alpha 0 (transparent), bit 1 = some texel has 0 < alpha < 255
+        // (translucent); 0 = fully opaque. 0xFF when the key is unknown.
+        // Read by mesh workers like GetUVRect: built with the atlas, stable
+        // until the next rebuild (which remeshes everything).
+        static constexpr uint8_t kTexelTransparent = 1, kTexelTranslucent = 2;
+        uint8_t QuadTransparency(const std::string& textureKey,
+                                 float u0, float v0, float u1, float v1) const;
         // Every packed sprite, (key, rect), in no particular order.
         template <class F> void ForEachUVRect(F&& fn) const {
             for (const auto& [key, rect] : textureKeyToUV) fn(key, rect);
@@ -163,13 +192,15 @@ namespace Render {
         // Debug: Save atlas to file
         bool SaveAtlasDebugImage(const std::string& outputPath) const;
 
-        // **NEW**: Animation support
-        void SetTextureAnimator(TextureAnimator* animator);
-        TextureAnimator* GetTextureAnimator() const { return textureAnimator; }
+        // This atlas's animated sprites (MC TextureAtlas.cycleAnimationFrames).
+        TextureAnimator* GetTextureAnimator() const { return m_animator.get(); }
+        // Once per frame: advances and draws this atlas's animated sprites.
+        void UpdateAnimations(float deltaTime);
 
     private:
         // Backend texture handles
         Render::TextureHandle m_atlasTexture = Render::INVALID_TEXTURE;
+        void DestroyAtlasTextures();
         Render::TextureHandle m_spriteTable  = Render::INVALID_TEXTURE;
         // Number sprites and (re)create m_spriteTable from textureKeyToUV.
         void BuildSpriteTable();
@@ -185,8 +216,17 @@ namespace Render {
         int m_mipmapLevel = 4; // Default to max mipmap level
         bool m_borderExtrusionEnabled = true; // Enable border extrusion for mipmap padding
 
-        // **NEW**: Animation support
-        TextureAnimator* textureAnimator;
+        AtlasId m_id = AtlasId::Blocks;
+        int m_padding = 0;          // Stitcher padding (1 << m_stitchMipLevel)
+        int m_stitchMipLevel = 0;   // MC SpriteLoader's mip level for this atlas
+
+        // This atlas's animations; registered from pendingAnimations after
+        // every (re)build of the atlas texture and of its mip chain.
+        std::unique_ptr<TextureAnimator> m_animator;
+        void RegisterAnimations();
+        // The mip levels the atlas carries now: the option, capped by what
+        // the stitched layout supports; 0 without mipmaps.
+        int EffectiveMipLevels() const;
         
         // **NEW**: Animation data storage
         struct PendingAnimation {
@@ -212,6 +252,15 @@ namespace Render {
         // mipmaps or changes the level — those paths recreate the texture and
         // would otherwise leave levels 1..N undefined.
         std::vector<PackRect> m_packedRects;
+        // Per sprite: its frame size and one transparency code per texel
+        // (the bits of QuadTransparency, OR-ed over animation frames).
+        struct SpriteAlpha {
+            int width = 0, height = 0;
+            std::vector<uint8_t> bits;
+        };
+        std::unordered_map<std::string, SpriteAlpha> m_spriteAlpha;
+        void BuildSpriteAlpha(const std::vector<TextureSource>& sources,
+                              const std::vector<PackRect>& packedRects);
 
         // Step 1: Parse the JSON atlas descriptor
         bool ParseAtlasJSON(const std::string& jsonPath,
@@ -260,9 +309,6 @@ namespace Render {
         Render::TextureHandle CreateColormapTexture(const std::vector<unsigned char>& data,
                                                     int width, int height);
 
-        // Bin packing algorithm
-        PackNode* InsertRect(PackNode* node, int width, int height, int index);
-
         // Helper: Copy texture to atlas at specified position
         void CopyTextureToAtlas(const TextureSource& source,
                                int destX, int destY);
@@ -301,7 +347,25 @@ namespace Render {
                                 std::vector<std::vector<unsigned char>>& frames);
     };
 
-    // Global atlas builder instance (optional - can be created as needed)
+    // The atlases. g_atlasBuilder is the BLOCK atlas (terrain, block
+    // models, block items); g_itemAtlasBuilder the item atlas.
     extern std::unique_ptr<AtlasBuilder> g_atlasBuilder;
+    extern std::unique_ptr<AtlasBuilder> g_itemAtlasBuilder;
+    AtlasBuilder* GetAtlas(AtlasId id);
+    // The atlas's texture, INVALID_TEXTURE while it is not built.
+    TextureHandle GetAtlasTexture(AtlasId id);
+
+    // A model texture resolved to its atlas (MC Material.Baked: the sprite
+    // knows its sheet, and the draw binds that sheet).
+    struct AtlasSprite {
+        AtlasId     atlas = AtlasId::Blocks;
+        AtlasUVRect rect;
+    };
+    // MC MaterialBaker.bake: the item atlas first, then the block atlas. A
+    // key names a sprite in exactly one atlas in practice ("item/..." vs
+    // "block/..."), so the order only matters for a key both hold — and then
+    // MC's order wins. Block models reach the item atlas only through a
+    // particle texture (barrier, light_NN, structure_void).
+    bool FindSprite(const std::string& textureKey, AtlasSprite& out);
 
 } // namespace Render

@@ -328,27 +328,25 @@ namespace Render {
         // cube which has unresolvable textures. Render flat 2D texture instead.
         if (!Game::BlockModelRegistry::HasModel(modelName) &&
             !Game::BlockModelRegistry::HasModel(modelName + "_inventory")) {
-            AtlasUVRect uvRect;
+            // The sprite resolves like MC's MaterialBaker (item atlas, then
+            // blocks). An animated sprite's atlas cell is already one frame
+            // (the sheet is split at load), so its rect is drawn as is.
+            AtlasSprite sprite;
             bool found = false;
             std::string texKey = model.ResolveTexture("#particle");
-            if (texKey != "missingno") found = g_atlasBuilder->GetUVRect(texKey, uvRect);
-            if (!found) found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
+            if (texKey != "missingno") found = FindSprite(texKey, sprite);
+            if (!found) found = FindSprite("block/" + modelName, sprite);
             if (!found && modelName.size() > 6 && modelName.substr(modelName.size() - 6) == "_still") {
-                found = g_atlasBuilder->GetUVRect("block/" + modelName.substr(0, modelName.size() - 6), uvRect);
+                found = FindSprite("block/" + modelName.substr(0, modelName.size() - 6), sprite);
             }
             if (found) {
-                // For animated textures, clamp UV to first frame (square)
-                float frameHeight = uvRect.uvMax.x - uvRect.uvMin.x;
-                float clampedV1 = uvRect.uvMin.y + frameHeight;
-                if (clampedV1 < uvRect.uvMax.y) {
-                    uvRect.uvMax.y = clampedV1;
-                }
                 // Water is a greyscale texture tinted blue
                 uint32_t tint = 0xFFFFFFFF;
                 if (modelName.find("water") != std::string::npos) {
                     tint = 0xFF4C7FFF; // R=76, G=127, B=255 (matches FluidMeshBuilder waterTint)
                 }
-                self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                const AtlasUVRect& uvRect = sprite.rect;
+                self.Blit(GetAtlasTexture(sprite.atlas),
                           x, y, x + 16, y + 16,
                           uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y, tint);
             }
@@ -367,17 +365,20 @@ namespace Render {
             }
         }
         if (!anyVisible) {
-            AtlasUVRect uvRect;
+            // The particle sprite, resolved like MC's MaterialBaker: a
+            // barrier or light block's is item/..., on the item atlas.
+            AtlasSprite sprite;
             std::string particleTex = model.ResolveTexture("#particle");
             bool found = false;
             if (particleTex != "missingno") {
-                found = g_atlasBuilder->GetUVRect(particleTex, uvRect);
+                found = FindSprite(particleTex, sprite);
             }
             if (!found) {
-                found = g_atlasBuilder->GetUVRect("block/" + modelName, uvRect);
+                found = FindSprite("block/" + modelName, sprite);
             }
             if (found) {
-                self.Blit(g_atlasBuilder->GetBackendTextureHandle(),
+                const AtlasUVRect& uvRect = sprite.rect;
+                self.Blit(GetAtlasTexture(sprite.atlas),
                           x, y, x + 16, y + 16,
                           uvRect.uvMin.x, uvRect.uvMin.y, uvRect.uvMax.x, uvRect.uvMax.y,
                           0xFFFFFFFF);

@@ -1,9 +1,11 @@
 // The PS3 front-end menus (UIScene_*) as data: controls, navigation and the
 // settings they write.
 #include "ConsoleMenus.h"
+#include "ConsoleUiAnimation.h"
 #include "ConsoleCredits.h"
 #include "ConsoleStrings.h"
 #include <iostream>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 
@@ -12,6 +14,22 @@ static void require(bool good,const std::string& message){if(!good)throw std::ru
 static std::string text(const char* name){return consoleString(consoleStringId(name));}
 
 int main(){try{
+    // Golden timeline samples from skin.swf and Panorama720.swf (30 fps).
+    namespace anim=console_ui_animation;
+    require(anim::panoramaFrame(0)==0 && anim::panoramaFrame(1.0/30)==1 &&
+            anim::panoramaFrame(4099.0/30)==4099 && anim::panoramaFrame(4100.0/30)==0,
+            "Panorama SWF frame wrap");
+    require(std::abs(anim::savePanelFadeIn(0)-133.f/256)<.0001f &&
+            std::abs(anim::savePanelFadeIn(1.0/30)-141.f/256)<.0001f &&
+            std::abs(anim::savePanelFadeIn(18.0/30)-248.f/256)<.0001f &&
+            anim::savePanelFadeIn(19.0/30)==1.f,"Recess panel SWF fade frames");
+    require(anim::buttonPressed(0) && anim::buttonPressed(9.0/30) &&
+            !anim::buttonPressed(10.0/30),"Button SWF press frames");
+    require(anim::scrollArrowAlpha(0,false)==1.f &&
+            std::abs(anim::scrollArrowAlpha(4.0/30,false)-64.f/256)<.0001f &&
+            anim::scrollArrowAlpha(7.0/30,false)==1.f &&
+            std::abs(anim::scrollArrowAlpha(4.0/30,true)-64.f/256)<.0001f &&
+            anim::scrollArrowAlpha(8.0/30,true)==1.f,"Scroll arrow SWF fade frames");
     GameSettings settings;
     ConsoleMenus menus(settings);
 
@@ -48,8 +66,8 @@ int main(){try{
     require(menus.scene()==MenuScene::MoreOptions && !menus.controls()[0].enabled,"Online options are disabled offline");
     require(menus.focus()==3 && menus.focusedDescription()==consoleStringId("IDS_GAMEOPTION_PVP"),"Focus starts past disabled options");
     menus.input(MenuInput::Up);
-    require(menus.focus()==11,"Up from the first enabled option wraps past the disabled ones");
-    menus.setFocus(10);menus.input(MenuInput::Accept);
+    require(menus.focus()==10,"Up from the first enabled option wraps past the disabled ones");
+    menus.setFocus(9);menus.input(MenuInput::Accept);
     require(menus.newWorld().superflat,"Superflat checkbox");
     menus.input(MenuInput::Back);
     require(menus.scene()==MenuScene::CreateWorld && menus.newWorld().superflat,"More Options keeps its values");

@@ -799,7 +799,15 @@ namespace Client {
             }
         }
         if (g_clientMobManager) {
-            g_clientMobManager->HandleEvent(packet.entityId, packet.event);
+            // MC handleAnimate CRITICAL_HIT / MAGIC_CRITICAL_HIT: the burst
+            // on whatever was struck — a player as much as a mob.
+            if (packet.event == Game::kEntityEventCrit) {
+                g_clientMobManager->CreateTrackingEmitter(packet.entityId, Game::ParticleKind::Crit);
+            } else if (packet.event == Game::kEntityEventMagicCrit) {
+                g_clientMobManager->CreateTrackingEmitter(packet.entityId, Game::ParticleKind::EnchantedHit);
+            } else {
+                g_clientMobManager->HandleEvent(packet.entityId, packet.event);
+            }
         }
         m_stats.packetsProcessed++;
     }

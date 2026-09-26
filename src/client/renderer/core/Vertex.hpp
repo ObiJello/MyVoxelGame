@@ -103,10 +103,11 @@ namespace Render {
     //                          reserved. The vertex shader samples the
     //                          lightmap with it (MC terrain.vsh:
     //                          vertexColor = Color * sample_lightmap(UV2)).
-    //                          A merged rectangle (face-mapped or a fluid
-    //                          plate) is lit uniformly — the mesher only
-    //                          merges faces whose four corners all read the
-    //                          same light. MC emissiveRendering faces (magma,
+    //                          A face-mapped rectangle ignores it: each
+    //                          block's four corner lights are in its face-map
+    //                          record and the fragment shader lights it per
+    //                          block. A fluid plate is lit uniformly (its
+    //                          merge requires equal light). MC emissiveRendering faces (magma,
     //                          active sculk sensors, the engine's full-bright
     //                          Block::emissive blocks) carry 240/240.
     //
@@ -221,9 +222,10 @@ namespace Render {
 
         // A greedy-merged BLOCK rectangle corner (face-mapped): the corner's
         // tile coordinate (0..16), the rectangle's tile-space origin (tu0,
-        // tv0, 0..15) and size (w, h, 1..16), the texel index of its first
-        // face-map record within the section layer's record array, and the
-        // rectangle's (uniform) light.
+        // tv0, 0..15) and size (w, h, 1..16), and the texel index of its
+        // first face-map record within the section layer's record array.
+        // `lightWord` is carried but unread: light is per block, in the
+        // records.
         static TerrainVertex Mapped(const glm::vec3& rel, int tileU, int tileV,
                                     int tu0, int tv0, int w, int h, uint32_t recordTexel,
                                     uint32_t lightWord) {
@@ -238,20 +240,29 @@ namespace Render {
             t.light = lightWord;
             return t;
         }
-        // One face-map record = two uint32 words = one RGBA16 texel of the
-        // slab's buffer texture (r16 = colour r | g << 8, g16 = colour b |
-        // AO byte << 8, b16 = sprite id, a16 = 0): word 0 = tint * face
-        // shade in rgb with the block's four 2-bit AO corner codes in the
-        // top byte (tile-corner order, see Mesher::TryStashGreedyQuad);
-        // word 1 = the sprite id. The vertex's record index counts records.
+        // One face-map record = four uint32 words = two RGBA16 texels of the
+        // slab's buffer texture. Texel 0 (r16 = colour r | g << 8, g16 =
+        // colour b | AO byte << 8, b16 = sprite id, a16 = 0): word 0 = tint *
+        // face shade in rgb with the block's four 2-bit AO corner codes in
+        // the top byte (tile-corner order, see Mesher::TryStashGreedyQuad);
+        // word 1 = the sprite id. Texel 1: the block face's four corner light
+        // words (LightWord's low 16 bits, block8 | sky8 << 8), in the same
+        // tile-corner order — word 2 = (0,0) | (1,0) << 16, word 3 = (0,1) |
+        // (1,1) << 16 — so light varies per block and never splits a merge.
+        // The vertex's record index counts TEXELS.
         // Records start 8-byte aligned in the slab (ChunkMegaBuffer pads the
         // 20-byte vertex run up to the next texel).
-        static constexpr uint32_t kFaceMapWordsPerRecord = 2;
+        static constexpr uint32_t kFaceMapWordsPerRecord = 4;
+        static constexpr uint32_t kFaceMapWordsPerTexel  = 2;
         static uint32_t FaceMapTexel0(uint32_t baseColor, uint8_t aoByte) {
             return (baseColor & 0x00FFFFFFu) | (static_cast<uint32_t>(aoByte) << 24);
         }
         static uint32_t FaceMapTexel1(uint16_t spriteId) {
             return static_cast<uint32_t>(spriteId);
+        }
+        // Two corner light words, tile corners (a) and (b), for texel 1.
+        static uint32_t FaceMapLightPair(uint32_t lightA, uint32_t lightB) {
+            return (lightA & 0xFFFFu) | ((lightB & 0xFFFFu) << 16);
         }
     };
 

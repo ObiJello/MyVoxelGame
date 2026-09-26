@@ -5,7 +5,8 @@ Analyse a Tracy .tracy capture without opening the GUI.
 Tracy's timeline is great for looking at ONE frame, but bad at the question we
 actually keep asking: "this zone spiked once — how often does that happen, and
 what else was running when it did?"  That needs every instance of every zone,
-which is what `tracy-csvexport -u` dumps and what this script chews on.
+which is what tracy-export's per-thread zone tables hold and what this script
+chews on.
 
     python3 tools/analyze_trace.py capture.tracy
     python3 tools/analyze_trace.py capture.tracy --zone PollEvents
@@ -22,94 +23,26 @@ Three reports:
                  much of the stall window each zone covers. This is the part
                  the GUI cannot answer without a lot of manual scrubbing.
 
-Needs tracy-csvexport. Built at cmake-build-tracy/tools/ (see CLAUDE.md); pass
---csvexport to point somewhere else.
+Reads the capture through tools/tracy_tools.py (tracy-export at the pinned
+Tracy version, built on demand; --zone needs the raw zones, a larger export).
 """
 
 import argparse
 import bisect
 import os
-import shutil
-import subprocess
 import sys
 from collections import defaultdict
 
-SEP = "\t"  # zone names can contain commas; tabs they cannot.
-
-# tracy-csvexport -u column order (csvexport.cpp:408). Asserted at runtime
-# against the real header so a Tracy upgrade that reorders columns fails loudly
-# instead of silently mis-parsing.
-UNWRAP_COLUMNS = [
-    "name", "src_file", "src_line",
-    "ns_since_start", "exec_time_ns", "thread", "value",
-]
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import tracy_tools  # noqa: E402
 
 
-def find_csvexport(explicit):
-    if explicit:
-        if not os.path.isfile(explicit):
-            sys.exit(f"error: --csvexport path does not exist: {explicit}")
-        return explicit
-    here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [
-        os.path.join(here, "..", "cmake-build-tracy", "tools", "tracy-csvexport"),
-        os.path.join(here, "tracy", "tracy-csvexport"),
-    ]
-    for c in candidates:
-        c = os.path.normpath(c)
-        if os.path.isfile(c):
-            return c
-    found = shutil.which("tracy-csvexport")
-    if found:
-        return found
-    sys.exit(
-        "error: tracy-csvexport not found.\n"
-        "  Build it from the fetched Tracy source:\n"
-        "    cd cmake-build-tracy/_deps/tracy-src/csvexport\n"
-        "    cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build\n"
-        "  Then copy it to cmake-build-tracy/tools/, or pass --csvexport."
-    )
-
-
-def run_export(csvexport, trace, unwrap, zone_filter=None):
-    """Yield parsed rows. Streams — traces get big."""
-    cmd = [csvexport, "-s", SEP]
-    if unwrap:
-        cmd.append("-u")
-    if zone_filter:
-        cmd += ["-f", zone_filter]
-    cmd.append(trace)
-
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
-    )
-    header = proc.stdout.readline().rstrip("\n")
-    if not header:
-        err = proc.stderr.read().strip()
-        sys.exit(f"error: tracy-csvexport produced no output.\n{err}")
-    cols = header.split(SEP)
-
-    if unwrap and cols[:len(UNWRAP_COLUMNS)] != UNWRAP_COLUMNS:
-        sys.exit(
-            "error: unexpected tracy-csvexport column layout.\n"
-            f"  expected: {UNWRAP_COLUMNS}\n"
-            f"  got:      {cols}\n"
-            "  A Tracy upgrade probably reordered them; update UNWRAP_COLUMNS."
-        )
-
-    for line in proc.stdout:
-        line = line.rstrip("\n")
-        if not line:
-            continue
-        parts = line.split(SEP)
-        if len(parts) < len(cols):
-            continue
-        yield dict(zip(cols, parts))
-
-    proc.stdout.close()
-    rc = proc.wait()
-    if rc != 0:
-        sys.exit(f"error: tracy-csvexport exited {rc}\n{proc.stderr.read().strip()}")
+def all_zones(ex):
+    """(name, start_ns, end_ns, thread label) of every zone on every thread."""
+    for tid in ex.zone_files():
+        label = ex.thread_label(tid)
+        for _id, _parent, _depth, start, end, _self, name, _text in ex.zones(tid):
+            yield name, start, end, label
 
 
 def ms(ns):
@@ -125,21 +58,20 @@ def fmt_time(ns):
     return f"{ns:8.0f} ns"
 
 
-def report_summary(csvexport, trace, top):
+def report_summary(ex, top):
     print("\n" + "=" * 78)
     print("SUMMARY  — spike = max/mean. High spike + low mean = a STALL, not a cost.")
     print("=" * 78)
 
     rows = []
     totals = {}   # zone -> total_ns, the baseline denominator for OVERLAP
-    for r in run_export(csvexport, trace, unwrap=False):
-        try:
-            counts = int(r["counts"])
-            mean = float(r["mean_ns"])
-            mx = float(r["max_ns"])
-            total = float(r["total_ns"])
-        except (KeyError, ValueError):
+    for r in ex.rows("zone_stats"):
+        if r["thread"] != "all":
             continue
+        counts = int(r["count"])
+        mean = float(r["mean_ns"])
+        mx = float(r["max_ns"])
+        total = float(r["total_ns"])
         rows.append((total, r["name"], counts, mean, mx,
                      float(r.get("min_ns", 0)), float(r.get("std_ns", 0))))
         totals[r["name"]] = total
@@ -161,16 +93,9 @@ def report_summary(csvexport, trace, top):
     return totals
 
 
-def collect_zone(csvexport, trace, zone):
-    """Every instance of `zone`. Exact name match — the -f filter is a substring."""
-    out = []
-    for r in run_export(csvexport, trace, unwrap=True, zone_filter=zone):
-        if r["name"] != zone:
-            continue
-        try:
-            out.append((int(r["ns_since_start"]), int(r["exec_time_ns"]), r["thread"]))
-        except ValueError:
-            continue
+def collect_zone(ex, zone):
+    """Every instance of `zone` (exact name match)."""
+    out = [(s, e - s, t) for name, s, e, t in all_zones(ex) if name == zone]
     out.sort()
     return out
 
@@ -218,7 +143,7 @@ def report_outliers(instances, zone, factor):
     return outliers
 
 
-def report_overlap(csvexport, trace, outliers, zone, max_windows, baseline):
+def report_overlap(ex, outliers, zone, max_windows, baseline):
     """What ran on OTHER threads during the stalls, versus its normal rate.
 
     Raw coverage alone is a trap. If a zone runs 80% of the session anyway, then
@@ -249,13 +174,7 @@ def report_overlap(csvexport, trace, outliers, zone, max_windows, baseline):
     threads = defaultdict(set)
     span_ns = 0  # session length, for the baseline denominator
 
-    for r in run_export(csvexport, trace, unwrap=True):
-        name = r["name"]
-        try:
-            s = int(r["ns_since_start"])
-            e = s + int(r["exec_time_ns"])
-        except ValueError:
-            continue
+    for name, s, e, thread in all_zones(ex):
         if e > span_ns:
             span_ns = e
         if name == zone:
@@ -271,7 +190,7 @@ def report_overlap(csvexport, trace, outliers, zone, max_windows, baseline):
             if ov > 0:
                 covered[name] += ov
                 hits[name] += 1
-                threads[name].add(r["thread"])
+                threads[name].add(thread)
             i -= 1
 
     if not covered:
@@ -326,23 +245,22 @@ def main():
     ap.add_argument("--top", type=int, default=30, help="summary rows (default 30)")
     ap.add_argument("--windows", type=int, default=10,
                     help="how many of the worst stalls to correlate (default 10)")
-    ap.add_argument("--csvexport", help="path to tracy-csvexport")
     args = ap.parse_args()
 
     if not os.path.isfile(args.trace):
         sys.exit(f"error: no such trace file: {args.trace}")
 
-    csvexport = find_csvexport(args.csvexport)
+    # The raw zones are only needed for --zone.
+    ex = tracy_tools.export(args.trace, zones=bool(args.zone))
     print(f"trace      : {args.trace}")
-    print(f"csvexport  : {csvexport}")
+    print(f"export     : {ex.path}")
 
-    baseline = report_summary(csvexport, args.trace, args.top) or {}
+    baseline = report_summary(ex, args.top) or {}
 
     if args.zone:
-        instances = collect_zone(csvexport, args.trace, args.zone)
+        instances = collect_zone(ex, args.zone)
         outliers = report_outliers(instances, args.zone, args.factor)
-        report_overlap(csvexport, args.trace, outliers, args.zone,
-                       args.windows, baseline)
+        report_overlap(ex, outliers, args.zone, args.windows, baseline)
     else:
         print("\n  Pass --zone <name> to hunt outliers and see what overlapped them.")
     print()

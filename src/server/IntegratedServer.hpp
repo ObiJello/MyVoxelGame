@@ -1162,13 +1162,10 @@ namespace Server {
         // view is where LivingEntity::Hurt actually set it.
         Server::PlayerEntityView* GetPlayerEntityView(uint32_t connectionId);
 
-        // MC's crit is a particle burst plus a sound; this port has neither
-        // yet, so the event exists to carry the signal and the client draws
-        // what it can. Numbered clear of MC's own 2/3/10/18/60.
-        static constexpr uint8_t kEntityEventCrit = 200;
-        // MC ClientboundAnimatePacket(entity, MAGIC_CRITICAL_HIT) — the
-        // enchanted-hit burst, same stand-in as the crit above.
-        static constexpr uint8_t kEntityEventMagicCrit = 201;
+        // MC ClientboundAnimatePacket CRITICAL_HIT / MAGIC_CRITICAL_HIT, as
+        // entity events — see Game::kEntityEventCrit (EntityLevel.hpp).
+        static constexpr uint8_t kEntityEventCrit = Game::kEntityEventCrit;
+        static constexpr uint8_t kEntityEventMagicCrit = Game::kEntityEventMagicCrit;
 
         // Spawn `count` mobs of `type` at `pos`, for /summon. Returns how many
         // were actually created. Scattered slightly so a stack of them does not

@@ -255,7 +255,10 @@ if(ENABLE_TRACY)
         # MUST match the tracy-profiler UI you run. Tracy checks a protocol
         # version on connect and refuses with "Protocol mismatch" if the client
         # library and the viewer come from different releases — bump both together.
-        GIT_TAG v0.14.0
+        # This is also the single pin for the command-line tools:
+        # tools/build_tracy_tools.sh builds tracy-export / capture / csvexport /
+        # update at this tag (the report scripts run it when the pin moves).
+        GIT_TAG v0.14.1
         GIT_SHALLOW TRUE
         # Drops the root requirement from Tracy 0.14's Apple system tracing.
         # Upstream itself notes the privilege check is unnecessary for what is
@@ -946,6 +949,8 @@ set(GAME_SOURCES
             src/client/renderer/texture/AtlasBuilder.hpp
             src/client/renderer/texture/TextureAnimator.cpp
             src/client/renderer/texture/TextureAnimator.hpp
+            src/client/renderer/texture/Stitcher.cpp
+            src/client/renderer/texture/Stitcher.hpp
 
             # Client world
             src/client/world/ClientChunkManager.cpp

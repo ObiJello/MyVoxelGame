@@ -1,6 +1,7 @@
 // File: src/client/network/NetworkIOService.cpp
 #include "NetworkIOService.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <chrono>
 
 namespace Client {
@@ -61,6 +62,9 @@ namespace Client {
     }
     
     void NetworkIOService::RunIOThread() {
+        // Server packets are read and decoded here — chunk packets are
+        // prebuilt on this thread (ClientChunkManager::PrebuildChunk).
+        PROFILE_THREAD("NetworkIO");
         Log::Info("NetworkIOService: I/O thread started (tid: %zu)", 
                   std::hash<std::thread::id>{}(std::this_thread::get_id()));
         

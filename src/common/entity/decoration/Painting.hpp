@@ -50,6 +50,13 @@ namespace Game {
         void DropItem(Entity* causedBy) override;
         void PlayPlacementSound() override;
 
+        // DELIBERATE DIVERGENCE FROM MC (by request): placing a painting
+        // still needs the whole wall behind it (Survives, MC's rule), but a
+        // painting already hung stays up while ANY block behind it still
+        // supports it — so blocks can be dug out from behind a painting for
+        // a hidden doorway. MC pops it on the next 100-tick check.
+        bool StillHangs() const override { return SurvivesWith(/*requireFullSupport=*/false); }
+
         // MC getPickResult.
         static ItemStack PickResult() { return ItemStack(Items::Painting, 1); }
 

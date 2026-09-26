@@ -235,6 +235,12 @@ namespace Game {
         };
         DigState digState;
         bool breakButtonHeld = false;
+        // This press of the attack button landed on an entity. Mining stays
+        // off until the button is released, so the press that breaks a
+        // painting (or kills a mob) against a wall does not go on to dig
+        // the wall behind it the moment the entity is gone — at once, in
+        // creative.
+        bool pressHitEntity = false;
 
         // Placing state — tick-based now, no wall-clock throttle (matches MC).
         bool placeButtonHeld = false;

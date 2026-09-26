@@ -222,6 +222,19 @@ namespace Game {
 
         const glm::dvec3 movement = velocity;
 
+        // MC AbstractArrow.tick: a crit arrow sheds four CRIT sparks along
+        // this tick's path, blown back against the flight. (ServerLevel's
+        // addParticle draws nothing; the client's copy spawns them.)
+        if (m_critArrow && !serverSide) {
+            for (int i = 0; i < 4; ++i) {
+                const double t = static_cast<double>(i) / 4.0;
+                m_level->AddParticle(ParticleKind::Crit,
+                                     origin.x + movement.x * t, origin.y + movement.y * t,
+                                     origin.z + movement.z * t,
+                                     -movement.x, -movement.y + 0.2, -movement.z);
+            }
+        }
+
         // ── Rotation follows the velocity (MC lerpRotation at 0.2) ─────────
         const double horiz = std::sqrt(movement.x * movement.x + movement.z * movement.z);
         const float targetYRot =

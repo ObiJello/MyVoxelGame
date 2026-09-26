@@ -33,19 +33,23 @@ namespace Render {
     bool Lightmap::Initialize() {
         if (!g_renderBackend) return false;
         for (int slot = 0; slot < 2; ++slot) {
-            if (m_texture[slot] != INVALID_TEXTURE) continue;
+            if (m_texture[slot][0] != INVALID_TEXTURE) continue;
             // White until the first Update: a draw before it is simply unlit.
             std::array<uint8_t, 16 * 16 * 4> white{};
             white.fill(255);
-            m_texture[slot] = g_renderBackend->CreateTexture2D(16, 16, TextureFormat::RGBA8, white.data());
-            if (m_texture[slot] == INVALID_TEXTURE) {
-                Log::Error("[Light] could not create the lightmap texture");
-                return false;
+            for (int r = 0; r < kRing; ++r) {
+                TextureHandle& tex = m_texture[slot][r];
+                tex = g_renderBackend->CreateTexture2D(16, 16, TextureFormat::RGBA8, white.data());
+                if (tex == INVALID_TEXTURE) {
+                    Log::Error("[Light] could not create the lightmap texture");
+                    return false;
+                }
+                // MC: the lightmap is sampled LINEAR, clamped (a smooth-lit
+                // vertex's fractional level blends the two texels around it).
+                g_renderBackend->SetTextureFilter(tex, TextureFilter::Linear, TextureFilter::Linear);
+                g_renderBackend->SetTextureWrap(tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
             }
-            // MC: the lightmap is sampled LINEAR, clamped (a smooth-lit
-            // vertex's fractional level blends the two texels around it).
-            g_renderBackend->SetTextureFilter(m_texture[slot], TextureFilter::Linear, TextureFilter::Linear);
-            g_renderBackend->SetTextureWrap(m_texture[slot], TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+            m_current[slot] = 0;
             m_texels[slot] = white;
             m_hasUploaded[slot] = false;
         }
@@ -55,8 +59,11 @@ namespace Render {
     void Lightmap::Shutdown() {
         if (!g_renderBackend) return;
         for (int slot = 0; slot < 2; ++slot) {
-            if (m_texture[slot] != INVALID_TEXTURE) g_renderBackend->DestroyTexture(m_texture[slot]);
-            m_texture[slot] = INVALID_TEXTURE;
+            for (TextureHandle& tex : m_texture[slot]) {
+                if (tex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(tex);
+                tex = INVALID_TEXTURE;
+            }
+            m_current[slot] = 0;
             m_hasUploaded[slot] = false;
         }
         m_mainFrame = nullptr;
@@ -146,9 +153,16 @@ namespace Render {
     }
 
     void Lightmap::Upload(int slot) {
-        if (m_texture[slot] == INVALID_TEXTURE || !g_renderBackend) return;
+        if (m_texture[slot][0] == INVALID_TEXTURE || !g_renderBackend) return;
         if (m_hasUploaded[slot] && m_uploaded[slot] == m_texels[slot]) return;
-        g_renderBackend->UpdateTexture2D(m_texture[slot], 0, 0, 16, 16, m_texels[slot].data());
+        // GL: the next texture in the ring — the one drawn with longest ago.
+        // Vulkan writes in place: it stages the copy into the NEXT frame's
+        // command buffer (no stall to avoid), so a freshly rotated handle
+        // bound this frame would show the texels of four uploads ago.
+        const bool rotate = g_renderBackend->GetType() == BackendType::OpenGL;
+        const int next = rotate ? (m_current[slot] + 1) % kRing : m_current[slot];
+        g_renderBackend->UpdateTexture2D(m_texture[slot][next], 0, 0, 16, 16, m_texels[slot].data());
+        m_current[slot] = next;
         m_uploaded[slot] = m_texels[slot];
         m_hasUploaded[slot] = true;
     }
@@ -171,7 +185,7 @@ namespace Render {
     }
 
     TextureHandle Lightmap::TextureFor(const EnvironmentFrame& frame) {
-        if (&frame == m_mainFrame || m_texture[1] == INVALID_TEXTURE) return m_texture[0];
+        if (&frame == m_mainFrame || m_texture[1][0] == INVALID_TEXTURE) return m_texture[0][m_current[0]];
         // A portal's far-side frame: its own lightmap in the second slot.
         // The upload lands at the next frame's start (Vulkan stages texture
         // updates), a frame's latency on a view that barely changes.
@@ -179,7 +193,7 @@ namespace Render {
         Upload(1);
         m_farFrame = &frame;
         m_farSerial = m_updateSerial;
-        return m_texture[1];
+        return m_texture[1][m_current[1]];
     }
 
     glm::vec3 Lightmap::SampleFor(const EnvironmentFrame& frame, int blockLevel, int skyLevel) {

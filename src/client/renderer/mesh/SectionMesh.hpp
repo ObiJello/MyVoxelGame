@@ -128,8 +128,9 @@ namespace Render {
         }
 
         // Face map: the per-block records of this layer's greedy-merged
-        // rectangles (two RGBA8 texels per block face, see
-        // TerrainVertex::Mapped). Uploaded after the layer's vertices into
+        // rectangles (four words = two RGBA16 texels per block face: colour,
+        // AO and sprite, then the four corner lights — see
+        // TerrainVertex::kFaceMapWordsPerRecord). Uploaded after the layer's vertices into
         // the same mega-buffer region and read by the fragment shader
         // through a buffer texture over the slab.
         std::vector<uint32_t> opaqueFaceMap;

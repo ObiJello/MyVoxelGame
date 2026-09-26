@@ -1486,36 +1486,36 @@ static uint16_t     s_lastPresencePort = 0;
         return Shader(vertPath, fragPath); // This will create a basic shader even if files don't exist
     }
 
+    // The unique_ptr each atlas lives in (Render::GetAtlas reads them).
+    std::unique_ptr<Render::AtlasBuilder>& AtlasSlot(Render::AtlasId id) {
+        return id == Render::AtlasId::Items ? Render::g_itemAtlasBuilder : Render::g_atlasBuilder;
+    }
+
     bool InitializeTextureSystem() {
-        // Initialize TextureAnimator first
-        Render::g_textureAnimator = std::make_unique<Render::TextureAnimator>();
-        
-        // Initialize AtlasBuilder
-        Render::g_atlasBuilder = std::make_unique<Render::AtlasBuilder>();
-        
-        // Connect the TextureAnimator to the AtlasBuilder
-        Render::g_atlasBuilder->SetTextureAnimator(Render::g_textureAnimator.get());
-        
-        std::string atlasJsonPath = GetAssetPath("assets/atlases/blocks.json");
-        std::string texturesPath = GetAssetPath("assets/textures");
-
-        // Video Settings "Mipmap Levels" — MC passes options.mipmapLevels
-        // into the AtlasManager at startup (Minecraft.java:523). options.txt
-        // is not loaded yet at this point (this reads the compiled-in 4);
-        // the saved value is applied right after InitializeGameDirectorySystem.
-        Render::g_atlasBuilder->SetMipmapLevels(Platform::g_gameSettings.GetMipmapLevels());
-
-        if (!Render::g_atlasBuilder->BuildFromJSON(atlasJsonPath, texturesPath)) {
-            Log::Warning("AtlasBuilder failed to build from JSON at %s",
-                        atlasJsonPath.c_str());
-            Render::g_atlasBuilder.reset();
-            Render::g_textureAnimator.reset();
-            return false;
+        // MC AtlasManager: the block atlas (mipmapped) and the item atlas.
+        // Each owns its TextureAnimator.
+        const std::string texturesPath = GetAssetPath("assets/textures");
+        for (int i = 0; i < Render::kAtlasCount; ++i) {
+            const auto id = static_cast<Render::AtlasId>(i);
+            auto& slot = AtlasSlot(id);
+            slot = std::make_unique<Render::AtlasBuilder>(id);
+            // Video Settings "Mipmap Levels" — MC passes options.mipmapLevels
+            // into the AtlasManager at startup (Minecraft.java:523). options.txt
+            // is not loaded yet at this point (this reads the compiled-in 4);
+            // the saved value is applied right after InitializeGameDirectorySystem.
+            // (A no-op on the atlases MC never mipmaps.)
+            slot->SetMipmapLevels(Platform::g_gameSettings.GetMipmapLevels());
+            const std::string jsonPath = GetAssetPath(slot->GetConfig().definition);
+            if (!slot->BuildFromJSON(jsonPath, texturesPath)) {
+                Log::Warning("AtlasBuilder failed to build the %s atlas from %s",
+                             slot->GetConfig().name, jsonPath.c_str());
+                slot.reset();
+                if (id == Render::AtlasId::Blocks) return false;   // the one the world cannot do without
+                continue;
+            }
+            Log::Info("Atlas '%s': %dx%d with %zu textures", slot->GetConfig().name,
+                      slot->GetAtlasWidth(), slot->GetAtlasHeight(), slot->GetTextureCount());
         }
-        Log::Info("AtlasBuilder initialized successfully: %dx%d atlas with %zu textures",
-                 Render::g_atlasBuilder->GetAtlasWidth(),
-                 Render::g_atlasBuilder->GetAtlasHeight(),
-                 Render::g_atlasBuilder->GetTextureCount());
         return true;
     }
 
@@ -1541,11 +1541,13 @@ static uint16_t     s_lastPresencePort = 0;
             }
         }
 
-        if (Render::g_atlasBuilder) {
-            Render::g_atlasBuilder->ReleaseGpuResources();
-            if (!Render::g_atlasBuilder->BuildFromJSON(GetAssetPath("assets/atlases/blocks.json"),
-                                                        GetAssetPath("assets/textures"))) {
-                Log::Error("[ResourcePacks] block atlas rebuild failed");
+        for (int i = 0; i < Render::kAtlasCount; ++i) {
+            Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i));
+            if (!atlas) continue;
+            atlas->ReleaseGpuResources();
+            if (!atlas->BuildFromJSON(GetAssetPath(atlas->GetConfig().definition),
+                                      GetAssetPath("assets/textures"))) {
+                Log::Error("[ResourcePacks] %s atlas rebuild failed", atlas->GetConfig().name);
             }
         }
         Game::BiomeRegistry::LoadColormaps(GetAssetPath("assets/textures"));
@@ -1893,6 +1895,45 @@ static uint16_t     s_lastPresencePort = 0;
     }
 #endif
 
+    // "[Window] framebuffer WxH (full screen|windowed)" on every change of
+    // the drawable's size — the one line that says what a capture measured.
+    // Scripted profiling runs check it: a replay that did not stay full
+    // screen for its whole playback is a different workload.
+    void LogWindowSizeIfChanged(GLFWwindow* window) {
+        static int s_loggedW = -1, s_loggedH = -1, s_loggedFull = -1, s_loggedFocus = -1;
+        int w = 0, h = 0;
+        glfwGetFramebufferSize(window, &w, &h);
+#ifdef __APPLE__
+        const int full = MacIsNativeFullscreen(window) ? 1 : 0;
+#else
+        const int full = s_isFullscreen ? 1 : 0;
+#endif
+        const int focus = glfwGetWindowAttrib(window, GLFW_FOCUSED) ? 1 : 0;
+        if (w == s_loggedW && h == s_loggedH && full == s_loggedFull && focus == s_loggedFocus) return;
+        s_loggedW = w;
+        s_loggedH = h;
+        s_loggedFull = full;
+        s_loggedFocus = focus;
+        Log::Info("[Window] framebuffer %dx%d (%s, %s)", w, h, full ? "full screen" : "windowed",
+                  focus ? "focused" : "not focused");
+    }
+
+    // The saved "fullscreen:true", applied on the first frame of a running
+    // loop rather than at startup. macOS's native full-screen transition runs
+    // on the app's event loop; requested at startup it overlapped the second
+    // or two of blocking initialisation (registries, models, atlases) that
+    // pumps no events, and the transition regularly reverted — the window
+    // came up at 3420x2146 and fell back to a 1280x720 window a moment later
+    // (the [Window] log, 2026-09-25).
+    static bool s_startupFullscreenPending = false;
+
+    void ToggleFullscreen(GLFWwindow* window);
+    void ApplyStartupFullscreen(GLFWwindow* window) {
+        if (!s_startupFullscreenPending) return;
+        s_startupFullscreenPending = false;
+        if (!s_isFullscreen) ToggleFullscreen(window);
+    }
+
     void ToggleFullscreen(GLFWwindow* window) {
 #ifdef __APPLE__
         // The window's ACTUAL state, not the flag: the green button and Esc
@@ -2056,6 +2097,7 @@ static uint16_t     s_lastPresencePort = 0;
             // are judged correctly.
             Input::SetUiActive(true);
             glfwPollEvents();
+            ApplyStartupFullscreen(window);
             Input::UpdateKeyStates();
             Input::ClearRawKeyEvents();   // F3 chords are an in-world thing
 
@@ -3439,9 +3481,10 @@ static uint16_t     s_lastPresencePort = 0;
         Input::Init(window);
         SetCursorCaptured(window, true);
 
-        // Apply fullscreen setting from saved preferences
+        // Apply fullscreen setting from saved preferences — on the first
+        // running frame (ApplyStartupFullscreen), once events are pumped.
         if (Platform::g_gameSettings.GetFullscreen()) {
-            ToggleFullscreen(window);
+            s_startupFullscreenPending = true;
         }
 
         // Initialize game systems BEFORE any chunk loading
@@ -3536,8 +3579,8 @@ static uint16_t     s_lastPresencePort = 0;
                 Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
                 Render::g_skyRenderer.Shutdown();
                 Render::g_cloudRenderer.Shutdown();
-                if (Render::g_atlasBuilder)    Render::g_atlasBuilder.reset();
-                if (Render::g_textureAnimator) Render::g_textureAnimator.reset();
+                Render::g_atlasBuilder.reset();
+                Render::g_itemAtlasBuilder.reset();
                 if (Client::g_friendsClient) {
                     Client::g_friendsClient->Stop();
                     Client::g_friendsClient.reset();
@@ -4215,7 +4258,11 @@ static uint16_t     s_lastPresencePort = 0;
                 std::error_code ec;
                 std::filesystem::create_directories(dir, ec);
                 bool ok = false;
-                if (Render::g_atlasBuilder) ok = Render::g_atlasBuilder->SaveAtlasDebugImage((dir / "atlas_blocks.png").string());
+                // MC dumps every atlas as <atlas>.png.
+                for (int i = 0; i < Render::kAtlasCount; ++i) {
+                    const Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i));
+                    if (atlas && atlas->SaveAtlasDebugImage((dir / (std::string("atlas_") + atlas->GetConfig().name + ".png")).string())) ok = true;
+                }
                 if (!ok) return false;
                 shown = std::filesystem::relative(dir, Platform::g_gameDirectory.GetGameDirectory(), ec).string();
                 absolute = dir.string();
@@ -4892,6 +4939,7 @@ static uint16_t     s_lastPresencePort = 0;
             }
             Render::DebugScreen::FrameProfiler::Pop();
             DEBUG_PIE_ZONE("Keybindings");
+            ApplyStartupFullscreen(window);
 #ifdef __APPLE__
             MacTrackNativeFullscreen(window);
 #endif
@@ -7178,12 +7226,16 @@ static uint16_t     s_lastPresencePort = 0;
                 lastFrameMeshActive = Threading::g_clientWorkerPool->GetActiveJobCount();
             }
 
+            LogWindowSizeIfChanged(window);
+
             // 8. Update texture animations
             { PROFILE_ZONE_N("TexAnimation");
             PROFILE_TIMER_START(texanim);
             DEBUG_PIE_ZONE("textures");
-            if (Render::g_textureAnimator) {
-                Render::g_textureAnimator->UpdateAnimations(dt);
+            for (int i = 0; i < Render::kAtlasCount; ++i) {
+                if (Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i))) {
+                    atlas->UpdateAnimations(dt);
+                }
             }
             PROFILE_TIMER_END(texanim, metrics.textureAnimationTime);
             }
@@ -9975,6 +10027,7 @@ static uint16_t     s_lastPresencePort = 0;
             }
             PROFILE_TIMER_END(vsync, metrics.vsyncWaitTime);
             }
+            Render::DevSkipFrameMark();
 
             // Max Framerate option (Video Settings). 260 = Unlimited. Applied
             // whether or not VSync is on, as MC does (Minecraft.renderFrame:
@@ -10289,12 +10342,8 @@ static uint16_t     s_lastPresencePort = 0;
         Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
         Render::g_skyRenderer.Shutdown();
         Render::g_cloudRenderer.Shutdown();
-        if (Render::g_atlasBuilder) {
-            Render::g_atlasBuilder.reset();
-        }
-        if (Render::g_textureAnimator) {
-            Render::g_textureAnimator.reset();
-        }
+        Render::g_atlasBuilder.reset();
+        Render::g_itemAtlasBuilder.reset();
 
         // 8b. Cleanup debug system (before render backend, since ImGui shutdown needs the backend)
         Debug::DebugSystem::Shutdown();

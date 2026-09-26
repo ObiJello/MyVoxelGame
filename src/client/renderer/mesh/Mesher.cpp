@@ -103,6 +103,21 @@ namespace Render {
                   "s_ctmUVs is declared with a literal 64 in Mesher.hpp to keep "
                   "ConnectedTextures.hpp out of that header - keep them in step");
     thread_local std::unordered_map<const Game::FaceDef*, SpriteRef> Mesher::s_faceUVCache;
+    thread_local std::unordered_map<const Game::FaceDef*, RenderLayer> Mesher::s_faceLayerCache;
+
+    namespace {
+        // OBEY_BLOCK_LAYERS=1: the pre-2026-09-25 per-block layer (the
+        // registry's), for A/B against MC's per-quad rule. Launch-time.
+        bool PerBlockLayers() {
+            static const bool on = std::getenv("OBEY_BLOCK_LAYERS") != nullptr;
+            return on;
+        }
+        // Faces per (block-layer rule -> per-quad rule), logged every 4096
+        // sections: [LayerCensus]. Diagnostic.
+        std::atomic<uint64_t> s_layerCensus[3][3];
+        std::atomic<uint32_t> s_layerCensusSections{0};
+        thread_local uint32_t t_layerCensus[3][3];
+    }
 
     // Face normal vectors for each block face
     static const glm::vec3 FACE_NORMALS[] = {
@@ -188,13 +203,14 @@ namespace Render {
                 // UNMERGED (ineligible): this quad must then stay a 1x1 too,
                 // or the pair's tessellations differ and z-fight.
                 uint8_t   solo;
-                // The face's light word, the same at all four corners (the
-                // stash's eligibility test). Part of the merge test: a merged
-                // rectangle carries ONE light (TerrainVertex::light), so only
-                // cells lit alike join.
-                uint32_t  light;
-                // The four corners' light words, for a 1x1 survivor's verbatim
-                // re-emit (all equal to `light` by eligibility, kept for clarity).
+                // The face's four corner light words in TILE-corner order
+                // (the aoByte's: index tu + 2 * tv) — its face-map record's
+                // second texel. NOT part of the merge test: the fragment
+                // shader lights every block from its own record, so faces lit
+                // differently still merge.
+                uint32_t  tileLight[4];
+                // The four corners' light words in vertex order, for a 1x1
+                // survivor's verbatim re-emit.
                 std::array<uint32_t, 4> cornerLight;
             };
             // The merge test compares NOTHING about a quad's look any more:
@@ -209,6 +225,17 @@ namespace Render {
             inline uint64_t QuadKey(const PendingQuad&) {
                 return 1ull;
             }
+            // OBEY_GREEDY_LIGHT_SPLIT=1 (launch-time A/B switch): the pre-
+            // 2026-09-25 merge rule — only faces lit alike at all four corners,
+            // and alike across the rectangle, merge — on top of the per-block
+            // light records, so the image is identical and only the merging
+            // differs. Measured at the tour pose: 4.8 M vs 3.8 M terrain
+            // vertices, +0.4 ms GPU per frame.
+            inline bool LightSplit() {
+                static const bool on = std::getenv("OBEY_GREEDY_LIGHT_SPLIT") != nullptr;
+                return on;
+            }
+
 
             // [layer][face][plane][v][u]: layer 0 = opaque, 1 = cutout.
             thread_local int32_t t_grid[2][6][16][16][16];
@@ -557,6 +584,7 @@ namespace Render {
         // grass block would draw whatever sprite now sits at the old id.
         s_ctmUVs.clear();
         s_faceUVCache.clear();
+        s_faceLayerCache.clear();
 
         for (size_t i = 0; i < BLOCK_ID_COUNT; ++i) {
             auto blockId = static_cast<Game::BlockID>(i);
@@ -1577,10 +1605,24 @@ namespace Render {
                 // FaceDef::cutoutOverlay. The invariant this maintains is the
                 // one the opaque shaders rely on: every texel drawn by the
                 // opaque pass is meant to land, alpha ignored.
-                const RenderLayer faceLayer =
+                const RenderLayer ruleLayer =
                     (blockLayer == RenderLayer::Opaque && faceDef.cutoutOverlay)
                         ? RenderLayer::Cutout
                         : blockLayer;
+                // MC 26.3 picks the layer PER QUAD from the texels its UV
+                // rectangle covers (SectionCompiler: quad.materialInfo().layer()
+                // = ChunkSectionLayer.byTransparency(FaceBakery's
+                // computeMaterialTransparency)): a fully opaque face of a
+                // cutout block is drawn in the solid pass, without the alpha
+                // test that makes the cutout pass cost more. The one block
+                // rule left is Fast leaves, forced solid whatever their texels
+                // (ModelBlockRenderer.forceOpaque) — already in blockLayer.
+                const bool leavesForcedSolid = s_blockPropsCache[static_cast<uint16_t>(blockId)].isLeaves &&
+                                               !s_activeMeshOptions.cutoutLeaves;
+                const RenderLayer texelLayer = leavesForcedSolid ? RenderLayer::Opaque
+                                                                 : FaceTexelLayer(model, faceDef, ruleLayer);
+                ++t_layerCensus[static_cast<int>(ruleLayer)][static_cast<int>(texelLayer)];
+                const RenderLayer faceLayer = PerBlockLayers() ? ruleLayer : texelLayer;
 
                 glm::vec3 faceNormal = GetFaceNormal(blockFace);
                 FaceCapture* capture = nullptr;
@@ -2218,11 +2260,14 @@ namespace Render {
         const uint32_t color = baseColor[0];
         if (baseColor[1] != color || baseColor[2] != color || baseColor[3] != color) return false;
         if (aoCode[0] > 3 || aoCode[1] > 3 || aoCode[2] > 3 || aoCode[3] > 3) return false;
-        // Light rides the VERTEX (one value per merged rectangle, not per
-        // block like AO), so only a face lit the same at all four corners
-        // can merge: open sky, a dark cave, a torch-lit room's flat wall
-        // interior — not the gradient around a torch or under an overhang.
-        if (light[1] != light[0] || light[2] != light[0] || light[3] != light[0]) return false;
+        // Light is NOT a condition: like AO, each face's four corner lights
+        // go into its face-map record (tileLight below) and the fragment
+        // shader relights every block from it — so the gradient around a
+        // torch or under an overhang merges as well as open sky. (Until
+        // 2026-09-25 light rode the vertex and only faces lit alike at all
+        // four corners merged: 21% more terrain vertices at the tour pose.)
+        if (Greedy::LightSplit() &&
+            (light[1] != light[0] || light[2] != light[0] || light[3] != light[0])) return false;
         // Place each corner's AO level at its TILE corner, derived from the
         // vertex's actual position inside the cell through the same per-face
         // tile-uv mapping emitMerged applies (tileUV): u/v of a unit cell are
@@ -2230,6 +2275,7 @@ namespace Render {
         // position rather than assuming a corner order keeps this exact even
         // if CreateFaceVertices' order ever differs from emitMerged's.
         uint8_t aoByte = 0;
+        uint32_t tileLight[4] = {0, 0, 0, 0};
         for (int k = 0; k < 4; ++k) {
             const glm::vec3 l = faceVerts[static_cast<size_t>(k)].pos -
                                 glm::vec3(static_cast<float>(worldX), static_cast<float>(worldY),
@@ -2245,6 +2291,7 @@ namespace Render {
                 default:                   tu = cz;     tv = 1 - cy; break;   // NegativeX
             }
             aoByte = static_cast<uint8_t>(aoByte | (aoCode[k] << (2 * (tu + 2 * tv))));
+            tileLight[tu + 2 * tv] = light[static_cast<size_t>(k)];
         }
 
         // Section-local cell coordinates. ProcessBlock only ever hands us
@@ -2271,7 +2318,7 @@ namespace Render {
         if (cell != 0) return false;
 
         Greedy::t_pending.push_back({faceVerts, sprite.id, color, blockId, aoByte, 0ull, 0,
-                                     light[0], light});
+                                     {tileLight[0], tileLight[1], tileLight[2], tileLight[3]}, light});
         cell = static_cast<int32_t>(Greedy::t_pending.size());
         // Link with a coplanar face of the other layer in this cell, either
         // stash order (see PendingQuad::partnerKey).
@@ -2286,6 +2333,26 @@ namespace Render {
     }
 
     void Mesher::FlushGreedyQuads(SectionMesh& outMesh) {
+        // [LayerCensus]: this section's faces, then every 4096 sections a
+        // log line of the running totals (block-layer rule -> per-quad rule).
+        for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+                if (t_layerCensus[a][b]) {
+                    s_layerCensus[a][b].fetch_add(t_layerCensus[a][b], std::memory_order_relaxed);
+                    t_layerCensus[a][b] = 0;
+                }
+        if ((s_layerCensusSections.fetch_add(1, std::memory_order_relaxed) + 1) % 4096 == 0) {
+            uint64_t c[3][3];
+            for (int a = 0; a < 3; ++a)
+                for (int b = 0; b < 3; ++b) c[a][b] = s_layerCensus[a][b].load(std::memory_order_relaxed);
+            Log::Info("[LayerCensus] faces rule->quad: opaque->(%llu,%llu,%llu) cutout->(%llu,%llu,%llu) "
+                      "translucent->(%llu,%llu,%llu) [opaque,cutout,translucent]%s",
+                      (unsigned long long)c[0][0], (unsigned long long)c[0][1], (unsigned long long)c[0][2],
+                      (unsigned long long)c[1][0], (unsigned long long)c[1][1], (unsigned long long)c[1][2],
+                      (unsigned long long)c[2][0], (unsigned long long)c[2][1], (unsigned long long)c[2][2],
+                      PerBlockLayers() ? " (OBEY_BLOCK_LAYERS: rule layer in use)" : "");
+        }
+
         using Greedy::PendingQuad;
 
         int mergedQuads = 0;
@@ -2415,6 +2482,8 @@ namespace Render {
             const bool debug = s_greedyDebugColors.load(std::memory_order_relaxed);
             const uint32_t heat = debug ? GreedyHeatColor(w * h) : 0u;
             const uint32_t recordBase = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerRecord);
+            // The vertices address records by TEXEL (two per record).
+            const uint32_t recordTexel = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerTexel);
             faceMap.resize(faceMap.size() +
                            static_cast<size_t>(w * h) * TerrainVertex::kFaceMapWordsPerRecord);
             for (int dv = 0; dv < h; ++dv) {
@@ -2427,6 +2496,8 @@ namespace Render {
                     faceMap[rec]     = debug ? TerrainVertex::FaceMapTexel0(heat, 0)
                                              : TerrainVertex::FaceMapTexel0(cq.color, cq.aoByte);
                     faceMap[rec + 1] = TerrainVertex::FaceMapTexel1(cq.spriteId);
+                    faceMap[rec + 2] = TerrainVertex::FaceMapLightPair(cq.tileLight[0], cq.tileLight[1]);
+                    faceMap[rec + 3] = TerrainVertex::FaceMapLightPair(cq.tileLight[2], cq.tileLight[3]);
                 }
             }
 
@@ -2436,7 +2507,7 @@ namespace Render {
                 const glm::vec2 t = tileUV(local[k]);
                 outVerts.push_back(TerrainVertex::Mapped(local[k],
                                                          static_cast<int>(t.x), static_cast<int>(t.y),
-                                                         tu0, tv0, w, h, recordBase, q.light));
+                                                         tu0, tv0, w, h, recordTexel, q.tileLight[0]));
             }
             MeshCensus::Count(q.blockId, &outVerts == &outMesh.opaqueVerts ? 0 : 1, true,
                               static_cast<uint32_t>(w * h));
@@ -2475,10 +2546,8 @@ namespace Render {
                     auto matches = [&](int32_t other) {
                         if (other <= 0 || q.solo) return false;
                         const PendingQuad& o = Greedy::t_pending[other - 1];
-                        // Same light too: the rectangle carries one. Both
-                        // layers of a coplanar pair read the same light, so
-                        // they still break at the same cells.
-                        return !o.solo && o.partnerKey == q.partnerKey && o.light == q.light;
+                        return !o.solo && o.partnerKey == q.partnerKey &&
+                               (!Greedy::LightSplit() || o.tileLight[0] == q.tileLight[0]);
                     };
 
                     int w = 1;
@@ -2560,6 +2629,45 @@ namespace Render {
 
         // IBlockAccess handles cross-chunk boundaries automatically
         return blocks.GetBlock(neighborX, neighborY, neighborZ);
+    }
+
+    RenderLayer Mesher::FaceTexelLayer(const Game::BlockModel& model, const Game::FaceDef& faceDef,
+                                       RenderLayer fallback) {
+        if (auto it = s_faceLayerCache.find(&faceDef); it != s_faceLayerCache.end()) return it->second;
+        RenderLayer layer = fallback;
+        // Material.Baked.forceTranslucent: a texture slot the model marks
+        // `force_translucent` — at any hop of the slot chain — or whose
+        // resolved sprite a composite model marked.
+        bool forceTranslucent = false;
+        if (!model.translucentTextureRefs.empty()) {
+            std::string ref = faceDef.textureRef;
+            for (size_t hops = 0; hops <= model.textures.size() && !ref.empty(); ++hops) {
+                if (ref[0] == '#') ref = ref.substr(1);
+                if (model.translucentTextureRefs.count(ref)) { forceTranslucent = true; break; }
+                auto t = model.textures.find(ref);
+                if (t == model.textures.end()) break;
+                ref = t->second;
+                if (ref.empty() || ref[0] != '#') {
+                    forceTranslucent = model.translucentTextureRefs.count(ref) != 0;
+                    break;
+                }
+            }
+        }
+        if (forceTranslucent) {
+            layer = RenderLayer::Translucent;
+        } else if (g_atlasBuilder) {
+            const glm::vec4& uv = faceDef.uv;
+            const uint8_t bits = g_atlasBuilder->QuadTransparency(model.ResolveTexture(faceDef.textureRef),
+                                                                  uv.x / 16.0f, uv.y / 16.0f,
+                                                                  uv.z / 16.0f, uv.w / 16.0f);
+            if (bits != 0xFF) {
+                layer = (bits & AtlasBuilder::kTexelTranslucent) ? RenderLayer::Translucent
+                      : (bits & AtlasBuilder::kTexelTransparent) ? RenderLayer::Cutout
+                                                                 : RenderLayer::Opaque;
+            }
+        }
+        s_faceLayerCache[&faceDef] = layer;
+        return layer;
     }
 
     bool Mesher::GetTextureUV(const std::string& texturePath, SpriteRef& sprite) {

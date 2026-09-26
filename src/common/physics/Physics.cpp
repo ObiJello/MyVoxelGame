@@ -1816,7 +1816,15 @@ namespace Game {
 
     double CollideAxis(int axis, const AABBd& box, double desired,
                        const std::vector<AABBd>& colliders) {
-        if (desired == 0.0) return 0.0;
+        // MC VoxelShape.collide's tolerance: a move shorter than 1e-7 is no
+        // move, and a face within 1e-7 of the box counts as touching it —
+        // on the moving axis as well as the two cross axes. Without it a box
+        // that STARTS a hair inside the floor (a mob teleported onto a
+        // player whose float-precision rest height sits 1e-8 below the
+        // block's top) does not see the floor at all and drops through it
+        // into the block underneath.
+        constexpr double kEpsilon = 1.0e-7;
+        if (std::abs(desired) < kEpsilon) return 0.0;
 
         // The two axes that are NOT being resolved. A collider only blocks
         // motion along `axis` if the box already overlaps it on both of them.
@@ -1833,18 +1841,19 @@ namespace Game {
         double result = desired;
 
         for (const AABBd& c : colliders) {
-            // Strict inequality on both cross axes, matching AABB::Intersects —
-            // an entity sliding exactly along a face must not be caught by it.
-            if (hi(box, a) <= lo(c, a) || lo(box, a) >= hi(c, a)) continue;
-            if (hi(box, b) <= lo(c, b) || lo(box, b) >= hi(c, b)) continue;
+            // The cross axes: an entity sliding along a face (or within 1e-7
+            // of it) must not be caught by it.
+            if (hi(box, a) <= lo(c, a) + kEpsilon || lo(box, a) >= hi(c, a) - kEpsilon) continue;
+            if (hi(box, b) <= lo(c, b) + kEpsilon || lo(box, b) >= hi(c, b) - kEpsilon) continue;
 
             if (result > 0.0) {
-                // Moving positive: the collider's near (min) face stops us.
+                // Moving positive: the collider's near (min) face stops us —
+                // also when the box already reaches up to 1e-7 past it.
                 const double gap = lo(c, axis) - hi(box, axis);
-                if (gap >= 0.0 && gap < result) result = gap;
+                if (gap >= -kEpsilon && gap < result) result = gap;
             } else {
                 const double gap = hi(c, axis) - lo(box, axis);
-                if (gap <= 0.0 && gap > result) result = gap;
+                if (gap <= kEpsilon && gap > result) result = gap;
             }
         }
 

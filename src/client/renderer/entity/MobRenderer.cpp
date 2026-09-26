@@ -1114,8 +1114,15 @@ namespace Render {
         // Same load as ChestRenderer::LoadVariantTexture — nearest filtering
         // and clamped wrap, because entity sheets are pixel art whose edges
         // must not bleed into the neighbouring part's texels.
-        const std::string full = PlatformMain::GetAssetPath(relativePath);
-        if (!std::filesystem::exists(full)) {
+        PROFILE_ZONE_N("MobRender.LoadTexture");
+        PROFILE_ZONE_TEXT(relativePath.c_str(), relativePath.size());
+        std::string full;
+        bool exists = false;
+        { PROFILE_ZONE_N("MobRender.Locate");
+        full = PlatformMain::GetAssetPath(relativePath);
+        exists = std::filesystem::exists(full);
+        }
+        if (!exists) {
             Log::Warning("[MobRenderer] missing texture %s", relativePath.c_str());
             m_textureCache[cacheKey] = INVALID_TEXTURE;
             return INVALID_TEXTURE;
@@ -1123,7 +1130,10 @@ namespace Render {
 
         int w = 0, h = 0, ch = 0;
         stbi_set_flip_vertically_on_load(0);
-        unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+        unsigned char* pixels = nullptr;
+        { PROFILE_ZONE_N("MobRender.Decode");
+        pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
+        }
         if (!pixels) {
             Log::Warning("[MobRenderer] failed to decode %s", relativePath.c_str());
             m_textureCache[cacheKey] = INVALID_TEXTURE;
@@ -1154,7 +1164,8 @@ namespace Render {
         const auto it = m_models.find(key);
         if (it != m_models.end()) return &it->second;
 
-        std::unique_ptr<EntityModel> model = CreateModelFor(type);
+        std::unique_ptr<EntityModel> model;
+        { PROFILE_ZONE_N("MobRender.CreateModel"); model = CreateModelFor(type); }
         if (!model) {
             // Cache the miss. Without this every type with no model — primed
             // TNT and falling blocks, which BlockCubeEntityRenderer draws —

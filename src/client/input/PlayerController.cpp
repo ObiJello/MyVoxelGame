@@ -1085,6 +1085,11 @@ namespace Game {
             if (digState.isDestroying) AbortDig();
             return;
         }
+        // The press already hit an entity — see pressHitEntity.
+        if (pressHitEntity) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
 
         // The fill tool's cancel: Alt + left-click drops the marked corner
         // and breaks nothing.
@@ -1339,11 +1344,13 @@ namespace Game {
         // `range` is the pick distance left along this ray, `blockLimit` the
         // distance at which the crosshair's block stops it.
 
-        // Ray-vs-AABB over the mobs in range, nearest wins. MC inflates each
-        // candidate box by 0.3 (EntityHitResult's pick margin) so a target is
-        // hittable slightly outside its collision box, which is what makes
-        // combat feel responsive rather than pixel-perfect.
-        constexpr float kPickInflate = 0.3f;
+        // Ray-vs-AABB over the entities in range, nearest wins, each box
+        // inflated by its own MC getPickRadius (ProjectileUtil.
+        // getEntityHitResult: getBoundingBox().inflate(getPickRadius())) —
+        // 0 for players and mobs, 1 for a punchable projectile. (A blanket
+        // 0.3 margin here reached a painting's 1/16-deep box round the edge
+        // of the block it hangs on, so a hit on that block's top or side
+        // broke the painting.)
 
         int32_t bestId = 0;
         float bestT = range;
@@ -1387,8 +1394,9 @@ namespace Game {
                 const Game::Morph::Dims dims = Game::Morph::DimsOf(rp.morph);
                 const double hw = static_cast<double>(dims.width) * rp.scale * 0.5;
                 const double h  = static_cast<double>(dims.height) * rp.scale;
-                const glm::dvec3 mn = rp.position - glm::dvec3(hw + kPickInflate, kPickInflate, hw + kPickInflate);
-                const glm::dvec3 mx = rp.position + glm::dvec3(hw + kPickInflate, h + kPickInflate, hw + kPickInflate);
+                // Player.getPickRadius: 0.
+                const glm::dvec3 mn = rp.position - glm::dvec3(hw, 0.0, hw);
+                const glm::dvec3 mx = rp.position + glm::dvec3(hw, h, hw);
                 const float tMin = slab(mn, mx);
                 if (tMin < 0.0f || tMin >= bestT) continue;
                 if (blockLimit < tMin) continue;
@@ -1423,8 +1431,8 @@ namespace Game {
                     // their grid error far from the origin is well inside
                     // the 0.3 pick margin.
                     const Game::AABB& pbox = parts[pi];
-                    const float tMin = slab(glm::dvec3(pbox.min) - double(kPickInflate),
-                                            glm::dvec3(pbox.max) + double(kPickInflate));
+                    // EnderDragonPart.getPickRadius: 0.
+                    const float tMin = slab(glm::dvec3(pbox.min), glm::dvec3(pbox.max));
                     if (tMin < 0.0f || tMin >= bestT) continue;
                     if (blockLimit < tMin) continue;
                     bestT = tMin;
@@ -1441,7 +1449,8 @@ namespace Game {
             if (!mob.IsPickable()) continue;
 
             const Game::AABBd box = mob.GetAABBd();
-            const float tMin = slab(box.min - double(kPickInflate), box.max + double(kPickInflate));
+            const double pick = static_cast<double>(mob.GetPickRadius());
+            const float tMin = slab(box.min - pick, box.max + pick);
             if (tMin < 0.0f || tMin >= bestT) continue;
 
             // A block between us and the mob wins. lastBlockHit is the
@@ -1558,6 +1567,7 @@ namespace Game {
 
         {
             breakButtonHeld = true;
+            pressHitEntity = false;   // a fresh press decides for itself
 
 #if ENABLE_PORTAL_GUN
             // PortalGun hijacks left-click for blue-portal placement.
@@ -1572,7 +1582,10 @@ namespace Game {
             // crosshair target is whichever is nearer, and an entity in front
             // of a wall must be hittable. Doing this after the block path
             // would make mobs unhittable whenever anything was behind them.
-            if (TryAttackEntity()) return;
+            if (TryAttackEntity()) {
+                pressHitEntity = true;
+                return;
+            }
 
             // MC parity: startDestroyBlock runs SYNCHRONOUSLY on the click —
             // it doesn't wait for the next continueDestroyBlock tick AND it
@@ -1639,6 +1652,7 @@ namespace Game {
 
         breakButtonHeld = down;
         if (!down) {
+            pressHitEntity = false;
             // Releasing LMB ends the held-mining sequence the destroyDelay
             // belongs to. Without this, the player gets a 5-tick "first
             // click after a break" lag every time they tap LMB.

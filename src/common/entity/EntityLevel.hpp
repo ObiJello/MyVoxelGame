@@ -172,6 +172,12 @@ namespace Game {
         GeyserBase,
         GeyserPoof,
         GeyserPlume,
+        // ParticleTypes.CRIT / ENCHANTED_HIT (CritParticle.Provider /
+        // MagicProvider): the sparks of a critical hit and of a hit whose
+        // weapon's damage enchantments added damage — sprayed by a
+        // TrackingEmitter on the struck entity (entity events 200 / 201).
+        Crit,
+        EnchantedHit,
     };
 
     // MC client ParticleStatus (Options "particles"): the ordinals are the
@@ -216,6 +222,13 @@ namespace Game {
     static constexpr uint8_t kEntityEventExplosionSmall   = 101;
     static constexpr uint8_t kEntityEventLoveHeart        = 102;
     static constexpr uint8_t kEntityEventSwing            = 103;
+    //   kEntityEventCrit / kEntityEventMagicCrit — MC's
+    //       ClientboundAnimatePacket CRITICAL_HIT (4) / MAGIC_CRITICAL_HIT
+    //       (5), which this port has no packet for: the client answers with
+    //       ParticleEngine.createTrackingEmitter(entity, CRIT /
+    //       ENCHANTED_HIT) on whatever was struck, player or mob.
+    static constexpr uint8_t kEntityEventCrit             = 200;
+    static constexpr uint8_t kEntityEventMagicCrit        = 201;
 
     struct EntityLevel {
         virtual ~EntityLevel() = default;

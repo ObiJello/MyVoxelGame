@@ -323,6 +323,171 @@ shading multipliers come from the existing AO path, not a re-port of
 fire does not light the hand; shader-pack entity passes still get constant
 lmcoords; the far-portal lightmap is one frame late.
 
+## Sprite atlases (2026-09-25)
+
+MC 26's split, packed by MC's own stitcher (`texture/Stitcher.{hpp,cpp}`, a
+line-for-line port of `Stitcher` + `SpriteLoader.stitch`):
+
+- **blocks** (`assets/atlases/blocks.json`: block/, conduit, bell, pot,
+  enchanting book) — mipmapped, padding 16, ~4096x2048 with the CTM variants.
+  `g_atlasBuilder`. Terrain, block models, block items, fluids, break overlay.
+- **items** (`items.json`: item/, minus the 1254 px portal gun icon via MC's
+  `filter` source) — never mipmapped (MC), padding 1, ~1024x512.
+  `g_itemAtlasBuilder`.
+- `Render::FindSprite(key)` resolves like MC `MaterialBaker.bake`: items first,
+  then blocks, and returns the atlas the draw must bind (`GetAtlasTexture`).
+  Block models reach the item atlas only through `particle` (barrier,
+  light_NN, structure_void): the block-marker particle and the GUI's flat
+  fallback use `FindSprite`.
+- Item rendering does NOT read the item atlas: icons, held, dropped and framed
+  items draw each item's own PNG (HeldItemSpriteMesh, GuiGraphics
+  LoadItemTexture) — an engine difference from MC, not a bug of the split.
+- The stitcher rounds every slot to the mip grid, so no sprite can be
+  misaligned and lose its mip chain (the old packer lost 1,058 behind the
+  portal gun). A sprite whose size cannot halve to level 4 lowers the whole
+  atlas's mip level, with MC's warning — that is MC's rule too.
+- The block atlas is stitched for level 4 whatever the option; the Mipmap
+  Levels option rebuilds the chain in place (MC reloads resources instead).
+  MC's anisotropy widening of the padding is left out for the same reason.
+
+## GPU writes into sampled textures (2026-09-25)
+
+Apple's GL driver makes the CPU wait for the GPU when a texture that queued
+frames still sample is written with `glTexSubImage2D` — whichever write comes
+first in a frame eats the whole wait, and CPU/GPU overlap is lost. A replay
+A/B (GL 96 fps vs Vulkan 128) put it at `AnimFrameUpload` (median 12 us,
+18-25 ms outliers on 1,389 of 1,954 animating frames) and `Lightmap.Update`.
+
+- **Animated atlas sprites** follow MC's `AnimationState` exactly (per-tick
+  frames, `"interpolate": true` blending, the padding ring), but the pixels
+  are made on the CPU and only the changed rectangles written. MC draws them
+  into the atlas on the GPU; built and measured here, that cost +0.7 ms per
+  tick frame on Vulkan (and a freeze while generating) and +5 ms on GL, atlas
+  size made no difference, and was removed. `OBEY_SPRITE_ANIM`: `cpu`
+  (UpdateTexture2DLevel — Vulkan stages it, the default there) or `pbo` (GL
+  default: through a rotating pixel-unpack buffer, +1.8 ms per tick frame vs
+  +8.6 ms direct; a three-copy atlas ring measured +2.7 ms and was removed).
+  Pixel building is integer (the shader's mix, rounded) with memcpy'd padding:
+  0.14 ms per tick on Vulkan. GL's remainder is ~250 glTexSubImage2D calls
+  per tick inside Apple's driver; batching the staging-buffer mapping did not
+  move it.
+- **Lightmap** (GL only): uploads rotate through four textures, so the one
+  written was last drawn with four uploads ago. Vulkan writes in place and
+  the backend's per-frame copies keep it off the in-flight frame (see
+  "Frame overlap on MoltenVK").
+- Rule for new code: never CPU-write a texture or buffer the previous frames
+  still read on GL; draw into it on the GPU, rotate, or map unsynchronized
+  (`UpdateBufferUnsynchronized`).
+
+## Frame overlap on MoltenVK (2026-09-25)
+
+A Metal System Trace with hardware counters (template
+`gpu-counters.tracetemplate`, Performance Limiters) showed every Vulkan frame
+as one Metal command buffer — ~5 ms vertex, then ~2.5 ms fragment — and the
+next frame's vertex work never starting before the previous frame's fragment
+work ended: **0.0% vertex/fragment overlap**, against 19-33% on GL. On a tile
+GPU the geometry of frame N+1 can run while frame N shades pixels; during the
+vertex phase the shader cores sat nearly idle (VS occupancy ~4%, ALU ~3%,
+~45 GB/s), so the overlap is almost free. Five things each forbade it on its
+own — removing four of them left 0.0%, removing all five gave 51%:
+
+1. **MoltenVK argument buffers.** With them (and a Metal residency set,
+   macOS 15+) MoltenVK orders consecutive command buffers with per-stage
+   fences: `MVKCommandEncodingContext::syncFences` publishes every stage's
+   fence at the end of a command buffer and the next render encoder waits on
+   the fragment fence before its vertex stage (MVKCommandBuffer.mm, 1.4.1).
+   Off → resources bound directly, Metal's own hazard tracking orders what
+   actually conflicts. Costs ~0.3 ms CPU per frame in `vkQueueSubmit`
+   (`bindMetalResources`, per-draw binding) — the price of the overlap.
+2. **MTLEvent semaphores.** SINGLE_QUEUE style instead: one VkQueue does
+   graphics, uploads and present, so in-queue order is exact.
+   Both are passed per instance through `VK_EXT_layer_settings`
+   (`CreateInstance`) — MoltenVK reads its environment once, on the first
+   Vulkan call (GLFW's), so a `setenv` in the backend is too late. An
+   explicit `MVK_CONFIG_*` environment variable still wins, which is the A/B
+   switch: `--env MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=1 --env
+   MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=1` restores the serialised frames.
+3. **One depth image.** Now one per frame slot (`m_depthImages`), framebuffers
+   per (slot, swapchain image) — `FrameFramebuffer()`. +28 MB at 3420×2146.
+4. **Writing a texture the in-flight frame samples** (the lightmap and the
+   animated atlas each blocked it alone). A texture that takes a queued
+   update after it has been drawn with gets **per-frame copies**
+   (`VKTextureInfo::frameCopies`, one per frame slot; +43 MB for the block
+   atlas). Frame slot s samples and writes only copy s; the updates of the
+   frames it missed are replayed into it from the staging ring, which is why
+   that ring is 2 × MAX_FRAMES_IN_FLIGHT slots (see `kTexStagingSlots`). The
+   write barriers wait only on earlier transfers, never on shader reads.
+5. **The timestamp query pool,** reset every frame even with every GPU timer
+   off. Now one pool per frame slot, reset only after a timer used it.
+
+Rule: nothing one frame writes on the GPU may be an object the previous frame
+still uses — attachments, textures, query pools. Metal serialises the WHOLE
+next render encoder, vertex stage included, on any such write.
+
+Measured (tour replay, full screen, M4): Metal trace 133 → 180 fps (frame
+p50 7.7 → 5.6 ms, overlap 0 → 52%); Tracy 115.8 → 151.8 fps, p99 14.3 →
+12.1 ms, frames > 16.7 ms 0.39% → 0.18%. New: with vsync off the game now
+often renders ~3 frames per display refresh, and Metal's "Wait for Next
+Drawable" (inside `vkQueueSubmit` — MoltenVK takes the drawable lazily)
+occasionally waits 15-35 ms when the compositor holds all three swapchain
+images (2 frames > 33 ms in the 57 s replay). That is the display, not
+GPU or CPU work; `ca-client-buffer-wait-interval` does NOT show it, the
+"Wait for Next Drawable" rows of `metal-application-intervals` do.
+
+## GPU cost per render stage (2026-09-25)
+
+Metal cannot time stages inside one render pass on a tile GPU, so each stage
+is measured by subtraction: `OBEY_SKIP=<stage> OBEY_SKIP_PERIOD=2` toggles it
+every 2 s inside one run, each toggle is a Points-of-Interest signpost
+("DevSkip" on/off; plus one "Frame" signpost per frame while OBEY_SKIP is set,
+because Apple's GL presents outside CAMetalLayer), and a Metal System Trace
+recorded with `--instrument "Points of Interest"` splits the GPU timeline at
+those marks. Cost = GPU busy time per frame (vertex ∪ fragment) of the OFF
+phases minus the ON phase between them (pairs cancel thermal drift; use only
+phases the GPU recording fully covers — the signposts keep coming after it
+stops). Parked at the tour's first pose, full screen, 20 s per stage:
+
+| stage | Vulkan ms/frame | GL ms/frame |
+|---|---|---|
+| cutout terrain (leaves, plants) | 4.26 (vertex 4.3, fragment 2.1) | 5.84 |
+| opaque terrain | 2.26 (vertex 3.0, fragment 0.5) | 4.26 |
+| translucent | 0.72 | 0.54 |
+| sky | 0.37 | 0.43 |
+| held item, HUD, clouds, mobs, players, items, block entities, particles, outline | ≤ 0.07 each (noise ±0.03-0.07) | ≤ 0.08 each |
+
+Terrain is the GPU frame; cutout costs more than opaque (MC's fancy leaves
+draw every leaf face — `LeavesBlock.skipRendering` with `cutoutLeaves`).
+Drawing cutout front-to-back (distance order instead of the merge's
+slab/offset order) was measured and changed nothing on Vulkan (+0.01 ± 0.03
+ms) and cost GL 1.5 ms (more draw calls) — the overdraw is not the problem.
+
+## Greedy merging and light; per-quad layers (2026-09-25)
+
+**Light is per block in the face map.** The light-engine port (2026-09-24)
+made light a merge condition: a merged rectangle carried one light word, so
+only faces lit alike at all four corners and across the rectangle merged —
+next to nothing near shade, trees, caves or torches. A face-map record is now
+two RGBA16 texels (`TerrainVertex::kFaceMapWordsPerRecord` = 4 words): colour,
+AO and sprite, then the four corner light words in tile-corner order. The
+terrain fragment shaders sample the lightmap at each corner, multiply by that
+corner's AO and blend the four exactly as the GPU blends an unmerged quad's
+vertex colours (MC terrain.vsh lights per vertex), so the image is unchanged
+(screenshots vs `OBEY_NO_GREEDY` agree to capture noise). Tour pose, Fast
+leaves: 4.85 M → 3.78 M terrain vertices; interleaved A/B against
+`OBEY_GREEDY_LIGHT_SPLIT=1` (the old rule, same shaders): −0.4 ms GPU per
+frame (vertex −0.9, fragment +0.25 for the per-pixel corner lighting).
+Greedy as a whole: `OBEY_NO_GREEDY` draws 6.9 M vertices, +3.5 ms.
+
+**Render layer per quad, as MC 26.3.** `SectionCompiler` puts each quad in
+`ChunkSectionLayer.byTransparency` of the texels its UV rectangle covers
+(`FaceBakery.computeMaterialTransparency`, OR-ed over an animated sprite's
+frames; `force_translucent` materials are translucent; Fast leaves are forced
+solid). `AtlasBuilder::QuadTransparency` + `Mesher::FaceTexelLayer` do the
+same, cached per model face. ~14% of cutout faces move to the solid pass; at
+the tour pose that measured no GPU change (within noise, +1% vertices from
+split greedy rectangles) — kept for parity. `OBEY_BLOCK_LAYERS=1` restores the
+per-block layer; `[LayerCensus]` in the log counts the moves.
+
 ## Camera-relative rendering (2026-09-07)
 
 The world past a few hundred thousand blocks used to jitter (float32 resolves
@@ -377,16 +542,38 @@ engine does the same through ONE origin per view — read
 
 ### Reading a capture without the GUI: `tools/tracy_report.py`
 
-`tools/tracy_report.py capture.tracy` (or `--csv` on an existing
-`tracy-csvexport -u` dump) prints the whole picture: thread map auto-classified
-by dominant zone (main, server, mesh workers, chunk-load, terrain-gen,
-occlusion BFS), main-thread frame budget + per-phase breakdown with EXACT self
-times and the worst frames explained, server tick budget + per-tick breakdown +
-worst ticks, and worker-pool throughput/utilisation. Needs `tracy-csvexport`
-built from `cmake-build-tracy/_deps/tracy-src/csvexport` (`TRACY_CSVEXPORT`
-env var, or it looks in the session scratchpad). `-f` in csvexport is a
-SUBSTRING filter and `Vk.BeginFrame` (the GPU fence) sits INSIDE `Render`.
+`tools/tracy_report.py capture.tracy` prints the whole picture: frame pacing
+from the FrameMark frames (fps, 1%-low, p50..p99, frames over 16.7/33 ms), the
+main thread's per-frame budget by EXACT self time with p95 per frame and the
+worst frames explained, the server tick (TPS, work per tick minus
+`Server.Park`, per-tick budget, heaviest ticks), every thread pool's busy share
+and top zones, and every plot. Give it two captures (`gl.tracy vk.tracy`) for an
+A/B: frame stats, per-zone self time per frame sorted by the difference, server,
+thread busy and plot means side by side. A capture made with `--replay` is cut
+to the replayed path (`Replay/Time` >= 0) so two runs of one recording compare
+like for like; `--window all|START:END` overrides. "Busy" leaves out the waits
+(`Present`, `Vk.FenceWait`, `Vk.Acquire`, `Server.Park`).
 
+Under it, `tools/tracy_tools.py` runs `tracy-export` (source in
+`tools/tracy_export/`, built against Tracy's own loader) and caches its output
+per capture in `~/Library/Caches/obeycraft-tracy/exports/`. The export is every
+table the capture holds — threads with real names, frames, `frame_zones` (per
+frame × thread × zone: count, total, self, max — the per-frame breakdown
+without the raw zones), `zone_stats` (per zone × thread, percentiles), plots,
+messages, GPU zones, locks, memory, context switches, callstack samples (+
+folded stacks) and `info.json` — as quoted CSV. The raw per-thread zone tables
+(`zones/<tid>_<thread>.csv`, ~80 bytes per zone: a minute of play is 40 M zones,
+3 GB) are only written when a script asks (`analyze_trace.py --zone`).
+
+`tools/build_tracy_tools.sh` builds the tools at the tracy `GIT_TAG` in
+`CMakeLists.txt` (Tracy checkout + CPM deps cached in
+`~/Library/Caches/obeycraft-tracy`), checks every tool reports that version and
+stamps `tools/tracy/VERSION`; the scripts call it when the stamp and the pin
+differ. Upgrading Tracy is therefore: bump `GIT_TAG`, delete
+`cmake-build-*/_deps/tracy-*`, install the matching viewer. A capture saved by
+a newer viewer than the pin fails with an explicit "bump GIT_TAG" message
+(exit 2 from `tracy-export`); stock `tracy-csvexport` threw
+`tracy::UnsupportedVersion` there.
 
 ### macOS Game Mode when profiling (2026-09-04)
 
@@ -462,10 +649,16 @@ times to align the two clocks and regresses GPU vertex time against the
 - **No GPU counters from the command line.** The stock template records one
   useless counter (`RT Unit Active`) in a 3 GB table; adding `--instrument
   'Metal GPU Counters'` fails with "Selected counter profile is not
-  supported on target device". For limiter counters save a template from
-  the Instruments GUI with the counter set chosen and pass it with
-  `--gpu-template=path.tracetemplate`. Until then, attribution is by
-  regression against the Tracy plots and by `OBEY_SKIP` A/B.
+  supported on target device". The GUI-saved `gpu-counters.tracetemplate`
+  (project root: Performance Limiters + shader timeline) works with
+  `--gpu-template=`: 68 counters every ~22-34 us, ~90 MB per second of
+  recording — keep those runs to ~10 s (a 50 s one failed to save). The
+  shader-core counters are stamped on a GPU clock (ns, fixed offset from
+  trace time); align them by matching VS/FS occupancy > 0 against the
+  Vertex/Fragment channels.
+- **xctrace leaves a raw `instruments*.ktrace` (0.5-2 GB) in `$TMPDIR` per
+  recording and never deletes it** — 36 GB of them filled the disk on
+  2026-09-25. `play.sh` now deletes the ones its recording made.
 - The same trace carries a 1 kHz **time profile with real symbols** (the
   `time-profile` table); gpu_report.py prints the main thread's leaf
   functions and where samples land inside `--cpu-fn` functions. This is

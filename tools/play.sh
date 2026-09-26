@@ -86,9 +86,15 @@ if [ "$gputrace" != 0 ]; then
         out="$root/gpu-$(date +%H-%M-%S).trace"
         echo "--- gpu trace: recording Metal System Trace for ${gputrace}s -> $out ---"
         echo "--- gpu trace: KEEP THE GAME RUNNING until $(date -v+${gputrace}S +%H:%M:%S) (quitting earlier leaves an unreadable bundle) ---"
+        # xctrace records into a raw instruments*.ktrace in $TMPDIR and never
+        # deletes it (0.5-2 GB per recording — 36 GB of them filled the disk
+        # on 2026-09-25). The ones this recording made go once it is done.
+        marker="$(mktemp -t gputrace-start)"
         xcrun xctrace record --template "$gputemplate" --attach "$pid" \
             --time-limit "${gputrace}s" --output "$out" >/dev/null 2>&1 \
             && echo "--- gpu trace saved: $out (tools/gpu_report.py $out) ---" || echo "--- gpu trace FAILED (is Xcode installed and licensed?) ---"
+        find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'instruments*.ktrace' -newer "$marker" -delete 2>/dev/null
+        rm -f "$marker"
     ) &
 fi
 log="$HOME/Library/Application Support/obeycraft/logs/latest.log"
