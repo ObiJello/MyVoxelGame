@@ -53,9 +53,29 @@ namespace Render {
             m_experience      = progress;
             m_experienceLevel = level;
         }
+        // The riding player's mount (MC Hud.getPlayerVehicleWithHealth /
+        // LocalPlayer.jumpableVehicle): its heart count (0 = none shown —
+        // no living vehicle) and current health, and — for a jumpable mount
+        // (a horse, a camel) — the jump bar that replaces the XP bar: the
+        // charge (getJumpRidingScale) or the cooldown sprite.
+        void SetVehicleHud(int vehicleHearts, int vehicleHealth, bool jumpable, float jumpScale, bool jumpCooldown) {
+            m_vehicleHearts = vehicleHearts;
+            m_vehicleHealth = vehicleHealth;
+            m_jumpableVehicle = jumpable;
+            m_jumpRidingScale = jumpScale;
+            m_jumpCooldown = jumpCooldown;
+        }
         // Creative/spectator hide the survival stat block (hearts, food,
         // armor, air, XP) — MC Gui gates those on gameMode.canHurtPlayer().
         void SetStatsHidden(bool hidden)   { m_statsHidden = hidden; }
+        // Spectator (MC Hud with getPlayerMode() == SPECTATOR): the spectator
+        // menu's hotbar replaces the item hotbar and its action text the
+        // held item's name; `crosshair` is canRenderCrosshairForSpectator,
+        // without which the crosshair's attack indicator is not drawn either.
+        void SetSpectator(bool spectator, bool crosshair) {
+            m_spectator = spectator;
+            m_spectatorCrosshair = crosshair;
+        }
 
         // MAX_HEALTH with HEALTH_BOOST (ClientPlayer::GetMaxHealth) — the
         // heart containers MC's Hud draws from player.getMaxHealth().
@@ -103,10 +123,13 @@ namespace Render {
 
         // ── Action bar (MC Gui.setOverlayMessage / renderOverlayMessage) ──
         // The line above the hotbar: bed problems, "N/M players sleeping".
-        // Shown for 60 ticks, fading over the last 20.
-        void SetOverlayMessage(const std::string& text) {
+        // Shown for 60 ticks, fading over the last 20. `animate` is MC's
+        // animateOverlayMessageColor — the jukebox's "Now Playing" line
+        // (Hud.setNowPlaying), whose colour cycles through the hues.
+        void SetOverlayMessage(const std::string& text, bool animate = false) {
             m_overlayMessage     = text;
             m_overlayMessageTime = 60.0f / 20.0f;   // seconds; ticked at render rate
+            m_animateOverlayMessageColor = animate;
         }
 
         void RenderAttackIndicator(GuiGraphics& graphics);
@@ -139,6 +162,9 @@ namespace Render {
         void RenderFood(GuiGraphics& graphics, int yLineBase, int xRight);
         void RenderAir(GuiGraphics& graphics, int yLineAir, int xRight);
         void RenderExperienceBar(GuiGraphics& graphics);
+        // MC JumpableVehicleBar.extractBackground and Hud.extractVehicleHealth.
+        void RenderJumpBar(GuiGraphics& graphics);
+        void RenderVehicleHealth(GuiGraphics& graphics);
         void RenderExperienceLevel(GuiGraphics& graphics);
         void RenderSleepOverlay(GuiGraphics& graphics);
         void RenderOverlayMessage(GuiGraphics& graphics);
@@ -148,6 +174,7 @@ namespace Render {
         int         m_sleepTimer = 0;
         std::string m_overlayMessage;
         float       m_overlayMessageTime = 0.0f;
+        bool        m_animateOverlayMessageColor = false;
 
         // State — MC's Gui.toolHighlightTimer + lastToolHighlight.
         // Frames remaining for the item-name overlay (MC uses 40 ticks ×
@@ -190,8 +217,16 @@ namespace Render {
         int64_t m_healthBlinkTime = 0;
         Game::JavaRandom m_random{0};
         bool m_statsHidden = false; // True in creative/spectator (SetStatsHidden)
+        bool m_spectator = false;          // SetSpectator
+        bool m_spectatorCrosshair = false;
         float m_experience = 0.0f; // XP bar progress (0.0-1.0)
         int m_experienceLevel = 0;
+        // SetVehicleHud.
+        int   m_vehicleHearts = 0;
+        int   m_vehicleHealth = 0;
+        bool  m_jumpableVehicle = false;
+        float m_jumpRidingScale = 0.0f;
+        bool  m_jumpCooldown = false;
         bool m_isUnderWater = false;
 
         bool  m_waterOverlay = false;

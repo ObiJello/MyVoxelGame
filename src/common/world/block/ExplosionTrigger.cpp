@@ -6,6 +6,8 @@
 #include "common/sound/SoundType.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/Blocks.hpp"
+#include "common/world/block/RedstoneComponents.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/block/Direction.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
@@ -53,38 +55,13 @@ namespace Game {
 
         const std::string& model = BlockRegistry::Get(id).modelName;
 
-        // ── ButtonBlock.onExplosionHit → press ────────────────────────────
-        if (NameHas(model, "_button")) {
-            if (IsPowered(state)) return false;
-            // MC press(): POWERED = true, notify neighbours, schedule the
-            // release tick, play the sound.
-            const BlockState next = state.SetName(PropertyId::POWERED, "true");
-            if (!WriteState(level, pos, next)) return false;
-            if (auto* ticks = level.Ticks()) {
-                // MC ButtonBlock.ticksToStayPressed — 30 for a stone button,
-                // 20 for wood. Wooden buttons are the ones an arrow can hit.
-                const int hold = NameHas(model, "stone") ||
-                                 NameHas(model, "blackstone") ? 20 : 30;
-                ticks->ScheduleTick(pos, id, hold);
-            }
-            // MC ButtonBlock.press(null) → playSound(null, pos, getSound(true),
-            // BLOCKS) — the block's BlockSetType click.
-            if (const BlockSetType* set = BlockSetTypeOf(id)) {
-                level.PlaySound(nullptr, pos, set->buttonClickOn, SoundSource::Blocks);
-            }
-            return true;
-        }
-
-        // ── LeverBlock.onExplosionHit → pull ──────────────────────────────
-        if (model == "lever") {
-            const bool nowOn = !IsPowered(state);
-            const BlockState next =
-                state.SetName(PropertyId::POWERED, nowOn ? "true" : "false");
-            if (!WriteState(level, pos, next)) return false;
-            // MC LeverBlock.playSound: LEVER_CLICK, 0.3, 0.6 on / 0.5 off.
-            level.PlaySound(nullptr, pos, SoundEvents::LEVER_CLICK, SoundSource::Blocks, 0.3f,
-                            nowOn ? 0.6f : 0.5f);
-            return true;
+        // ── ButtonBlock / LeverBlock.onExplosionHit → press / pull ────────
+        //
+        // The redstone port's own press and pull (RedstoneComponents), so a
+        // wind-charged button powers the block it hangs on and releases on
+        // its ticksToStayPressed, exactly as a clicked one.
+        if (NameHas(model, "_button") || model == "lever") {
+            return RedstoneComponentOnExplosionHit(level, pos, state);
         }
 
         // ── FenceGateBlock.onExplosionHit → toggle OPEN ───────────────────
@@ -99,6 +76,9 @@ namespace Game {
                 level.PlaySound(nullptr, pos, wasOpen ? wood->fenceGateClose : wood->fenceGateOpen,
                                 SoundSource::Blocks, 1.0f, JitterPitch(level));
             }
+            // :139 gameEvent(open ? BLOCK_CLOSE : BLOCK_OPEN, pos, Context.of(state)).
+            level.GameEvent(wasOpen ? GameEventId::BlockClose : GameEventId::BlockOpen, pos,
+                            GameEventContext::Of(state));
             return true;
         }
 
@@ -114,6 +94,8 @@ namespace Game {
                 level.PlaySound(nullptr, pos, wasOpen ? set->trapdoorClose : set->trapdoorOpen,
                                 SoundSource::Blocks, 1.0f, JitterPitch(level));
             }
+            // toggle → gameEvent(null, open ? BLOCK_OPEN : BLOCK_CLOSE, pos).
+            level.GameEvent(nullptr, wasOpen ? GameEventId::BlockClose : GameEventId::BlockOpen, pos);
             return true;
         }
 
@@ -145,6 +127,8 @@ namespace Game {
                 level.PlaySound(nullptr, pos, wasOpen ? set->doorClose : set->doorOpen,
                                 SoundSource::Blocks, 1.0f, JitterPitch(level));
             }
+            // setOpen → gameEvent(null, open ? BLOCK_OPEN : BLOCK_CLOSE, pos).
+            level.GameEvent(nullptr, wasOpen ? GameEventId::BlockClose : GameEventId::BlockOpen, pos);
             return true;
         }
 
@@ -155,8 +139,10 @@ namespace Game {
             if (!WriteState(level, pos, state.SetName(PropertyId::LIT, "false"))) {
                 return false;
             }
-            // MC AbstractCandleBlock.extinguish:81.
+            // MC AbstractCandleBlock.extinguish:81 — the sound, then
+            // gameEvent(null, BLOCK_CHANGE, pos).
             level.PlaySound(nullptr, pos, SoundEvents::CANDLE_EXTINGUISH, SoundSource::Blocks, 1.0f, 1.0f);
+            level.GameEvent(nullptr, GameEventId::BlockChange, pos);
             return true;
         }
 
@@ -167,6 +153,8 @@ namespace Game {
         // only the sound is real: MC attemptToRing:144, BELL_BLOCK at 2.0.
         if (model == "bell") {
             level.PlaySound(nullptr, pos, SoundEvents::BELL_BLOCK, SoundSource::Blocks, 2.0f, 1.0f);
+            // attemptToRing → gameEvent(null, BLOCK_CHANGE, pos).
+            level.GameEvent(nullptr, GameEventId::BlockChange, pos);
             return false;
         }
 

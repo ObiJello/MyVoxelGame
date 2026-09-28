@@ -33,6 +33,16 @@ namespace Platform {
     // Sentry still gets its report.
     void InstallCrashHandler(const std::string& crashDir, const std::string& version);
 
+    // Give the CALLING thread its own alternate signal stack, so the handler
+    // can still run — and write the backtrace — when this thread dies of a
+    // stack overflow (without one the kernel has nowhere to push the signal
+    // frame and kills the process with no report). sigaltstack is per
+    // thread: call it at the top of every long-lived thread's entry point,
+    // next to SetCurrentThreadPriority. Idempotent per thread; the stack is
+    // released when the thread exits. InstallCrashHandler covers the thread
+    // that calls it (the main thread). No-op on Windows.
+    void InstallThreadCrashStack();
+
     // Path this session would write a crash to. Fixed at install time so the
     // signal handler does no string formatting — see the .cpp for why.
     const char* CrashReportPath();

@@ -285,8 +285,13 @@ namespace Game {
         // SkeletonDruid.performRangedAttack.
         void PerformRangedAttack(LivingEntity& target, float power) override;
 
-        // Whether the main hand holds the hoe (adult) or the stick (baby).
-        bool HoldsHoe() const { return !m_baby; }
+        // Whether the main hand holds a hoe (TF: `getItem() instanceof
+        // HoeItem`) — the adult's golden hoe; a baby holds a stick.
+        bool HoldsHoe() const;
+
+        // SkeletonDruid.populateDefaultEquipmentSlots: a stick for a baby,
+        // a golden hoe otherwise (no armour roll).
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
 
         void SaveModNbt(ModNbtOut& out) const override;
         void LoadModNbt(const ModNbtIn& in) override;
@@ -302,7 +307,7 @@ namespace Game {
     private:
         // AbstractSkeleton.reassessWeaponGoal, TF's override: the ranged
         // goal while the hoe is in hand, AbstractSkeleton's melee otherwise.
-        void ReassessWeaponGoal();
+        void ReassessWeaponGoal() override;
 
         bool  m_baby = false;
         Goal* m_rangedGoal = nullptr;

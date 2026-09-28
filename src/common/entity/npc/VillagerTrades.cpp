@@ -8,6 +8,7 @@
 #include "common/entity/alchemy/Potions.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/text/Language.hpp"
+#include "common/world/map/MapItem.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/world/enchantment/EnchantmentDefinitions.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
@@ -220,6 +221,8 @@ namespace Game::VillagerTrades {
                 SetPotion, SetRandomPotion, SetStewEffect, SetRandomDyes,
                 ExplorationMap, Unsupported,
             };
+            // exploration_map
+            ExplorationMapParams exploration;
             Kind kind = Kind::Unsupported;
             std::string name;
             // enchant_*
@@ -323,7 +326,25 @@ namespace Game::VillagerTrades {
                 fn.dyes = f.contains("number_of_dyes") ? ParseNumber(f["number_of_dyes"], 1.0f)
                                                        : Number::Constant(1.0f);
             } else if (fn.name == "exploration_map") {
+                // ExplorationMapFunction {destination, decoration?, zoom?,
+                // search_radius?, skip_existing_chunks?}.
                 fn.kind = Function::Kind::ExplorationMap;
+                std::string destination = f.value("destination", std::string("#minecraft:on_treasure_maps"));
+                // A HolderSet names a tag with "#"; the older trade files
+                // wrote the tag id bare.
+                if (!destination.empty() && destination[0] != '#') {
+                    const std::string path = destination.substr(destination.find(':') + 1);
+                    if (path.rfind("on_", 0) == 0) destination = "#" + destination;
+                }
+                fn.exploration.destination = destination;
+                if (f.contains("decoration") && f["decoration"].is_string()) {
+                    if (auto type = Maps::DecorationTypeFromKey(f["decoration"].get<std::string>())) {
+                        fn.exploration.decoration = *type;
+                    }
+                }
+                fn.exploration.zoom = f.value("zoom", 2);
+                fn.exploration.searchRadius = f.value("search_radius", 50);
+                fn.exploration.skipKnownStructures = f.value("skip_existing_chunks", true);
             } else if (fn.name == "sequence" && f.contains("functions")) {
                 // A LootItemFunctions sequence written as an object.
                 Function seq;
@@ -516,6 +537,7 @@ namespace Game::VillagerTrades {
             JavaRandom& random;
             std::optional<VillagerType> merchantType;
             int additionalCost = 0;   // MC's ADDITIONAL_TRADE_COST component, carried aside
+            const TradeOrigin* origin = nullptr;   // LootContextParams.ORIGIN + the merchant's level
         };
 
         bool HasStoredEnchantments(const ItemStack& s) {
@@ -579,8 +601,8 @@ namespace Game::VillagerTrades {
                     if (pass && fn.needsEnchantments) pass = IsEnchanted(stack);
                     if (pass && fn.needsStoredEnchantments) pass = HasStoredEnchantments(stack);
                     if (pass && fn.needsDyedColor) pass = stack.get(DataComponents::DYED_COLOR).has_value();
-                    // minecraft:map_id — no filled-map system: never met.
-                    if (pass && fn.needsMapId) pass = false;
+                    // minecraft:map_id — the stack carries a map id.
+                    if (pass && fn.needsMapId) pass = stack.get(DataComponents::MAP_ID).has_value();
                     ApplyAll(pass ? fn.onPass : fn.onFail, stack, ctx);
                     break;
                 }
@@ -665,10 +687,13 @@ namespace Game::VillagerTrades {
                     break;
                 }
                 case Function::Kind::ExplorationMap:
-                    // MC ExplorationMapFunction: needs a filled-map system to
-                    // write the found structure into. Without one the blank
-                    // map is returned — MC's own result when no structure is
-                    // found — and the trade's map_id filter discards it.
+                    // MC ExplorationMapFunction.run from the merchant's
+                    // position; no structure found leaves the stack as it
+                    // was, and the trade's map_id filter discards it.
+                    if (ctx.origin) {
+                        stack = MapItemBridge::ApplyExplorationMap(stack, ctx.origin->dimensionId,
+                                                                   ctx.origin->position, fn.exploration);
+                    }
                     break;
                 case Function::Kind::Unsupported:
                     Log::Debug("[VillagerTrades] item modifier '%s' is not supported; left unchanged",
@@ -740,7 +765,8 @@ namespace Game::VillagerTrades {
     } // namespace
 
     void AddOffersFromTradeSet(const std::string& tradeSetKey, MerchantOffers& offers,
-                               JavaRandom& random, std::optional<VillagerType> merchantType) {
+                               JavaRandom& random, std::optional<VillagerType> merchantType,
+                               const TradeOrigin* origin) {
         std::vector<std::shared_ptr<Trade>> potential;
         int numberOfOffers = 0;
         bool allowDuplicates = false;
@@ -752,7 +778,7 @@ namespace Game::VillagerTrades {
             numberOfOffers = set->amount.GetInt(random);
             allowDuplicates = set->allowDuplicates;
         }
-        OfferContext ctx{ random, merchantType, 0 };
+        OfferContext ctx{ random, merchantType, 0, origin };
         int found = 0;
         if (allowDuplicates) {
             // MC addOffersFromItemListings: draw with replacement; a trade

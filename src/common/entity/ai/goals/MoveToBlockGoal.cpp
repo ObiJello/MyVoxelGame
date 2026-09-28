@@ -1,5 +1,8 @@
 // File: src/common/entity/ai/goals/MoveToBlockGoal.cpp
 #include "common/entity/ai/goals/MoveToBlockGoal.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -7,6 +10,9 @@
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/particle/ParticleOptions.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
 
@@ -155,18 +161,42 @@ namespace Game {
         }
 
         // The stomp: alternate hops (+0.3 up, then -0.3 down every other
-        // tick). Sounds and particles are not modelled; the movement is, since
-        // it is visible and it is what delays the break to ~3 seconds.
+        // tick), a puff of egg crumbs on every hop, the progress sound on
+        // every sixth tick, and after three seconds the block is gone in a
+        // cloud of POOF with the break sound (RemoveBlockGoal.tick).
+        JavaRandom& random = level->Random();   // removerMob.getRandom()
         if (m_ticksSinceReachedGoal > 0) {
             m_mob->velocity.y = 0.3;
+            if (!level->IsClientSide()) {
+                // sendParticles(ITEM egg, eat + (0.5, 0.7, 0.5), 3, three
+                // (nextFloat - 0.5) * 0.08 spreads, speed 0.15).
+                const double dx = (static_cast<double>(random.NextFloat()) - 0.5) * 0.08;
+                const double dy = (static_cast<double>(random.NextFloat()) - 0.5) * 0.08;
+                const double dz = (static_cast<double>(random.NextFloat()) - 0.5) * 0.08;
+                level->SendParticles(ParticleOptions::Item(Items::Egg), eatPos.x + 0.5, eatPos.y + 0.7,
+                                     eatPos.z + 0.5, 3, dx, dy, dz, 0.15000000596046448);
+            }
         }
         if (m_ticksSinceReachedGoal % 2 == 0) {
             m_mob->velocity.y = -0.3;
+            if (m_ticksSinceReachedGoal % 6 == 0) {
+                PlayDestroyProgressSound(*level, m_blockPos);
+            }
         }
 
         if (m_ticksSinceReachedGoal > 60) {
             // MC level.removeBlock(pos, false) — no drops.
             level->SetBlock(eatPos, BlockID::Air);
+            if (!level->IsClientSide()) {
+                for (int i = 0; i < 20; ++i) {
+                    const double xa = random.NextGaussian() * 0.02;
+                    const double ya = random.NextGaussian() * 0.02;
+                    const double za = random.NextGaussian() * 0.02;
+                    level->SendParticles(ParticleKind::Poof, eatPos.x + 0.5, eatPos.y, eatPos.z + 0.5, 1,
+                                         xa, ya, za, 0.15000000596046448);
+                }
+                PlayBreakSound(*level, eatPos);
+            }
         }
 
         ++m_ticksSinceReachedGoal;
@@ -201,6 +231,18 @@ namespace Game {
     }
 
     // ── RaidGardenGoal ─────────────────────────────────────────────────────
+
+    // ── ZombieAttackTurtleEggGoal's sounds ────────────────────────────────
+
+    void ZombieAttackTurtleEggGoal::PlayDestroyProgressSound(EntityLevel& level, const glm::ivec3& pos) {
+        level.PlaySound(nullptr, pos, SoundEvents::ZOMBIE_DESTROY_EGG, SoundSource::Hostile, 0.5f,
+                        0.9f + level.Random().NextFloat() * 0.2f);
+    }
+
+    void ZombieAttackTurtleEggGoal::PlayBreakSound(EntityLevel& level, const glm::ivec3& pos) {
+        level.PlaySound(nullptr, pos, SoundEvents::TURTLE_EGG_BREAK, SoundSource::Blocks, 0.7f,
+                        0.9f + level.Random().NextFloat() * 0.2f);
+    }
 
     RaidGardenGoal::RaidGardenGoal(Rabbit* rabbit)
         : MoveToBlockGoal(rabbit, 0.7, 16), m_rabbit(rabbit) {}
@@ -248,9 +290,15 @@ namespace Game {
                 level->DestroyBlock(cropsPos, true);
             } else {
                 // MC: setBlock(state.setValue(AGE, age - 1), 2) + level event
-                // 2001 (break particles — no particle system).
+                // 2001 (the break particles and sound of the old state).
                 level->SetBlockState(cropsPos,
                                      state.SetIndex(PropertyId::AGE_7, age - 1));
+                PlayLevelEventSound(*level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, cropsPos,
+                                    static_cast<int>(state.RawId()), &level->Random());
+                // MC: level.gameEvent(BLOCK_CHANGE, cropsPos, Context.of(rabbit)).
+                if (ILevelWrite* write = level->MutableBlocks()) {
+                    write->GameEvent(GameEventId::BlockChange, cropsPos, GameEventContext::Of(m_rabbit));
+                }
             }
             m_rabbit->SetMoreCarrotTicks(40);
         }

@@ -49,6 +49,15 @@ namespace Game {
     bool SpawnItemEntity(DimensionId dimension, const glm::dvec3& pos, const glm::dvec3& velocity,
                          const ItemStack& stack, int pickupDelay);
 
+    // MC Containers.dropItemStack(level, x, y, z, stack): a container's
+    // spilled slot — from a random point in the cell at floor(pos) (the
+    // item's width kept inside it), split into stacks of 10..30, each
+    // tossed with triangle(0 / 0.2 / 0, 0.11485) and no pickup delay. What a
+    // broken or exploded chest, barrel, furnace, pot or campfire drops its
+    // contents through (BlockEntity.preRemoveSideEffects). The level's
+    // random drives the rolls.
+    void DropContainerItemStack(ILevelWrite& level, const glm::dvec3& pos, ItemStack stack);
+
     // MC Block.popResourceFromFace — same, but nudged out of one face of the
     // block and launched away from it, for items that logically come off a
     // particular side. `face` is a Direction ordinal (0=down .. 5=east).
@@ -72,6 +81,9 @@ namespace Game {
     // and pop the results at `pos`, without touching the cell. The half of
     // DestroyBlockWithDrops that World::DestroyBlock needs on its own,
     // because it clears the cell with a caller-supplied update limit.
+    // No breaking entity is supplied (MC's three-argument dropResources), so
+    // `entity_properties` loot conditions fail — snow and chorus flowers
+    // destroyed this way drop nothing, as in vanilla.
     void DropBlockLoot(ILevelWrite& level, const glm::ivec3& pos, BlockState state);
 
 } // namespace Game

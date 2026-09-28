@@ -7,6 +7,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include "platform/CrashHandler.hpp"
 
 namespace Core {
 
@@ -102,6 +103,7 @@ namespace Core {
         }
 
         void WorkerLoop(Pool& p) {
+            Platform::InstallThreadCrashStack();   // entity ticks run here: keep crash reports working
             std::unique_lock<std::mutex> lk(p.m);
             for (;;) {
                 if (p.stop) return;

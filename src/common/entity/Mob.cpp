@@ -1,5 +1,8 @@
 // File: src/common/entity/Mob.cpp
 #include "common/entity/Mob.hpp"
+#include "common/entity/HorseTaming.hpp"
+#include "common/entity/TamableAnimal.hpp"
+#include "common/entity/ai/Controls.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/Sensing.hpp"
@@ -12,6 +15,8 @@
 #include "common/sound/EntitySounds.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/entity/Item.hpp"
+#include "common/entity/MaceItem.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -80,6 +85,8 @@ namespace Game {
         m_speed = 0.0f;
         zza = 0.0f;
         velocity = glm::dvec3(0.0);
+        // MC resetAngularLeashMomentum.
+        if (m_leashData) m_leashData->angularMomentum = 0.0;
     }
 
     // ── Conversion (MC Mob.convertTo) ──────────────────────────────────────
@@ -129,6 +136,9 @@ namespace Game {
         to.SetCustomNameVisible(IsCustomNameVisible());
         to.SetCustomName(GetCustomName());
         to.SetRemainingFireTicks(GetRemainingFireTicks());   // setSharedFlagOnFire
+        // ConversionType.SINGLE: `if (leashHolder != null)
+        // to.setLeashedTo(leashHolder, true)` — the lead moves over.
+        if (Entity* holder = GetLeashHolder()) to.SetLeashedTo(*holder, true);
     }
 
     Mob* Mob::FinishConversion(std::unique_ptr<Mob> replacement) {
@@ -182,18 +192,44 @@ namespace Game {
     }
 
     bool Mob::DoHurtTarget(Entity& target) {
-        const float damage = static_cast<float>(GetAttributeValue(Attribute::AttackDamage));
+        float damage = static_cast<float>(GetAttributeValue(Attribute::AttackDamage));
 
         LivingEntity* living = dynamic_cast<LivingEntity*>(&target);
         if (!living) return false;
 
-        const bool hit = living->Hurt(MobDamageSource::MobAttack, damage, this);
+        // MC Mob.doHurtTarget: weaponItem.getDamageSource(this) — a mace that
+        // can smash makes it mace_smash — and damage +=
+        // weaponItem.getItem().getAttackDamageBonus(target, dmg, source)
+        // (the mace's fall-scaled bonus; every other item's is 0).
+        const ItemStack* weapon = GetWeaponItem();
+        const bool maceInHand = weapon && !weapon->IsEmpty() && MaceItem::IsMace(weapon->itemId);
+        const MobDamageSource attackSource = (maceInHand && MaceItem::CanSmashAttack(*this))
+            ? MobDamageSource::MaceSmash : MobDamageSource::MobAttack;
+        // dmg = EnchantmentHelper.modifyDamage(level, weaponItem, target,
+        // source, dmg): the held weapon's Sharpness / Smite / Bane (a trial
+        // spawner's armed zombie), before the item's own bonus.
+        const bool weaponInHand = weapon && !weapon->IsEmpty();
+        if (weaponInHand && m_level && !m_level->IsClientSide()) {
+            damage = EnchantmentHelper::ModifyDamage(*m_level, *weapon, target,
+                                                     DamageSourceInfo::Of(attackSource, this, nullptr), damage);
+        }
+        if (maceInHand && m_level && !m_level->IsClientSide()) {
+            damage += MaceItem::AttackDamageBonus(*m_level, target,
+                                                  DamageSourceInfo::Of(attackSource, this, nullptr));
+        }
+
+        const bool hit = living->Hurt(attackSource, damage, this);
         if (hit) {
-            // MC's extra knockback from ATTACK_KNOCKBACK, on top of the base
-            // 0.4 that Hurt already applied. Zero for all eight of our mobs, so
-            // this is a no-op today and correct the moment one gains the
-            // attribute.
-            const double extra = GetAttributeValue(Attribute::AttackKnockback) / 2.0;
+            // MC's extra knockback: getKnockback — ATTACK_KNOCKBACK through
+            // the weapon's Knockback (EnchantmentHelper.modifyKnockback) —
+            // halved, on top of the base 0.4 that Hurt already applied.
+            float knockback = static_cast<float>(GetAttributeValue(Attribute::AttackKnockback));
+            if (weaponInHand && m_level && !m_level->IsClientSide()) {
+                knockback = EnchantmentHelper::ModifyKnockback(*m_level, *weapon, target,
+                                                               DamageSourceInfo::Of(attackSource, this, nullptr),
+                                                               knockback);
+            }
+            const double extra = static_cast<double>(knockback) / 2.0;
             if (extra > 0.0) {
                 const float angle = yRot * Mth::kDegToRad;
                 // MC LivingEntity.doHurtTarget:2572 — (sin, -cos), the facing
@@ -203,12 +239,17 @@ namespace Game {
                 velocity.x *= 0.6;
                 velocity.z *= 0.6;
             }
+            // MC weaponItem.hurtEnemy(livingTarget, this): the mace's smash
+            // (a mob that fell onto its target with one).
+            if (maceInHand && m_level && !m_level->IsClientSide()) {
+                MaceItem::HurtEnemy(*m_level, *living, *this);
+            }
             // MC Mob.doHurtTarget → EnchantmentHelper.doPostAttackEffects:
             // the victim's worn post_attack effects (a player's Thorns
-            // pricking this mob and wearing the armour); a mob carries no
-            // weapon here, so the attacker half has nothing to run.
-            if (m_level && !m_level->IsClientSide() && living->HasEquipmentSlots()) {
-                const DamageSourceInfo source = DamageSourceInfo::Of(MobDamageSource::MobAttack, this, nullptr);
+            // pricking this mob and wearing the armour), and the attacker's
+            // weapon's (a mace's Wind Burst).
+            if (m_level && !m_level->IsClientSide() && (living->HasEquipmentSlots() || weaponInHand)) {
+                const DamageSourceInfo source = DamageSourceInfo::Of(attackSource, this, nullptr);
                 EnchantmentHelper::DoPostAttackEffects(*m_level, target, source);
             }
             SetLastHurtMob(&target);
@@ -309,6 +350,10 @@ namespace Game {
         if (m_bodyRotationControl) m_bodyRotationControl->ClientTick();
     }
 
+    int Mob::GetExperienceReward(EntityLevel& level, Entity* killer) {
+        return EnchantmentHelper::ProcessMobExperience(level, killer, *this, GetXpReward());
+    }
+
     int Mob::GetAmbientSoundInterval() const {
         return EntitySoundsOf(GetType()).ambientInterval;
     }
@@ -383,6 +428,18 @@ namespace Game {
         // a dead mob once the sweep returns" stays total. See the riding
         // lifetime note in Entity.hpp.
         UnlinkRidingReferenceTo(entity);
+
+        // The lead's holder is about to be freed: the next tickLeash drops
+        // the lead, as MC's does for a holder that stopped existing.
+        if (m_leashData && m_leashData->holder == entity) MarkLeashHolderLost();
+
+        // The owner of a tamed pet / horse (the mixins are not on Mob's
+        // chain): demote the cached pointer — the identity stays, an owner
+        // who logged off is still the owner. (EntityRef's liveness token
+        // already keeps a stale pointer from being touched; this drops it at
+        // the notification, as every other holder here does.)
+        if (auto* tamable = dynamic_cast<TamableAnimal*>(this)) tamable->ClearOwnerReferenceTo(entity);
+        if (auto* horse = dynamic_cast<HorseTaming*>(this)) horse->ClearOwnerReferenceTo(entity);
     }
 
     void Mob::AiStep() {
@@ -390,15 +447,17 @@ namespace Game {
         LivingEntity::AiStep();
         if (BurnsInDaylight()) BurnUndead();
 
-        // MC LivingEntity.baseTick: a water-sensitive mob (blaze, snow golem)
-        // takes 1 drowning damage per tick while wet. Lives here rather than
-        // BaseTick so it stays server-side with the rest of the damage the AI
-        // step deals; MC's isInWaterRainOrBubble collapses to IsInWater with
-        // no weather system.
-        if (IsSensitiveToWater() && IsAlive() && IsInWater() &&
+        // MC LivingEntity.aiStep: a water-sensitive mob (blaze, snow golem,
+        // enderman, strider) takes 1 drowning damage per tick while
+        // isInWaterOrRain. Lives here rather than BaseTick so it stays
+        // server-side with the rest of the damage the AI step deals.
+        if (IsSensitiveToWater() && IsAlive() && IsInWaterOrRain() &&
             m_level && !m_level->IsClientSide()) {
             Hurt(MobDamageSource::Drown, 1.0f, nullptr);
         }
+
+        // MC Mob.aiStep's "looting" section — last, after the burn.
+        TickLooting();
     }
 
     bool Mob::IsSunBurnTick() {
@@ -432,16 +491,33 @@ namespace Game {
         // is drawn even when those would reject.
         if (m_level->Random().NextFloat() * 30.0f >= (br - 0.4f) * 2.0f) return false;
 
-        // MC also excludes rain and powder snow here; neither is modelled.
-        if (IsInWater()) return false;
+        // MC isInNonBurnableBlock: isInWaterOrRain() || isInPowderSnow ||
+        // wasInPowderSnow (powder snow is not modelled).
+        if (IsInWaterOrRain()) return false;
 
         return m_level->CanSeeSky(p.x, eyeY, p.z);
     }
 
     void Mob::BurnUndead() {
-        // MC checks a helmet in the sun-protection slot first. Mobs here carry
-        // no equipment, so the ignite is unconditional.
-        if (IsAlive() && IsSunBurnTick()) IgniteForSeconds(8);
+        // MC Mob.burnUndead: a piece in the sun-protection slot (the head)
+        // shades the mob and wears by nextInt(2) instead; bare-headed, it
+        // ignites for 8 seconds.
+        if (!IsAlive() || !IsSunBurnTick()) return;
+        const EquipmentSlot slot = SunProtectionSlot();
+        const ItemStack& sunBlocker = GetEquipment(slot);
+        if (!sunBlocker.IsEmpty()) {
+            if (IsDamageableItem(sunBlocker) && m_level) {
+                ItemStack worn = sunBlocker;
+                HurtAndBreak(worn, m_level->Random().NextInt(2), *this, slot);
+                // Wear in place (a break empties it) — re-synced only when
+                // the roll actually changed the stack.
+                if (worn.count != sunBlocker.count || !IsSameItemSameComponents(worn, sunBlocker)) {
+                    ReplaceEquipmentStack(slot, worn);
+                }
+            }
+            return;
+        }
+        IgniteForSeconds(8);
     }
 
     std::shared_ptr<SpawnGroupData>
@@ -475,6 +551,45 @@ namespace Game {
         sacrifice -= (3 - difficultyId) * 4;
         if (sacrifice < 0) sacrifice = 0;
         return GetComfortableFallDistance(static_cast<float>(sacrifice));
+    }
+
+    bool Mob::IsServerSteeredFlier() const {
+        if (LivingEntity::IsServerSteeredFlier()) return true;   // FlyingAnimal
+        if (const MoveControl* control = m_moveControl.get()) {
+            if (dynamic_cast<const FlyingMoveControl*>(control) ||
+                dynamic_cast<const GhastMoveControl*>(control)) {
+                return true;
+            }
+        }
+        switch (GetType()) {
+            // Vanilla fliers with their own steering: Bat.customServerAiStep,
+            // Blaze's rise/hover, PhantomMoveControl, VexMoveControl (+noPhysics),
+            // the wither's own flight; the ghasts too (GhastMoveControl above
+            // covers them — listed so a control swap cannot drop them).
+            case EntityTypeId::Bat:
+            case EntityTypeId::Blaze:
+            case EntityTypeId::Phantom:
+            case EntityTypeId::Vex:
+            case EntityTypeId::Wither:
+            case EntityTypeId::Ghast:
+            case EntityTypeId::HappyGhast:
+            // Mod fliers: Aether (zephyr, aerwhale), Twilight Forest (wraith,
+            // the flying birds), the Hush (echo wraith, lumen moth,
+            // leviathan, choir mother, the Unsung).
+            case EntityTypeId::Zephyr:
+            case EntityTypeId::Aerwhale:
+            case EntityTypeId::Wraith:
+            case EntityTypeId::TinyBird:
+            case EntityTypeId::Raven:
+            case EntityTypeId::EchoWraith:
+            case EntityTypeId::LumenMoth:
+            case EntityTypeId::HushLeviathan:
+            case EntityTypeId::ChoirMother:
+            case EntityTypeId::TheUnsung:
+                return true;
+            default:
+                return false;
+        }
     }
 
     bool Mob::CheckMobSpawnRules(EntityLevel& level, SpawnReason reason,
@@ -537,10 +652,11 @@ namespace Game {
             return;
         }
 
-        if (IsPersistenceRequired() || RequiresCustomPersistence()) {
-            m_noActionTime = 0;
-            return;
-        }
+        // MC 26.3 checkDespawn: a persistent mob skips both removals but
+        // still has its idle clock reset while a player is near — the same
+        // noActionTime every other mob gets (a far-off persistent mob keeps
+        // counting, which is what gates its idle strolls in MC too).
+        const bool persistent = IsDespawnPersistent();
 
         LivingEntity* nearest = m_level->GetNearestPlayer(position.x, position.y, position.z, -1.0);
         if (!nearest) return;
@@ -550,7 +666,7 @@ namespace Game {
         const int noDespawn = kNoDespawnDistance;
 
         // Hard cutoff: too far to matter, remove immediately.
-        if (d2 > static_cast<double>(despawnDistance) * despawnDistance &&
+        if (!persistent && d2 > static_cast<double>(despawnDistance) * despawnDistance &&
             RemoveWhenFarAway(d2)) {
             Discard();
             return;
@@ -559,7 +675,9 @@ namespace Game {
         // Soft cutoff: a mob that has been idle for 30 seconds and is outside
         // the keep-alive radius has a 1-in-800 chance per tick of vanishing.
         // This is what stops a world slowly filling with mobs nobody visits.
-        if (m_noActionTime > 600 && m_level->Random().NextInt(800) == 0 &&
+        // (MC's `&&` order: the RNG is drawn only for a non-persistent mob
+        // idle past 600 ticks.)
+        if (!persistent && m_noActionTime > 600 && m_level->Random().NextInt(800) == 0 &&
             d2 > static_cast<double>(noDespawn) * noDespawn && RemoveWhenFarAway(d2)) {
             Discard();
         } else if (d2 < static_cast<double>(noDespawn) * noDespawn) {

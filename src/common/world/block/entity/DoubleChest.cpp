@@ -52,12 +52,49 @@ namespace Game {
         }
     }
 
+    namespace {
+        constexpr BlockID kCopperChests[2][4] = {
+            { BlockID::CopperChest, BlockID::ExposedCopperChest,
+              BlockID::WeatheredCopperChest, BlockID::OxidizedCopperChest },
+            { BlockID::WaxedCopperChest, BlockID::WaxedExposedCopperChest,
+              BlockID::WaxedWeatheredCopperChest, BlockID::WaxedOxidizedCopperChest },
+        };
+    }
+
+    int CopperChestWeatherState(BlockID id) {
+        for (int w = 0; w < 2; ++w)
+            for (int s = 0; s < 4; ++s)
+                if (kCopperChests[w][s] == id) return s;
+        return -1;
+    }
+
+    bool IsWaxedCopperChest(BlockID id) {
+        for (int s = 0; s < 4; ++s) if (kCopperChests[1][s] == id) return true;
+        return false;
+    }
+
+    bool IsCopperChestBlock(BlockID id) { return CopperChestWeatherState(id) >= 0; }
+
+    BlockID CopperChestOf(int weatherState, bool waxed) {
+        if (weatherState < 0 || weatherState > 3) return BlockID::Air;
+        return kCopperChests[waxed ? 1 : 0][weatherState];
+    }
+
+    bool IsChestBlock(BlockID id) {
+        return id == BlockID::Chest || id == BlockID::TrappedChest || IsCopperChestBlock(id);
+    }
+
+    bool ChestCanConnectTo(BlockID self, BlockID other) {
+        if (IsCopperChestBlock(self)) return IsCopperChestBlock(other);
+        return IsChestBlock(self) && other == self;
+    }
+
     std::optional<ChestPairing> FindChestPartner(const IBlockAccess& world, const glm::ivec3& pos) {
         const BlockID self = world.GetBlock(pos.x, pos.y, pos.z);
 
         // Ender chests never pair in MC — each is a view onto the player's own
         // ender inventory, not block storage (ChestBlock vs EnderChestBlock).
-        if (self != BlockID::Chest && self != BlockID::TrappedChest) return std::nullopt;
+        if (!IsChestBlock(self)) return std::nullopt;
 
         const auto& def = BlockRegistry::GetStateDefinition(self);
         const BlockState state = world.GetBlockState(pos.x, pos.y, pos.z);
@@ -90,8 +127,9 @@ namespace Game {
         // This is what stops a chest placed BETWEEN two others from chaining:
         // the middle one pairs with exactly one side, and the other side —
         // still typed single, or pointing elsewhere — refuses to join.
-        if (world.GetBlock(partner.x, partner.y, partner.z) != self) return std::nullopt;
-        if (ParseFacing(FacingOf(world, partner, self)) != facing) return std::nullopt;
+        const BlockID partnerBlock = world.GetBlock(partner.x, partner.y, partner.z);
+        if (!ChestCanConnectTo(self, partnerBlock)) return std::nullopt;
+        if (ParseFacing(FacingOf(world, partner, partnerBlock)) != facing) return std::nullopt;
 
         const BlockState partnerState = world.GetBlockState(partner.x, partner.y, partner.z);
         const std::string_view partnerType = partnerState.GetValueByName("type");
@@ -106,6 +144,46 @@ namespace Game {
         // MC's getBlockType: RIGHT is FIRST, so it supplies the top 27 slots
         // and draws the half whose seam faces +X.
         return ChestPairing{partner, !isLeft};
+    }
+
+} // namespace Game
+
+namespace Game {
+
+    std::optional<glm::ivec3> ChestConnectedCell(BlockState state, const glm::ivec3& pos) {
+        const std::string_view type = state.GetValueByName("type");
+        if (type != "left" && type != "right") return std::nullopt;
+        const Horizontal facing = ParseFacing(state.GetValueByName("facing"));
+        if (facing == Horizontal::Invalid) return std::nullopt;
+        return pos + Offset(type == "left" ? ClockWise(facing) : CounterClockWise(facing));
+    }
+
+    BlockState ChestWithPropertiesOf(BlockID block, BlockState state) {
+        // Every ChestBlock shares one property layout (facing, type,
+        // waterlogged), so the state index carries across unchanged.
+        if (!IsChestBlock(block) || !IsChestBlock(state.Block())) return state;
+        return BlockStates::FromIndex(block, state.Index());
+    }
+
+    BlockState CopperChestLeastOxidizedState(const IBlockAccess& level, const glm::ivec3& pos,
+                                             BlockState state) {
+        const BlockID self = state.Block();
+        if (!IsCopperChestBlock(self)) return state;
+        const auto connected = ChestConnectedCell(state, pos);
+        if (!connected) return state;   // TYPE SINGLE
+        const BlockID other = level.GetBlock(connected->x, connected->y, connected->z);
+        if (!IsCopperChestBlock(other)) return state;
+
+        BlockID updated = self;
+        BlockID connectedPredicted = other;
+        if (IsWaxedCopperChest(self) != IsWaxedCopperChest(other)) {
+            // unwaxBlock: HoneycombItem.WAX_OFF_BY_BLOCK for a waxed one.
+            updated            = CopperChestOf(CopperChestWeatherState(self), false);
+            connectedPredicted = CopperChestOf(CopperChestWeatherState(other), false);
+        }
+        const BlockID least = CopperChestWeatherState(self) <= CopperChestWeatherState(other)
+                                  ? updated : connectedPredicted;
+        return ChestWithPropertiesOf(least, state);
     }
 
 } // namespace Game

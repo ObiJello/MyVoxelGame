@@ -935,6 +935,17 @@ void NoiseBasedChunkGenerator::generateCarvers(RandomState& randomState, const T
                                                         core::QuartPos::fromBlock(blockY),
                                                         core::QuartPos::fromBlock(sourcePos.getMinBlockZ())));
     };
+    // carverBiomeRegion.getChunk(sourcePos).carverBiome(...): vanilla's y = 0
+    // sample, memoized on the source chunk.
+    auto sourceCarverBiome = [&carverBiome, &context](const ::world::ChunkPos& sourcePos) {
+        if (context.carverBiomeRegion) {
+            if (auto* proto = dynamic_cast<::world::ProtoChunk*>(context.carverBiomeRegion(sourcePos.x(),
+                                                                                           sourcePos.z()))) {
+                return proto->carverBiome([&] { return carverBiome(sourcePos, 0); });
+            }
+        }
+        return carverBiome(sourcePos, 0);
+    };
 
     // new WorldgenRandom(new LegacyRandomSource(RandomSupport.generateUniqueSeed())).
     LegacyRandomSource random(RandomSupport::generateUniqueSeed());
@@ -962,7 +973,7 @@ void NoiseBasedChunkGenerator::generateCarvers(RandomState& randomState, const T
     for (int32_t dx = -8; dx <= 8; ++dx) {
         for (int32_t dz = -8; dz <= 8; ++dz) {
             const ::world::ChunkPos sourcePos(pos.x() + dx, pos.z() + dz);
-            const world::biome::BiomeHolder sourceBiome = carverBiome(sourcePos, 0);
+            const world::biome::BiomeHolder sourceBiome = sourceCarverBiome(sourcePos);
             const world::biome::BiomeGenerationSettings* genSettings = nullptr;
             if (sourceBiome && isTwilightDimension) {
                 // Every TF biome carries at most one configured carver

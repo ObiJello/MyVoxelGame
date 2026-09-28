@@ -74,10 +74,22 @@ namespace Render {
                           const glm::dvec4& clipPlane = glm::dvec4(0.0),
                           float deathFlipDeg = 0.0f,
                           bool glowing = false,
-                          bool drawBody = true);
+                          bool drawBody = true,
+                          bool isSitting = false,
+                          bool spectatorHead = false,
+                          float fallFlyTicks = 0.0f,
+                          float spinAttackAgeTicks = -1.0f);
+        // `fallFlyTicks` (> 0 while gliding, partial tick included): the
+        // elytra glide tip (MC setupRotations' fall-flying branch), as the
+        // bulk pass gives remote players.
+        // `spinAttackAgeTicks` (>= 0 while riptiding: the body's age in
+        // ticks, partial included): the spin along the look.
+        // `spectatorHead`: a spectator's body — the translucent head alone
+        // (MC PlayerModel with isSpectator, drawn with forceTransparent).
         // `glowing`: also into the GLOWING outline pass (EntityOutline.hpp)
         // while the main view is collecting; `drawBody` false with it: the
         // outline alone (an INVISIBLE glowing body, MC's outline render type).
+        // `isSitting`: the seated pose (a player on a cushion).
 
         // Render chat bubbles above remote players (screen-space billboarded)
         void RenderChatBubbles(const glm::mat4& projection, const glm::mat4& view,
@@ -91,6 +103,13 @@ namespace Render {
         };
         const Tally& LastTally() const { return m_tally; }
 
+        // Per frame, from the local player: a spectator sees INVISIBLE
+        // players translucent (MC Entity.isInvisibleTo), and while holding
+        // key.spectatorOutlines every non-spectator player glows
+        // (Minecraft.shouldEntityAppearGlowing).
+        void SetViewerSeesInvisible(bool sees) { m_viewerSeesInvisible = sees; }
+        void SetOutlinePlayers(bool outline)   { m_outlinePlayers = outline; }
+
     private:
         Tally m_tally;
         // Upload this call's m_triVerts / m_lineVerts into the frame's set
@@ -99,8 +118,10 @@ namespace Render {
         // is `cameraPos`. `glowing`: the figures also go to the GLOWING
         // outline pass (EntityOutline.hpp).
         // `drawBody` false: outline only (an INVISIBLE glowing body).
+        // `translucent`: alpha-blended (the spectator's translucent figures).
         void SubmitFigures(const glm::mat4& mvp, const glm::vec3& cameraPos,
-                           const glm::vec4& clipPlane, bool glowing, bool drawBody = true);
+                           const glm::vec4& clipPlane, bool glowing, bool drawBody = true,
+                           bool translucent = false);
 
         // The stick figures (shaders/stick_figure.*): lit and fogged like
         // every entity (EntityEnvironment.hpp).
@@ -139,6 +160,13 @@ namespace Render {
         std::vector<StickVertex> m_glowTriVerts;
         std::vector<StickVertex> m_outlineOnlyLineVerts;
         std::vector<StickVertex> m_outlineOnlyTriVerts;
+        // Render's translucent figures (spectator heads; INVISIBLE bodies a
+        // spectator viewer sees), and the dropped lines of a head-only build.
+        std::vector<StickVertex> m_translucentLineVerts;
+        std::vector<StickVertex> m_translucentTriVerts;
+        std::vector<StickVertex> m_scratchLineVerts;
+        bool m_viewerSeesInvisible = false;
+        bool m_outlinePlayers      = false;
 
         static const char* s_vertSource;
         static const char* s_fragSource;

@@ -11,6 +11,7 @@
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/sound/LevelSound.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/particle/ParticleOptions.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +33,14 @@ namespace Game {
 
         // MC order: applyGravity, applyInertia, THEN clip along the result.
         velocity.y -= GetDefaultGravity();
+        if (IsInWater()) {
+            // MC applyInertia in water: four BUBBLEs a quarter-step behind.
+            for (int i = 0; i < 4; ++i) {
+                m_level->AddParticle(ParticleKind::Bubble, position.x - velocity.x * 0.25,
+                                     position.y - velocity.y * 0.25, position.z - velocity.z * 0.25,
+                                     velocity.x, velocity.y, velocity.z);
+            }
+        }
         velocity *= static_cast<double>(IsInWater() ? 0.8f : 0.99f);
 
         const glm::dvec3 origin = position;
@@ -54,11 +63,18 @@ namespace Game {
     }
 
     void ThrownEnderpearl::OnHit(const HitResult& hit) {
-        // MC ThrownEnderpearl.onHit, transcribed. (The 32 PORTAL particles
-        // are a client visual with no ParticleKind here — skipped like the
-        // eye of ender's shatter burst.)
+        // MC ThrownEnderpearl.onHit, transcribed: 32 PORTAL particles on
+        // both copies (the server's addParticle is a no-op; the client's
+        // copy draws them), then the teleport on the server.
         Projectile::OnHit(hit);
         if (!m_level) return;
+        {
+            JavaRandom& r = m_level->Random();
+            for (int i = 0; i < 32; ++i) {
+                m_level->AddParticle(ParticleKind::Portal, position.x, position.y + r.NextDouble() * 2.0, position.z,
+                                     r.NextGaussian(), 0.0, r.NextGaussian());
+            }
+        }
         if (m_level->IsClientSide()) {
             // The client copy waits for the server's removal, like the TNT.
             return;
@@ -100,13 +116,18 @@ namespace Game {
                 // the teleport (the closest source here is FALL — feather
                 // falling reduces both in vanilla).
                 if (livingOwner && m_level->TeleportPlayer(*livingOwner, teleportPos)) {
+                    // MC: newOwner.resetCurrentImpulseContext() — a pearl
+                    // ends any wind-charge launch or mace bounce in flight.
+                    livingOwner->GetImpulseContext().Reset();
                     livingOwner->Hurt(MobDamageSource::Fall, 5.0f, nullptr);
                 }
             } else {
-                // MC's non-player branch: move the entity, reset its fall.
+                // MC's non-player branch: move the entity, reset its fall
+                // (and, for a living one, its current impulse).
                 owner->position = teleportPos;
                 owner->fallDistance = 0.0f;
                 owner->needsSync = true;
+                if (livingOwner) livingOwner->GetImpulseContext().Reset();
             }
             // MC ThrownEnderpearl.playSound: PLAYER_TELEPORT at the landing.
             m_level->PlaySound(nullptr, teleportPos, SoundEvents::PLAYER_TELEPORT, SoundSource::Players, 1.0f, 1.0f);
@@ -131,14 +152,41 @@ namespace Game {
     void Snowball::OnHit(const HitResult& hit) {
         ThrowableProjectile::OnHit(hit);
         if (m_level && !m_level->IsClientSide()) {
-            // MC broadcasts entity event 3 for the poof particles; the client
-            // has no particle system yet, so the event is a no-op there.
+            // MC broadcasts entity event 3: the client copy's 8-puff burst
+            // (HandleEntityEvent).
             m_level->BroadcastEntityEvent(*this, 3);
             Discard();
         }
     }
 
+    void Snowball::HandleEntityEvent(uint8_t id) {
+        if (id != 3 || !m_level) {
+            ThrowableProjectile::HandleEntityEvent(id);
+            return;
+        }
+        // getParticle(): an ITEM particle of the snowball stack.
+        const ParticleOptions particle = ParticleOptions::Item(Items::Snowball);
+        for (int i = 0; i < 8; ++i) {
+            m_level->AddParticle(particle, position.x, position.y, position.z, 0.0, 0.0, 0.0);
+        }
+    }
+
     // ── ThrownEgg ──────────────────────────────────────────────────────────
+
+    void ThrownEgg::HandleEntityEvent(uint8_t id) {
+        if (id != 3 || !m_level) {
+            ThrowableProjectile::HandleEntityEvent(id);
+            return;
+        }
+        const ParticleOptions particle = ParticleOptions::Item(Items::Egg);
+        JavaRandom& r = m_level->Random();
+        for (int i = 0; i < 8; ++i) {
+            const double xa = (static_cast<double>(r.NextFloat()) - 0.5) * 0.08;
+            const double ya = (static_cast<double>(r.NextFloat()) - 0.5) * 0.08;
+            const double za = (static_cast<double>(r.NextFloat()) - 0.5) * 0.08;
+            m_level->AddParticle(particle, position.x, position.y, position.z, xa, ya, za);
+        }
+    }
 
     void ThrownEgg::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         DealHitDamage(target, hit, MobDamageSource::Projectile, 0.0f,
@@ -301,9 +349,17 @@ namespace Game {
             if (IsLingering()) OnHitAsLingering(hit);
             else               OnHitAsSplash(potion, GetPotionDurationScale(m_item), hit);
         }
-        // levelEvent 1054/1053, the glass break (2007/2002, the splash
-        // particles in potion.getColor(), wait on particles). Entity event 3
-        // keeps the client's copy on the same removal path the snowball uses.
+        // levelEvent 2007 (a potion with instant effects) / 2002: the splash
+        // particles in potion.getColor(); then 1054 / 1053, the glass break
+        // — sent here as the plain sound it plays. Entity event 3 keeps the
+        // client's copy on the same removal path the snowball uses.
+        {
+            const bool instant = potion.potion && PotionHasInstantEffects(*potion.potion);
+            m_level->PlayLevelEvent(nullptr,
+                                    instant ? LevelEvent::PARTICLES_INSTANT_POTION_SPLASH
+                                            : LevelEvent::PARTICLES_SPELL_POTION_SPLASH,
+                                    BlockPosition(), potion.GetColor());
+        }
         if (!IsSilent()) {
             m_level->PlaySound(nullptr, Sound::BlockCenter(BlockPosition()), SoundEvents::SPLASH_POTION_BREAK,
                                SoundSource::Neutral, 1.0f, m_level->Random().NextFloat() * 0.1f + 0.9f);

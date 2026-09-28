@@ -1,11 +1,12 @@
 // File: src/common/entity/ai/goals/WitherGoals.cpp
 #include "common/entity/ai/goals/WitherGoals.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/projectile/Projectile.hpp"
-#include "common/entity/decoration/HangingEntity.hpp"
+#include "common/entity/decoration/BlockAttachedEntity.hpp"
 
 #include <vector>
 
@@ -49,8 +50,11 @@ namespace Game {
             // Projectiles ride the Mob pipeline here (MC's are not
             // LivingEntities and never reach this selector) — skip them.
             if (dynamic_cast<const Projectile*>(living)) return;
-            // The same for paintings and item frames (plain Entities in MC).
-            if (dynamic_cast<const HangingEntity*>(living)) return;
+            // The same for paintings, item frames and cushions (plain
+            // Entities in MC).
+            if (dynamic_cast<const BlockAttachedEntity*>(living)) return;
+            // And boats and minecarts (VehicleEntity, a plain Entity in MC).
+            if (IsVehicleEntityType(living->GetType())) return;
             if (!m_conditions.Test(m_wither, *living)) return;
             const double d = m_wither->DistanceToSqr(*living);
             if (!best || d < bestDistSq) { best = living; bestDistSq = d; }

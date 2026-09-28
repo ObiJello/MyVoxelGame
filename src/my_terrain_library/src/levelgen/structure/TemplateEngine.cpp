@@ -1131,6 +1131,10 @@ std::string blockEntityPayloadFor(const std::string& blockId,
             }
             if (const nbt::ListTag* sherds = templateNbt->getListPtr("sherds")) {
                 if (sherds->size() > 0) out += ",sherds:" + canonicalValue(sherds);
+            } else if (const nbt::CompoundTag* sidesTag = templateNbt->getCompoundPtr("sherds")) {
+                // 26.3 PotDecorations.CODEC: {back, left, right, front}, each
+                // an ItemStackTemplate - written back unless EMPTY.
+                if (sidesTag->size() > 0) out += ",sherds:" + canonicalValue(sidesTag);
             }
         }
         out += "}";
@@ -1195,13 +1199,73 @@ std::string blockEntityPayloadFor(const std::string& blockId,
     }
     if (blockId == "minecraft:furnace" || blockId == "minecraft:blast_furnace"
         || blockId == "minecraft:smoker") {
-        std::string beId = blockId;
-        return "{Items:[],RecipesUsed:{},components:{},cooking_time_spent:0s,"
-               "cooking_total_time:0s,id:\"" + beId
-             + "\",lit_time_remaining:0s,lit_total_time:0s}";
+        // Reference: AbstractFurnaceBlockEntity load -> save: Items,
+        // RecipesUsed and the four timers read from the template (getIntOr,
+        // default 0) and written back - the ancient city's furnace keeps its
+        // wooden shovel and deepslate.
+        std::string items = "[]";
+        std::string recipesUsed = "{}";
+        auto shortField = [&](const char* key) {
+            int value = 0;
+            if (templateNbt != nullptr) {
+                if (const nbt::Tag* t = templateNbt->get(key)) {
+                    if (auto v = t->asInt()) value = *v;
+                }
+            }
+            return std::to_string(static_cast<int16_t>(value)) + "s";
+        };
+        if (templateNbt != nullptr) {
+            if (const nbt::ListTag* list = templateNbt->getListPtr("Items")) {
+                items = canonicalValue(list);
+            }
+            if (const nbt::CompoundTag* used = templateNbt->getCompoundPtr("RecipesUsed")) {
+                recipesUsed = canonicalValue(used);
+            }
+        }
+        return "{Items:" + items + ",RecipesUsed:" + recipesUsed
+             + ",components:{},cooking_time_spent:" + shortField("cooking_time_spent")
+             + ",cooking_total_time:" + shortField("cooking_total_time")
+             + ",id:\"" + blockId + "\",lit_time_remaining:" + shortField("lit_time_remaining")
+             + ",lit_total_time:" + shortField("lit_total_time") + "}";
+    }
+    if (blockId == "minecraft:brewing_stand") {
+        // Reference: BrewingStandBlockEntity load -> save (the B8 dump shape
+        // {BrewTime:0s,Fuel:0b,Items:[...],components:{},id}): the igloo
+        // lab's splash potion of weakness and the end ship's potions of
+        // healing ride in on the template's Items.
+        std::string items = "[]";
+        int brewTime = 0;
+        int fuel = 0;
+        if (templateNbt != nullptr) {
+            if (const nbt::ListTag* list = templateNbt->getListPtr("Items")) {
+                items = canonicalValue(list);
+            }
+            if (const nbt::Tag* t = templateNbt->get("BrewTime")) {
+                if (auto v = t->asInt()) brewTime = *v;
+            }
+            if (const nbt::Tag* t = templateNbt->get("Fuel")) {
+                if (auto v = t->asInt()) fuel = *v;
+            }
+        }
+        return "{BrewTime:" + std::to_string(static_cast<int16_t>(brewTime))
+             + "s,Fuel:" + std::to_string(static_cast<int>(static_cast<int8_t>(fuel)))
+             + "b,Items:" + items + ",components:{},id:\"minecraft:brewing_stand\"}";
     }
     if (blockId == "minecraft:bell") {
         return "{components:{},id:\"minecraft:bell\"}";
+    }
+    if (blockId.size() >= 19
+        && blockId.compare(blockId.size() - 19, 19, "copper_golem_statue") == 0) {
+        // Reference: CopperGolemStatueBlockEntity - no fields of its own; the
+        // golem's name rides in the components (the abandoned camps' statues
+        // carry none). Every statue stage shares the one BE type.
+        std::string components = "{}";
+        if (templateNbt != nullptr) {
+            if (const nbt::CompoundTag* comp = templateNbt->getCompoundPtr("components")) {
+                components = canonicalValue(comp);
+            }
+        }
+        return "{components:" + components + ",id:\"minecraft:copper_golem_statue\"}";
     }
     if (blockId == "minecraft:spawner") {
         // Reference: BaseSpawner.load -> save over the template nbt - every
@@ -1563,8 +1627,19 @@ bool placeInWorld(WorldGenLevel* level, const std::string& templateId,
         bool hadWater = settings.keepLiquids && hasWaterSource(level->getBlockState(pos));
         BlockState* state = state_transforms::mirrorState(entry.state, settings.mirror);
         state = state_transforms::rotateState(state, settings.rotation);
-        // (barrier pre-placement for nbt blocks is overwritten immediately -
-        // dump-invisible, skipped.)
+        // Barrier pre-placement for nbt blocks: the barrier itself is
+        // overwritten immediately (dump-invisible), but its setBlock drops a
+        // block entity already standing there (WorldGenRegion.setBlock ->
+        // removeBlockEntity), so the template's own one is created fresh.
+        if (entry.info->hasNbt) {
+            BlockState* previous = level->getBlockState(pos);
+            if (previous != nullptr && previous->hasBlockEntity()) {
+                if (::world::IChunk* chunk =
+                        level->getChunk(pos.getX() >> 4, pos.getZ() >> 4)) {
+                    chunk->removeBlockEntity(pos);
+                }
+            }
+        }
         level->setBlock(pos, state, 2);
         minX = std::min(minX, pos.getX());
         minY = std::min(minY, pos.getY());

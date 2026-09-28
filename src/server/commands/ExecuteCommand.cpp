@@ -35,7 +35,64 @@
 namespace Server {
 
     void ExecuteCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("execute", ExecuteCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        using Cmd::Arg;
+        // MC ExecuteCommand's tree. Every modifier redirects back to the root
+        // (the next subcommand); `run` hands the rest of the line to the
+        // dispatcher; an if/unless test may also end the command.
+        const auto redirect = [](Cmd::Node n) { return std::move(n).Redirect(); };
+        const auto test = [](Cmd::Node n) { return std::move(n).Executes().Redirect(); };
+        const auto conditions = [&]() {
+            return std::vector<Cmd::Node>{
+                Cmd::Literal("block").Then(Cmd::Argument("pos", Arg::BlockPos)
+                    .Then(test(Cmd::Argument("block", Arg::BlockPredicate)))),
+                Cmd::Literal("blocks").Then(Cmd::Argument("start", Arg::BlockPos)
+                    .Then(Cmd::Argument("end", Arg::BlockPos)
+                        .Then(Cmd::Argument("destination", Arg::BlockPos)
+                            .Then(Cmd::Literal("all").Executes().Redirect())
+                            .Then(Cmd::Literal("masked").Executes().Redirect())))),
+                Cmd::Literal("biome").Then(Cmd::Argument("pos", Arg::BlockPos)
+                    .Then(test(Cmd::Argument("biome", Arg::BiomeOrTag)))),
+                Cmd::Literal("dimension").Then(test(Cmd::Argument("dimension", Arg::Dimension))),
+                Cmd::Literal("entity").Then(test(Cmd::Argument("entities", Arg::Entities))),
+                Cmd::Literal("loaded").Then(test(Cmd::Argument("pos", Arg::BlockPos))),
+            };
+        };
+        std::vector<Cmd::Node> relations;
+        for (const char* r : {"attacker", "controller", "leasher", "origin", "owner", "passengers", "target", "vehicle"}) {
+            relations.push_back(redirect(Cmd::Literal(r)));
+        }
+        const auto anchors = [&]() {
+            return std::vector<Cmd::Node>{redirect(Cmd::Literal("eyes")), redirect(Cmd::Literal("feet"))};
+        };
+        std::vector<Cmd::Node> heightmaps;
+        for (const char* h : {"world_surface", "motion_blocking", "motion_blocking_no_leaves", "ocean_floor"}) {
+            heightmaps.push_back(redirect(Cmd::Literal(h)));
+        }
+        dispatcher.RegisterCommand("execute", ExecuteCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literal("run").Then(Cmd::Argument("command", Arg::Command)))
+                .Then(Cmd::Literal("as").Then(redirect(Cmd::Argument("targets", Arg::Entities))))
+                .Then(Cmd::Literal("at").Then(redirect(Cmd::Argument("targets", Arg::Entities))))
+                .Then(Cmd::Literal("positioned")
+                    .Then(redirect(Cmd::Argument("pos", Arg::Vec3)))
+                    .Then(Cmd::Literal("as").Then(redirect(Cmd::Argument("targets", Arg::Entities))))
+                    .Then(Cmd::Literal("over").Then(std::move(heightmaps))))
+                .Then(Cmd::Literal("rotated")
+                    .Then(redirect(Cmd::Argument("rot", Arg::Rotation)))
+                    .Then(Cmd::Literal("as").Then(redirect(Cmd::Argument("targets", Arg::Entities)))))
+                .Then(Cmd::Literal("facing")
+                    .Then(redirect(Cmd::Argument("pos", Arg::Vec3)))
+                    .Then(Cmd::Literal("entity").Then(Cmd::Argument("targets", Arg::Entities)
+                        .Then(anchors()))))
+                .Then(Cmd::Literal("align").Then(redirect(Cmd::Argument("axes", Arg::Word)
+                    .Suggests({"x", "xy", "xyz", "xz", "y", "yz", "z"}))))
+                .Then(Cmd::Literal("anchored").Then(anchors()))
+                .Then(Cmd::Literal("in").Then(redirect(Cmd::Argument("dimension", Arg::Dimension))))
+                .Then(Cmd::Literal("summon").Then(redirect(Cmd::Argument("entity", Arg::EntityType))))
+                .Then(Cmd::Literal("on").Then(std::move(relations)))
+                .Then(Cmd::Literal("if").Then(conditions()))
+                .Then(Cmd::Literal("unless").Then(conditions())));
     }
 
     namespace {
@@ -188,7 +245,10 @@ namespace Server {
                     // MC OwnableEntity — tamed animals.
                     if (auto* tamable = dynamic_cast<Game::TamableAnimal*>(self)) related.push_back(tamable->GetOwner());
                 } else if (relation == "leasher") {
-                    // No leads in this engine: nothing is Leashable.
+                    // MC Leashable.getLeashHolder.
+                    if (auto* mob = dynamic_cast<Game::Mob*>(self); mob && mob->IsLeashable()) {
+                        related.push_back(mob->GetLeashHolder());
+                    }
                 } else if (relation == "target") {
                     if (auto* mob = dynamic_cast<Game::Mob*>(self)) related.push_back(mob->GetTarget());
                 } else if (relation == "attacker") {

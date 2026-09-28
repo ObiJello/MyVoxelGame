@@ -25,7 +25,11 @@ namespace Server {
     }
 
     void ControlCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("control", ControlCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("control", ControlCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literals({"off", "stop"}))
+                .Then(Cmd::Argument("target", Cmd::Arg::PlayerName).Executes()));
     }
 
     void ControlCommand::Execute(const CommandSourceStack& source,

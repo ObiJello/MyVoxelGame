@@ -70,7 +70,13 @@ namespace Server {
     } // namespace
 
     void AurelithCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("aurelith", AurelithCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        std::vector<std::string> spots;
+        for (const Spot& s : kSpots) spots.emplace_back(s.name);
+        dispatcher.RegisterCommand("aurelith", AurelithCommand::Execute,
+            Cmd::Root().Executes()
+                .Then(Cmd::Literals({"status", "keys", "heldnote", "sing", "advance", "reset"}))
+                .Then(Cmd::Literal("tp").Then(Cmd::Literals(spots))));
     }
 
     void AurelithCommand::Execute(const CommandSourceStack& source,

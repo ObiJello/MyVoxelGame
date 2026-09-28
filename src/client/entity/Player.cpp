@@ -1,5 +1,6 @@
 // File: src/client/entity/Player.cpp
 #include "Player.hpp"
+#include "client/entity/ClientVehicles.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
 #include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/world/level/World.hpp"
@@ -8,10 +9,20 @@
 #include "../renderer/mesh/ClientMeshManager.hpp"
 #include "RemotePlayerManager.hpp"
 #include "ClientMobManager.hpp"
+#include "LocalItemCooldowns.hpp"
+#include "common/entity/PlayerRideable.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"   // HappyGhast (the harness platform)
 #include "../world/ClientLevel.hpp"
 #include <algorithm>
 #include <cmath>
 #include "common/core/Mth.hpp"
+#include "client/sound/ClientSounds.hpp"
+#include "common/sound/SoundEvents.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/SpearItem.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/data/DataComponents.hpp"
 #include <glm/gtc/constants.hpp>
 #include <algorithm>
 #include "common/core/Features.hpp"
@@ -33,6 +44,7 @@ namespace Game {
         // Initialize physics at a safe spawn position
         physics.position = glm::vec3(0.0f, 67.0f, 0.0f);
         physics.velocity = glm::vec3(0.0f);
+        physics.pushVelocity = glm::vec3(0.0f);
         physics.isOnGround = false;
         physics.isSneaking = false;
         physics.isSprinting = false;
@@ -44,6 +56,10 @@ namespace Game {
         visualPos = glm::dvec3(physics.position);
         
         lastPosition = physics.position;
+
+        // MC builds a fresh LocalPlayer (and with it a fresh ItemCooldowns)
+        // for every world joined.
+        Client::LocalItemCooldowns::Clear();
 
         Log::Info("ClientPlayer initialized at position (%.2f, %.2f, %.2f)",
                   physics.position.x, physics.position.y, physics.position.z);
@@ -80,11 +96,21 @@ namespace Game {
         // asymptote leaves it).
         if (hurtTime > 0) --hurtTime;
         if (damageCooldownTime > 0) --damageCooldownTime;
+        // MC Player.tick → getCooldowns().tick().
+        Client::LocalItemCooldowns::Tick();
         if (health <= 0) {
             if (deathTime < 20) ++deathTime;
         } else {
             deathTime = 0;
         }
+
+        // MC LivingEntity: fallFlyTicks counts the glide; the elytra's wings
+        // ease toward the glide / crouch / folded angles (elytraAnimation-
+        // State.tick), from this body's movement.
+        fallFlyTicks = physics.isFallFlying ? fallFlyTicks + 1 : 0;
+        elytraAnim.Tick(physics.isFallFlying,
+                        physics.isSneaking && !physics.isFlying && vehicleId == 0,
+                        glm::dvec3(physics.velocity));
 
         // MC Player.tick:228-248 — the sleep clock. Clamped at 100 while in
         // bed (the fade-in is complete), and once up it keeps counting to
@@ -97,6 +123,107 @@ namespace Game {
         }
 
         TickEffects();
+
+        // MC LivingEntity.aiStep: `if (autoSpinAttackTicks > 0) {
+        // --autoSpinAttackTicks; checkAutoSpinAttack(before, now); }` — the
+        // box the spin swept since the last tick.
+        if (autoSpinAttackTicks > 0) {
+            --autoSpinAttackTicks;
+            const double half = 0.3 * static_cast<double>(physics.scale);
+            const double height = 0.6 * static_cast<double>(physics.scale);
+            const glm::dvec3 lo = glm::min(spinPrevPosition, physics.position);
+            const glm::dvec3 hi = glm::max(spinPrevPosition, physics.position);
+            const Game::AABBd swept = Game::AABBd::FromMinMax(lo - glm::dvec3(half, 0.0, half),
+                                                              hi + glm::dvec3(half, height, half));
+            bool touched = false;
+            if (Client::g_clientMobManager) {
+                std::vector<Game::Entity*> nearby;
+                Game::AABB box;
+                box.min = glm::vec3(swept.min);
+                box.max = glm::vec3(swept.max);
+                Client::g_clientMobManager->Level().GetEntitiesInBox(box, nullptr, nearby);
+                for (Game::Entity* e : nearby) {
+                    const Game::LivingEntity* living = e ? e->AsLiving() : nullptr;
+                    if (!living || !living->IsAlive() || e->GetId() == vehicleId) continue;
+                    // A boat or a minecart is no LivingEntity in MC.
+                    if (Game::IsVehicleEntityType(living->GetType())) continue;
+                    if (!living->GetAABBd().Intersects(swept)) continue;
+                    touched = true;
+                    break;
+                }
+            }
+            if (!touched && Client::g_remotePlayerManager) {
+                for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                    if (!rp.positionInitialized || !Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                    const double w = 0.3 * rp.scale, h = 1.8 * rp.scale;
+                    const Game::AABBd box = Game::AABBd::FromMinMax(rp.position - glm::dvec3(w, 0.0, w),
+                                                                    rp.position + glm::dvec3(w, h, w));
+                    if (box.Intersects(swept)) { touched = true; break; }
+                }
+            }
+            if (touched) {
+                // doAutoAttackOnTouch (the server's), then the spin ends and
+                // the body bounces off: setDeltaMovement(scale(-0.2)).
+                autoSpinAttackTicks = 0;
+                physics.velocity *= -0.2f;
+            } else if (physics.horizontalCollision) {
+                autoSpinAttackTicks = 0;
+            }
+        }
+        spinPrevPosition = physics.position;
+        physics.isAutoSpinAttack = autoSpinAttackTicks > 0;
+    }
+
+    void ClientPlayer::StartRiptide(float strength, float yRot, float xRot, const IBlockAccess* blocks) {
+        // TridentItem.releaseUsing, riptide branch: push along the look,
+        // normalised to the Riptide strength (blocks per tick).
+        const float yr = yRot * 0.017453292f, xr = xRot * 0.017453292f;
+        float xd = -std::sin(yr) * std::cos(xr);
+        float yd = -std::sin(xr);
+        float zd = std::cos(yr) * std::cos(xr);
+        const float dist = std::sqrt(xd * xd + yd * yd + zd * zd);
+        if (dist > 0.0f) {
+            xd *= strength / dist;
+            yd *= strength / dist;
+            zd *= strength / dist;
+        }
+        // player.push(xd, yd, zd) — PlayerPhysics keeps blocks per second.
+        // The horizontal part is ordinary deltaMovement with MC's friction
+        // (pushVelocity), not the portal momentum `velocity` carries.
+        physics.velocity.y += yd * 20.0f;
+        physics.pushVelocity.x += xd * 20.0f;
+        physics.pushVelocity.z += zd * 20.0f;
+        // startAutoSpinAttack(20, 8, stack).
+        autoSpinAttackTicks = 20;
+        spinPrevPosition = physics.position;
+        // On the ground: player.move(SELF, (0, 1.1999999, 0)) — the hop that
+        // lets a riptide leave the floor, stopped by a ceiling.
+        if (physics.isOnGround && blocks) {
+            Game::PhysicsContext context;
+            context.blockAccess = blocks;
+            const float halfWidth = physics.GetWidth() * 0.5f;
+            const glm::vec3 halfExtents(halfWidth, physics.GetCurrentHeight() * 0.5f, halfWidth);
+            glm::dvec3 lift(0.0, 1.1999999284744263, 0.0);
+            glm::dvec3 pos = physics.position;
+            Game::MoveEntity(pos, lift, halfExtents, 0.0f, true, context);
+            physics.position = pos;
+            predictedPos = pos;
+            physics.isOnGround = false;
+        }
+        physics.isAutoSpinAttack = true;
+    }
+
+    void ClientPlayer::OnKineticHit() {
+        // MC LivingEntity.onKineticHit: once per HIT_FEEDBACK_TICKS, the used
+        // KINETIC_WEAPON's hit sound here (makeLocalHitSound).
+        if (tickCount - lastKineticHitFeedbackTick <= Game::Spear::kHitFeedbackTicks) return;
+        lastKineticHitFeedbackTick = tickCount;
+        if (!usingItem) return;
+        const Game::Spear::SpearDefinition* def = Game::Spear::Find(useItemId);
+        if (def && def->kinetic.hitSound) {
+            Client::Sounds::PlayLocal(physics.position, def->kinetic.hitSound, Game::SoundSource::Players,
+                                      1.0f, 1.0f);
+        }
     }
 
     // ── Status effects (MC LocalPlayer / LivingEntity, client side) ────────
@@ -284,9 +411,36 @@ namespace Game {
                                    glm::dvec3(0.0, 0.85 * sc, 0.0);
             }
             physics.velocity    = glm::vec3(0.0f);
+            physics.pushVelocity = glm::vec3(0.0f);
             physics.isOnGround  = true;
             physics.isSneaking  = false;
             physics.isSprinting = false;
+            predictedPos = physics.position;
+            jumpPressed  = false;
+            return;
+        }
+        if (vehicleId != 0) {
+            // MC Entity.rideTick → vehicle.positionRider: the body is the
+            // seat's, whatever the keys say. The copy of the vehicle gives the
+            // seat; until it is here (or once it is gone, before the server's
+            // dismount arrives) the last seat holds.
+            // The seat on the vehicle's copy as it is drawn this frame (its
+            // interpolated position and heading — a boat's seats swing with
+            // it), so the view rides the vehicle smoothly at any frame rate.
+            {
+                glm::dvec3 seat;
+                if (Client::Vehicles::LocalSeatPosition(*this, seat)) vehicleSeatPos = seat;
+            }
+            physics.position    = vehicleSeatPos;
+            physics.velocity    = glm::vec3(0.0f);
+            physics.pushVelocity = glm::vec3(0.0f);
+            // Player.tick: a passenger is never on the ground; the crouch
+            // pose needs !isPassenger (LocalPlayer.aiStep), and a ride
+            // clears the fall (LivingEntity.rideTick).
+            physics.isOnGround  = false;
+            physics.isSneaking  = false;
+            physics.isSprinting = false;
+            physics.fallDistance = 0.0f;
             predictedPos = physics.position;
             jumpPressed  = false;
             return;
@@ -314,7 +468,12 @@ namespace Game {
                     const double power = 1.0 - std::sqrt(nearestSq) / 8.0;
                     // 0.1 blocks per tick each tick → blocks per second, over this frame.
                     const double impulse = power * power * 0.1 * 20.0 * (deltaTime * 20.0);
-                    physics.velocity += glm::vec3(delta / len * impulse);
+                    // Horizontal via pushVelocity (MC friction), not the
+                    // portal momentum.
+                    const glm::vec3 pull(delta / len * impulse);
+                    physics.velocity.y += pull.y;
+                    physics.pushVelocity.x += pull.x;
+                    physics.pushVelocity.z += pull.z;
                 }
             }
         }
@@ -349,6 +508,7 @@ namespace Game {
             // not a nudge — a placed block.
             physics.position    = morphLockPos;
             physics.velocity    = glm::vec3(0.0f);
+            physics.pushVelocity = glm::vec3(0.0f);
             physics.isOnGround  = true;
             physics.isSneaking  = false;
             physics.isSprinting = false;
@@ -358,6 +518,24 @@ namespace Game {
             jumpPressed  = false;
             return;
         }
+        // Spectator — MC Player.tick: `noPhysics = isSpectator()`; and
+        // LocalPlayer.aiStep: a spectator who may fly IS flying, every tick
+        // (there is no landing and no double-tap out of it). The flight
+        // speed is the local Abilities.flyingSpeed, which the mouse wheel
+        // moves in spectator.
+        physics.noPhysics   = IsSpectator();
+        physics.flyingSpeed = flyingSpeed;
+        if (IsSpectator() && physics.mayFly) physics.isFlying = true;
+        // MC LocalPlayer.serverAiStep: the movement input only drives the
+        // body while it is the camera — looking through another entity, the
+        // spectator's own body is carried along with it (PlatformMain).
+        if (IsCameraDetached()) {
+            movementInput = glm::vec3(0.0f);
+            jumpPressed   = false;
+            jumpHeld      = false;
+            sprintPressed = false;
+        }
+
         // Update physics state based on input
         physics.isSneaking = sneakPressed;
         // Sneak normally blocks sprinting, but shift while flying is "descend",
@@ -383,9 +561,54 @@ namespace Game {
         UpdateEnchantmentLocationEffects(blockAccess);
         ApplyEffectPhysics();
 
+        // The elytra glide's inputs: whether a usable glider is worn (a
+        // broken or removed one ends the glide inside the step), and the
+        // look it steers by (MC getLookAngle / getXRot).
+        physics.gliderEquipped = HasUsableGlider();
+        physics.lookDir = lookDir;
+        physics.xRotDeg = Game::Mth::XRotFromVector(lookDir);
+
         // Create physics context with block access (World, ClientBlockAccess, etc.)
         PhysicsContext context;
         context.blockAccess = blockAccess;
+        // MC Entity.collide's entity half for the player: the happy ghasts
+        // solid to it (HappyGhast.canBeCollidedWith — its top to a player at
+        // or above it, its whole box on its still timeout), gathered once
+        // for the frame around where the player can reach. A box the player
+        // already overlaps is left out: MC's collision only stops motion
+        // INTO a shape, never pins what is inside one.
+        static thread_local std::vector<AABBd> t_solidEntities;
+        t_solidEntities.clear();
+        if (Client::g_clientMobManager) {
+            const double half = physics.GetWidth() * 0.5;
+            const AABBd playerBox = AABBd::FromMinMax(
+                physics.position - glm::dvec3(half, 0.0, half),
+                physics.position + glm::dvec3(half, physics.GetCurrentHeight(), half));
+            constexpr double kReach = 16.0;
+            for (const Client::ClientMob* entry : Client::g_clientMobManager->MobList()) {
+                if (!entry || !entry->mob || entry->mob->IsRemoved()) continue;
+                const Game::Mob& mob = *entry->mob;
+                const EntityTypeId type = mob.GetType();
+                // MC canBeCollidedWith(player): a boat (always), a live
+                // shulker, a happy ghast by its own rule. Never the vehicle
+                // this player sits on.
+                const bool boat = IsBoatEntityType(type);
+                if (!boat && type != EntityTypeId::Shulker && type != EntityTypeId::HappyGhast) continue;
+                if (vehicleId != 0 && mob.GetId() == vehicleId) continue;
+                const AABBd box = mob.GetAABBd();
+                if (box.min.x > playerBox.max.x + kReach || box.max.x < playerBox.min.x - kReach ||
+                    box.min.y > playerBox.max.y + kReach || box.max.y < playerBox.min.y - kReach ||
+                    box.min.z > playerBox.max.z + kReach || box.max.z < playerBox.min.z - kReach) {
+                    continue;
+                }
+                if (type == EntityTypeId::HappyGhast &&
+                    !static_cast<const HappyGhast&>(mob).CanBeCollidedWithPlayer(physics.position.y)) continue;
+                if (type == EntityTypeId::Shulker && !mob.IsAlive()) continue;
+                if (box.Intersects(playerBox)) continue;
+                t_solidEntities.push_back(box);
+            }
+        }
+        context.entityColliders = t_solidEntities.empty() ? nullptr : &t_solidEntities;
         // MC Player.travel's swim steering reads getLookAngle().y.
         physics.lookDirY = lookDir.y;
         // MC EnvironmentAttributes.FAST_LAVA: the nether's lava pushes harder.
@@ -427,6 +650,19 @@ namespace Game {
             first = false;
         } while (remaining > 1e-6f);
         physics.didJumpThisStep = jumped;
+
+        // A glide into a wall (handleFallFlyingCollisions): the fall-damage
+        // sound here — Player.playSound excepts the glider on the server —
+        // and the damage to the server with the next move.
+        if (physics.flyIntoWallDamage > 0.0f) {
+            const float dmg = physics.flyIntoWallDamage;
+            physics.flyIntoWallDamage = 0.0f;
+            flyIntoWallSinceMoveSend = std::max(flyIntoWallSinceMoveSend, dmg);
+            Client::Sounds::PlayLocal(physics.position,
+                                      static_cast<int>(dmg) > 4 ? Game::SoundEvents::PLAYER_BIG_FALL
+                                                                : Game::SoundEvents::PLAYER_SMALL_FALL,
+                                      Game::SoundSource::Players, 1.0f, 1.0f);
+        }
 
         // Accumulate jump impulses for the next PlayerMoveC2S (server-side
         // jump exhaustion — MC ServerPlayer.jumpFromGround). Cleared by the
@@ -607,6 +843,7 @@ namespace Game {
                                   std::floor(physics.position.z) + 0.5);
         physics.position = morphLockPos;
         physics.velocity = glm::vec3(0.0f);
+        physics.pushVelocity = glm::vec3(0.0f);
         physics.stepVisualOffset = 0.0f;
     }
 
@@ -678,9 +915,18 @@ namespace Game {
         // Double-tap-space creative flight toggle — MC LocalPlayer.aiStep
         // (LocalPlayer.java:760-782): first tap arms a 7-tick (0.35 s)
         // window; a second tap inside it flips abilities.flying. Gated on
-        // mayFly; water bobbing and debug noclip keep their own controls.
-        if (risingEdge && physics.mayFly && !physics.noclip &&
-            (physics.isFlying || !physics.isInWater)) {
+        // mayFly; water bobbing keeps its own control. Debug noclip is NOT a
+        // gate and is never touched here: while noclipping the double-tap
+        // still flips the creative flying flag underneath — movement stays
+        // noclip flight — so it is the flag that decides whether the player
+        // flies or falls once N ends noclip (and flight can be turned off
+        // without leaving noclip first). In noclip the tap can only turn
+        // flight OFF, never on: with the flag already off it does nothing.
+        // Noclip ignores water, so the water gate does not apply to it.
+        bool justToggledCreativeFlight = false;
+        if (risingEdge && physics.mayFly && !IsSpectator() &&
+            (!physics.noclip || physics.isFlying) &&
+            (physics.isFlying || physics.noclip || !physics.isInWater)) {
             if (flyToggleTimer > 0.0f) {
                 physics.isFlying = !physics.isFlying;
                 if (physics.isFlying) {
@@ -688,10 +934,46 @@ namespace Game {
                     physics.velocity.y = 0.0f;
                 }
                 flyToggleTimer = 0.0f;
+                justToggledCreativeFlight = true;
             } else {
                 flyToggleTimer = FLY_DOUBLE_TAP_WINDOW;
             }
         }
+
+        // MC LocalPlayer.aiStep: a fresh jump press that did not toggle
+        // creative flight, off any climbable, starts an elytra glide
+        // (tryToStartFallFlying → START_FALL_FLYING).
+        if (risingEdge && !justToggledCreativeFlight && !physics.onClimbable && vehicleId == 0 &&
+            !physics.noclip) {
+            TryToStartFallFlying();
+        }
+    }
+
+    bool ClientPlayer::HasUsableGlider() const {
+        const Game::ItemStack& chest =
+            inventory.GetSlot(Game::InventoryIndexFor(Game::EquipmentSlot::CHEST));
+        if (chest.IsEmpty() || chest.itemId != Game::Items::Elytra) return false;
+        auto equippable = chest.get(Game::DataComponents::EQUIPPABLE);
+        return equippable && equippable->slot == Game::EquipmentSlot::CHEST && !Game::NextDamageWillBreak(chest);
+    }
+
+    bool ClientPlayer::TryToStartFallFlying() {
+        physics.gliderEquipped = HasUsableGlider();
+        if (physics.isFallFlying || !physics.CanGlide() || physics.isInWater || physics.isInLava ||
+            IsSpectator()) {
+            return false;
+        }
+        // This engine's air walk is the input direction at speed plus a
+        // residual velocity; MC's deltaMovement is the sum. The glide steers
+        // the sum, so the walk it takes off with is folded in first.
+        const glm::vec3 walk(movementInput.x, 0.0f, movementInput.z);
+        if (glm::dot(walk, walk) > 1.0e-8f) {
+            const glm::vec3 dir = glm::normalize(walk) * physics.currentSpeed;
+            physics.velocity.x += dir.x;
+            physics.velocity.z += dir.z;
+        }
+        physics.isFallFlying = true;
+        return true;
     }
 
     void ClientPlayer::ToggleNoclip() {
@@ -700,6 +982,7 @@ namespace Game {
 
         if (physics.noclip) {
             physics.velocity = glm::vec3(0.0f);
+            physics.pushVelocity = glm::vec3(0.0f);
             physics.isOnGround = false;
         }
     }
@@ -710,6 +993,7 @@ namespace Game {
 
         if (physics.noclip) {
             physics.velocity = glm::vec3(0.0f);
+            physics.pushVelocity = glm::vec3(0.0f);
             physics.isOnGround = false;
         }
     }

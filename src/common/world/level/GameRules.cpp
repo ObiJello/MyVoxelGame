@@ -38,12 +38,16 @@ namespace Game::Rules {
             Id::PlayersNetherPortalCreativeDelay,
             Id::Pvp,                              // PlayerEntityView::Hurt
             Id::RespawnRadius,                    // PlayerSessionManager::OnPlayerRespawn (PlayerSpawnFinder)
+            Id::SpectatorsGenerateChunks,         // Spectator::SkipsChunkLoading (MC ChunkMap.skipPlayer)
             Id::PlayersSleepingPercentage,        // IntegratedServer sleep status (SleepStatus port)
             // Mobs
             Id::MaxEntityCramming,                // LivingEntity::PushEntities
             Id::UniversalAnger, Id::ForgiveDeadPlayers,   // NeutralMob
             // Spawning
             Id::SpawnMonsters,                    // RunNaturalSpawner category gate
+            Id::SpawnWanderingTraders,            // WanderingTraderSpawner::Tick
+            Id::SpawnPatrols,                     // PatrolSpawner::Tick
+            Id::SpawnWardens,                     // SculkShriekerBlockEntity::CanRespond
             // Drops
             Id::BlockDrops, Id::MobDrops,         // ItemEntityManager::PopResource + block XP; MobManager::DropDeathLoot
             // Chat
@@ -51,6 +55,8 @@ namespace Game::Rules {
             // Updates
             Id::WaterSourceConversion,            // Fluids::GetNewLiquid (FlowingFluid.canConvertToSource)
             Id::LavaSourceConversion,
+            Id::AdvanceWeather,                   // Server::ServerWeather (advanceWeatherCycle, the night skip)
+            Id::MaxSnowAccumulationHeight,        // Precipitation::TickPrecipitation
             // Misc
             Id::AllowEnteringNetherUsingPortals,  // PortalTravel + immersive crossing
             Id::MaxCommandForks,                  // ExecuteCommand fork limit

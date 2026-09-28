@@ -1,6 +1,9 @@
 // File: shaders/block_vk.frag (Vulkan version of block.frag)
 // Cutout shader — uniform-based alpha discard via push constant.
 #version 450
+#ifdef OIT
+#extension GL_GOOGLE_include_directive : require
+#endif
 
 // Input from vertex shader
 layout (location = 0) in vec2 fragTexCoord;
@@ -53,7 +56,17 @@ layout (std140, set = 1, binding = 0) uniform Common {
 } U;
 
 // Output
+#ifndef OIT_ALPHA_ONLY
 layout (location = 0) out vec4 FragColor;
+#endif
+
+// Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency): the
+// OIT variants are this file compiled with -DOIT and a stage define
+// (<name>_oit_{db,tr,ac}_vk.frag.spv, CMake). The engine's own compile never
+// sees any of it.
+#ifdef OIT
+#include "oit_lib.glsl"
+#endif
 
 float linearFog(float d, float s, float e) {
     if (d <= s) return 0.0;
@@ -68,6 +81,10 @@ void main() {
     if (textureColor.a < pc.uAlphaTest) {
         discard;
     }
+#ifdef OIT_ALPHA_ONLY
+    // MC item.fsh: the depth-bounds / transmittance stages read alpha only.
+    executeAlphaOnlyPhase(gl_FragCoord.z, textureColor.a * fragColor.a);
+#else
 
     // Vertex color contains: biome tint * AO * directional face shade (gamma space)
     vec3 finalColor = textureColor.rgb * fragColor.rgb;
@@ -86,4 +103,10 @@ void main() {
     finalColor = mix(finalColor, U.uFogColor_.rgb, fogValue * U.uFogColor_.a);
 
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
+#ifdef OIT_ACCUMULATE
+    // MC calculateFinalColor: premultiplied, weighted by the transmittance
+    // in front of it (the fog is already in the colour).
+    FragColor = sampleColorForAccumulation(FragColor);
+#endif
+#endif
 }

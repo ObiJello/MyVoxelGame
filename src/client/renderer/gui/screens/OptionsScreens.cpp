@@ -312,6 +312,14 @@ namespace Render {
 #endif
         }
 
+        // Engine option: OFF = the world fully lit (Render::Lightmap full
+        // white), AO / face shading kept. Read by the lightmap every frame.
+        auto* lighting = OnOff("Lighting", s.GetWorldLighting(),
+                               [](bool on) { Settings().SetWorldLighting(on); });
+        lighting->SetTooltip({"OFF renders the world fully lit: no",
+                              "darkness at night or in caves.",
+                              "Smooth lighting's shading (ambient",
+                              "occlusion) is kept. Applies instantly."});
         m_list->AddSmall(
             ValueSlider("Brightness", s.GetGamma(), 0.0, 1.0, 0.01,
                 [](double v) -> std::string {
@@ -320,7 +328,7 @@ namespace Render {
                     return std::to_string(static_cast<int>(std::lround(v * 100.0))) + "%";
                 },
                 [](double v) { Settings().SetGamma(static_cast<float>(v)); }),
-            nullptr);
+            lighting);
 
         m_list->AddHeader("Graphics Quality");
 
@@ -339,12 +347,15 @@ namespace Render {
         {
             using Preset = Platform::GameSettings::GraphicsPreset;
             const Preset current = s.GetGraphicsPreset();
-            std::vector<std::string> values = {"Fast", "Fancy"};
+            std::vector<std::string> values = {"Fast", "Fancy", "Fabulous"};
             if (current == Preset::Custom) values.push_back("Custom");
-            const int initial = current == Preset::Fast ? 0 : (current == Preset::Fancy ? 1 : 2);
+            const int initial = current == Preset::Fast ? 0
+                              : current == Preset::Fancy ? 1
+                              : current == Preset::Fabulous ? 2 : 3;
             auto* graphics = Cycle("Graphics", values, initial, [&mgr](int i) {
-                if (i >= 2) return;   // "Custom" is a state, not a choice
-                Settings().ApplyGraphicsPreset(i == 0 ? Preset::Fast : Preset::Fancy);
+                if (i >= 3) return;   // "Custom" is a state, not a choice
+                Settings().ApplyGraphicsPreset(i == 0 ? Preset::Fast
+                                             : i == 1 ? Preset::Fancy : Preset::Fabulous);
                 ApplyMeshOptions();
                 mgr.MarkSettingApplied(ScreenManager::APPLY_RENDER_DISTANCE |
                                        ScreenManager::APPLY_SIMULATION_DISTANCE |
@@ -357,6 +368,8 @@ namespace Render {
                                   "leaves, flat lighting, fewer particles.",
                                   "Fancy: 16 chunks, simulation 12,",
                                   "see-through leaves, smooth lighting.",
+                                  "Fabulous: Fancy with 32 chunks and",
+                                  "Improved Transparency.",
                                   lowEnd ? "Fast is recommended for this machine."
                                          : "Changing any option below = Custom."});
             auto* cull = OnOff("Cull Leaves", s.GetCullLeaves(),
@@ -496,7 +509,16 @@ namespace Render {
             aniso->SetTooltip({"Smooths textures seen at an angle —",
                                "the distant ground and walls. Needs",
                                "mipmaps on. Applied at once."});
-            m_list->AddSmall(aniso, nullptr);
+            // MC options.improvedTransparency (Render::ImprovedTransparency).
+            // Read every frame; applies live. Off by default.
+            auto* transparency = OnOff("Improved Transparency", s.GetImprovedTransparency(),
+                                       [](bool on) { Settings().SetImprovedTransparency(on); });
+            transparency->SetTooltip({"An experimental approach that uses",
+                                      "screen shaders for drawing weather,",
+                                      "clouds, and particles behind",
+                                      "translucent blocks and water.",
+                                      "This will impact GPU performance."});
+            m_list->AddSmall(aniso, transparency);
         }
 
         {
@@ -517,6 +539,13 @@ namespace Render {
             ValueSlider("Cloud Range", s.GetCloudRange(), 32, 512, 32,
                 [](double v) { return std::to_string(static_cast<int>(v)) + " blocks"; },
                 [](double v) { Settings().SetCloudRange(static_cast<int>(v)); }));
+        // MC options.weatherRadius ("Weather Effect Radius", 3..10 blocks):
+        // the rain / snow columns and splashes around the camera.
+        m_list->AddSmall(
+            ValueSlider("Weather Effect Radius", s.GetWeatherRadius(), 3, 10, 1,
+                [](double v) { return std::to_string(static_cast<int>(v)) + " blocks"; },
+                [](double v) { Settings().SetWeatherRadius(static_cast<int>(v)); }),
+            nullptr);
 
         m_list->AddHeader("Preferences");
 
@@ -801,7 +830,20 @@ namespace Render {
                 Client::MusicManager::Get().SetMinutesBetweenSongs(f);
             });
             frequency->SetTooltip({"Changes how frequently music plays while in a game world."});
-            m_list->AddSmall(frequency, nullptr);
+            // Engine option (options.txt "jukeboxRange": normal / global).
+            // Read by JukeboxSongPlayback every tick, so a change takes
+            // effect at once — a song already playing somewhere is picked
+            // up where it is.
+            const bool global = s.GetString("jukeboxRange", "normal") == "global";
+            AbstractWidget* jukeboxRange = Cycle("Jukebox Range", {"Normal", "Global"}, global ? 1 : 0,
+                                                 [](int i) {
+                Settings().SetString("jukeboxRange", i == 1 ? "global" : "normal");
+            });
+            jukeboxRange->SetTooltip({"Normal: hear a jukebox within 64 blocks, from where it",
+                                      "stands (vanilla).",
+                                      "Global: hear every jukebox on the server at full volume,",
+                                      "however far away and in any dimension."});
+            m_list->AddSmall(frequency, jukeboxRange);
         }
     }
 

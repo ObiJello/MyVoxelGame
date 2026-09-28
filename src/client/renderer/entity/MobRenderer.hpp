@@ -55,7 +55,13 @@
 
 #include "client/renderer/backend/RenderTypes.hpp"
 #include "client/renderer/entity/EntityFrame.hpp"
+#include "client/renderer/entity/LeashRenderer.hpp"
+#include "client/renderer/entity/FishingHookRenderer.hpp"
 #include "client/renderer/entity/model/EntityModels.hpp"
+#include "client/renderer/entity/model/HumanoidArmorModel.hpp"
+#include "client/renderer/entity/ItemDisplayTransforms.hpp"
+#include "common/entity/Item.hpp"
+#include "common/entity/EquipmentSlot.hpp"
 #include "common/entity/EntityType.hpp"
 #include "common/entity/Morph.hpp"
 
@@ -65,13 +71,14 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
 struct Frustum;
 namespace Game {
     class ArmorStand; class Mob; }
-namespace Client { class ClientMobManager; }
+namespace Client { class ClientMobManager; struct ClientMob; }
 
 namespace Render {
 
@@ -91,6 +98,12 @@ namespace Render {
     // Bumped by SetBabyModelLook; the renderer drops its model cache when it
     // sees a new value, so a change applies to the next frame.
     int  BabyModelLookGeneration();
+
+    // MC HappyGhastModel over the generated happy ghast mesh `slug` (adult
+    // or baby row): the compiled setupAnim plus the body squeeze a worn
+    // harness applies (EntityRenderState::hasBodyItem). Null when the row is
+    // missing. MountEquipmentLayers.cpp.
+    std::unique_ptr<EntityModel> CreateHappyGhastModel(std::string_view slug);
 
     class MobRenderer {
     public:
@@ -113,16 +126,29 @@ namespace Render {
         // Beyond this the server has stopped sending updates anyway.
         static constexpr float kMaxRenderDistance = 160.0f;
 
+        // ── Spectator (set per frame by the frame loop) ──────────────────
+        // The mob the camera is inside (a spectator looking through it) is
+        // not drawn — MC skips the camera entity in first person. -1 = none.
+        void SetHiddenEntity(int32_t id) { m_hiddenEntityId = id; }
+        // MC Entity.isInvisibleTo(player): a spectator sees INVISIBLE bodies,
+        // translucent (LivingEntityRenderer's forceTransparent).
+        void SetViewerSeesInvisible(bool sees) { m_viewerSeesInvisible = sees; }
+
         // ── /morph ────────────────────────────────────────────────────────
         // A player drawn as a mob: the mob's model at the player's feet with
         // the player's own body yaw, head yaw, pitch and walk animation, so
-        // it reads exactly like a mob to whoever is looking. What a mob's
-        // own state drives beyond that (held items, wool colour, anger,
-        // charge, variants) has no player-side source and is not drawn —
-        // the plain adult model with its base texture, its layer where the
-        // model has one (sheep wool, drowned/stray/bogged overlay).
+        // it reads exactly like a mob to whoever is looking. The player's
+        // own held items and armour ride it where the mob's renderer has
+        // those layers (MorphPose::equipment). What a mob's own state drives
+        // beyond that (wool colour, anger, charge, variants) has no
+        // player-side source and is not drawn — the plain adult model with
+        // its base texture, its layer where the model has one (sheep wool,
+        // drowned/stray/bogged overlay).
         struct MorphPose {
             uint32_t   code = Game::Morph::kNone;   // Game::Morph: a mob or a block here
+            // The morph's look beyond the code (Game::Morph::DefaultVariantOf:
+            // a tropical fish's packed variant, a salmon's size).
+            int32_t    variant = 0;
             glm::dvec3 position;      // feet, world space (double)
             float bodyYaw   = 0.0f;   // degrees
             float headYaw   = 0.0f;
@@ -137,6 +163,30 @@ namespace Render {
             float animTick  = 0.0f;   // sheep graze / skeleton draw ticks left (lerped)
             uint32_t seed   = 0;      // per-body phase (phantom flap, witch nose)
             bool  crouching = false;  // the player model's sneak pose
+            // The player's arm (MC LivingEntity.getAttackAnim(partialTick),
+            // 0..1 through a swing), its arm poses (AvatarRenderer.getArmPose,
+            // ArmPose ordinals), the item-use clock and seat — what
+            // HumanoidModel reads off the player's render state.
+            float attackTime     = 0.0f;
+            uint8_t rightArmPose = 0;
+            uint8_t leftArmPose  = 0;
+            bool  usingItem      = false;
+            int   useItemHand    = 0;       // 0 main, 1 off
+            float ticksUsingItem = 0.0f;
+            float maxCrossbowCharge = 25.0f;   // HumanoidRenderState.maxCrossbowChargeDuration
+            bool  passenger      = false;
+            // MC LivingEntityRenderState.isAutoSpinAttack (a riptide: the
+            // body spun along its look, the swirl layer) and
+            // ticksSinceKineticHitFeedback (a charging spear's recoil).
+            bool  autoSpinAttack = false;
+            float ticksSinceKineticHitFeedback = 0.0f;
+            // The player's worn elytra (ElytraAnimationState.hpp flags) and
+            // its wings' angles (partial-tick lerped) — MC WingsLayer, on
+            // the humanoid mobs HumanoidMobRenderer gives one.
+            uint8_t elytraFlags = 0;
+            float elytraRotX = 0.2617994f;
+            float elytraRotY = 0.0f;
+            float elytraRotZ = -0.2617994f;
             // The player's INVISIBILITY / GLOWING (MC: the body is not drawn
             // but its layers are; a glowing body is outlined) and burning
             // (full block light, MC getBlockLightLevel).
@@ -148,12 +198,127 @@ namespace Render {
             // rotateX(-30) before the entity's own rotateY(180) is this +30
             // after it). 0 for a morph.
             float tiltDeg   = 0.0f;
+            // MC ParrotOnShoulderLayer — NOT a morph: with shoulderParrot
+            // >= 0 (a Parrot.Variant id) this pose is a PLAYER's (feet,
+            // body/head yaw, pitch, walk, age, scale, crouch, death topple)
+            // and only a parrot in the ON_SHOULDER pose is drawn, on the
+            // left or right shoulder of the player model. `code` is ignored.
+            int   shoulderParrot = -1;
+            bool  shoulderLeft   = false;
+            // An engine addition: the shoulder parrot dances (PARTY pose)
+            // while its player is near a playing jukebox (ShoulderParrots).
+            bool  shoulderParty  = false;
+            // What the player holds and wears, by Game::EquipmentSlot
+            // ordinal (MAINHAND = the selected hotbar stack): the morph body
+            // draws them as the mob's renderer would its own — the held
+            // items through ItemInHandLayer on every armed humanoid (the
+            // Herobrine player model too), the armour and head item through
+            // HumanoidArmorLayer / CustomHeadLayer only on a mob whose
+            // renderer has an armour layer (zombies, skeletons, piglins).
+            Game::ItemStack equipment[6];
         };
         // Same buffers, pipeline and per-batch draw as Render; appends
         // after it within the frame.
         void RenderMorphs(const glm::mat4& projection, const glm::mat4& view,
                           const glm::vec3& cameraPos, const Frustum& frustum,
                           const std::vector<MorphPose>& poses, float partialTick);
+
+        // MC WingsLayer on a (stick-figure) player: the elytra model on the
+        // player model's pose stack — AvatarRenderer's 0.9375 scale and
+        // crouch offset, the body yaw, the −1.501 model offset — then
+        // translate(0, 0, 0.125) and ElytraModel posed from the wings'
+        // angles. The stick figure's own glide tip and death topple (both
+        // about the feet) are applied the same way, so the wings stay on its
+        // back. `glint` adds MC's armor_entity_glint pass.
+        struct ElytraPose {
+            glm::dvec3 position{0.0};   // feet, world space
+            float bodyYaw   = 0.0f;
+            float pitch     = 0.0f;     // the glide tip's (90 + xRot)
+            float scale     = 1.0f;     // the player's /scale
+            bool  crouching = false;
+            float rotX = 0.2617994f, rotY = 0.0f, rotZ = -0.2617994f;
+            bool  glint     = false;
+            float deathFlipDeg = 0.0f;
+            float fallFlyTicks = 0.0f;  // > 0 while gliding (with partial)
+            bool  glowing   = false;
+        };
+        void RenderElytras(const glm::mat4& projection, const glm::mat4& view,
+                           const glm::vec3& cameraPos, const Frustum& frustum,
+                           const std::vector<ElytraPose>& poses);
+
+        // MC SpinAttackEffectLayer (RiptideLayer.cpp): the swirl around a
+        // riptiding stick-figure player, and — through DrawRiptideSwirls —
+        // around a /morph player-model body.
+        struct RiptidePose {
+            glm::dvec3 position{0.0};   // feet, world space
+            float bodyYaw    = 0.0f;
+            float pitch      = 0.0f;    // xRot, degrees
+            float ageInTicks = 0.0f;    // the spin's clock (partial included)
+            float scale      = 1.0f;
+            bool  glowing    = false;
+        };
+        void RenderRiptideSwirls(const glm::mat4& projection, const glm::mat4& view,
+                                 const glm::vec3& cameraPos, const Frustum& frustum,
+                                 const std::vector<RiptidePose>& poses);
+        struct RiptideDraw {
+            glm::mat4 rootPx{1.0f};     // the player model's root, pixel space
+            float ageInTicks = 0.0f;
+            int   packedLight = 0;
+            bool  glowing = false;
+        };
+        void DrawRiptideSwirls(const glm::mat4& projection, const glm::mat4& view,
+                               const glm::vec3& cameraPos, const std::vector<RiptideDraw>& draws);
+        // The riptiding player model's root transform (pixel space).
+        static glm::mat4 SpinningPlayerRoot(const glm::dvec3& feet, float bodyYaw, float pitch,
+                                            float ageInTicks, float scale);
+
+        // One elytra to draw (ElytraLayer.cpp): the body model's ROOT
+        // transform in pixel space (the matrix AppendMob returns — WingsLayer
+        // sits on the parent model's pose stack), the baby model's 0.5 mesh
+        // scale, the wings' angles, the glint, the body's packed light.
+        struct ElytraDraw {
+            glm::mat4 rootPx{1.0f};
+            bool  baby = false;
+            float rotX = 0.2617994f, rotY = 0.0f, rotZ = -0.2617994f;
+            bool  crouching = false;
+            bool  glint = false;
+            int   packedLight = 0;
+            bool  glowing = false;
+        };
+        void DrawElytras(const glm::mat4& projection, const glm::mat4& view,
+                         const glm::vec3& cameraPos, const std::vector<ElytraDraw>& draws);
+
+        // ── An entity in a GUI box (MC GuiEntityRenderer) ─────────────────
+        // InventoryScreen.extractEntityInInventoryFollowsMouse overrides the
+        // render state's rotations (bodyRot = 180 + xAngle·20, yRot = the
+        // head's yaw off the body, xRot = −yAngle·20) and draws the entity
+        // with every layer its renderer has (a horse's saddle, armour, a
+        // llama's carpet). CaptureForGui runs the mob pass for that ONE
+        // client mob with those rotations, partial tick 1 and no culling,
+        // and hands back its geometry instead of drawing it: render-space
+        // blocks with the entity's feet at the origin, one triangle list per
+        // texture (hidden, depth-only and glint batches left out). The GUI
+        // projects it (MountInventoryScreen).
+        struct GuiEntityPose {
+            float bodyRot    = 180.0f;   // degrees
+            float headYawRel = 0.0f;     // LivingEntityRenderState.yRot
+            float xRot       = 0.0f;
+            // ENTITY_IN_UI's two lights, carried into render space by the
+            // caller (the GUI box's rotation inverted) — the faces are shaded
+            // with them instead of the level's pair.
+            glm::vec3 light0{0.0f, 1.0f, 0.0f};
+            glm::vec3 light1{0.0f, 1.0f, 0.0f};
+        };
+        struct GuiEntityBatch {
+            TextureHandle texture = INVALID_TEXTURE;
+            bool blend = false;
+            std::vector<ModelVertex> triangles;   // 3 per triangle
+        };
+        bool CaptureForGui(const Client::ClientMobManager& mobs, int32_t entityId,
+                           const GuiEntityPose& pose, std::vector<GuiEntityBatch>& out);
+        // The renderer the frame loop owns (set by Initialize, cleared by
+        // Shutdown); null before the world renderer is up.
+        static MobRenderer* Instance();
 
         // MC LivingEntityRenderer.setupRotations:174-181 — how far a dying
         // entity has toppled, in degrees, from its death timer.
@@ -182,6 +347,9 @@ namespace Render {
             TextureHandle texture = INVALID_TEXTURE;
             // Sheep carry a second, dyed layer over the base body.
             std::unique_ptr<EntityModel> overlayModel;
+            // MC WolfArmorLayer's adultModel (ModelLayers.WOLF_ARMOR): the
+            // mesh the BODY slot's armour is drawn on. Adults only, as MC.
+            std::unique_ptr<EntityModel> bodyArmorModel;
             // MC AgeableMobRenderer's babyModel — the separate baby MESH
             // (big head, half body), not a shrunken adult. Built on the
             // first baby seen; null means MC has no baby mesh for this mob
@@ -194,6 +362,18 @@ namespace Render {
             // swapped in per frame by the synced puff state.
             std::unique_ptr<EntityModel> pufferMid;
             std::unique_ptr<EntityModel> pufferBig;
+            // MC TropicalFishRenderer's second body (TROPICAL_FISH_LARGE —
+            // `model` is the small one) and TropicalFishPatternLayer's two
+            // pattern meshes (TROPICAL_FISH_SMALL/LARGE_PATTERN), picked per
+            // frame by the synced pattern's base.
+            std::unique_ptr<EntityModel> tropicalLarge;
+            std::unique_ptr<EntityModel> tropicalSmallPattern;
+            std::unique_ptr<EntityModel> tropicalLargePattern;
+            // MC SalmonRenderer's SALMON_SMALL / SALMON_LARGE (the SALMON
+            // mesh through MeshTransformer.scaling(0.5 / 1.5)) — `model` is
+            // the medium one; picked per frame by the synced size.
+            std::unique_ptr<EntityModel> salmonSmall;
+            std::unique_ptr<EntityModel> salmonLarge;
             // MC CowRenderer / PigRenderer / ChickenRenderer's per-ModelType
             // AdultAndBabyModelPair: [variant byte] → mesh, adult and baby,
             // built on first sight. Null where the variant draws with the
@@ -215,6 +395,11 @@ namespace Render {
             bool innerTried = false;
         };
 
+        // CaptureForGui's request while it runs the mob pass (null otherwise).
+        const GuiEntityPose* m_guiPose = nullptr;
+        int32_t m_guiEntityId = 0;
+        std::vector<GuiEntityBatch>* m_guiOut = nullptr;
+
         ModelEntry* GetModelFor(Game::EntityTypeId type);
         // The baby mesh (and its overlay mesh) for a type, built on the
         // first baby seen — MC AgeableMobRenderer's babyModel. Shared by the
@@ -222,6 +407,19 @@ namespace Render {
         // MC never draws through a baby mesh (the caller then shrinks the
         // adult).
         static void EnsureBabyModels(ModelEntry& entry, Game::EntityTypeId type);
+        // MC TropicalFishRenderer's look for a packed variant, shared by the
+        // mob pass and the morph pass: the body mesh for the pattern's base
+        // (`entry.model` / `entry.tropicalLarge`) and its sheet, and
+        // TropicalFishPatternLayer — the *_PATTERN mesh appended over it,
+        // tinted by the pattern colour. The pattern returns its sheet and
+        // first index (INVALID_TEXTURE when nothing was appended).
+        static EntityModel* TropicalFishBody(ModelEntry& entry, int32_t packedVariant);
+        TextureHandle TropicalFishBodyTexture(int32_t packedVariant);
+        TextureHandle AppendTropicalFishPattern(ModelEntry& entry, int32_t packedVariant,
+                                                const EntityRenderState& state,
+                                                const glm::dvec3& renderPos, float bodyRot,
+                                                const glm::vec3& cameraPos,
+                                                size_t& firstIndex, bool& cull);
         // `repeatWrap` samples the sheet with REPEAT instead of the clamp
         // entity sheets normally get — for a texture the shader scrolls
         // across its edge (the breeze's wind). Cached separately.
@@ -253,7 +451,18 @@ namespace Render {
                                       float swimPivotY = 0.0f,
                                       const glm::vec3& modelOffset = glm::vec3(0.0f),
                                       bool upsideDown = false,
-                                      float boundingBoxHeight = 0.0f);
+                                      float boundingBoxHeight = 0.0f,
+                                      // A riptide (isAutoSpinAttack): the
+                                      // head pitch and the age it spins by.
+                                      bool autoSpinAttack = false,
+                                      float spinXRot = 0.0f,
+                                      float spinAgeInTicks = 0.0f,
+                                      // The fish renderers' setupRotations
+                                      // (EntityRenderState::fishYawDeg /
+                                      // fishLandRoll / fishLandOffset).
+                                      float fishYawDeg = 0.0f,
+                                      bool fishLandRoll = false,
+                                      const glm::vec3& fishLandOffset = glm::vec3(0.0f));
 
         // Build one mob's posed geometry into `verts`/`idx`, already in world
         // space. Returns the matrix it used.
@@ -283,21 +492,6 @@ namespace Render {
                                          const DisplaySpec& spec,
                                          std::vector<ModelVertex>& verts,
                                          std::vector<uint32_t>& idx);
-        // A BLOCK item in a hand: the block's own model through models/
-        // block/block.json's thirdperson display (MC ItemInHandLayer with a
-        // block model). Returns the blocks atlas.
-        TextureHandle AppendHeldBlockAt(const glm::mat4& entityMatrix,
-                                        const glm::mat4& handMatrix, bool leftHand,
-                                        Game::BlockID block,
-                                        std::vector<ModelVertex>& verts,
-                                        std::vector<uint32_t>& idx);
-        // MC CustomHeadLayer's non-skull branch: the item on the head — a
-        // block's model, or a flat item through its HEAD display.
-        TextureHandle AppendHeadItem(const glm::mat4& entityMatrix,
-                                     const glm::mat4& headMatrix,
-                                     const Game::ItemStack& stack,
-                                     std::vector<ModelVertex>& verts,
-                                     std::vector<uint32_t>& idx);
         // MC ArmorStandRenderer's layers: HumanoidArmorLayer (the four
         // armor pieces on the armor mesh, the leggings on the inner one),
         // ItemInHandLayer (both hands), CustomHeadLayer (a block or item on
@@ -312,6 +506,159 @@ namespace Render {
         // leggings 0.5) — MC ArmorModelSet.
         std::unique_ptr<ArmorStandArmorModel> m_armorStandArmorOuter;
         std::unique_ptr<ArmorStandArmorModel> m_armorStandArmorInner;
+        // MC HumanoidArmorLayer for a mob whose renderer has one (the zombie
+        // and skeleton families, the piglins — ArmorFamilyFor): its worn
+        // pieces (Mob::GetEquipment) through AppendHumanoidArmor, the 26.x
+        // baby mesh set under a 26.x baby body. Defined in
+        // MobEquipmentLayers.cpp. `emit` as for the stand.
+        void AppendMobArmorLayer(const Game::Mob& mob, EntityModel& model,
+                                 const EntityRenderState& state,
+                                 const glm::dvec3& renderPos, float bodyRot,
+                                 const glm::vec3& cameraPos,
+                                 const std::function<void(TextureHandle, size_t, bool)>& emit);
+
+        // ── Equipment layers (MobEquipmentLayers.cpp) ─────────────────────
+        //
+        // MC's item-carrying render layers over the synced equipment
+        // (Mob::GetEquipment): ItemInHandLayer on every armed renderer (both
+        // hands, the left-handed mob's arms swapped, the baby grip),
+        // CustomHeadLayer (a block, item or mob head on the head),
+        // HumanoidArmorLayer (the renderer's armour mesh set — humanoid,
+        // zombie-villager or piglin, adult or the 26.x baby mesh), and the
+        // per-renderer holders (FoxHeldItemLayer, DolphinCarryingItemLayer,
+        // PandaHoldsItemLayer, WitchItemLayer, CrossedArmsItemLayer). Every
+        // item goes through AppendItem — MC ItemStackRenderState.submit with
+        // the item model's own display transform.
+    public:
+        using EmitFn = std::function<void(TextureHandle, size_t, bool)>;
+        // What an ItemModelResolver reads off the holder: the use clock that
+        // picks the bow / crossbow pull stage, the trident's throwing model,
+        // the shield's blocking model.
+        struct ItemUseState {
+            bool  usingItem = false;
+            float useTicks  = 0.0f;
+            // SpearAnimations' inputs for this arm (ItemInHandLayer
+            // .submitArmWithItem): the swing progress (ArmedEntityRenderState
+            // .swingAnimation), whether that swing is this arm's STAB, the
+            // SPEAR pose (ArmPose.animateUseItem) and the kinetic hit clock.
+            float swingAnimation = 0.0f;
+            bool  stabbing = false;
+            bool  spearPose = false;
+            float ticksSinceKineticHitFeedback = 0.0f;
+        };
+        // The two arms' ItemUseStates from a humanoid render state (right
+        // arm, left arm) — the use clock on the arm in use, the swing on the
+        // main arm.
+        static void ArmUseStates(const EntityRenderState& state, ItemUseState& right, ItemUseState& left);
+        // MC ItemStackRenderState.submit: `pose` is the pose stack at submit,
+        // in BLOCKS (render space); the context's display transform is
+        // applied here. Each sprite layer / model closes its own batch
+        // through `emit` (NO_OVERLAY — the caller's batch carries none).
+        void AppendItem(const glm::mat4& pose, const Game::ItemStack& stack,
+                        ItemDisplay::Context context, const ItemUseState& use,
+                        const EmitFn& emit);
+        // MC ItemInHandLayer.submitArmWithItem up to the item's submit: the
+        // model's translateToHand for the arm (the vex's scaled grip, or
+        // `handOverride` — the allay's), X -90, Y 180 and the grip offset
+        // (the baby one for a baby). False when the model has no such arm.
+        bool ArmItemPose(const EntityModel& model, Game::EntityTypeId type,
+                         const glm::mat4& entityMatrix, bool leftArm, bool babyGrip,
+                         glm::mat4& out, const glm::mat4* handOverride = nullptr) const;
+        // MC ItemInHandLayer.submit: the right arm's item, then the left's.
+        void AppendHeldItems(const EntityModel& model, Game::EntityTypeId type,
+                             const glm::mat4& entityMatrix,
+                             const Game::ItemStack& rightItem, const Game::ItemStack& leftItem,
+                             bool babyGrip, const ItemUseState& rightUse,
+                             const ItemUseState& leftUse, const EmitFn& emit);
+        // MC CustomHeadLayer.Transforms.
+        struct HeadTransforms {
+            float yOffset = 0.0f, skullYOffset = 0.0f;
+            float horizontalScale = 1.0f, verticalScale = 1.0f;
+        };
+        static HeadTransforms HeadTransformsFor(Game::EntityTypeId type);
+        // MC CustomHeadLayer.submit for the head slot's stack: a mob head
+        // (skull model) or a non-armour item / block. Armour drawn by the
+        // armour layer is left alone (HumanoidArmorLayer.shouldRender).
+        // `wornHeadAnimationPos` flaps a piglin head's ears (the wearer's
+        // walk position).
+        void AppendCustomHead(const EntityModel& model, const glm::mat4& entityMatrix,
+                              const Game::ItemStack& head, const HeadTransforms& transforms,
+                              float wornHeadAnimationPos, const EmitFn& emit);
+        // Which armour mesh set a renderer's HumanoidArmorLayer uses; None
+        // for a renderer without one (MC IllagerRenderer, VillagerRenderer…).
+        enum class ArmorFamily : uint8_t { None, Humanoid, ZombieVillager, Piglin };
+        static ArmorFamily ArmorFamilyFor(Game::EntityTypeId type);
+        // MC HumanoidArmorLayer.submit: chest, legs, feet, head — each
+        // EQUIPPABLE piece with an equipment asset in its own slot, on the
+        // family's mesh (the 26.x baby mesh when `babyMesh`), posed from
+        // `wearer`, in its asset's sheet (dyed leather under its overlay).
+        // `equipment` is indexed by Game::EquipmentSlot ordinal (6).
+        void AppendHumanoidArmor(ArmorFamily family, bool babyMesh,
+                                 const Game::ItemStack* equipment, EntityModel& wearer,
+                                 const EntityRenderState& state, const glm::dvec3& renderPos,
+                                 float bodyRot, const glm::vec3& cameraPos, const EmitFn& emit);
+        // The layers above for one mob of the mob pass, gated per renderer
+        // as MC's are (the vindicator's axe only while aggressive…); the
+        // held and head layers only — the armour is AppendMobArmorLayer.
+        void AppendMobItemLayers(const Game::Mob& mob, Game::EntityTypeId type, EntityModel& model,
+                                 const EntityRenderState& state, const glm::mat4& entityMatrix,
+                                 const EmitFn& emit);
+        // The /morph pass's equipment layers: the player's held items in
+        // the morph's hands (ItemInHandLayer — every armed humanoid, and the
+        // Herobrine player model when `playerModel`), and on a mob whose
+        // renderer has one, the armour layer and the head item. `mainHand`
+        // is the right arm's stack (the player's, or the morph's own bow).
+        void AppendMorphEquipment(const MorphPose& pose, Game::EntityTypeId type, bool playerModel,
+                                  EntityModel& model, const EntityRenderState& state,
+                                  const glm::mat4& entityMatrix, const glm::dvec3& renderPos,
+                                  bool babyMesh, const Game::ItemStack& mainHand,
+                                  const glm::vec3& cameraPos, const EmitFn& emit);
+        // The item lookups MobRenderer.cpp keeps (EquipmentAssets, the
+        // stack's sprite, the block a block item shows as).
+        static const char* EquipmentAssetFor(Game::ItemID id);
+        static std::string ItemSpriteName(Game::ItemID id);
+        static Game::BlockID ItemBlockShown(Game::ItemID id);
+    private:
+        // ── Mount equipment layers (MountEquipmentLayers.cpp) ─────────────
+        //
+        // MC SimpleEquipmentLayer on the mount renderers — saddles (horse,
+        // donkey, mule, skeleton / zombie horse, pig, strider, camel, camel
+        // husk, nautilus), horse and nautilus armour (leather dyed by
+        // DYED_COLOR), the happy ghast's harness with its goggles — plus
+        // LlamaDecorLayer (carpets, the trader llama's decor) and the happy
+        // ghast's RopesLayer, over the synced SADDLE / BODY equipment.
+        // Each layer mesh is the body mesh plus MC's layer parts, posed by
+        // the body's own setupAnim. `emit` as for the armour layer.
+        void AppendMountEquipmentLayers(const Game::Mob& mob, Game::EntityTypeId type,
+                                        const EntityRenderState& state,
+                                        const glm::dvec3& renderPos, float bodyRot,
+                                        const glm::vec3& cameraPos, const EmitFn& emit);
+        // The mount renderers' extractRenderState inputs the models read:
+        // isRidden (entity.isVehicle() — the reins, the goggles, the
+        // strider's bristles) and the happy ghast's worn body item.
+        static void FillMountRenderState(const Game::Mob& mob, Game::EntityTypeId type,
+                                         EntityRenderState& state);
+        enum class MountMesh : uint8_t;
+        // The layer mesh for (mesh, type), built on first use; dropped when
+        // the baby look changes. Null when the mob has no such mesh.
+        EntityModel* MountModel(MountMesh mesh, Game::EntityTypeId type);
+        std::unordered_map<uint32_t, std::unique_ptr<EntityModel>> m_mountModels;
+        int m_mountModelsLookGeneration = -1;
+
+        // The armour meshes by set: humanoid outer 1.0 / inner 0.5, piglin
+        // outer 1.02, zombie villager outer / inner, humanoid baby outer /
+        // inner, piglin baby — built on first use.
+        std::unique_ptr<HumanoidArmorModel> m_armorModels[8];
+        HumanoidArmorModel& ArmorModel(int index);
+        // The mob-head models (MC SkullModel's mob head / humanoid head and
+        // PiglinHeadModel), by SkullBlock.Type ordinal — built on first use.
+        std::unique_ptr<ModelPart> m_skullModels[6];
+        std::unique_ptr<ModelPart> m_shieldModel;
+        // MC BannerModel (standing: pole + bar) and BannerFlagModel (the
+        // flag, patterned) for a banner worn or held — the illager captain's
+        // ominous banner. Built on first use.
+        std::unique_ptr<ModelPart> m_bannerModel;
+        std::unique_ptr<ModelPart> m_bannerFlagModel;
         TextureHandle AppendHeldSprite(const EntityModel& model,
                                        const glm::mat4& entityMatrix,
                                        const std::string& itemName,
@@ -319,12 +666,6 @@ namespace Render {
                                        std::vector<ModelVertex>& verts,
                                        std::vector<uint32_t>& idx);
 
-        // The drowned's trident: MC renders the trident MODEL in hand (the
-        // trident_in_hand.json display block), not a sprite.
-        TextureHandle AppendHeldTrident(const EntityModel& model,
-                                        const glm::mat4& entityMatrix,
-                                        std::vector<ModelVertex>& verts,
-                                        std::vector<uint32_t>& idx);
 
         ShaderHandle m_shader = INVALID_SHADER;
 
@@ -395,13 +736,17 @@ namespace Render {
 
         SpriteEntry* EnsureSpriteGeometry(const std::string& itemName);
         // Appends the billboarded sprite; returns the texture to batch with,
-        // or INVALID_TEXTURE when nothing was appended.
+        // or INVALID_TEXTURE when nothing was appended. `edgeOn`: MC
+        // FireworkEntityRenderer's shot-at-angle turn (Z 180, Y 180, X 90
+        // after the camera orientation — the sprite laid edge-on to the
+        // view, a streak rather than a card).
         TextureHandle AppendSpriteProjectile(const std::string& itemName,
                                              const glm::dvec3& renderPos,
                                              float halfHeight,
                                              const glm::vec3& cameraPos,
                                              std::vector<ModelVertex>& verts,
-                                             std::vector<uint32_t>& idx);
+                                             std::vector<uint32_t>& idx,
+                                             bool edgeOn = false);
 
         // ── End dragon fight geometry ─────────────────────────────────────
         //
@@ -445,17 +790,51 @@ namespace Render {
             size_t frameFirst = 0, frameCount = 0;
             TextureHandle itemTex = INVALID_TEXTURE;
             size_t itemFirst = 0, itemCount = 0;
+            // A framed map (MapRenderer.render, showOnlyFrame): the map's own
+            // texture, then its frame-visible decorations on the
+            // map_decorations atlas.
+            TextureHandle mapTex = INVALID_TEXTURE;
+            size_t mapFirst = 0, mapCount = 0;
+            TextureHandle decorationTex = INVALID_TEXTURE;
+            size_t decorationFirst = 0, decorationCount = 0;
         };
         ItemFrameGeometry AppendItemFrame(const Game::Mob& frame, const glm::dvec3& centerWorld,
                                           std::vector<ModelVertex>& verts,
                                           std::vector<uint32_t>& idx);
+
+        // Boats, rafts and minecarts (VehicleRenderer.cpp) — MC
+        // AbstractBoatRenderer (BoatRenderer / RaftRenderer, the chest
+        // variants, the water patch) and AbstractMinecartRenderer (the cart
+        // on its rails, the displayed block, the TNT cart's swell and flash).
+        // Appends the geometry to m_verts / m_indices and one piece per draw.
+        struct VehiclePiece {
+            TextureHandle texture = INVALID_TEXTURE;
+            size_t first = 0, count = 0;
+            // The boat's water patch: RenderTypes.waterMask — depth only, so
+            // the water surface is not drawn inside the hull.
+            bool   depthOnly = false;
+            // A lit TNT minecart's block flashes white (OverlayTexture u(1)).
+            bool   whiteFlash = false;
+            int    packedLight = 0;
+        };
+        void AppendVehicle(const Client::ClientMob& entry, const glm::dvec3& renderPos, float partialTick,
+                           std::vector<VehiclePiece>& out);
         TextureHandle m_whiteTexture = INVALID_TEXTURE;
         TextureHandle m_beamTexture = INVALID_TEXTURE;
         bool m_beamTextureTried = false;
 
         // Reused across frames so the per-frame rebuild does not allocate.
         std::vector<ModelVertex> m_verts;
+        int32_t m_hiddenEntityId      = -1;
+        bool    m_viewerSeesInvisible = false;
         std::vector<uint32_t>    m_indices;
+
+        // Leads and fence knots (LeashRenderer.hpp) — drawn from Render, so
+        // every pass that draws the mobs draws their ropes.
+        LeashRenderer m_leashRenderer;
+        // Fishing bobbers and their lines (FishingHookRenderer.hpp) — the
+        // same arrangement as the leads.
+        FishingHookRenderer m_fishingHookRenderer;
 
         bool m_initialized = false;
     };

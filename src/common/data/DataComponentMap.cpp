@@ -13,6 +13,21 @@ namespace Game {
         return false;
     }
 
+    bool DataComponentMap::CopyNamed(const DataComponentMap& src, std::string_view name) {
+        for (const auto& e : src.entries) {
+            if (!e.type || e.type->name != name) continue;
+            for (auto& mine : entries) {
+                if (mine.type == e.type) {
+                    mine.value = e.value;
+                    return true;
+                }
+            }
+            entries.push_back(e);
+            return true;
+        }
+        return false;
+    }
+
     void DataComponentMap::remove(const DataComponentTypeBase& key) {
         for (auto it = entries.begin(); it != entries.end(); ++it) {
             if (it->type == &key) { entries.erase(it); return; }

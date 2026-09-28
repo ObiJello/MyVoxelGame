@@ -6,6 +6,7 @@
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/biome/Biomes.hpp"
+#include "common/world/biome/BiomeZoom.hpp"
 #include "levelgen/Heightmap.h"
 
 #include "levelgen/structure/ChunkGeneratorStructureState.h"
@@ -30,6 +31,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 
@@ -80,7 +82,7 @@ namespace Server {
         // `info` start in chunk (cx, cz) under `placement`?
         bool StructureGeneratesAt(Game::MyTerrainGenerator& generator, mls::ChunkGeneratorStructureState& state,
                                   const mls::StructurePlacement& placement, const mls::StructureInfo& info,
-                                  int32_t cx, int32_t cz) {
+                                  int32_t cx, int32_t cz, mls::StructureStartData* outStart = nullptr) {
             if (!placement.isStructureChunk(state, cx, cz)) return false;
             if (!mls::Structures::isImplemented(info)) return false;
             const auto& validBiomes = mls::BiomeTags::resolve(info.biomesTag);
@@ -89,11 +91,23 @@ namespace Server {
                                            cx, cz, &validBiomes);
             mls::StructureStartData start;
             try {
-                return mls::Structures::generate(info, context, 0, start) && start.isValid();
+                const bool valid = mls::Structures::generate(info, context, 0, start) && start.isValid();
+                if (valid && outStart) *outStart = std::move(start);
+                return valid;
             } catch (const std::exception& e) {
                 Log::Warning("[Locate] %s at chunk (%d, %d) threw: %s", info.name.c_str(), cx, cz, e.what());
                 return false;
             }
+        }
+
+        // ChunkGenerator.getStructureGeneratingAt with createReference:
+        // the start must also accept a new map reference (tryAddReference)
+        // when the caller skips known structures.
+        bool StructureGeneratesAtFor(Game::MyTerrainGenerator& generator, mls::ChunkGeneratorStructureState& state,
+                                     const mls::StructurePlacement& placement, const mls::StructureInfo& info,
+                                     int32_t cx, int32_t cz, const StructureReferenceFn* tryAddReference) {
+            if (!StructureGeneratesAt(generator, state, placement, info, cx, cz)) return false;
+            return !tryAddReference || (*tryAddReference)(StructureStartKey{info.name, cx, cz});
         }
 
         // StructurePlacement.getLocatePos.
@@ -320,7 +334,8 @@ namespace Server {
 
     std::optional<LocateResult> FindNearestStructure(ServerLevel& level,
                                                      const std::vector<std::string>& structureIds,
-                                                     const glm::ivec3& from, int maxSearchRadius) {
+                                                     const glm::ivec3& from, int maxSearchRadius,
+                                                     const StructureReferenceFn* tryAddReference) {
         Game::MyTerrainGenerator* generator = level.TerrainGenerator();
         if (!generator || !generator->GetLibGenerator() || !generator->GetRandomState()) return std::nullopt;
         mls::ChunkGeneratorStructureState* state = generator->GetStructureState();
@@ -366,7 +381,7 @@ namespace Server {
                     const double d = DistSqr(probe, from);
                     if (closest && d >= closestDist) continue;
                     for (const mls::StructureInfo* info : scan.wanted) {
-                        if (StructureGeneratesAt(*generator, *state, *placement, *info, cx, cz)) {
+                        if (StructureGeneratesAtFor(*generator, *state, *placement, *info, cx, cz, tryAddReference)) {
                             closest = LocateResult{LocatePos(*placement, cx, cz), info->name};
                             closestDist = d;
                             break;
@@ -439,7 +454,7 @@ namespace Server {
                 while (!pending.empty() && (lastRing || pending.top().distSqr <= floorNext * floorNext)) {
                     const Candidate c = pending.top();
                     pending.pop();
-                    if (StructureGeneratesAt(*generator, *state, *c.placement, *c.info, c.cx, c.cz)) {
+                    if (StructureGeneratesAtFor(*generator, *state, *c.placement, *c.info, c.cx, c.cz, tryAddReference)) {
                         best = LocateResult{glm::ivec3(c.blockX, 0, c.blockZ), c.info->name};   // the landmark centre, as the mod reports
                         break;
                     }
@@ -470,7 +485,7 @@ namespace Server {
                             const auto [cx, cz] = placement->getPotentialStructureChunk(
                                 state->getLevelSeed(), originChunkX + spacing * x, originChunkZ + spacing * z);
                             for (const mls::StructureInfo* info : scan->wanted) {
-                                if (StructureGeneratesAt(*generator, *state, *placement, *info, cx, cz)) {
+                                if (StructureGeneratesAtFor(*generator, *state, *placement, *info, cx, cz, tryAddReference)) {
                                     hit = LocateResult{LocatePos(*placement, cx, cz), info->name};
                                     break;
                                 }
@@ -489,11 +504,105 @@ namespace Server {
         return nearest;
     }
 
+    std::optional<StructureStartKey> FindStructureStartAt(ServerLevel& level,
+                                                          const std::vector<std::string>& structureIds,
+                                                          const glm::ivec3& pos) {
+        Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+        if (!generator || !generator->GetLibGenerator() || !generator->GetRandomState()) return std::nullopt;
+        mls::ChunkGeneratorStructureState* state = generator->GetStructureState();
+        if (!state) return std::nullopt;
+
+        // StructureManager.getStructureAt(pos, set): a start of one of the
+        // structures with a piece containing pos. Starts are found where
+        // the placements put them — the spread cells (or ring positions)
+        // whose candidate chunk lies within kReach chunks of pos, which
+        // covers the widest vanilla structures (a woodland mansion or an
+        // ancient city spans well under 12 chunks from its start).
+        constexpr int32_t kReach = 12;
+        const int32_t pcx = static_cast<int32_t>(std::floor(pos.x / 16.0));
+        const int32_t pcz = static_cast<int32_t>(std::floor(pos.z / 16.0));
+        auto containsPos = [&pos](const mls::StructureStartData& start) {
+            for (const auto& piece : start.pieces) {
+                const auto& b = piece.boundingBox;
+                if (pos.x >= b.minX && pos.x <= b.maxX && pos.y >= b.minY && pos.y <= b.maxY &&
+                    pos.z >= b.minZ && pos.z <= b.maxZ) return true;
+            }
+            return false;
+        };
+        for (const mls::StructureSet* set : state->possibleStructureSets()) {
+            std::vector<const mls::StructureInfo*> wanted;
+            for (const auto& entry : set->structures) {
+                if (std::find(structureIds.begin(), structureIds.end(), entry.structure->name) != structureIds.end() &&
+                    mls::Structures::isImplemented(*entry.structure)) {
+                    wanted.push_back(entry.structure);
+                }
+            }
+            if (wanted.empty()) continue;
+            const mls::StructurePlacement* placement = set->placement.get();
+            std::vector<std::pair<int32_t, int32_t>> candidates;
+            if (const auto* spread = dynamic_cast<const mls::RandomSpreadStructurePlacement*>(placement)) {
+                const int32_t spacing = std::max(1, spread->effectiveSpacing());
+                std::set<std::pair<int32_t, int32_t>> seen;
+                for (int32_t x = pcx - kReach; x <= pcx + kReach + spacing; x += spacing) {
+                    for (int32_t z = pcz - kReach; z <= pcz + kReach + spacing; z += spacing) {
+                        const auto c = spread->getPotentialStructureChunk(state->getLevelSeed(),
+                                                                          std::min(x, pcx + kReach),
+                                                                          std::min(z, pcz + kReach));
+                        if (std::abs(c.first - pcx) <= kReach && std::abs(c.second - pcz) <= kReach &&
+                            seen.insert(c).second) {
+                            candidates.push_back(c);
+                        }
+                    }
+                }
+            } else if (const auto* rings = dynamic_cast<const mls::ConcentricRingsStructurePlacement*>(placement)) {
+                state->ensureStructuresGenerated();
+                if (const auto* positions = state->getRingPositionsFor(rings)) {
+                    for (const auto& [cx, cz] : *positions) {
+                        if (std::abs(cx - pcx) <= kReach && std::abs(cz - pcz) <= kReach) candidates.emplace_back(cx, cz);
+                    }
+                }
+            }
+            for (const auto& [cx, cz] : candidates) {
+                if (!placement->isStructureChunk(*state, cx, cz)) continue;
+                for (const mls::StructureInfo* info : wanted) {
+                    mls::StructureStartData start;
+                    if (StructureGeneratesAt(*generator, *state, *placement, *info, cx, cz, &start) &&
+                        containsPos(start)) {
+                        return StructureStartKey{info->name, cx, cz};
+                    }
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
     std::string BiomeAt(ServerLevel& level, const glm::ivec3& pos) {
         Game::MyTerrainGenerator* generator = level.TerrainGenerator();
         if (!generator || !generator->GetBiomeSource() || !generator->GetRandomState() ||
             !generator->GetRandomState()->sampler()) return {};
         return generator->GetBiomeSource()->getNoiseBiome(pos.x >> 2, pos.y >> 2, pos.z >> 2,
+                                                          *generator->GetRandomState()->sampler());
+    }
+
+    std::string ZoomedBiomeAt(ServerLevel& level, const glm::ivec3& pos) {
+        Game::MyTerrainGenerator* generator = level.TerrainGenerator();
+        if (!generator || !generator->GetBiomeSource() || !generator->GetRandomState() ||
+            !generator->GetRandomState()->sampler()) return {};
+        mls::ChunkGeneratorStructureState* state = generator->GetStructureState();
+        if (!state) return {};
+        // BiomeManager.obfuscateSeed is a SHA-256; remember it per seed.
+        static std::mutex s_zoomMutex;
+        static std::map<int64_t, int64_t> s_zoomSeeds;
+        int64_t zoomSeed = 0;
+        {
+            std::lock_guard<std::mutex> lock(s_zoomMutex);
+            const int64_t seed = state->getLevelSeed();
+            auto it = s_zoomSeeds.find(seed);
+            if (it == s_zoomSeeds.end()) it = s_zoomSeeds.emplace(seed, Game::BiomeZoom::ObfuscateSeed(seed)).first;
+            zoomSeed = it->second;
+        }
+        const glm::ivec3 quart = Game::BiomeZoom::NoiseQuartAt(zoomSeed, pos.x, pos.y, pos.z);
+        return generator->GetBiomeSource()->getNoiseBiome(quart.x, quart.y, quart.z,
                                                           *generator->GetRandomState()->sampler());
     }
 

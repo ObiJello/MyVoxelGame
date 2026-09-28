@@ -2,8 +2,8 @@
 #include "client/shader/ShaderPacks.hpp"
 
 #include "common/core/Log.hpp"
+#include "common/core/ZipArchive.hpp"
 #include "platform/GameDirectory.hpp"
-#include "unzip.h"
 
 #include <algorithm>
 #include <cctype>
@@ -70,50 +70,38 @@ namespace Shaders {
             return true;
         }
 
-        bool ReadZipEntry(unzFile zf, std::string& out) {
-            if (unzOpenCurrentFile(zf) != UNZ_OK) return false;
-            char buf[65536];
-            int n;
-            out.clear();
-            while ((n = unzReadCurrentFile(zf, buf, sizeof buf)) > 0) out.append(buf, static_cast<size_t>(n));
-            unzCloseCurrentFile(zf);
-            return n == 0;
-        }
-
         bool ExtractZip(const fs::path& zip, const fs::path& destDir) {
-            unzFile zf = unzOpen(zip.string().c_str());
-            if (!zf) return false;
+            Core::ZipArchive zf(zip);
+            if (!zf.IsOpen()) return false;
             std::error_code ec;
             fs::remove_all(destDir, ec);
             fs::create_directories(destDir, ec);
             bool ok = true;
             size_t files = 0;
-            if (unzGoToFirstFile(zf) == UNZ_OK) {
-                do {
-                    char name[1024];
-                    unz_file_info info{};
-                    if (unzGetCurrentFileInfo(zf, &info, name, sizeof name, nullptr, 0, nullptr, 0) != UNZ_OK) { ok = false; break; }
-                    const std::string entry(name);
-                    if (entry.empty() || entry.back() == '/') continue;
-                    if (!SafeRelativeEntry(entry)) { Log::Warning("[ShaderPacks] skipping unsafe zip entry %s", entry.c_str()); continue; }
-                    // Only shader files and the pack's own metadata, wherever
-                    // the zip keeps them.
-                    const std::string ext = fs::path(entry).extension().string();
-                    const bool shaderFile = ext == ".fsh" || ext == ".vsh" || ext == ".gsh" || ext == ".csh" ||
-                                            ext == ".glsl" || ext == ".inc" || ext == ".properties" ||
-                                            ext == ".lang" || ext == ".json" || ext == ".png" || ext == ".settings";
-                    if (!shaderFile && entry.find("pack.") == std::string::npos &&
-                        entry.find("LICENSE") == std::string::npos && entry.find("README") == std::string::npos) continue;
-                    std::string bytes;
-                    if (!ReadZipEntry(zf, bytes)) { ok = false; break; }
-                    const fs::path dest = destDir / entry;
-                    fs::create_directories(dest.parent_path(), ec);
-                    std::ofstream out(dest, std::ios::binary);
-                    if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) { ok = false; break; }
-                    ++files;
-                } while (unzGoToNextFile(zf) == UNZ_OK);
+            for (const Core::ZipArchive::Entry& e : zf.Entries()) {
+                const std::string& entry = e.name;
+                if (entry.empty() || e.IsDirectory()) continue;
+                if (!SafeRelativeEntry(entry)) { Log::Warning("[ShaderPacks] skipping unsafe zip entry %s", entry.c_str()); continue; }
+                // Only shader files and the pack's own metadata, wherever
+                // the zip keeps them.
+                const std::string ext = fs::path(entry).extension().string();
+                const bool shaderFile = ext == ".fsh" || ext == ".vsh" || ext == ".gsh" || ext == ".csh" ||
+                                        ext == ".glsl" || ext == ".inc" || ext == ".properties" ||
+                                        ext == ".lang" || ext == ".json" || ext == ".png" || ext == ".settings";
+                if (!shaderFile && entry.find("pack.") == std::string::npos &&
+                    entry.find("LICENSE") == std::string::npos && entry.find("README") == std::string::npos) continue;
+                std::string bytes;
+                if (!zf.Read(e, bytes)) {
+                    Log::Warning("[ShaderPacks] %s: %s", zip.filename().string().c_str(), zf.Error().c_str());
+                    ok = false;
+                    break;
+                }
+                const fs::path dest = destDir / entry;
+                fs::create_directories(dest.parent_path(), ec);
+                std::ofstream out(dest, std::ios::binary);
+                if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) { ok = false; break; }
+                ++files;
             }
-            unzClose(zf);
             Log::Info("[ShaderPacks] extracted %zu file(s) from %s", files, zip.filename().string().c_str());
             return ok;
         }

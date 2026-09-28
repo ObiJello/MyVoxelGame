@@ -8,6 +8,8 @@
 #include "client/ClientTickRateManager.hpp"
 #include "client/world/HushStillnessState.hpp"
 #include "client/world/HushSignalState.hpp"
+#include "client/entity/LocalItemCooldowns.hpp"
+#include "common/network/packets/game/CooldownS2CPacket.hpp"
 #include "client/world/AurelithState.hpp"
 #include "common/network/packets/game/HushStillnessS2CPacket.hpp"
 #include <chrono>
@@ -21,6 +23,7 @@
 #include "common/network/packets/HandshakeC2S.hpp"  // Network::kProtocolVersion
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/RemotePlayerManager.hpp"
+#include "ClientPlayerInfo.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/BlockEntityType.hpp"
@@ -30,7 +33,14 @@
 #include "client/world/ClientBlockAccess.hpp"
 #include "client/world/ClientBiomeZoom.hpp"
 #include "common/world/math/WorldCoordinates.hpp"
+#include "common/core/HardwareProfile.hpp"
+#include "common/core/ThreadPriority.hpp"
+#include <condition_variable>
+#include <deque>
 #include <functional>
+#include <mutex>
+#include <thread>
+#include "platform/CrashHandler.hpp"
 
 // Chat message callback — set by PlatformMain to route messages to ChatComponent
 static std::function<void(const Network::ChatMessageS2CPacket&)> s_chatCallback;
@@ -65,6 +75,108 @@ void SetTeleportCallback(std::function<void(double, double, double, float, float
 }
 
 namespace Client {
+
+    namespace {
+        // Chunk packets decode off the network I/O thread. Deserialising one and
+        // building its sections (~75 us) on the I/O thread made that thread the
+        // client's chunk intake: the batch-rate estimate the client reports to
+        // the server (ChunkBatchSizeCalculator) is sized by how fast chunks
+        // arrive, so a saved view came in at a few hundred chunks a tick no
+        // matter how fast the server loaded it. The I/O thread now only copies
+        // the payload and queues the packet in order; these threads decode.
+        class ChunkDecodePool {
+        public:
+            static int ThreadCount() { return Core::HardwareProfile::Get().IsLowEnd() ? 1 : 3; }
+
+            static ChunkDecodePool& Get() {
+                // Leaked: the threads live for the process, and nothing they
+                // touch outlives it (a job owns its payload and its result).
+                static ChunkDecodePool* pool = new ChunkDecodePool();
+                return *pool;
+            }
+
+            void Submit(std::function<void()> job) {
+                {
+                    std::lock_guard<std::mutex> lock(m_mutex);
+                    m_jobs.push_back(std::move(job));
+                }
+                m_cv.notify_one();
+            }
+
+        private:
+            ChunkDecodePool() {
+                // Weaker machines: one thread still takes the work off the I/O
+                // thread without adding contention.
+                for (int i = 0; i < ThreadCount(); ++i) {
+                    std::thread([this] { Run(); }).detach();
+                }
+            }
+
+            void Run() {
+                PROFILE_THREAD("ChunkDecode");
+                // The player is waiting on these, like the server's chunk loads.
+                Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
+                Platform::InstallThreadCrashStack();
+                for (;;) {
+                    std::function<void()> job;
+                    {
+                        std::unique_lock<std::mutex> lock(m_mutex);
+                        m_cv.wait(lock, [this] { return !m_jobs.empty(); });
+                        job = std::move(m_jobs.front());
+                        m_jobs.pop_front();
+                    }
+                    job();
+                }
+            }
+
+            std::mutex m_mutex;
+            std::condition_variable m_cv;
+            std::deque<std::function<void()>> m_jobs;   // FIFO: the queue's head decodes first
+        };
+
+        struct ChunkDecodeJob {
+            std::vector<uint8_t> payload;
+            Network::ChunkDataS2CPacket data;
+            std::string error;
+            std::mutex mutex;
+            std::condition_variable cv;
+            bool done = false;
+        };
+
+        // A ChunkDataS2C whose decode may still be running. It sits in the
+        // incoming queue in arrival order like any packet; applying it waits
+        // for its own decode, which — the pool being FIFO and this the oldest
+        // chunk still queued — is at most that one chunk's decode time, and
+        // counts inside the drain's frame budget and the batch timing.
+        class AsyncChunkDataS2CPacket : public Network::IS2CPacket {
+        public:
+            explicit AsyncChunkDataS2CPacket(std::shared_ptr<ChunkDecodeJob> job) : m_job(std::move(job)) {}
+
+            void apply(Network::IPacketListener& listener) override {
+                {
+                    PROFILE_ZONE_N("WaitChunkDecode");
+                    std::unique_lock<std::mutex> lock(m_job->mutex);
+                    m_job->cv.wait(lock, [this] { return m_job->done; });
+                }
+                if (!m_job->error.empty()) {
+                    Log::Error("[ClientConnection] Dropped a chunk packet that failed to decode: %s",
+                               m_job->error.c_str());
+                    return;
+                }
+                listener.onChunkDataS2C(m_job->data);
+            }
+
+            Network::PacketId getId() const override { return Network::PacketId::ChunkDataS2C; }
+            std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+
+        private:
+            std::shared_ptr<ChunkDecodeJob> m_job;
+            std::chrono::steady_clock::time_point m_timestamp = std::chrono::steady_clock::now();
+        };
+    } // namespace
+
+    int ChunkDecodeThreadCount() { return ChunkDecodePool::ThreadCount(); }
+
 
     ClientConnection::ClientConnection(tcp::socket socket, NetworkClient* client)
         : NetworkConnection(std::move(socket))
@@ -118,6 +230,13 @@ namespace Client {
             [](const std::vector<uint8_t>& p) {
                 Client::HushSignalState::OnPacket(
                     Network::Serialization::DeserializeHushSignalS2C(p));
+            });
+        // MC ClientboundCooldownPacket: into the local player's cooldown table
+        // behind its lock (LocalItemCooldowns); the HUD reads it.
+        m_packetRegistry.RegisterHandler(PacketId::CooldownS2C,
+            [](const std::vector<uint8_t>& p) {
+                Client::LocalItemCooldowns::OnPacket(
+                    Network::Serialization::DeserializeCooldownS2C(p));
             });
         // Aurelith's cities (their quest state) and the flourishes the server
         // has no particles for: into AurelithState behind its mutex; the
@@ -193,8 +312,12 @@ namespace Client {
 
             case ConnectionPhase::LOGIN:
                 // LoginProtocols.SERVERBOUND. We have no encryption or cookie
-                // packets, so LoginStart is the whole set.
-                return packetId == static_cast<uint8_t>(Network::PacketId::LoginStart);
+                // packets, so LoginStart is the whole set — plus the client
+                // settings, which stand in for MC's configuration phase
+                // (ServerboundClientInformationPacket, sent before PLAY; see
+                // SendHandshakeAndLogin).
+                return packetId == static_cast<uint8_t>(Network::PacketId::LoginStart)
+                    || packetId == static_cast<uint8_t>(Network::PacketId::ClientConfigC2S);
 
             case ConnectionPhase::PLAY:
                 // GameProtocols.SERVERBOUND_TEMPLATE — everything gameplay.
@@ -303,6 +426,20 @@ namespace Client {
 
         Log::Info("[ClientConnection] Sent handshake and login for player: %s (color id=%u)",
                   playerName.c_str(), static_cast<unsigned>(playerColor));
+
+        // The view and simulation distance go out BEFORE play, as MC's
+        // configuration phase sends ClientInformation before the game
+        // starts. The server parks them (ServerConnection::HandleClientSettings)
+        // and applies them when the session is created, so the first tracking
+        // view is already the full one. Sent only after LOGIN SUCCESS, they
+        // waited for the server's next tick: a saved world's view started at
+        // the 7x7 default and grew to 32 up to a tick later. Login success
+        // sends them again (HandleLoginSuccess), which changes nothing when
+        // this copy arrived.
+        SendClientSettings(Platform::g_gameSettings.GetRenderDistance(),
+                           Platform::g_gameSettings.GetSimulationDistance(),
+                           Platform::g_gameSettings.GetVSync(),
+                           Platform::g_gameSettings.GetMouseSensitivity());
     }
 
     // ========================================================================
@@ -594,6 +731,37 @@ namespace Client {
         // packet-threading rework; the assert is the standing proof it does not.
         ASSERT_CLIENT_THREAD();
 
+        // The listed-player table (MC playerInfoMap) keeps everyone, the local
+        // player included — the tab list and the spectator menu read it.
+        {
+            auto& infos = Client::PlayerInfoMap();
+            Client::LocalPlayerInfoId() = m_playerId;
+            switch (packet.action) {
+                case Network::PlayerInfoS2CPacket::Action::ADD: {
+                    Client::PlayerInfo& info = infos[packet.playerId];
+                    info.playerId = packet.playerId;
+                    info.name     = packet.playerName;
+                    info.gameMode = packet.gameMode;
+                    info.colorId  = packet.colorId;
+                    info.latency  = packet.latency;
+                    break;
+                }
+                case Network::PlayerInfoS2CPacket::Action::REMOVE:
+                    infos.erase(packet.playerId);
+                    break;
+                case Network::PlayerInfoS2CPacket::Action::UPDATE_GAME_MODE: {
+                    auto it = infos.find(packet.playerId);
+                    if (it != infos.end()) it->second.gameMode = packet.gameMode;
+                    break;
+                }
+                case Network::PlayerInfoS2CPacket::Action::UPDATE_LATENCY: {
+                    auto it = infos.find(packet.playerId);
+                    if (it != infos.end()) it->second.latency = packet.latency;
+                    return;   // nothing else on the client reads it
+                }
+            }
+        }
+
         // Don't track our own player ID in the remote player manager — it's only for OTHER players
         // (matching MC: the local player is in PlayerInfo for tab-list purposes, but we don't render
         // ourselves as a remote entity).
@@ -627,7 +795,12 @@ namespace Client {
                       static_cast<unsigned>(packet.colorId));
         } else if (packet.action == Network::PlayerInfoS2CPacket::Action::REMOVE) {
             Client::g_remotePlayerManager->RemovePlayer(packet.playerId);
+            Client::g_remotePlayerManager->ForgetEquipment(packet.playerId);
             Log::Info("[ClientConnection] PlayerInfo REMOVE: ID %u", packet.playerId);
+        }
+        if (packet.action == Network::PlayerInfoS2CPacket::Action::ADD ||
+            packet.action == Network::PlayerInfoS2CPacket::Action::UPDATE_GAME_MODE) {
+            Client::g_remotePlayerManager->SetGameMode(packet.playerId, packet.gameMode);
         }
     }
 
@@ -677,9 +850,37 @@ namespace Client {
         // Create typed packet on I/O thread based on packet ID
         switch (static_cast<PacketId>(packetId)) {
             case PacketId::ChunkDataS2C: {
-                auto data = Serialization::DeserializeChunkDataS2C(payload);
-                data.prebuilt = Client::ClientChunkManager::PrebuildChunk(data);   // I/O thread
-                return std::make_unique<ChunkDataS2CPacketImpl>(std::move(data));
+                // Decoded on the ChunkDecodePool, applied in arrival order.
+                auto job = std::make_shared<ChunkDecodeJob>();
+                job->payload = payload;
+                if (m_client) {
+                    if (auto handler = m_client->GetPacketHandler()) handler->NoteChunkPacketReceived();
+                }
+                auto decode = [job] {
+                    const auto decodeStart = std::chrono::steady_clock::now();
+                    try {
+                        {
+                            PROFILE_ZONE_N("DeserializeChunkData");
+                            job->data = Serialization::DeserializeChunkDataS2C(job->payload);
+                        }
+                        job->data.prebuilt = Client::ClientChunkManager::PrebuildChunk(job->data);
+                    } catch (const std::exception& e) {
+                        job->error = e.what();
+                    } catch (...) {
+                        job->error = "unknown exception";
+                    }
+                    job->data.decodeNanos = std::chrono::duration<double, std::nano>(
+                        std::chrono::steady_clock::now() - decodeStart).count();
+                    job->payload.clear();
+                    job->payload.shrink_to_fit();
+                    {
+                        std::lock_guard<std::mutex> lock(job->mutex);
+                        job->done = true;
+                    }
+                    job->cv.notify_all();
+                };
+                ChunkDecodePool::Get().Submit(std::move(decode));
+                return std::make_unique<AsyncChunkDataS2CPacket>(std::move(job));
             }
             
             case PacketId::UnloadChunkS2C: {
@@ -796,6 +997,38 @@ namespace Client {
                 auto data = Serialization::DeserializePlayerSleepS2C(payload);
                 return std::make_unique<PlayerSleepS2CPacketImpl>(std::move(data));
             }
+            case PacketId::PlayerMountS2C: {
+                auto data = Serialization::DeserializePlayerMountS2C(payload);
+                return std::make_unique<PlayerMountS2CPacketImpl>(data);
+            }
+            case PacketId::SetPassengersS2C: {
+                auto data = Serialization::DeserializeSetPassengersS2C(payload);
+                return std::make_unique<SetPassengersS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::MoveVehicleS2C: {
+                auto data = Serialization::DeserializeMoveVehicleS2C(payload);
+                return std::make_unique<MoveVehicleS2CPacketImpl>(data);
+            }
+            case PacketId::MountScreenOpenS2C: {
+                auto data = Serialization::DeserializeMountScreenOpenS2C(payload);
+                return std::make_unique<MountScreenOpenS2CPacketImpl>(data);
+            }
+            case PacketId::UpdateAttributesS2C: {
+                auto data = Serialization::DeserializeUpdateAttributesS2C(payload);
+                return std::make_unique<UpdateAttributesS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::VehicleDataS2C: {
+                auto data = Serialization::DeserializeVehicleDataS2C(payload);
+                return std::make_unique<VehicleDataS2CPacketImpl>(data);
+            }
+            case PacketId::PlayerSwingS2C: {
+                auto data = Serialization::DeserializePlayerSwingS2C(payload);
+                return std::make_unique<PlayerSwingS2CPacketImpl>(data);
+            }
+            case PacketId::ShoulderParrotsS2C: {
+                auto data = Serialization::DeserializeShoulderParrotsS2C(payload);
+                return std::make_unique<ShoulderParrotsS2CPacketImpl>(data);
+            }
             case PacketId::OpenSignEditorS2C: {
                 auto data = Serialization::DeserializeOpenSignEditorS2C(payload);
                 return std::make_unique<OpenSignEditorS2CPacketImpl>(std::move(data));
@@ -807,6 +1040,10 @@ namespace Client {
             case PacketId::MerchantOffersS2C: {
                 auto data = Serialization::DeserializeMerchantOffersS2C(payload);
                 return std::make_unique<MerchantOffersS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::SetCameraS2C: {
+                auto data = Serialization::DeserializeSetCameraS2C(payload);
+                return std::make_unique<SetCameraS2CPacketImpl>(data);
             }
             case PacketId::UpdateMobEffectS2C: {
                 auto data = Serialization::DeserializeUpdateMobEffectS2C(payload);
@@ -823,6 +1060,22 @@ namespace Client {
             case PacketId::SoundEntityS2C: {
                 auto data = Serialization::DeserializeSoundEntityS2C(payload);
                 return std::make_unique<SoundEntityS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::LevelEventS2C: {
+                auto data = Serialization::DeserializeLevelEventS2C(payload);
+                return std::make_unique<LevelEventS2CPacketImpl>(data);
+            }
+            case PacketId::JukeboxSongS2C: {
+                auto data = Serialization::DeserializeJukeboxSongS2C(payload);
+                return std::make_unique<JukeboxSongS2CPacketImpl>(data);
+            }
+            case PacketId::SelfParticleStateS2C: {
+                auto data = Serialization::DeserializeSelfParticleStateS2C(payload);
+                return std::make_unique<SelfParticleStateS2CPacketImpl>(data);
+            }
+            case PacketId::LevelParticlesS2C: {
+                auto data = Serialization::DeserializeLevelParticlesS2C(payload);
+                return std::make_unique<LevelParticlesS2CPacketImpl>(std::move(data));
             }
             case PacketId::ControlS2C: {
                 auto data = Serialization::DeserializeControlS2C(payload);
@@ -862,6 +1115,13 @@ namespace Client {
                 auto data = Serialization::DeserializeChangeDimensionS2C(payload);
                 return std::make_unique<ChangeDimensionS2CPacketImpl>(std::move(data));
             }
+            // MC ClientboundGameEventPacket (the weather events) — typed, so
+            // it applies on the main thread in order with the dimension
+            // change that resets the client's weather.
+            case PacketId::WeatherChange: {
+                auto data = Serialization::DeserializeGameEventS2C(payload);
+                return std::make_unique<GameEventS2CPacketImpl>(std::move(data));
+            }
 
             case PacketId::ExplodeS2C: {
                 auto data = Serialization::DeserializeExplodeS2C(payload);
@@ -881,9 +1141,29 @@ namespace Client {
                 auto data = Serialization::DeserializeArmorStandDataS2C(payload);
                 return std::make_unique<ArmorStandDataS2CPacketImpl>(std::move(data));
             }
+            case PacketId::FishingHookDataS2C: {
+                auto data = Serialization::DeserializeFishingHookDataS2C(payload);
+                return std::make_unique<FishingHookDataS2CPacketImpl>(data);
+            }
             case PacketId::ItemFrameDataS2C: {
                 auto data = Serialization::DeserializeItemFrameDataS2C(payload);
                 return std::make_unique<ItemFrameDataS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::MapItemDataS2C: {
+                auto data = Serialization::DeserializeMapItemDataS2C(payload);
+                return std::make_unique<MapItemDataS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::SetEntityLinkS2C: {
+                auto data = Serialization::DeserializeSetEntityLinkS2C(payload);
+                return std::make_unique<SetEntityLinkS2CPacketImpl>(data);
+            }
+            case PacketId::FireworkRocketDataS2C: {
+                auto data = Serialization::DeserializeFireworkRocketDataS2C(payload);
+                return std::make_unique<FireworkRocketDataS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::BodyArmorS2C: {
+                auto data = Serialization::DeserializeBodyArmorS2C(payload);
+                return std::make_unique<BodyArmorS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::Disconnect: {
@@ -953,7 +1233,7 @@ namespace Client {
 
             case PacketId::ChunkBatchFinishedS2C: {
                 auto data = Serialization::DeserializeChunkBatchFinishedS2C(payload);
-                return std::make_unique<ChunkBatchFinishedS2CPacketImpl>(data.batchSize);
+                return std::make_unique<ChunkBatchFinishedS2CPacketImpl>(data.batchSize, data.serverSendMicros);
             }
 
             case PacketId::HotbarSyncS2C: {
@@ -968,7 +1248,7 @@ namespace Client {
 
             case PacketId::CommandsS2C: {
                 auto data = Serialization::DeserializeCommandsS2C(payload);
-                return std::make_unique<CommandsS2CPacketImpl>(std::move(data.commandNames));
+                return std::make_unique<CommandsS2CPacketImpl>(std::move(data));
             }
 
             case PacketId::WorldgenIdsS2C:
@@ -1093,7 +1373,9 @@ namespace Client {
         Network::IncomingPacket packet;
         while (true) {
             if (applied != 0 && (applied % 8) == 0 &&
-                std::chrono::steady_clock::now() - drainStart > kDrainBudget) break;
+                std::chrono::steady_clock::now() - drainStart > kDrainBudget) {
+                break;
+            }
             if (!TryPopIncoming(packet)) break;
             ++applied;
             // The globals follow the packet: a chunk for the Nether is
@@ -1113,7 +1395,9 @@ namespace Client {
                     }
                 } else if (auto* s2cPacket = dynamic_cast<Network::IS2CPacket*>(packet.packet.get())) {
                     PROFILE_ZONE_N("ApplyPacket");
+                    handler->SetPacketReceivedAt(s2cPacket->getTimestamp());
                     s2cPacket->apply(*handler);
+                    if (s2cPacket->getId() == Network::PacketId::ChunkDataS2C) handler->NoteChunkPacketApplied();
                 }
             } catch (const std::exception& e) {
                 Log::Error("[ClientConnection] Exception applying packet: %s", e.what());

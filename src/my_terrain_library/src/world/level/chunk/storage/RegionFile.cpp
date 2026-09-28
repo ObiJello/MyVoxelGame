@@ -2,7 +2,7 @@
 #include <cstring>
 #include <sstream>
 #include <stdexcept>
-#include <zlib.h>
+#include "util/Deflate.h"
 #include <filesystem>
 
 // Reference: net/minecraft/world/level/chunk/storage/RegionFile.java
@@ -199,35 +199,11 @@ std::vector<char> RegionFile::readChunkData(const ChunkPos& pos) {
         return compressedData;
     }
 
-    // Decompress using zlib (both GZIP and ZLIB use same decompression)
-    z_stream strm{};
-    strm.next_in = reinterpret_cast<Bytef*>(compressedData.data());
-    strm.avail_in = static_cast<uInt>(compressedData.size());
-
-    int windowBits = (compressionType == COMPRESSION_GZIP) ? (16 + MAX_WBITS) : MAX_WBITS;
-    if (inflateInit2(&strm, windowBits) != Z_OK) {
+    // GZIP and ZLIB alike (the wrapper is read from the stream itself).
+    std::vector<char> decompressedData;
+    if (!::minecraft::util::deflate::decompress(compressedData.data(), compressedData.size(), decompressedData)) {
         return {};
     }
-
-    std::vector<char> decompressedData;
-    char buffer[16384];
-
-    int ret;
-    do {
-        strm.next_out = reinterpret_cast<Bytef*>(buffer);
-        strm.avail_out = sizeof(buffer);
-
-        ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-            inflateEnd(&strm);
-            return {};
-        }
-
-        size_t have = sizeof(buffer) - strm.avail_out;
-        decompressedData.insert(decompressedData.end(), buffer, buffer + have);
-    } while (ret != Z_STREAM_END);
-
-    inflateEnd(&strm);
     return decompressedData;
 }
 
@@ -245,36 +221,13 @@ void RegionFile::ChunkDataOutputStream::finalize() {
         return;
     }
 
-    // Compress using zlib
-    z_stream strm{};
-    strm.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(uncompressedData.data()));
-    strm.avail_in = static_cast<uInt>(uncompressedData.size());
-
-    if (deflateInit(&strm, Z_DEFAULT_COMPRESSION) != Z_OK) {
+    // zlib format (id 2, vanilla's default)
+    std::vector<char> compressedData;
+    if (!::minecraft::util::deflate::compress(uncompressedData.data(), uncompressedData.size(), compressedData,
+                                 ::minecraft::util::deflate::Format::Zlib)) {
         m_parent = nullptr;
         return;
     }
-
-    std::vector<char> compressedData;
-    char buffer[16384];
-
-    int ret;
-    do {
-        strm.next_out = reinterpret_cast<Bytef*>(buffer);
-        strm.avail_out = sizeof(buffer);
-
-        ret = deflate(&strm, Z_FINISH);
-        if (ret == Z_STREAM_ERROR) {
-            deflateEnd(&strm);
-            m_parent = nullptr;
-            return;
-        }
-
-        size_t have = sizeof(buffer) - strm.avail_out;
-        compressedData.insert(compressedData.end(), buffer, buffer + have);
-    } while (strm.avail_out == 0);
-
-    deflateEnd(&strm);
 
     m_parent->writeChunk(m_pos, compressedData);
     m_parent = nullptr;

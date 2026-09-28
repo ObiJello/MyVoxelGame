@@ -1,7 +1,9 @@
 // File: src/client/renderer/blockentity/SpawnerRenderer.hpp
 //
-// The mini mob spinning inside a monster spawner's cage. Mirrors MC
-// `SpawnerRenderer.java` (extractRenderState + submitEntityInSpawner, with
+// The mini mob spinning inside a monster spawner's cage — and a trial
+// spawner's (MC TrialSpawnerRenderer: the same submitEntityInSpawner, drawn
+// only while its state has a spinning mob). Mirrors MC `SpawnerRenderer.java`
+// (extractRenderState + submitEntityInSpawner, with
 // TrialSpawnerRenderer.extractSpawnerData's scale):
 //
 //   translate(0.5, 0.4, 0.5)

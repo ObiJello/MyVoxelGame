@@ -102,8 +102,8 @@ namespace Game {
         }
 
         // ── Follow / teleport (MC's own methods, verbatim) ─────────────────
-        // MC unableToMoveToOwner: ordered to sit, riding, (leashed — no leash
-        // system), or the owner is a spectator.
+        // MC unableToMoveToOwner: ordered to sit, riding, leashed
+        // (mayBeLeashed), or the owner is a spectator.
         bool UnableToMoveToOwner() const;
         bool ShouldTryTeleportToOwner() const;
         void TryToTeleportToOwner();

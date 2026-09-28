@@ -2,7 +2,9 @@
 #include "util/LinearCongruentialGenerator.h"
 #include "util/SHA256.h"
 #include "math/Mth.h"
+#include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <iostream>
 
@@ -29,6 +31,57 @@ BiomeManager BiomeManager::withDifferentSource(const NoiseBiomeSource* biomeSour
     return BiomeManager(biomeSource, m_biomeZoomSeed);
 }
 
+namespace {
+
+// Direct-mapped, per worker thread. The surface rules ask for the biome of
+// nearly every block of a column; walking 16x16 columns top to bottom touches
+// ~6x6x100 corners per chunk, each wanted by up to 512 blocks.
+constexpr int kFiddleCacheBits = 11;
+
+struct FiddleCache {
+    int64_t seed;
+    bool primed;
+    uint8_t valid[1 << kFiddleCacheBits];
+    BiomeManager::CornerFiddle entries[1 << kFiddleCacheBits];
+    // The eight corners of the last cell asked for, in getBiome's corner
+    // order. A column walk asks for the same cell 3 times in 4, and every
+    // block of a 4x4x4 cell reads the same corners.
+    bool cellValid;
+    int32_t cellX, cellY, cellZ;
+    BiomeManager::CornerFiddle cellCorners[8];
+};
+
+thread_local FiddleCache t_fiddleCache;
+
+// The calling thread's cache for `seed`, emptied when the seed changes.
+// Fetched once per getBiome: every thread_local access is a call on Darwin
+// (_tlv_get_addr), which cost as much as the LCG it saved when made per corner.
+FiddleCache& fiddleCacheFor(int64_t seed) {
+    FiddleCache& cache = t_fiddleCache;
+    if (!cache.primed || cache.seed != seed) {
+        std::fill(std::begin(cache.valid), std::end(cache.valid), uint8_t{0});
+        cache.cellValid = false;
+        cache.seed = seed;
+        cache.primed = true;
+    }
+    return cache;
+}
+
+BiomeManager::CornerFiddle cornerFiddle(FiddleCache& cache, int32_t x, int32_t y, int32_t z) {
+    const uint32_t hash = static_cast<uint32_t>(x) * 0x9E3779B1u
+                        ^ static_cast<uint32_t>(y) * 0x85EBCA77u
+                        ^ static_cast<uint32_t>(z) * 0xC2B2AE3Du;
+    const uint32_t slot = hash >> (32 - kFiddleCacheBits);
+    BiomeManager::CornerFiddle& entry = cache.entries[slot];
+    if (!cache.valid[slot] || entry.x != x || entry.y != y || entry.z != z) {
+        entry = BiomeManager::computeCornerFiddle(cache.seed, x, y, z);
+        cache.valid[slot] = 1;
+    }
+    return entry;
+}
+
+} // namespace
+
 // Reference: BiomeManager.java lines 31-65
 BiomeHolder BiomeManager::getBiome(const core::BlockPos& pos) const {
     // Reference: BiomeManager.java lines 32-34
@@ -52,17 +105,30 @@ BiomeHolder BiomeManager::getBiome(const core::BlockPos& pos) const {
     double minFiddledDistance = std::numeric_limits<double>::infinity();
 
     // Reference: BiomeManager.java lines 44-59
-    // Loop through 8 corners of the cube
+    // Loop through 8 corners of the cube. A corner's fiddle offsets depend on
+    // the seed and the corner alone, and every block of the 4x4x4 cell (and
+    // of the seven cells sharing the corner) reads the same ones: they come
+    // from a per-thread corner cache. The distance sum below is Java's.
+    // Copied out of the corner cache: two corners of one cell may share a slot.
+    FiddleCache& cache = fiddleCacheFor(m_biomeZoomSeed);
+    if (!cache.cellValid || cache.cellX != parentX || cache.cellY != parentY || cache.cellZ != parentZ) {
+        for (int32_t i = 0; i < 8; ++i) {
+            cache.cellCorners[i] = cornerFiddle(cache,
+                                                (i & 4) == 0 ? parentX : parentX + 1,
+                                                (i & 2) == 0 ? parentY : parentY + 1,
+                                                (i & 1) == 0 ? parentZ : parentZ + 1);
+        }
+        cache.cellX = parentX;
+        cache.cellY = parentY;
+        cache.cellZ = parentZ;
+        cache.cellValid = true;
+    }
+    const CornerFiddle* corners = cache.cellCorners;
     for (int32_t i = 0; i < 8; ++i) {
         // Reference: BiomeManager.java lines 45-47
         bool xEven = (i & 4) == 0;
         bool yEven = (i & 2) == 0;
         bool zEven = (i & 1) == 0;
-
-        // Reference: BiomeManager.java lines 48-50
-        int32_t cornerX = xEven ? parentX : parentX + 1;
-        int32_t cornerY = yEven ? parentY : parentY + 1;
-        int32_t cornerZ = zEven ? parentZ : parentZ + 1;
 
         // Reference: BiomeManager.java lines 51-53
         // CRITICAL: Java uses (double)1.0F
@@ -70,9 +136,11 @@ BiomeHolder BiomeManager::getBiome(const core::BlockPos& pos) const {
         double distanceY = yEven ? fractY : fractY - static_cast<double>(1.0F);
         double distanceZ = zEven ? fractZ : fractZ - static_cast<double>(1.0F);
 
-        // Reference: BiomeManager.java line 54
-        double next = getFiddledDistance(m_biomeZoomSeed, cornerX, cornerY, cornerZ,
-                                        distanceX, distanceY, distanceZ);
+        // Reference: BiomeManager.java line 54 (getFiddledDistance line 97)
+        const CornerFiddle& c = corners[i];
+        double next = Mth::square(distanceZ + c.fiddleZ) +
+                      Mth::square(distanceY + c.fiddleY) +
+                      Mth::square(distanceX + c.fiddleX);
 
         // Reference: BiomeManager.java lines 55-58
         if (minFiddledDistance > next) {
@@ -111,9 +179,10 @@ BiomeHolder BiomeManager::getNoiseBiomeAtQuart(int32_t quartX, int32_t quartY, i
     return m_noiseBiomeSource->getNoiseBiome(quartX, quartY, quartZ);
 }
 
-// Reference: BiomeManager.java lines 85-98
-double BiomeManager::getFiddledDistance(int64_t seed, int32_t xRandom, int32_t yRandom, int32_t zRandom,
-                                       double distanceX, double distanceY, double distanceZ) {
+// Reference: BiomeManager.java lines 85-96 (getFiddledDistance up to the
+// distance sum, which getBiome applies)
+BiomeManager::CornerFiddle BiomeManager::computeCornerFiddle(int64_t seed, int32_t xRandom, int32_t yRandom,
+                                                             int32_t zRandom) {
     // Reference: BiomeManager.java lines 86-91
     // Mix coordinates into seed using LCG
     int64_t rval = util::LinearCongruentialGenerator::next(seed, static_cast<int64_t>(xRandom));
@@ -125,17 +194,16 @@ double BiomeManager::getFiddledDistance(int64_t seed, int32_t xRandom, int32_t y
 
     // Reference: BiomeManager.java lines 92-96
     // Generate random offsets
-    double fiddleX = getFiddle(rval);
+    CornerFiddle corner;
+    corner.x = xRandom;
+    corner.y = yRandom;
+    corner.z = zRandom;
+    corner.fiddleX = getFiddle(rval);
     rval = util::LinearCongruentialGenerator::next(rval, seed);
-    double fiddleY = getFiddle(rval);
+    corner.fiddleY = getFiddle(rval);
     rval = util::LinearCongruentialGenerator::next(rval, seed);
-    double fiddleZ = getFiddle(rval);
-
-    // Reference: BiomeManager.java line 97
-    // Calculate squared distance with fiddle offsets
-    return Mth::square(distanceZ + fiddleZ) +
-           Mth::square(distanceY + fiddleY) +
-           Mth::square(distanceX + fiddleX);
+    corner.fiddleZ = getFiddle(rval);
+    return corner;
 }
 
 // Reference: BiomeManager.java lines 100-103

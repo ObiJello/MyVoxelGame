@@ -91,7 +91,13 @@ namespace Client {
 
         // The local player, for the piston tick (ILevelWrite hooks).
         void SetLocalPlayer(Game::ClientPlayer* player) { m_player = player; }
+        // ... and for the lead renderer, whose rope may end in its hand.
+        const Game::ClientPlayer* GetLocalPlayer() const { return m_player; }
         bool GetLocalPlayerBox(glm::dvec3& outMin, glm::dvec3& outMax) const override;
+        // MC ClientLevel.getPlayerByUUID — the local player or a remote one
+        // in this level, keyed by the offline UUID of their name (the vault's
+        // connection particles).
+        bool GetPlayerByUuid(const Game::Uuid& uuid, glm::dvec3& outPos, float& outBbHeight) const override;
         void MoveLocalPlayerByPiston(const glm::dvec3& delta) override;
         // ... and for the geyser's launch (PotentSulfurBlockEntity).
         bool GetLocalPlayerMovement(glm::dvec3& outDeltaMovement, bool& outFlying) const override;
@@ -104,6 +110,15 @@ namespace Client {
         // and its spawn burst): into the mob particle system's queue.
         void AddParticle(Game::ParticleKind kind, double x, double y, double z,
                          double vx, double vy, double vz) override;
+        // The same with a type's options (ClientLevel.doAddParticle).
+        using Game::ILevelWrite::AddParticle;
+        void DoAddParticle(const Game::ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                           double x, double y, double z, double xd, double yd, double zd) override;
+        // MC ClientLevel.levelEvent: run LevelEventHandler at once when
+        // `except` is this client's player (the predicted half); the server
+        // sends the event to everyone else.
+        void PlayLevelEvent(const Game::SoundExcept& except, int type, const glm::ivec3& pos,
+                            int data) override;
         // Section-flag answers for the two hot physics queries, so the client
         // simulation of a hundred thousand primed TNT pays one chunk lookup per
         // gather rather than one per cell (see IBlockAccess).

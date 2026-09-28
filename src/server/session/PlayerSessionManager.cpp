@@ -1,4 +1,10 @@
 // File: src/server/session/PlayerSessionManager.cpp
+#include "common/entity/ElytraAnimationState.hpp"
+#include "common/entity/PlayerArmPose.hpp"
+#include "common/entity/EquipmentSlot.hpp"
+#include "common/entity/Inventory.hpp"
+#include "common/entity/Morph.hpp"
+#include "common/network/packets/game/BodyArmorS2CPacket.hpp"
 #include "PlayerSessionManager.hpp"
 #include "server/items/HushItems.hpp"
 #include "server/IntegratedServer.hpp"
@@ -6,6 +12,7 @@
 #include "server/entity/ServerLevelBridge.hpp"
 #include <algorithm>
 #include "../player/ServerPlayer.hpp"
+#include "../player/SpectatorMode.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../world/ticketing/ChunkTicketManager.hpp"
 #include "common/core/Log.hpp"
@@ -17,8 +24,10 @@
 #include "common/world/level/World.hpp"
 #include "common/world/block/BedBlock.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
+#include <unordered_map>
 
 namespace Server {
 
@@ -596,6 +605,54 @@ namespace Server {
     void PlayerSessionManager::BroadcastPlayerPositions() {
         std::lock_guard<std::mutex> lock(m_sessionMutex);
 
+        // MC PlayerList.tick: `if (++sendAllPlayerInfoIn > 600)` every
+        // player's latency goes to everyone (ClientboundPlayerInfoUpdatePacket
+        // UPDATE_LATENCY) — the tab list's ping bars.
+        if (++m_sendAllPlayerInfoIn > 600) {
+            m_sendAllPlayerInfoIn = 0;
+            for (const auto& [srcId, srcSession] : m_sessions) {
+                if (!srcSession || !srcSession->GetConnection()) continue;
+                Network::PlayerInfoS2CPacket latency;
+                latency.action   = Network::PlayerInfoS2CPacket::Action::UPDATE_LATENCY;
+                latency.playerId = srcId;
+                latency.latency  = srcSession->GetConnection()->GetLatencyMs();
+                const auto data = Network::Serialization::Serialize(latency);
+                for (const auto& [dstId, dstSession] : m_sessions) {
+                    if (dstSession && dstSession->GetConnection()) {
+                        dstSession->GetConnection()->SendPacket(
+                            static_cast<uint8_t>(Network::PacketId::PlayerInfoS2C), data);
+                    }
+                }
+            }
+        }
+
+        // Each player's own /invisible flag, to that player, on change
+        // (SelfParticleStateS2C): its client must not kick up sprint dust
+        // for a hidden player. Keyed by connection id; a first sight sends
+        // only a set flag.
+        {
+            static std::unordered_map<uint32_t, bool> s_sentInvisible;
+            for (const auto& [id, session] : m_sessions) {
+                if (!session || !session->GetConnection() || !session->GetPlayer()) continue;
+                const bool invisible = session->GetPlayer()->isInvisible();
+                auto it = s_sentInvisible.find(id);
+                const bool known = it != s_sentInvisible.end();
+                if ((known && it->second == invisible) || (!known && !invisible)) {
+                    if (!known) s_sentInvisible.emplace(id, invisible);
+                    continue;
+                }
+                s_sentInvisible[id] = invisible;
+                Network::SelfParticleStateS2CPacket self;
+                self.invisible = invisible;
+                session->GetConnection()->SendPacket(
+                    static_cast<uint8_t>(Network::PacketId::SelfParticleStateS2C),
+                    Network::Serialization::Serialize(self));
+            }
+            for (auto it = s_sentInvisible.begin(); it != s_sentInvisible.end();) {
+                it = m_sessions.count(it->first) ? std::next(it) : s_sentInvisible.erase(it);
+            }
+        }
+
         // Fewer than 2 players means nothing to broadcast
         if (m_sessions.size() < 2) return;
 
@@ -608,7 +665,14 @@ namespace Server {
             packet.playerId = srcPlayer->getPlayerId();
             packet.position = srcPlayer->getPosition();
             packet.rotation = srcPlayer->getRotation();
-            packet.isCrouching = srcPlayer->IsSneaking();
+            // MC Player.isCrouching (the pose every other client draws): the
+            // sneak key, but never in flight or on a seat.
+            packet.isCrouching = srcPlayer->IsSneaking() && !srcPlayer->isFlying() && !srcPlayer->isPassenger();
+            packet.sprinting = srcPlayer->isSprinting();
+            packet.fallFlying = srcPlayer->isFallFlying();
+            // The chest's elytra for the wings layer (ElytraAnimationState.hpp).
+            packet.elytraFlags = Game::ElytraLayerFlags(srcPlayer->getInventory().GetSlot(
+                Game::InventoryIndexFor(Game::EquipmentSlot::CHEST)));
             // The hurt flash. LivingEntity::Hurt already set this on the
             // player's entity view when the damage landed; it is only read here.
             packet.hurtTime = 0;
@@ -641,16 +705,108 @@ namespace Server {
             packet.invisible = srcPlayer->isInvisible() ||
                                srcPlayer->hasEffect(Game::MobEffectId::Invisibility);
             packet.morph = srcPlayer->getMorph();   // /morph: drawn as that body
+            packet.morphVariant = srcPlayer->getMorphVariant();   // ... with that look
             packet.morphAnim = srcPlayer->getMorphAnim();
+            // AvatarRenderer.getArmPose's inputs, resolved here where the
+            // stacks are (a morphed body's humanoid arms).
+            {
+                const Game::Inventory& inv = srcPlayer->getInventory();
+                const bool using_ = srcPlayer->isUsingItem() && srcPlayer->getUseItemRemainingTicks() > 0;
+                Game::PlayerArmPose::Compute(inv.GetSelectedStack(), inv.GetSlot(Game::Inventory::OFFHAND_BEGIN),
+                                             using_, srcPlayer->getUsedItemHand(),
+                                             packet.rightArmPose, packet.leftArmPose,
+                                             /*swinging=*/srcSession->IsSwinging());
+                packet.maxCrossbowCharge = static_cast<uint8_t>(std::clamp(
+                    Game::PlayerArmPose::MaxCrossbowCharge(srcPlayer->getUseItem()), 0.0f, 255.0f));
+                packet.usingItem      = using_;
+                packet.useItemHand    = static_cast<uint8_t>(srcPlayer->getUsedItemHand() ? 1 : 0);
+                packet.ticksUsingItem = static_cast<uint32_t>(std::max(0, srcPlayer->getTicksUsingItem()));
+            }
+            // The riptide's spin (LivingEntity isAutoSpinAttack).
+            packet.autoSpinAttack = srcPlayer->isAutoSpinAttack();
 
             auto data = Network::Serialization::Serialize(packet);
+
+            // MC ServerPlayer.broadcastToPlayer: a spectator is seen only by
+            // other spectators, and by them only while looking through their
+            // own eyes (`getCamera() == this`). MC stops tracking the entity
+            // for everyone else; here the copy is kept current and marked
+            // invisible — no body, no name tag, no pick — which is the same
+            // picture without a despawn/respawn on every mode change.
+            std::vector<uint8_t> hiddenData;
+            const bool srcSpectator = srcPlayer->isSpectator();
+            if (srcSpectator) {
+                Network::PlayerUpdateS2CPacket hidden = packet;
+                hidden.invisible = true;
+                hiddenData = Network::Serialization::Serialize(hidden);
+            }
 
             for (const auto& [dstId, dstSession] : m_sessions) {
                 if (dstId == srcId) continue; // don't send to self
                 auto* conn = dstSession->GetConnection();
                 if (!conn) continue;
+                bool seen = true;
+                if (srcSpectator) {
+                    const ServerPlayer* dstPlayer = dstSession->GetPlayer();
+                    seen = dstPlayer && dstPlayer->isSpectator() && !srcPlayer->isCameraDetached();
+                }
                 conn->SendPacket(
-                    static_cast<uint8_t>(Network::PacketId::PlayerUpdateS2C), data);
+                    static_cast<uint8_t>(Network::PacketId::PlayerUpdateS2C), seen ? data : hiddenData);
+            }
+        }
+
+        // MC ClientboundSetEquipmentPacket for players (LivingEntity.
+        // handleEquipmentChanges → broadcast to the tracking players): what
+        // each player holds (the selected hotbar stack, the offhand) and
+        // wears, as BodyArmorS2C keyed by the player's id. The receiving
+        // clients draw it on a /morph body (ItemInHandLayer / Humanoid-
+        // ArmorLayer), so it goes out only while the source is morphed —
+        // each watcher's known copy kept per (watcher, source) pair, so a
+        // change, a new watcher or a fresh morph sends exactly the slots it
+        // does not have yet.
+        {
+            using EquipmentCopy = std::array<Game::ItemStack, 6>;
+            static std::unordered_map<uint64_t, EquipmentCopy> s_sentEquipment;
+            const auto key = [](uint32_t dst, uint32_t src) {
+                return (static_cast<uint64_t>(dst) << 32) | static_cast<uint64_t>(src);
+            };
+            for (const auto& [srcId, srcSession] : m_sessions) {
+                const ServerPlayer* srcPlayer = srcSession ? srcSession->GetPlayer() : nullptr;
+                if (!srcPlayer || Game::Morph::IsNone(srcPlayer->getMorph())) continue;
+                const Game::Inventory& inv = srcPlayer->getInventory();
+                EquipmentCopy now;
+                now[static_cast<size_t>(Game::EquipmentSlot::MAINHAND)] = inv.GetSelectedStack();
+                now[static_cast<size_t>(Game::EquipmentSlot::OFFHAND)]  = inv.GetSlot(Game::Inventory::OFFHAND_BEGIN);
+                for (const Game::EquipmentSlot slot : { Game::EquipmentSlot::FEET, Game::EquipmentSlot::LEGS,
+                                                        Game::EquipmentSlot::CHEST, Game::EquipmentSlot::HEAD }) {
+                    now[static_cast<size_t>(slot)] = inv.GetSlot(Game::InventoryIndexFor(slot));
+                }
+                for (const auto& [dstId, dstSession] : m_sessions) {
+                    if (dstId == srcId || !dstSession) continue;
+                    auto* conn = dstSession->GetConnection();
+                    if (!conn) continue;
+                    EquipmentCopy& known = s_sentEquipment[key(dstId, srcId)];
+                    for (size_t i = 0; i < now.size(); ++i) {
+                        const bool bothEmpty = known[i].IsEmpty() && now[i].IsEmpty();
+                        if (bothEmpty || (!known[i].IsEmpty() && !now[i].IsEmpty() &&
+                                          Game::IsSameItemSameComponents(known[i], now[i]))) {
+                            continue;
+                        }
+                        known[i] = now[i];
+                        Network::BodyArmorS2CPacket equipment;
+                        equipment.entityId = static_cast<int32_t>(srcPlayer->getPlayerId());
+                        equipment.item = now[i].IsEmpty() ? Game::ItemStack{} : now[i];
+                        equipment.slot = static_cast<Game::EquipmentSlot>(i);
+                        conn->SendPacket(static_cast<uint8_t>(Network::PacketId::BodyArmorS2C),
+                                         Network::Serialization::Serialize(equipment));
+                    }
+                }
+            }
+            // A pair whose watcher or source left: its client dropped the copy.
+            for (auto it = s_sentEquipment.begin(); it != s_sentEquipment.end();) {
+                const auto dst = static_cast<uint32_t>(it->first >> 32);
+                const auto src = static_cast<uint32_t>(it->first & 0xFFFFFFFFu);
+                it = (m_sessions.count(dst) && m_sessions.count(src)) ? std::next(it) : s_sentEquipment.erase(it);
             }
         }
     }
@@ -831,6 +987,11 @@ namespace Server {
     void PlayerSessionManager::ProcessSessionTick(std::shared_ptr<PlayerSession> session) {
         session->Tick(m_currentTick);
 
+        // MC ServerPlayer.tick's camera block: a spectator looking through
+        // another entity is carried along with it — before the ticket below,
+        // so the chunks follow the camera this very tick.
+        Spectator::TickCamera(*session);
+
         // Re-register the player's ticket from their LIVE position, every tick,
         // unconditionally. This is the whole fix.
         //
@@ -849,10 +1010,19 @@ namespace Server {
         // entity near the player for a whole session, because the ticket square
         // stayed at world spawn while a cached anchor claimed it had moved.
         if (ServerPlayer* player = session->GetPlayer()) {
-            UpdatePlayerTickets(session->GetPlayerId(),
-                                session->GetDimensionId(),
-                                player->getChunkPosition(),
-                                session->GetSimulationDistance());
+            if (Spectator::SkipsChunkLoading(*player)) {
+                // MC ChunkMap.updatePlayerStatus with skipPlayer: an ignored
+                // spectator is taken out of the DistanceManager — no ticket of
+                // theirs holds anything loaded.
+                if (ChunkTicketManager* tickets = TicketsForDimension(session->GetDimensionId())) {
+                    tickets->RemoveAllPlayerTickets(session->GetPlayerId());
+                }
+            } else {
+                UpdatePlayerTickets(session->GetPlayerId(),
+                                    session->GetDimensionId(),
+                                    player->getChunkPosition(),
+                                    session->GetSimulationDistance());
+            }
         }
 
         // Portal far sides (ChunkLoader::Source::Portal/IndirectPortal) are

@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/LlamaSpit.cpp
 #include "common/entity/projectile/LlamaSpit.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
@@ -35,6 +36,17 @@ namespace Game {
         if (!m_level || !m_level->Blocks()) return;
         const IBlockAccess& blocks = *m_level->Blocks();
         const bool serverSide = !m_level->IsClientSide();
+
+        // MC recreateFromPacket: the client copy's arrival puffs 7 SPIT
+        // particles along the spit's launch motion (first client tick here).
+        if (!serverSide && !m_spawnPuffDone) {
+            m_spawnPuffDone = true;
+            for (int i = 0; i < 7; ++i) {
+                const double k = 0.4 + 0.1 * static_cast<double>(i);
+                m_level->AddParticle(ParticleKind::Spit, position.x, position.y, position.z, velocity.x * k,
+                                     velocity.y, velocity.z * k);
+            }
+        }
 
         Entity::BaseTick();   // MC super.tick() first
 

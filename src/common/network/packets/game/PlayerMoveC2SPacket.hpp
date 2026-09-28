@@ -23,6 +23,14 @@ namespace Network {
         bool      isCrouching = false;
         bool      isSprinting = false;  // For sprint exhaustion (server-side FoodData)
         bool      jumpedThisTick = false; // Jump impulse since last move send (jump exhaustion)
+        // MC ServerboundSwingPacket(MAIN_HAND), folded in: the main arm swung
+        // since the last move send (flag 0x10). The server relays it to the
+        // other clients as PlayerSwingS2C.
+        bool      swungMainHand = false;
+        // MC ServerboundPlayerCommandPacket START_FALL_FLYING, folded in as a
+        // state bit (flag 0x20): the client is gliding on an elytra. The
+        // server re-checks canGlide (ServerPlayer::setFallFlyingFromClient).
+        bool      fallFlying = false;
         // Largest fall-landing distance since the last send (0 = no landing).
         // Client-tracked: its physics knows exact ground contact, while the
         // server's 20 Hz snapshots miss bunny-hop landings entirely.
@@ -37,6 +45,10 @@ namespace Network {
         // /morph: the body's own animation clock the server relays to the
         // others — a creeper morph's swell (0..30). Trailing, optional.
         uint8_t   morphAnim = 0;
+        // MC LivingEntity.handleFallFlyingCollisions: the elytra wall-impact
+        // damage the client's glide took since the last send (0 = none).
+        // Trailing, optional.
+        float     flyIntoWallDamage = 0.0f;
         std::chrono::steady_clock::time_point timestamp;
 
         PlayerMoveC2SPacket() = default;
@@ -58,11 +70,14 @@ namespace Network {
             if (packet.isCrouching)    flags |= 0x02;
             if (packet.isSprinting)    flags |= 0x04;
             if (packet.jumpedThisTick) flags |= 0x08;
+            if (packet.swungMainHand)  flags |= 0x10;
+            if (packet.fallFlying)     flags |= 0x20;
             buffer.WriteByte(flags);
             buffer.WriteFloat(packet.fallDistance);
             buffer.WriteVarInt(packet.sequenceNumber);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             buffer.WriteByte(packet.morphAnim);
+            buffer.WriteFloat(packet.flyIntoWallDamage);
             return buffer.GetData();
         }
 
@@ -79,11 +94,14 @@ namespace Network {
             packet.isCrouching    = (flags & 0x02) != 0;
             packet.isSprinting    = (flags & 0x04) != 0;
             packet.jumpedThisTick = (flags & 0x08) != 0;
+            packet.swungMainHand  = (flags & 0x10) != 0;
+            packet.fallFlying     = (flags & 0x20) != 0;
             packet.fallDistance   = reader.ReadFloat();
             packet.sequenceNumber = reader.ReadVarInt();
             packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte())
                                                   : PlayerMoveC2SPacket::kDimensionUnknown;
             packet.morphAnim = reader.HasMore() ? reader.ReadByte() : 0;
+            packet.flyIntoWallDamage = reader.HasMore() ? reader.ReadFloat() : 0.0f;
             packet.timestamp = std::chrono::steady_clock::now();
             return packet;
         }

@@ -7,6 +7,8 @@
 #include "../backend/RenderBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
 #include "../mesh/ChunkRenderer.hpp"
+#include "client/world/ClientChunkManager.hpp"   // section info for the occlusion gate
+#include "common/core/Config.hpp"
 #include "../mesh/ClientMeshManager.hpp"
 #include "../mesh/BlockHighlight.hpp"
 #include "../debug/FlickerDiag.hpp"
@@ -14,6 +16,7 @@
 #include "platform/GameDirectory.hpp"
 #if ENABLE_PORTAL_GUN
 #include "client/portal/ClientPortalManager.hpp"
+#include "client/ClientTickRateManager.hpp"   // WorldClockSeconds
 #include <GLFW/glfw3.h>
 #endif
 #include "client/world/ClientLevel.hpp"
@@ -211,7 +214,8 @@ namespace Render {
         float GunOpenScale(const Portal& portal) {
 #if ENABLE_PORTAL_GUN
             if (portal.kind != Game::Immersive::PortalKind::PortalGun) return 1.0f;
-            const double now = glfwGetTime();
+            // PortalRenderer's clock (the world clock — held while paused).
+            const double now = Client::g_clientTickRate.WorldClockSeconds();
             float scale = 1.0f;
             bool found = false;
             Client::GetClientPortalManager().ForEachPair([&](uint64_t, const Client::ClientPortalPair& pair) {
@@ -506,6 +510,77 @@ namespace Render {
         if ((m_frame % 60) == 0) EvictUnusedMeshes();
     }
 
+    void ImmersivePortalRenderer::RenderCapture(const glm::mat4& projection, const glm::mat4& view,
+                                                const Camera& camera, const Frustum& frustum,
+                                                float aspect, int renderDistanceChunks, float partialTick,
+                                                const LevelRenderFn& renderLevel,
+                                                const LevelRenderFn& renderCrossers) {
+        // Render() rotates the per-frame sets and counts as if a new frame
+        // began; the capture is not one, so they are put back afterwards.
+        auto drawnLast = m_drawnLastFrame;
+        auto drawnThis = m_drawnThisFrame;
+        const int renderedLast = m_renderedLastFrame;
+        const int renderedThis = m_renderedThisFrame;
+        m_captureView = true;
+        Render(projection, view, camera, frustum, aspect, renderDistanceChunks, partialTick,
+               renderLevel, renderCrossers);
+        m_captureView = false;
+        m_drawnLastFrame     = std::move(drawnLast);
+        m_drawnThisFrame     = std::move(drawnThis);
+        m_renderedLastFrame  = renderedLast;
+        m_renderedThisFrame  = renderedThis;
+    }
+
+    namespace {
+        // Blocks added around the visible part of a surface before its
+        // portal frustum is built (Frustum::VisibleSubRect): float planes,
+        // the rim, and a frame of camera motion stay inside.
+        constexpr double kPortalFrustumMargin = 0.25;
+
+        // Occlusion gate for a surface: does any section its box touches
+        // appear in the view's section list (the occlusion BFS reached it)?
+        // Conservative like Render::EntityCulling's gate — true for what a
+        // list never holds (no chunk, all-air, outside the build height), for
+        // a surface too big to walk (global borders, huge command portals),
+        // and with no renderer to ask — so a surface even partly in view is
+        // never dropped. `mainView`: the frame's main-view list, which no
+        // later pass overwrites; otherwise the list of the chunk pass that
+        // ran last (a portal view's own, drawn just before its nested layer).
+        bool SurfaceInSectionList(const Portal& p, bool mainView) {
+            const ChunkRenderer* renderer = g_chunkRenderer;
+            const Client::ClientChunkManager* chunks = Client::g_clientChunkManager;
+            if (!renderer || !chunks) return true;
+            if (p.Has(Game::Immersive::PortalFlag::Global)) return true;
+            glm::dvec3 mn, mx;
+            p.BoundingBox(mn, mx, 0.1);
+            mn -= glm::dvec3(0.1);
+            mx += glm::dvec3(0.1);
+            const int cx0 = static_cast<int>(std::floor(mn.x)) >> 4;
+            const int cx1 = static_cast<int>(std::floor(mx.x)) >> 4;
+            const int cz0 = static_cast<int>(std::floor(mn.z)) >> 4;
+            const int cz1 = static_cast<int>(std::floor(mx.z)) >> 4;
+            if (cx1 - cx0 > 8 || cz1 - cz0 > 8) return true;
+            int sy0 = (static_cast<int>(std::floor(mn.y)) - Config::MinY) >> 4;
+            int sy1 = (static_cast<int>(std::floor(mx.y)) - Config::MinY) >> 4;
+            if (sy1 < 0 || sy0 >= Game::Math::SECTIONS_PER_CHUNK) return true;
+            sy0 = std::max(sy0, 0);
+            sy1 = std::min(sy1, Game::Math::SECTIONS_PER_CHUNK - 1);
+            for (int cx = cx0; cx <= cx1; ++cx) {
+                for (int cz = cz0; cz <= cz1; ++cz) {
+                    const Game::Math::ChunkPos cp{ cx, cz };
+                    for (int sy = sy0; sy <= sy1; ++sy) {
+                        const Client::SectionInfo* si = chunks->GetSectionInfo(cp, sy);
+                        if (!si || si->isAllAir) return true;
+                        if (mainView ? renderer->IsMainViewSection(cp, sy) : renderer->IsSectionVisible(cp, sy)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    } // namespace
+
     std::vector<ImmersivePortalRenderer::Candidate> ImmersivePortalRenderer::Candidates(
             int layer, const Portal* through, const Portal* outerThrough, const glm::dvec3& eye,
             const Frustum& frustum, int renderDistanceChunks) const {
@@ -545,6 +620,10 @@ namespace Render {
                 glm::dvec3 mn, mx;
                 p.BoundingBox(mn, mx, 0.05);
                 if (!frustum.IsBoxVisible(glm::vec3(mn), glm::vec3(mx))) return;
+                // Hidden behind terrain from this view: its far side would
+                // be a whole level pass drawn into nothing. (Not up close —
+                // the camera's own section is always in its list anyway.)
+                if (!SurfaceInSectionList(p, /*mainView=*/layer == 0 && !m_captureView)) return;
             }
             // isInvalidRecursionRendering: two layers in, the portal the
             // layer above looks through, when it is the reverse of the one
@@ -603,6 +682,13 @@ namespace Render {
 
             glm::dvec3 corners[4];
             portal.Corners(corners);
+            // Only the part of the surface this view can see (see RenderLayer).
+            {
+                glm::dvec3 visible[4];
+                if (frustum.VisibleSubRect(corners, kPortalFrustumMargin, visible)) {
+                    for (int i = 0; i < 4; ++i) corners[i] = visible[i];
+                }
+            }
             glm::vec3 farCorners[4];
             for (int i = 0; i < 4; ++i) farCorners[i] = glm::vec3(portal.TransformPoint(corners[i]));
             // Culling stays in world space.
@@ -782,6 +868,19 @@ namespace Render {
                 // mapped to the far side.
                 glm::dvec3 corners[4];
                 portal.Corners(corners);
+                // Narrowed to the part of the surface THIS view can see
+                // (Source's portal frustum from the visible portal rect): a
+                // surface half off-screen — or seen through an outer portal
+                // whose own frustum crops it — culls its far view to the
+                // visible half. The rect keeps a margin and is conservative;
+                // nested views narrow further because `frustum` is already
+                // the outer view's portal frustum.
+                {
+                    glm::dvec3 visible[4];
+                    if (frustum.VisibleSubRect(corners, kPortalFrustumMargin, visible)) {
+                        for (int i = 0; i < 4; ++i) corners[i] = visible[i];
+                    }
+                }
                 glm::vec3 farCorners[4];
                 for (int i = 0; i < 4; ++i) farCorners[i] = glm::vec3(portal.TransformPoint(corners[i]));
                 // The portal-bounded frustum degenerates with the eye at the

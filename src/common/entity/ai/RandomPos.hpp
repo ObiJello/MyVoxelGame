@@ -71,6 +71,14 @@ namespace Game {
                                              int verticalDist,
                                              const std::function<double(const glm::ivec3&)>& scoring);
 
+        // MC LandRandomPos.getPosAway(mob, minHorizontalDist,
+        // maxHorizontalDist, verticalDist, avoidPos) — a land target in the
+        // hemisphere away from `avoidPos`, between the two horizontal
+        // distances (the spear users' charge run-up and retreat).
+        std::optional<glm::dvec3> GetLandPosAway(PathfinderMob& mob, double minHorizontalDist,
+                                                 double maxHorizontalDist, int verticalDist,
+                                                 const glm::dvec3& avoidPos);
+
     } // namespace RandomPos
 
 } // namespace Game

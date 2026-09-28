@@ -1746,6 +1746,7 @@ namespace Debug {
         ImGui::Text("F3          Toggle F3 overlay");
         ImGui::Text("~           Toggle log console");
         ImGui::Text("RAlt+K      Toggle debug UI (debug modifier + K)");
+        ImGui::Text("RAlt+M      Fill in held map / cancel (cheats)");
         ImGui::Text("Escape      Exit");
 
         ImGui::Separator();

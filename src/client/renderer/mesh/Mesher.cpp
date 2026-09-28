@@ -645,7 +645,15 @@ namespace Render {
             // is true and the model shape defaults to a full cube. Marking
             // them as non-occluding here prevents the neighbour-face cull
             // from punching visible holes in adjacent walls behind a chest.
-            const bool beFlagged = Game::BlockEntityTypes::HasBlockEntity(blockId);
+            // The suspicious blocks carry a block entity (the buried find)
+            // but are ordinary full cubes in the chunk mesh — their renderer
+            // only adds the item — so they occlude like the sand they are.
+            // The chiseled bookshelf likewise: a full cube drawn by its model
+            // (the slot_N_occupied parts), its entity only holds the books.
+            const bool brushable = blockId == Game::BlockID::SuspiciousSand ||
+                                   blockId == Game::BlockID::SuspiciousGravel ||
+                                   blockId == Game::BlockID::ChiseledBookshelf;
+            const bool beFlagged = Game::BlockEntityTypes::HasBlockEntity(blockId) && !brushable;
             s_blockPropsCache[i].opaqueMaterial = block.opaque && !beFlagged;
             s_blockPropsCache[i].isOpaque = block.opaque && fullCube && !beFlagged;
             s_blockPropsCache[i].hasStates = Game::BlockRegistry::HasStates(blockId);
@@ -866,6 +874,7 @@ namespace Render {
 
         m_biomeSource = nullptr;
         m_biomeAccess = &blocks;
+        InvalidateBiomeCache();
 
         // States over the FULL 18^3, halo included: a waterlogged neighbour
         // culls the fluid face it shares with this cell, so the halo's state
@@ -899,6 +908,7 @@ namespace Render {
         m_biomeAccess = nullptr;
         // One read per section build: the seed only changes between levels.
         m_biomeZoomSeed = ::Client::BiomeZoomSeed();
+        InvalidateBiomeCache();
 
         const Client::Render::SectionCopy* centre = region.Centre();
 
@@ -1453,7 +1463,9 @@ namespace Render {
         //
         // The fluid is emitted first, matching MC's order.
         const Game::BlockState state = Game::BlockStates::FromIndex(blockId, stateIndex);
-        const bool holdsWater = Game::BlockRegistry::ContainsWater(state);
+        // DeriveWaterCache already asked ContainsWater of this very cell.
+        const bool holdsWater =
+            m_waterCache[worldY - m_sectionBaseWorldY + 1][localZ + 1][localX + 1];
         if (holdsWater || blockId == Game::BlockID::Lava) {
             if (m_fluidBuilder) {
                 m_fluidBuilder->BuildFluidBlock(blocks, chunkPos, worldX, worldY, worldZ, mesh);
@@ -1470,10 +1482,25 @@ namespace Render {
             }
         }
 
+        // Buried: all six neighbours opaque and every face of the model culls
+        // against one of them, so the face loop below would drop each face at
+        // ShouldCullFace and emit nothing. Skipped before the model is walked
+        // (not on a portal surface, where a face is drawn whatever is behind it).
+        static const bool s_noBuriedSkip = std::getenv("OBEY_NO_BURIED_SKIP") != nullptr;   // A/B switch
+        if (!s_noBuriedSkip && m_config.enableFaceCulling && m_portalFaces.empty()) {
+            const int ly = worldY - m_sectionBaseWorldY + 1, lz = localZ + 1, lx = localX + 1;
+            if (m_opaqueCache[ly - 1][lz][lx] && m_opaqueCache[ly + 1][lz][lx] &&
+                m_opaqueCache[ly][lz - 1][lx] && m_opaqueCache[ly][lz + 1][lx] &&
+                m_opaqueCache[ly][lz][lx - 1] && m_opaqueCache[ly][lz][lx + 1] &&
+                AllFacesCull(state)) {
+                return;
+            }
+        }
+
         // Model is keyed on (block, state) — the blockstate JSON maps each
         // state to its own, possibly pre-rotated, model. MC's equivalent lookup
         // is BlockModelShaper.getBlockModel(BlockState).
-        const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
+        const Game::BlockModel& model = ModelFor(state);
         glm::vec3 worldPos = LocalToWorldPos(chunkPos, localX, worldY, localZ);
 
         // Use cached render layer instead of registry lookup
@@ -2050,7 +2077,67 @@ namespace Render {
         m_lastStats.quadsGenerated++;
     }
 
+    const Game::BlockModel& Mesher::ModelFor(Game::BlockState state) {
+        const uint32_t generation = Game::BlockModelRegistry::Generation();
+        if (generation != m_stateModelGen) {
+            m_stateModel.assign(Game::kBlockStateCount, nullptr);
+            m_stateAllFacesCull.assign(Game::kBlockStateCount, 0);
+            m_stateModelGen = generation;
+        }
+        const uint32_t raw = state.RawId();
+        if (raw >= m_stateModel.size()) return Game::BlockRegistry::GetBlockModel(state);
+        const Game::BlockModel*& slot = m_stateModel[raw];
+        if (!slot) slot = &Game::BlockRegistry::GetBlockModel(state);
+        return *slot;
+    }
+
+    bool Mesher::AllFacesCull(Game::BlockState state) {
+        const Game::BlockModel& model = ModelFor(state);   // resets the table on a new generation
+        const uint32_t raw = state.RawId();
+        uint8_t* slot = raw < m_stateAllFacesCull.size() ? &m_stateAllFacesCull[raw] : nullptr;
+        if (slot && *slot != 0) return *slot == 2;
+        bool all = true;
+        for (const auto& element : model.elements) {
+            for (const auto& [faceDir, faceDef] : element.faces) {
+                all = all && faceDef.cullfaceDir >= 0;
+            }
+        }
+        if (slot) *slot = all ? 2 : 1;
+        return all;
+    }
+
+    void Mesher::InvalidateBiomeCache() {
+        if (m_biomeCacheStamp.empty()) {
+            m_biomeCacheStamp.assign(kBiomeCacheSize, 0);
+            m_biomeCacheValue.assign(kBiomeCacheSize, 0);
+            m_tintCacheStamp.assign(kTintCacheSize, 0);
+            m_tintCacheValue.assign(kTintCacheSize, 0);
+        }
+        if (++m_biomeCacheGen == 0) {   // wrapped: no stale stamp may match
+            std::fill(m_biomeCacheStamp.begin(), m_biomeCacheStamp.end(), 0u);
+            std::fill(m_tintCacheStamp.begin(), m_tintCacheStamp.end(), 0u);
+            m_biomeCacheGen = 1;
+        }
+    }
+
     uint16_t Mesher::ResolveBiome(int worldX, int worldY, int worldZ) const {
+        const int cx = worldX - m_sectionBaseWorldX + kBiomeCacheMargin;
+        const int cy = worldY - m_sectionBaseWorldY;
+        const int cz = worldZ - m_sectionBaseWorldZ + kBiomeCacheMargin;
+        static const bool s_noCache = std::getenv("OBEY_NO_MESH_BIOME_CACHE") != nullptr;   // A/B switch
+        if (!s_noCache && m_biomeCacheGen != 0 && cx >= 0 && cx < kBiomeCacheXZ && cy >= 0 && cy < 16 &&
+            cz >= 0 && cz < kBiomeCacheXZ) {
+            const size_t i = static_cast<size_t>((cy * kBiomeCacheXZ + cz) * kBiomeCacheXZ + cx);
+            if (m_biomeCacheStamp[i] != m_biomeCacheGen) {
+                m_biomeCacheValue[i] = ResolveBiomeUncached(worldX, worldY, worldZ);
+                m_biomeCacheStamp[i] = m_biomeCacheGen;
+            }
+            return m_biomeCacheValue[i];
+        }
+        return ResolveBiomeUncached(worldX, worldY, worldZ);
+    }
+
+    uint16_t Mesher::ResolveBiomeUncached(int worldX, int worldY, int worldZ) const {
         if (m_biomeSource) {
             // MC ClientLevel.getBiome: the fuzzy zoom picks the quart this
             // block shows (BiomeZoom.hpp), then its noise biome is read. Quart
@@ -2086,6 +2173,29 @@ namespace Render {
     // cheaper here shows up as a hard seam at every biome border.
     glm::vec4 Mesher::BlendedBiomeTint(BiomeChannel channel,
                                        int worldX, int worldY, int worldZ) const {
+        const int lx = worldX - m_sectionBaseWorldX;
+        const int ly = worldY - m_sectionBaseWorldY;
+        const int lz = worldZ - m_sectionBaseWorldZ;
+        static const bool s_noTintCache = std::getenv("OBEY_NO_MESH_TINT_CACHE") != nullptr;   // A/B switch
+        uint32_t packed;
+        if (!s_noTintCache && m_biomeCacheGen != 0 && ((lx | ly | lz) & ~15) == 0) {
+            const size_t i = (static_cast<size_t>(channel) << 12) |
+                             static_cast<size_t>((ly << 8) | (lz << 4) | lx);
+            if (m_tintCacheStamp[i] != m_biomeCacheGen) {
+                m_tintCacheValue[i] = BlendedBiomeColor(channel, worldX, worldY, worldZ);
+                m_tintCacheStamp[i] = m_biomeCacheGen;
+            }
+            packed = m_tintCacheValue[i];
+        } else {
+            packed = BlendedBiomeColor(channel, worldX, worldY, worldZ);
+        }
+        return glm::vec4(((packed >> 16) & 0xFF) / 255.0f,
+                         ((packed >> 8) & 0xFF) / 255.0f,
+                         (packed & 0xFF) / 255.0f, 1.0f);
+    }
+
+    uint32_t Mesher::BlendedBiomeColor(BiomeChannel channel,
+                                       int worldX, int worldY, int worldZ) const {
         // Options.biomeBlendRadius (0..7), published per build. Radius 0 is
         // MC's single-lookup fast path — the loop below degenerates to one
         // sample, which is the same thing without a second code path.
@@ -2119,9 +2229,7 @@ namespace Render {
                 b += c & 0xFF;
             }
         }
-        return glm::vec4((r / kSize) / 255.0f,
-                         (g / kSize) / 255.0f,
-                         (b / kSize) / 255.0f, 1.0f);
+        return static_cast<uint32_t>(((r / kSize) << 16) | ((g / kSize) << 8) | (b / kSize));
     }
 
     // **NEW**: Grass-specific tinting (tint index 1)

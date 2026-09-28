@@ -37,6 +37,7 @@
 #include <functional>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -68,6 +69,13 @@ namespace Server {
         size_t RemoveAllForced();
         bool   IsForced(ChunkPos pos) const { return m_forced.count(pos) != 0; }
         std::vector<ChunkPos> ForcedChunks() const;
+
+        // ── command holds ───────────────────────────────────────────────────
+        // A command waiting on a far chunk (a `name=` selector's named entity
+        // in an unloaded chunk — NamedEntityIndex.hpp) keeps it loaded until
+        // it has run. Counted, never persisted, the chunk alone (no halo).
+        void HoldForCommand(ChunkPos pos);
+        void ReleaseCommandHold(ChunkPos pos);
 
         // ── the redstone index ─────────────────────────────────────────────
         void SetRedstoneEnabled(bool on);
@@ -121,6 +129,7 @@ namespace Server {
         ChunkSet m_forced;
         ChunkSet m_redstone;
         ChunkSet m_kept;
+        std::unordered_map<ChunkPos, int, Game::Math::ChunkPosHash> m_commandHolds;
         bool m_keptDirty       = true;
         bool m_forcedDirty     = false;
         bool m_indexDirty      = false;

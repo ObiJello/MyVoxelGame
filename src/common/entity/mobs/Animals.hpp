@@ -19,7 +19,14 @@
 #include "common/entity/NeutralMob.hpp"
 #include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/TamableAnimal.hpp"
+#include "common/entity/ParrotDanceRange.hpp"
+#include "common/entity/HorseTaming.hpp"
+#include "common/entity/MountInventory.hpp"
+#include "common/entity/PlayerRideableJumping.hpp"
+#include "common/entity/ItemBasedSteering.hpp"
+#include "common/entity/DyeColorUtil.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/entity/mobs/WolfVariants.hpp"
 #include "common/sound/SoundEvents.hpp"
 
 namespace Game {
@@ -88,21 +95,92 @@ namespace Game {
         // MC MushroomCow.readyForShearing: alive and not a calf.
         bool ReadyForShearing() const { return IsAlive() && !IsBaby(); }
 
-        // MC MushroomCow.shear — convert to Cow, drop 5 mushrooms.
+        // MC MushroomCow.shear — convert to Cow, drop 5 mushrooms (of the
+        // variant's colour).
         void Shear();
+
+        // MC MushroomCow.Variant — RED (0, the default) / BROWN (1). Saved
+        // as "Type" ("red" / "brown"), synced through the variant byte
+        // (DATA_TYPE); the renderer picks red_ / brown_mooshroom.png and the
+        // matching mushrooms on its back.
+        enum class Variant : uint8_t { Red = 0, Brown = 1 };
+        Variant GetVariant() const { return m_variant; }
+        void SetVariant(Variant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override { m_variant = v == 1 ? Variant::Brown : Variant::Red; }
+
+        // MC MushroomCow.thunderHit: a bolt this mooshroom has not been hit
+        // by yet (lastLightningBoltUUID) swaps red <-> brown with the
+        // convert sound — once per bolt, however many flashes it makes. No
+        // fire, no damage (the base thunderHit is not called).
+        void ThunderHit(Entity* bolt) override;
+
+        // MC getBreedOffspring / getOffspringVariant: two parents of one
+        // colour have a 1-in-1024 mutation to the other; otherwise either
+        // parent's colour at random.
+        std::unique_ptr<Animal> CreateBaby() override;
+        void SpawnChildFromBreeding(Animal& partner) override;
+
+    private:
+        Variant m_variant = Variant::Red;
+        int8_t  m_breedPartnerVariant = -1;   // -1 = no partner known
+        Uuid    m_lastLightningBoltUuid{};
     };
 
-    // MC Pig. MAX_HEALTH 10, MOVEMENT_SPEED 0.25.
-    //
-    // MC Pig.thunderHit (pig → ZOMBIFIED_PIGLIN via Mob.convertTo when
-    // lightning strikes) is SKIPPED: weather has no lightning strikes in this
-    // engine, so the thunderHit hook that starts it never fires. The
-    // conversion machinery itself is live — see Mob::ConvertTo, and
-    // Mooshroom::Shear above for the interaction-driven conversion that
-    // landed with the mobInteract wave.
-    class Pig : public Animal {
+    // MC Pig. MAX_HEALTH 10, MOVEMENT_SPEED 0.25. ItemSteerable: a saddled
+    // pig carries a player (mobInteract) and is steered by one holding a
+    // carrot on a stick (ItemBasedSteering, FoodOnAStickItem).
+    class Pig : public Animal, public ItemSteerable {
     public:
         explicit Pig(EntityLevel* level);
+
+        // ── Riding (MC Pig.getControllingPassenger / tickRidden /
+        //    getRiddenInput / getRiddenSpeed / boost) ────────────────────
+        // MC getControllingPassenger: saddled, and the player in the first
+        // seat holds a carrot on a stick in either hand (isHolding).
+        bool CanBeSteeredBy(const RiderControl& rider) const override;
+        // MC getRiddenInput: always straight ahead — the pig walks where the
+        // rider looks, whatever keys are held.
+        glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) override;
+        // MC tickRidden: turn to the rider's view (pitch halved), body and
+        // head with it, then the boost clock.
+        void TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) override;
+        // MC getRiddenSpeed: MOVEMENT_SPEED * 0.225 * boostFactor.
+        float GetRiddenSpeed(const RiderControl& rider) const override;
+        // MC ItemSteerable.boost — the carrot on a stick's use.
+        bool Boost() override;
+        // MC Pig.mobInteract: an empty-of-food hand on a saddled, unridden
+        // pig climbs on (not while sneaking); anything else is Animal's (the
+        // saddle's own interactLivingEntity follows a PASS on the server).
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // ── The saddle (MC Pig.canUseSlot / canDispenserEquipIntoSlot /
+        //    getEquipSound) ─────────────────────────────────────────────────
+        bool CanUseSlot(EquipmentSlot slot) const override {
+            if (slot != EquipmentSlot::SADDLE) return Animal::CanUseSlot(slot);
+            return IsAlive() && !IsBaby();
+        }
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return slot == EquipmentSlot::SADDLE || Animal::CanDispenserEquipIntoSlot(slot);
+        }
+        std::string GetEquipSound(EquipmentSlot slot, const ItemStack& stack,
+                                  const Equippable& equippable) const override {
+            return slot == EquipmentSlot::SADDLE ? std::string(SoundEvents::PIG_SADDLE)
+                                                 : Animal::GetEquipSound(slot, stack, equippable);
+        }
+        // MC DATA_BOOST_TIME, carried on the mob's synced data int (the
+        // sulfur cube's carried-block field — a pig carries no block). The
+        // client's copy starts its burst when a new length arrives
+        // (onSyncedDataUpdated → steering.onSynced).
+        uint32_t GetCarriedBlockRaw() const override {
+            return static_cast<uint32_t>(m_steering.BoostTimeTotal());
+        }
+        void SetCarriedBlockRaw(uint32_t raw) override;
+
+        // MC Pig.thunderHit: off Peaceful, the pig becomes a ZOMBIFIED_PIGLIN
+        // (Mob.convertTo SINGLE, equipment not kept, loot pickup kept) with
+        // its default gear (the golden sword) and persistence; on Peaceful —
+        // or if the conversion fails — the base burn-and-hurt.
+        void ThunderHit(Entity* bolt) override;
 
         bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override;
@@ -131,6 +209,7 @@ namespace Game {
     protected:
         TemperatureVariant m_variant = TemperatureVariant::Temperate;
         int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
+        ItemBasedSteering m_steering;        // MC Pig.steering
         void RegisterGoals() override;
     };
 
@@ -278,26 +357,61 @@ namespace Game {
         bool  m_isChickenJockey = false;   // MC DEFAULT_CHICKEN_JOCKEY = false
     };
 
-    // MC Parrot. MAX_HEALTH 6, FLYING_SPEED 0.4, MOVEMENT_SPEED 0.2,
-    // ATTACK_DAMAGE 3.
+    // MC Parrot (extends ShoulderRidingEntity extends TamableAnimal).
+    // MAX_HEALTH 6, FLYING_SPEED 0.4, MOVEMENT_SPEED 0.2, ATTACK_DAMAGE 3.
     //
-    // The parts that make a parrot a parrot here: FlyingMoveControl(10, false)
-    // + the flying navigation, the flap state machine (calculateFlapping —
-    // also the slow fall: descending motion is scaled by 0.6, and
-    // checkFallDamage is a no-op), never breeding, and — taming landed —
+    // FlyingMoveControl(10, false) + the flying navigation, the flap state
+    // machine (calculateFlapping — also the slow fall: descending motion is
+    // scaled by 0.6, and checkFallDamage is a no-op), never breeding,
     // seed-taming (1/10), sit-on-command, follow-owner (it may perch on
-    // leaves: canFlyToOwner), and the cookie poison-kill. Not modelled, each
-    // named at its site: LandOnOwnersShoulderGoal (shoulder riding needs the
-    // player render), the five-colour variant (needs per-variant textures;
-    // the wire byte exists but the renderer draws red_blue) and the jukebox
-    // party dance.
+    // leaves: canFlyToOwner), the cookie poison-kill, the five-colour
+    // Parrot.Variant (rolled in finalizeSpawn, saved as "Variant", on the
+    // wire as the variant byte), the tree-perching wander (ParrotWanderGoal),
+    // FollowMobGoal, the shoulder ride (LandOnOwnersShoulderGoal + the
+    // ShoulderRidingEntity cooldown; the player half lives on the server's
+    // player, see server/entity/ShoulderEntities), mob imitation and the
+    // jukebox party dance.
     class Parrot : public Animal, public TamableAnimal {
     public:
+        // Mob::IsTamedPet — a tamed one never despawns (IsDespawnPersistent).
+        bool IsTamedPet() const override { return IsTame(); }
+
+        // MC Parrot.Variant, declaration order = id (ByIdMap.continuous,
+        // OutOfBoundsStrategy.CLAMP).
+        enum class Variant : uint8_t { RedBlue = 0, Blue = 1, Green = 2, YellowBlue = 3, Gray = 4 };
+        static constexpr int kVariantCount = 5;
+        // MC Parrot.Variant.byId: out-of-range ids CLAMP to the ends.
+        static Variant VariantById(int id) {
+            return static_cast<Variant>(id < 0 ? 0 : (id >= kVariantCount ? kVariantCount - 1 : id));
+        }
+        // MC ParrotRenderer.getVariantTexture.
+        static const char* VariantTexture(Variant variant);
+
+        // MC ShoulderRidingEntity.RIDE_COOLDOWN.
+        static constexpr int kRideCooldown = 100;
+        // The jukebox counts while it is closer than this to the block's
+        // centre (MC Parrot.aiStep's closerToCenterThan, 3.46 there — widened
+        // on purpose, see ParrotDanceRange.hpp).
+        static constexpr double kJukeboxRange = kParrotDanceRange;
+
         explicit Parrot(EntityLevel* level);
+
+        // MC Parrot.finalizeSpawn — a random variant for every spawn reason
+        // (natural, spawn egg, command, structure), then super.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        Variant GetVariant() const { return m_variant; }
+        void    SetVariant(Variant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override { m_variant = VariantById(v); }
 
         // MC Parrot.mobInteract — seeds tame (1/10), cookies kill, a tame
         // grounded parrot toggles sitting.
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // MC Parrot.hurtServer: a hit parrot stops sitting first.
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
 
         // MC Parrot.canFlyToOwner: true — the teleport may land on leaves.
         bool CanFlyToOwner() const override { return true; }
@@ -319,27 +433,51 @@ namespace Game {
         }
 
         // The tamable byte (bit 0 sitting pose, bit 1 tame) IS the parrot's
-        // anim state byte — its first user.
+        // anim state byte.
         uint8_t GetAnimStateByte() const override { return GetTamableAnimByte(); }
         void    SetAnimStateByte(uint8_t v) override { SetTamableAnimByte(v); }
 
         // MC Parrot.isFood: false — seeds TAME, they never breed.
-        bool IsFood(uint32_t itemId) const override { return false; }
+        bool IsFood(uint32_t itemId) const override { (void)itemId; return false; }
         // MC Parrot.getBreedOffspring returns null; canMate is false.
         std::unique_ptr<Animal> CreateBaby() override { return nullptr; }
-        bool CanMate(const Animal& other) const override { return false; }
-        // MC Parrot.isBaby: false — parrots have no baby form.
+        bool CanMate(const Animal& other) const override { (void)other; return false; }
+        // MC Parrot.canBeABaby: false — parrots have no baby form.
         bool IsBaby() const override { return false; }
 
         bool IsFlyingAnimal() const override { return true; }
 
-        // MC Parrot.aiStep — the imitation roll, super, calculateFlapping.
+        // MC Parrot.isPushable: true (the living default gates on alive).
+        bool IsPushable() const override { return true; }
+        // MC Parrot.doPush: a player is never pushed by (nor pushes) the
+        // parrot through its own push.
+        void DoPush(Entity& other) override;
+
+        // MC ShoulderRidingEntity.tick — the ride cooldown counts up — then
+        // super.
+        void Tick() override;
+        // MC ShoulderRidingEntity.canSitOnShoulder.
+        bool CanSitOnShoulder() const { return m_rideCooldownCounter > kRideCooldown; }
+
+        // MC Parrot.aiStep — the jukebox check, the imitation roll, super,
+        // calculateFlapping.
         void AiStep() override;
+
+        // MC Parrot.setRecordPlayingNearby / isPartyParrot.
+        void SetRecordPlayingNearby(const glm::ivec3& pos, bool playing) override;
+        bool IsPartyParrot() const { return m_partyParrot; }
 
         // MC Parrot.getAmbientSound (a 1/1000 mob imitation outside
         // peaceful) and getVoicePitch (no baby shift).
         const char* GetAmbientSound() const override;
         float GetVoicePitch() const override;
+
+        // MC Parrot.getAmbient / getPitch / imitateNearbyMobs — static in MC
+        // because the shoulder parrot (ServerPlayer.playShoulderEntity
+        // AmbientSound) speaks through them with the PLAYER as the entity.
+        static const char* GetAmbient(EntityLevel& level, JavaRandom& random);
+        static float GetPitch(JavaRandom& random);
+        static bool ImitateNearbyMobs(EntityLevel& level, const Entity& entity);
 
         // MC ParrotRenderer.extractRenderState: flapAngle =
         // (sin(lerp(flap)) + 1) * lerp(flapSpeed).
@@ -364,11 +502,24 @@ namespace Game {
     private:
         // MC Parrot.calculateFlapping — the flap fields verbatim.
         void CalculateFlapping();
+        // The party state (MC aiStep's head, event-driven) — see
+        // UpdatePartyState.
+        void UpdatePartyState();
+        bool IsJukeboxStillPlaying(const glm::ivec3& pos) const;
+        bool IsWithinJukeboxRange(const glm::ivec3& pos) const;
 
+        Variant m_variant = Variant::RedBlue;   // MC Variant.DEFAULT
         float m_flap = 0.0f, m_oFlap = 0.0f;
         float m_flapSpeed = 0.0f, m_oFlapSpeed = 0.0f;
         float m_flapping = 1.0f;
         float m_nextFlap = 1.0f;
+        int   m_rideCooldownCounter = 0;
+        bool  m_partyParrot = false;
+        // The jukeboxes whose songs this parrot was told of (song start, or
+        // the one check on arrival), each kept while its song plays.
+        std::vector<glm::ivec3> m_jukeboxes;
+        bool  m_jukeboxSearched = false;     // client: the one on-arrival check ran
+        int   m_lastDanceLogTick = -1000;    // diagnostics rate limit
     };
 
     // MC animal/rabbit/Rabbit. MAX_HEALTH 3, MOVEMENT_SPEED 0.3,
@@ -520,47 +671,55 @@ namespace Game {
         int   m_warningSoundTicks = 0;
     };
 
-    // MC animal/wolf/Wolf, promoted from the generic path for the
-    // persistent-anger system (NeutralMob): a wild wolf targets a player only
-    // while ANGRY at them — being hit starts a 400..780-tick grudge, the
-    // whole pack is alerted (HurtByTargetGoal.setAlertOthers), and the angry
-    // state drives the red-eyed texture and raised tail. It keeps
-    // GenericAnimal's def-driven goal set (float/panic/breed/tempt/
-    // follow-parent/stroll/looks + the def's attributes) and layers MC's
-    // combat goals on top: LeapAtTargetGoal(0.4) at 4, MeleeAttackGoal(1.0,
-    // true) at 5 — the generic wolf could acquire targets but had no attack
-    // goal at all.
+    // MC 26.3 animal/wolf/Wolf — TamableAnimal + NeutralMob.
     //
-    // MC synchronises DATA_ANGER_END_TIME so the CLIENT's isAngry() picks the
-    // angry texture; this wire has no per-mob long, so the angry state is
-    // mapped onto the aggressive bit each server tick (which is also what the
-    // renderer's wolf branch already reads for the 1.5393804 tail angle) —
-    // overriding MeleeAttackGoal's own start/stop writes one tick later,
-    // deliberately: MC's wolf visual keys on anger, not on mid-swing.
+    // Built on GenericAnimal for the def's attributes and locomotion only:
+    // the constructor clears the def-driven goal set and registers
+    // Wolf.registerGoals exactly, priority for priority (MC's wolf has no
+    // TemptGoal and no FollowParentGoal, and its panic is the
+    // environmental-only TamableAnimalPanicGoal — a hit wolf fights, it does
+    // not run).
     //
-    // Taming landed (TamableAnimal mixin): bone-taming, sit-on-command,
-    // follow-owner with the teleport, owner defence (OwnerHurtBy/
-    // OwnerHurtTargetGoal), the 40-health tame boost, and the
-    // NonTameRandomTargetGoal prey hunts. Still skipped at their sites:
-    // BegGoal (needs the held-item render), WolfAvoidEntityGoal (needs the
-    // llama's strength stat), collar/tame texture (renderer texture table is
-    // per-type), and wolf armor/variants (ride items).
+    // Synched data (MC DATA_*), and where each rides this port's wire:
+    //   anim byte    bit 0 sitting pose, bit 1 tame (TamableAnimal's flags),
+    //                bit 2 DATA_INTERESTED_ID (the beg head tilt),
+    //                bit 3 isAngry() — MC syncs DATA_ANGER_END_TIME and the
+    //                client compares it with its own game time; the server
+    //                evaluates the same comparison each tick and ships the
+    //                answer, which is what the renderer's angry sheet, raised
+    //                tail and still tail read,
+    //                bits 4-7 DATA_COLLAR_COLOR (a DyeColor ordinal).
+    //   variant byte bits 0-3 DATA_VARIANT_ID (WolfVariants::Variant),
+    //                bits 4-6 DATA_SOUND_VARIANT_ID.
+    //   BodyArmorS2C the BODY equipment slot (wolf armor), whole stack — the
+    //                armour layer needs its damage and dye.
+    //
+    // Not modelled, named at its site: armour trims/glint on the armour
+    // layer. (Rain soaks a wolf like water does — Wolf::Tick's
+    // isInWaterOrRain.)
     class Wolf : public GenericAnimal, public NeutralMob, public TamableAnimal {
     public:
+        // Mob::IsTamedPet — a tamed one never despawns (IsDespawnPersistent).
+        bool IsTamedPet() const override { return IsTame(); }
+
         explicit Wolf(EntityLevel* level);
 
         // MC Wolf.startPersistentAngerTimer — rangeOfSeconds(20, 39).
         void StartPersistentAngerTimer() override;
 
-        // MC Wolf.aiStep tail: updatePersistentAnger(level, true); plus the
-        // aggressive-bit mapping described above. (The wet-shake machinery —
-        // isWet/isShaking, entity events 8/56 — waits on a rain query and
-        // the shake render pass.)
+        // MC Wolf.aiStep: the server's shake start (wet, not already
+        // shaking, not path-finding, on the ground → entity event 8) and
+        // updatePersistentAnger(level, true).
         void AiStep() override;
 
-        // MC Wolf.mobInteract — bone-taming for the wild, feed/sit-toggle
-        // for the tame (dye collar and wolf armor branches skipped: no
-        // collar render layer, no wolf armor item).
+        // MC Wolf.tick: the interested-angle spring and the whole wet/shake
+        // cycle (sound, splash particles), both sides.
+        void Tick() override;
+
+        // MC Wolf.die: a dying wolf stops shaking.
+        void Die(MobDamageSource source, Entity* attacker) override;
+
+        // MC Wolf.mobInteract, every branch (see the .cpp).
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
 
         // MC Wolf.applyTamingSideEffects: MAX_HEALTH 40 tame, 8 wild.
@@ -569,13 +728,16 @@ namespace Game {
         // MC Wolf.hurtServer: a hit wolf stands up.
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
 
+        // MC Wolf.actuallyHurt: worn wolf armor takes the whole hit (unless
+        // #bypasses_wolf_armor), cracking audibly at each Crackiness step.
+        void ActuallyHurt(MobDamageSource source, float amount, Entity* attacker) override;
+
         // MC Wolf.getMaxHeadXRot: 20 while sitting.
         int GetMaxHeadXRot() const override {
             return IsInSittingPose() ? 20 : GenericAnimal::GetMaxHeadXRot();
         }
 
-        // MC Wolf.getMaxSpawnClusterSize (Wolf.java:508-510) — a pack of 8,
-        // double the Mob default of 4.
+        // MC Wolf.getMaxSpawnClusterSize — a pack of 8.
         int GetMaxSpawnClusterSize() const override { return 8; }
 
         // MC TamableAnimal.canAttack — never the owner.
@@ -583,63 +745,126 @@ namespace Game {
             return TamableCanAttack(target) && GenericAnimal::CanAttack(target);
         }
 
-        // MC Wolf.handleEntityEvent: 8 (begin shake) / 56 (cancel shake)
-        // wait on the wet-shake machinery (see AiStep note); the inherited
-        // TamableAnimal half — 7 taming hearts / 6 taming smoke — lands
-        // here.
-        void HandleEntityEvent(uint8_t id) override {
-            if (!HandleTamableEntityEvent(id))
-                GenericAnimal::HandleEntityEvent(id);
-        }
+        // MC Wolf.handleEntityEvent: 8 begin shake, 56 cancel shake; then
+        // TamableAnimal's 7/6 taming particles; 65 the armour's break sound.
+        void HandleEntityEvent(uint8_t id) override;
 
-        // MC Wolf.wantsToAttack — no creepers/ghasts, no tame animals, no
-        // tamed horses. (ArmorStand and the owner-PvP canHarmPlayer test have
-        // no equivalents here — no armor stands, PvP is always on.)
+        // MC Wolf.wantsToAttack, verbatim.
         bool WantsToAttack(const LivingEntity& target,
                            const LivingEntity& owner) const override;
 
         // MC Wolf.canMate: both tame, partner not sitting, both in love.
         bool CanMate(const Animal& other) const override;
 
-        // MC Wolf.getBreedOffspring — a tame parent's pup inherits the tame
-        // flag and the owner (the collar-colour mix rides the collar).
+        // MC Wolf.getBreedOffspring — coat from a random parent, tame +
+        // owner + mixed collar from a tame parent, a fresh sound variant.
+        // The partner is only known in SpawnChildFromBreeding, so it is
+        // noted there for the CreateBaby that follows (the Cow pattern); a
+        // spawn egg on an adult breeds with the adult itself, as in MC.
         std::unique_ptr<Animal> CreateBaby() override;
+        void SpawnChildFromBreeding(Animal& partner) override;
 
-        // The tamable byte (bit 0 sitting pose, bit 1 tame) IS the wolf's
-        // anim state byte; bit 2 carries MC's DATA_INTERESTED_ID (the beg
-        // head-tilt).
-        uint8_t GetAnimStateByte() const override {
-            return static_cast<uint8_t>(GetTamableAnimByte() |
-                                        (m_interested ? 4 : 0));
+        // MC Wolf.finalizeSpawn: the coat by biome (shared through the
+        // pack's WolfPackData), then a random sound variant.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        // ── Wire bytes (see the class note) ────────────────────────────────
+        uint8_t GetAnimStateByte() const override;
+        void    SetAnimStateByte(uint8_t v) override;
+        uint8_t GetVariantByte() const override;
+        void    SetVariantByte(uint8_t v) override;
+        // Mob::GetRenderPhase: the beg tilt (isInterested + interestedAngle)
+        // and the shake (isWet, isShaking, shakeAnim).
+        int GetRenderPhase(float* out) const override {
+            out[0] = m_interested ? 1.0f : 0.0f;
+            out[1] = m_interestedAngle;
+            out[2] = m_interestedAngleO;
+            out[3] = m_isWet ? 1.0f : 0.0f;
+            out[4] = m_isShaking ? 1.0f : 0.0f;
+            out[5] = m_shakeAnim;
+            out[6] = m_shakeAnimO;
+            return 7;
         }
-        void SetAnimStateByte(uint8_t v) override {
-            SetTamableAnimByte(v);
-            m_interested = (v & 4) != 0;
+        void SetRenderPhase(const float* in, int count) override {
+            if (count < 7) return;
+            m_interested       = in[0] != 0.0f;
+            m_restoredInterest = m_interested;   // see Wolf::AiStep
+            m_interestedAngle  = in[1];
+            m_interestedAngleO = in[2];
+            m_isWet            = in[3] != 0.0f;
+            m_isShaking        = in[4] != 0.0f;
+            m_shakeAnim        = in[5];
+            m_shakeAnimO       = in[6];
         }
+
+        // ── Coat / sound / collar ──────────────────────────────────────────
+        WolfVariants::Variant GetVariant() const { return m_variant; }
+        void SetVariant(WolfVariants::Variant v) { m_variant = v; }
+        WolfSoundVariants::SoundVariant GetSoundVariant() const { return m_soundVariant; }
+        void SetSoundVariant(WolfSoundVariants::SoundVariant v) { m_soundVariant = v; }
+        // MC getCollarColor / setCollarColor (DyeColor ordinal, default RED).
+        uint8_t GetCollarColor() const { return m_collarColor; }
+        void    SetCollarColor(uint8_t c) { m_collarColor = static_cast<uint8_t>(c & 0x0F); }
+
+        // MC Wolf.isAngry() as each side sees it: the server's anger window,
+        // the client's synched copy of the same answer.
+        bool IsAngryState() const;
+
+        // MC Wolf.getTexture — the variant's tame / angry / wild sheet.
+        std::string GetTexturePath() const;
 
         // MC Wolf.setIsInterested / isInterested — BegGoal's head tilt.
         void SetIsInterested(bool v) { m_interested = v; }
         bool IsInterested() const { return m_interested; }
 
-        // MC Wolf.getHeadRollAngle — what WolfRenderer.extractRenderState
-        // feeds the model's headRollAngle.
+        // MC Wolf.getHeadRollAngle / getShakeAnim / getWetShade — what
+        // WolfRenderer.extractRenderState reads.
         float GetHeadRollAngle(float partialTick) const;
+        float GetShakeAnim(float partialTick) const;
+        float GetWetShade(float partialTick) const;
 
-        // MC Wolf.getTailAngle: angry 1.5393804; tame scales with health
-        // ((0.55 - damageRatio*0.4)*PI); wild idle PI/5.
+        // MC Wolf.getTailAngle: angry 1.5393804; tame scales with health;
+        // wild idle DEFAULT_TAIL_ANGLE.
         float GetTailAngle() const;
+
+        // ── Body armor (MC's BODY equipment slot) ──────────────────────────
+        const ItemStack& GetBodyArmorItem() const { return m_bodyArmor; }
+        bool IsWearingBodyArmor() const { return !m_bodyArmor.IsEmpty(); }
+        // Server: equips (or clears) the slot, applying the item's armour
+        // modifier, and marks it for the tracker. Client: the synched copy.
+        void SetBodyArmorItem(const ItemStack& stack);
+        // The tracker's send-on-change latch for BodyArmorS2C.
+        bool ConsumeBodyArmorDirty() {
+            const bool d = m_bodyArmorDirty;
+            m_bodyArmorDirty = false;
+            return d;
+        }
+        // LivingEntity's equipment view — the BODY slot only.
+        ItemStack* EquipmentInSlot(EquipmentSlot slot) override;
+        bool HasEquipmentSlots() const override { return true; }
+        // MC Mob.dropCustomDeathLoot: the guaranteed BODY-slot drop
+        // (setItemSlotAndDropWhenKilled).
+        void DropCustomDeathLoot(EntityLevel& level) override;
 
         void ClearReferenceTo(const Entity* entity) override {
             GenericAnimal::ClearReferenceTo(entity);
             ClearAngerReferenceTo(entity);
+            ClearOwnerReferenceTo(entity);
         }
 
-        // MC Wolf.getAmbientSound / getHurtSound off the classic sound set
-        // (the sound-variant registry is not modelled): angry growls, else a
-        // 1-in-3 pant (whine when tame and hurt), else the plain bark.
-        // (WOLF_ARMOR_DAMAGE waits on wolf armor.)
+        // MC Wolf's sound hooks, through the wolf's sound variant (the baby
+        // set for a pup). getHurtSound is WOLF_ARMOR_DAMAGE when the armour
+        // takes the hit.
         const char* GetAmbientSound() const override;
         const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
+
+        // MC Wolf.PREY_SELECTOR, for NonTameRandomTargetGoal.
+        static bool IsPrey(EntityTypeId type) {
+            return type == EntityTypeId::Sheep || type == EntityTypeId::Rabbit ||
+                   type == EntityTypeId::Fox;
+        }
 
     private:
         void RegisterWolfGoals();
@@ -647,21 +872,191 @@ namespace Game {
         // MC Wolf.tryToTame — the 1/3 bone roll.
         void TryToTame(LivingEntity& player);
 
-        // MC Wolf.interestedAngle(+O) — the beg tilt spring, ticked in
-        // AiStep on both sides.
+        // MC Wolf.cancelShake.
+        void CancelShake();
+
+        // MC Wolf.canArmorAbsorb: wearing wolf armor, and the source is not
+        // in #bypasses_wolf_armor.
+        bool CanArmorAbsorb(MobDamageSource source) const;
+
+        // MC Mob.attemptToShearEquipment for the BODY slot (Entity.interact's
+        // shears branch, reached from MobInteract — see the .cpp).
+        bool TryShearBodyArmor(LivingEntity& player, ItemStack& shears);
+
+        WolfVariants::Variant           m_variant = WolfVariants::kDefault;
+        WolfSoundVariants::SoundVariant m_soundVariant = WolfSoundVariants::SoundVariant::Classic;
+        uint8_t m_collarColor = kDyeColorRed;
+
+        // MC Wolf.interestedAngle(+O).
         bool  m_interested = false;
+        bool  m_restoredInterest = false;   // set by SetRenderPhase, see AiStep
         float m_interestedAngle = 0.0f;
         float m_interestedAngleO = 0.0f;
+
+        // The client's copy of isAngry() (anim byte bit 3).
+        bool  m_clientAngry = false;
+
+        // MC Wolf.isWet / isShaking / shakeAnim(O).
+        bool  m_isWet = false;
+        bool  m_isShaking = false;
+        float m_shakeAnim = 0.0f;
+        float m_shakeAnimO = 0.0f;
+
+        ItemStack m_bodyArmor;
+        bool      m_bodyArmorDirty = false;
+        // Client: the last armour the server showed, so entity event 65
+        // (the break) still knows its sound when the emptied slot's update
+        // lands first.
+        ItemStack m_lastBodyArmorSeen;
+
+        // Set for the duration of SpawnChildFromBreeding.
+        const Wolf* m_breedPartner = nullptr;
     };
 
-    // MC animal/equine/Llama, promoted from the generic base for the SPIT:
-    // RangedAttackGoal(1.25, 40, 20) plus LlamaHurtByTargetGoal (spit once,
-    // stand down) and LlamaAttackWolfGoal, layered ON TOP of the generic
-    // animal goal set the base constructor already registered — the caravan,
-    // chest, strength/variant and rider systems this port does not model are
-    // exactly the parts the generic base never carried either.
-    class Llama : public GenericAnimal, public RangedAttackMob {
+    // MC Wolf.WolfPackData — the coat the first member of a natural pack
+    // rolled, shared by the rest (AgeableMobGroupData(false): no pups).
+    struct WolfPackData : SpawnGroupData {
+        explicit WolfPackData(WolfVariants::Variant v) : variant(v) {}
+        WolfVariants::Variant variant;
+    };
+
+    // MC animal/equine/Llama (extends AbstractChestedHorse extends
+    // AbstractHorse — the equine half is the HorseTaming mixin here). MC's
+    // own goal table replaces the generic base's wholesale: the taming buck,
+    // the caravan (LlamaFollowCaravanGoal), the spit (RangedAttackGoal(1.25,
+    // 40, 20)), LlamaHurtByTargetGoal (spit once, stand down) and
+    // LlamaAttackWolfGoal. The chested-horse attributes (MAX_HEALTH rolled
+    // 15..30 at spawn and inherited with the speed and jump on breeding),
+    // AbstractHorse's shared rules (pushable only while unridden, the 1-in-3
+    // hurt roll, the slow self-heal) and the llama's own fall damage (none
+    // below six blocks). The coat (MC Llama.Variant, DATA_VARIANT_ID, saved
+    // as "Variant") rides the wire's variant byte. A llama is never steered:
+    // it wears no saddle, so AbstractHorse.getControllingPassenger falls
+    // through to Mob's (no player) and a rider goes where its AI takes it.
+    class Llama : public GenericAnimal, public RangedAttackMob, public HorseTaming {
     public:
+        // Its rolled health, and the inherited speed/jump, reach the client
+        // (UpdateAttributesS2C) — the rider's vehicle hearts read them.
+        bool SyncsAttributesToClient() const override { return true; }
+        // ── Taming (MC Llama extends AbstractChestedHorse extends
+        // AbstractHorse — the HorseTaming mixin here). Tamed by riding, as
+        // the horses; a llama cannot be steered (no saddle), and the
+        // chest/carpet/caravan systems are not carried by this port.
+        // Mob::IsTamedPet — a tamed llama never despawns.
+        bool IsTamedPet() const override { return IsTamed(); }
+        // MC Llama.getMaxTemper: 30.
+        int GetMaxTemper() const override { return 30; }
+        // MC AbstractHorse.makeMad for a llama: canPerformRearing is false,
+        // so only the angry sound (LLAMA_ANGRY) — server only.
+        void MakeMad() override;
+        // MC AbstractChestedHorse.mobInteract → AbstractHorse.mobInteract.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC AbstractHorse.fedFood with Llama.handleEating's table.
+        UseResult FedFood(LivingEntity& player, ItemStack& held);
+        bool HandleEating(LivingEntity& player, const ItemStack& held);
+        // MC AbstractHorse.doPlayerRide (TraderLlama refuses while it is on
+        // a wandering trader's lead).
+        virtual void DoPlayerRide(LivingEntity& player);
+        // PlayerRideable — MC Llama.getPassengerAttachmentPoint: the type's
+        // (0, 1.37, -0.3) turned to the yaw, less the player's 0.6.
+        glm::dvec3 PlayerRiderPosition() const override;
+        // MC AbstractHorse.getDismountLocationForPassenger (the llama is one).
+        glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const override {
+            return EquineDismountLocation(*this, passenger);
+        }
+        // MC entity events 7 / 6: the taming hearts / smoke.
+        void HandleEntityEvent(uint8_t id) override;
+        void ClearReferenceTo(const Entity* entity) override {
+            GenericAnimal::ClearReferenceTo(entity);
+            ClearOwnerReferenceTo(entity);
+            // The caravan links are plain references, as MC's fields are.
+            if (m_caravanHead && static_cast<const Entity*>(m_caravanHead) == entity) m_caravanHead = nullptr;
+            if (m_caravanTail && static_cast<const Entity*>(m_caravanTail) == entity) m_caravanTail = nullptr;
+        }
+
+        // ── The caravan (MC Llama.caravanHead / caravanTail) ───────────────
+        // MC leaveCaravan: the llama ahead loses its tail, this its head.
+        void LeaveCaravan() {
+            if (m_caravanHead) m_caravanHead->m_caravanTail = nullptr;
+            m_caravanHead = nullptr;
+        }
+        // MC joinCaravan(tail): fall in behind `head`.
+        void JoinCaravan(Llama& head) {
+            m_caravanHead = &head;
+            head.m_caravanTail = this;
+        }
+        bool   HasCaravanTail() const { return m_caravanTail != nullptr; }
+        bool   InCaravan() const { return m_caravanHead != nullptr; }
+        Llama* GetCaravanHead() const { return m_caravanHead; }
+
+        // MC Llama.isTraderLlama.
+        virtual bool IsTraderLlama() const { return false; }
+
+        // ── Equipment and chest (MC Llama / AbstractChestedHorse /
+        //    AbstractHorse; the system is MountInventory's) ─────────────────
+        // MC Llama.canUseSlot: every slot — the carpet (BODY) included; no
+        // saddle ever fits (#can_equip_saddle leaves the llamas out).
+        bool CanUseSlot(EquipmentSlot) const override { return true; }
+        // MC AbstractHorse.canDispenserEquipIntoSlot.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return ((slot == EquipmentSlot::BODY || slot == EquipmentSlot::SADDLE) && IsTamed()) ||
+                   GenericAnimal::CanDispenserEquipIntoSlot(slot);
+        }
+        // MC AbstractHorse.getEquipSound: HORSE_SADDLE for the saddle slot.
+        std::string GetEquipSound(EquipmentSlot slot, const ItemStack& stack,
+                                  const Equippable& equippable) const override {
+            return slot == EquipmentSlot::SADDLE ? std::string(SoundEvents::HORSE_SADDLE)
+                                                 : GenericAnimal::GetEquipSound(slot, stack, equippable);
+        }
+        // MC AbstractHorse.equipBodyArmor — a carpet on the llama.
+        void EquipBodyArmor(LivingEntity& player, ItemStack& held);
+        MountInventory*       GetMountInventory() override       { return &m_mountInventory; }
+        const MountInventory* GetMountInventory() const override { return &m_mountInventory; }
+        // MC AbstractChestedHorse.hasChest (DATA_ID_CHEST, the anim byte's
+        // bit 7 here).
+        bool HasChest() const { return m_mountInventory.HasChest(); }
+        // MC Llama.getInventoryColumns: the strength while chested.
+        int GetInventoryColumns() const override { return m_mountInventory.HasChest() ? GetStrength() : 0; }
+        bool HasCustomInventoryScreen() const override { return true; }
+        // MC AbstractHorse.openCustomInventoryScreen.
+        void OpenCustomInventoryScreen(LivingEntity& player) override;
+        // Anim byte: bit 3 FLAG_TAME, bit 7 DATA_ID_CHEST — the equines'
+        // bits (AbstractHorse::kAnimTameBit / kAnimChestBit).
+        uint8_t GetAnimStateByte() const override {
+            return static_cast<uint8_t>((IsTamed() ? 0x08 : 0) | (m_mountInventory.HasChest() ? 0x80 : 0));
+        }
+        void SetAnimStateByte(uint8_t v) override {
+            SetTamed((v & 0x08) != 0);
+            m_mountInventory.SetChest((v & 0x80) != 0);
+        }
+
+        // ── AbstractHorse's shared rules, as a llama inherits them ─────────
+        // MC Llama.isImmobile: dead or eating (a llama never grazes).
+        bool IsImmobile() const override { return IsDeadOrDying(); }
+        // MC AbstractHorse.isPushable: not while anyone rides it.
+        bool IsPushable() const override { return !IsVehicle(); }
+        // MC AbstractHorse.getMaxSpawnClusterSize: herds of 6.
+        int GetMaxSpawnClusterSize() const override { return 6; }
+        // MC AbstractHorse.hurtServer: a 1-in-3 roll to rear (standIfPossible,
+        // which canPerformRearing = false makes a no-op for a llama).
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+        // MC Llama.causeFallDamage: hurt only from six blocks up, the block
+        // fall sound whenever there is damage — no HORSE_LAND.
+        bool CauseFallDamage(double fallDist, float damageMultiplier) override;
+        // MC AbstractHorse.aiStep for a llama: the tail roll (both sides),
+        // then the server's 1-in-900 self-heal (canEatGrass is false; the
+        // bred-foal followMommy needs the Bred flag nothing sets).
+        void AiStep() override;
+        // MC Llama.canMate: another llama (either kind), both able to parent
+        // (AbstractHorse.canParent: unridden, not riding, tamed, adult, at
+        // full health, in love).
+        bool CanMate(const Animal& other) const override;
+        bool CanParent() const;
+
+        // MC Llama.Variant — id order: CREAMY, WHITE, BROWN, GRAY.
+        enum class Variant : uint8_t { Creamy = 0, White = 1, Brown = 2, Gray = 3 };
+        static constexpr int kVariantCount = 4;
+
         explicit Llama(EntityLevel* level) : Llama(EntityTypeId::Llama, level) {}
 
         // MC Llama.didSpit — read/consumed by LlamaHurtByTargetGoal.
@@ -671,26 +1066,108 @@ namespace Game {
         // MC Llama.performRangedAttack — spit(target).
         void PerformRangedAttack(LivingEntity& target, float power) override;
 
+        // MC Llama.getStrength / setStrength (DATA_STRENGTH_ID, saved as
+        // "Strength", clamped 1..5 by the setter). Read by the wolf's
+        // WolfAvoidEntityGoal: a wild wolf flees a llama whose strength beats
+        // a nextInt(5) roll.
+        int  GetStrength() const { return m_strength; }
+        void SetStrength(int strength) { m_strength = std::clamp(strength, 1, 5); }
+
+        // MC Llama.getVariant / setVariant. Variant.byId clamps an unknown
+        // id to CREAMY (the DEFAULT).
+        Variant GetVariant() const { return m_variant; }
+        void    SetVariant(Variant v) { m_variant = v; }
+        static Variant VariantById(int id) {
+            return id >= 0 && id < kVariantCount ? static_cast<Variant>(id) : Variant::Creamy;
+        }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override { m_variant = VariantById(v); }
+
+        // MC Llama.finalizeSpawn: setRandomStrength (1 + nextInt(3), or
+        // 1 + nextInt(5) on a 4% roll), then the coat — the pack's
+        // (LlamaGroupData), else a uniform pick that becomes the pack's.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        // MC Llama.getBreedOffspring: makeNewLlama, AbstractHorse
+        // .setOffspringAttributes (health, jump, speed), strength
+        // nextInt(max(both)) + 1 (+1 on a 3% roll), a random parent's coat.
+        std::unique_ptr<Animal> CreateBaby() override;
+        void SpawnChildFromBreeding(Animal& partner) override;
+
     protected:
         // The variant constructor — TraderLlama is a llama of a different
         // type id, exactly as MC's extends.
         Llama(EntityTypeId type, EntityLevel* level);
+
+        // MC Llama.makeNewLlama — the baby's class.
+        virtual std::unique_ptr<Llama> MakeNewLlama();
 
         // MC Llama.spit — a LlamaSpit from just ahead of the mouth, aimed a
         // third up the target with the 0.2 loft, velocity 1.5, inaccuracy 10.
         void Spit(LivingEntity& target);
 
     private:
-        bool m_didSpit = false;
+        // MC Llama.registerGoals, priority for priority.
+        void RegisterLlamaGoals();
+
+        bool    m_didSpit = false;
+        int     m_strength = 0;   // MC DATA_STRENGTH_ID's defined default
+        Variant m_variant = Variant::Creamy;   // MC Variant.DEFAULT
+        // MC caravanHead / caravanTail (server; cleared by ClearReferenceTo).
+        Llama*  m_caravanHead = nullptr;
+        Llama*  m_caravanTail = nullptr;
+        // Set for the duration of SpawnChildFromBreeding.
+        const Llama* m_breedPartner = nullptr;
+        // MC AbstractHorse.inventory with AbstractChestedHorse's chest.
+        MountInventory m_mountInventory{true};
     };
 
-    // MC animal/equine/TraderLlama. Its one extra goal —
-    // TraderLlamaDefendWanderingTraderGoal — needs the wandering trader
-    // leash/ownership link and is skipped with it.
+    class WanderingTrader;
+
+    // MC animal/equine/TraderLlama — the llama that comes with a wandering
+    // trader: the blue trader decor (LlamaDecorLayer's TRADER_LLAMA asset),
+    // PanicGoal(2.0) on top, it defends the trader it is leashed to
+    // (TraderLlamaDefendWanderingTraderGoal) and hunts zombies and illagers,
+    // and it despawns with the trader — or on its own 47999-tick clock once
+    // off the trader's lead — unless a player leashed it, rides it, or it is
+    // persistent or age-locked.
     class TraderLlama : public Llama {
     public:
-        explicit TraderLlama(EntityLevel* level)
-            : Llama(EntityTypeId::TraderLlama, level) {}
+        static constexpr int kDefaultDespawnDelay = 47999;   // MC DEFAULT_DESPAWN_DELAY
+
+        explicit TraderLlama(EntityLevel* level);
+
+        int  GetDespawnDelay() const { return m_despawnDelay; }
+        void SetDespawnDelay(int ticks) { m_despawnDelay = ticks; }
+
+        bool IsTraderLlama() const override { return true; }
+
+        // MC TraderLlama.finalizeSpawn: an EVENT spawn is an adult, and a
+        // spawn with no group data gets AgeableMobGroupData(false) (no baby
+        // roll) before Llama's strength and coat.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        void AiStep() override;
+
+        // The trader it is on the lead of, or null.
+        WanderingTrader* GetLeashedWanderingTrader() const;
+
+    protected:
+        // MC TraderLlama.makeNewLlama: a trader llama, persistence required.
+        std::unique_ptr<Llama> MakeNewLlama() override;
+
+    public:
+        // MC TraderLlama.doPlayerRide: not while on a wandering trader's lead.
+        void DoPlayerRide(LivingEntity& player) override;
+
+    private:
+        void MaybeDespawn();
+        bool CanDespawn() const;
+        bool IsLeashedToSomethingOtherThanTheWanderingTrader() const;
+
+        int m_despawnDelay = kDefaultDespawnDelay;
     };
 
     // MC animal/fox/Fox. MAX_HEALTH 10, MOVEMENT_SPEED 0.3, ATTACK_DAMAGE 2,
@@ -702,15 +1179,21 @@ namespace Game {
     // state byte), the stalk → full-crouch → pounce arc with the snow
     // faceplant, the day-sleep schedule with its alertable-entity sensor, the
     // variant-ordered prey target goals, and the red/snow biome variant on
-    // the wire's variant byte. Not modelled, each named at its site: the
-    // whole mouth-item layer (pickup, eating, spit, equipment rolls — no mob
-    // item system), trust (rides the item layer; DefendTrustedTargetGoal and
-    // the avoid-player trust exemption are inert with it), villages
-    // (FoxStrollThroughVillageGoal, SeekShelterGoal's isVillage term), berry
-    // bushes (FoxEatBerriesGoal needs block-state AGE; its sniff and pick
-    // sounds with it). The eat/spit sounds ride the mouth-item loop.
+    // the wire's variant byte, and the mouth-item layer: the item rides the
+    // MAINHAND equipment slot (synced like any mob's), rolled at spawn
+    // (populateDefaultEquipmentSlots), taken from the ground by
+    // FoxSearchForItemsGoal + Mob's looting (canHoldItem / pickUpItem, the
+    // old item spat out), picked off berry bushes and glow-berry vines
+    // (FoxEatBerriesGoal), eaten after 600 ticks (event 45 crumbs before),
+    // and dropped on death. Not modelled, named at its site: villages
+    // (FoxStrollThroughVillageGoal, SeekShelterGoal's isVillage term).
     class Fox : public Animal {
     public:
+        // MC Fox.canDispenserEquipIntoSlot: only the mouth (main hand), and
+        // only a fox that picks up loot.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return slot == EquipmentSlot::MAINHAND && CanPickUpLoot();
+        }
         // MC Fox.getAmbientSound (sleep / night screech / yip) and
         // playAmbientSound (the screech at volume 2).
         const char* GetAmbientSound() const override;
@@ -726,6 +1209,36 @@ namespace Game {
         // MC ItemTags.FOX_FOOD: sweet berries, glow berries.
         bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override;
+
+        // ── Trust (MC DATA_TRUSTED_ID_0 / _1, the "Trusted" NBT list) ──────
+        //
+        // Up to two trusted identities, kept as UUIDs (MC EntityReference):
+        // a trusted player may be offline or in another dimension and the
+        // fox still knows them. Granted when a player breeds foxes (the cub
+        // trusts each feeder — FoxBreedGoal.breed) or hatches a cub with a
+        // spawn egg (onOffspringSpawnedFromEgg). A trusted player is not
+        // fled from, does not wake the fox, and is defended
+        // (DefendTrustedTargetGoal). Server-side state: MC syncs the two
+        // slots, but no client code reads them.
+        //
+        // MC trusts(entity) — does either slot name this entity?
+        bool Trusts(const LivingEntity& entity) const;
+        // MC addTrustedEntity: the first slot while it is empty, else the
+        // second (overwriting it — MC's own behaviour for a third).
+        void AddTrustedEntity(const LivingEntity& entity);
+        void AddTrustedUuid(const Uuid& uuid);
+        // MC clearTrusted.
+        void ClearTrusted() { m_trusted[0] = Uuid{}; m_trusted[1] = Uuid{}; }
+        // MC getTrustedEntities, as identities (slot 0 first; empty slots skipped).
+        std::vector<Uuid> GetTrustedUuids() const;
+
+        // MC FoxBreedGoal.breed: the offspring trusts the love-cause player
+        // of each parent (distinct ones both). Captures them, then the shared
+        // Animal path makes the cub through CreateBaby, which applies them.
+        void SpawnChildFromBreeding(Animal& partner) override;
+        // MC Fox.onOffspringSpawnedFromEgg: a cub from a spawn egg used on
+        // this fox trusts the player who used it.
+        void OnOffspringSpawnedFromEgg(LivingEntity& spawner, Mob& offspring) override;
 
         // ── MC DATA_FLAGS_ID, bit values verbatim ──────────────────────────
         bool IsSitting()     const { return GetFlag(0x01); }
@@ -748,6 +1261,25 @@ namespace Game {
         // meaning private to this class on both sides (the Bat pattern).
         uint8_t GetAnimStateByte() const override { return m_flags; }
         void    SetAnimStateByte(uint8_t v) override { m_flags = v; }
+        // Mob::GetRenderPhase: the head tilt (interested flag + ramp) and the
+        // crouch ramp.
+        int GetRenderPhase(float* out) const override {
+            out[0] = IsInterested() ? 1.0f : 0.0f;
+            out[1] = m_interestedAngle;
+            out[2] = m_interestedAngleO;
+            out[3] = m_crouchAmount;
+            out[4] = m_crouchAmountO;
+            return 5;
+        }
+        void SetRenderPhase(const float* in, int count) override {
+            if (count < 5) return;
+            SetIsInterested(in[0] != 0.0f);
+            m_restoredInterest = in[0] != 0.0f;   // see Fox::AiStep
+            m_interestedAngle  = in[1];
+            m_interestedAngleO = in[2];
+            m_crouchAmount     = in[3];
+            m_crouchAmountO    = in[4];
+        }
 
         // The variant byte carries MC's DATA_TYPE_ID (0 red, 1 snow). The
         // textures exist (assets/textures/entity/fox/); the renderer's
@@ -788,10 +1320,28 @@ namespace Game {
         // ramps (interestedAngle, crouchAmount).
         void Tick() override;
 
-        // MC Fox.aiStep — the mouth-item eating half is skipped with the item
-        // system; the target-loss state clear and the sleeping input freeze
-        // are kept.
+        // MC Fox.aiStep — the mouth-item eating clock (ticksSinceEaten: a
+        // held food is eaten after 600 ticks, crumbs from 560), the
+        // target-loss state clear and the sleeping input freeze.
         void AiStep() override;
+
+        // ── The mouth item (MC Fox's MAINHAND) ────────────────────────────
+        // MC canHoldItem: an empty mouth, or a food over a non-food once the
+        // fox has gone a tick without eating.
+        bool CanHoldItem(const ItemStack& stack) const override;
+        // MC pickUpItem: one of the stack goes in the mouth (the rest drops
+        // where it lay), the old mouth item is spat out, the slot becomes a
+        // guaranteed drop.
+        void PickUpItem(int32_t itemEntityId, const ItemStack& stack) override;
+        // MC populateDefaultEquipmentSlots: 20% carry a trinket.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        // MC handleEntityEvent 45: eating crumbs of the mouth item.
+        void HandleEntityEvent(uint8_t id) override;
+        // MC dropAllDeathLoot's override: the mouth item always drops.
+        void DropEquipment(EntityLevel& level) override;
+        // MC isConsumableFood: FOOD and CONSUMABLE.
+        static bool IsConsumableFood(const ItemStack& stack);
+        int GetTicksSinceEaten() const { return m_ticksSinceEaten; }
 
         // MC Fox.finalizeSpawn: variant by biome, pack members beyond the
         // second spawn as cubs (FoxGroupData), and the variant-ordered
@@ -812,9 +1362,17 @@ namespace Game {
 
         uint8_t m_flags = 0;
         Variant m_variant = Variant::Red;
+        Uuid    m_trusted[2] = {};                 // nil = empty slot
+        std::vector<Uuid> m_pendingOffspringTrust; // SpawnChildFromBreeding → CreateBaby
         float   m_interestedAngle = 0.0f, m_interestedAngleO = 0.0f;
         float   m_crouchAmount = 0.0f, m_crouchAmountO = 0.0f;
+        bool    m_restoredInterest = false;   // set by SetRenderPhase, see AiStep
         bool    m_targetGoalsSet = false;
+        int     m_ticksSinceEaten = 0;       // MC ticksSinceEaten
+        // MC spitOutItem / dropItemStack.
+        void SpitOutItem(const ItemStack& stack);
+        void DropItemStack(const ItemStack& stack);
+        bool CanEat(const ItemStack& itemInMouth) const;
     };
 
     // MC animal/turtle/Turtle. MAX_HEALTH 30, MOVEMENT_SPEED 0.25,
@@ -827,8 +1385,8 @@ namespace Game {
     // turtle_egg block), the water-biased travel goals, the amphibious
     // TurtleMoveControl, and both synced booleans on the wire's anim byte.
     // Not modelled, each named at its site: scute drops on growing up (loot
-    // tables handle death only), the lightning insta-kill, the per-state
-    // sounds, and the 0.3 baby scale (the renderer's baby scale is global).
+    // tables handle death only), the per-state sounds, and the 0.3 baby
+    // scale (the renderer's baby scale is global).
     class Turtle : public Animal {
     public:
         // MC Turtle.getAmbientSound — TURTLE_AMBIENT_LAND for an adult ashore.
@@ -845,6 +1403,14 @@ namespace Game {
         // MC ItemTags.TURTLE_FOOD: seagrass. A block item, resolved by slug.
         bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override;
+
+        // MC Turtle.thunderHit: hurtServer(lightningBolt, Float.MAX_VALUE) —
+        // lightning always kills a turtle. No fire.
+        void ThunderHit(Entity* bolt) override;
+        // entities/turtle's second pool: a bowl when the killing blow was
+        // #is_lightning (damage_source_properties — a conditional pool the
+        // generated mob-loot rows cannot carry).
+        void DropCustomDeathLoot(EntityLevel& level) override;
 
         // ── MC's two synced booleans, on the anim byte ─────────────────────
         bool HasEgg() const { return m_hasEgg; }
@@ -922,12 +1488,19 @@ namespace Game {
     // sit/on-back/roll render ramps, and the unhappy counter. The EFFECTIVE
     // gene rides the wire's variant byte so the renderer can pick the gene
     // texture (all seven exist in assets/textures/entity/panda/; the
-    // renderer's per-type texture table does not switch on it yet). Not
-    // modelled, each named at its site: everything riding mob-held items
-    // (PandaSitGoal's eat-what-you-hold loop, eating particles/sounds,
-    // pickUpItem), and the sneeze slime-ball gift drop.
+    // renderer's per-type texture table does not switch on it yet). The
+    // held-food layer rides MAINHAND: pickUpItem takes bamboo / cake off the
+    // ground (#panda_eats_from_ground), PandaSitGoal sits to chew it, the
+    // EAT_COUNTER clock with its crumbs and chomps eats it (ground food is
+    // used up after 100 ticks), a fed adult sits and chews the bamboo it was
+    // given, and a sneeze may gift a slime ball (gameplay/panda_sneeze).
     class Panda : public Animal {
     public:
+        // MC Panda.canDispenserEquipIntoSlot: the main hand of a panda that
+        // picks up loot.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return slot == EquipmentSlot::MAINHAND && CanPickUpLoot();
+        }
         // MC Panda.playAttackSound (PANDA_BITE) and getAmbientSound
         // (aggressive / worried / plain).
         void PlayAttackSound() override;
@@ -992,6 +1565,9 @@ namespace Game {
             uint8_t b = static_cast<uint8_t>(m_flags & 0x1E);
             if (m_unhappyCounter > 0) b |= 0x01;
             if (IsScared()) b |= 0x20;
+            // Bit 6: MC's EAT_COUNTER > 0 (isEating). The client runs its
+            // own counter from there, as MC's does off the synched int.
+            if (m_eatCounter > 0) b |= 0x40;
             return b;
         }
         void SetAnimStateByte(uint8_t v) override {
@@ -1000,6 +1576,8 @@ namespace Game {
             // head-shake pose and the scared sit both read these directly.
             m_clientUnhappy = (v & 0x01) != 0;
             m_clientScared = (v & 0x20) != 0;
+            if ((v & 0x40) == 0) m_eatCounter = 0;
+            else if (m_eatCounter == 0) m_eatCounter = 1;
         }
 
         // The variant byte carries the EFFECTIVE gene (what the renderer
@@ -1024,9 +1602,17 @@ namespace Game {
         // reads the synced bit (its level always answers "not thundering").
         bool IsScared() const;
 
-        // MC Panda.isEating — gated on the mouth item, which the item layer
-        // does not provide; stays false and the renderer field with it.
-        bool IsEatingPanda() const { return false; }
+        // MC Panda.isEating / eat(bool) — EAT_COUNTER > 0.
+        bool IsEatingPanda() const { return m_eatCounter > 0; }
+        void Eat(bool value) { m_eatCounter = value ? 1 : 0; }
+        int  GetEatCounter() const { return m_eatCounter; }
+
+        // MC Panda.canPickUpAndEat: #panda_eats_from_ground (bamboo, cake),
+        // past its pickup delay.
+        static bool CanPickUpAndEat(const ItemStack& stack);
+        // MC Panda.pickUpItem: into an empty paw only, the whole stack, a
+        // guaranteed drop.
+        void PickUpItem(int32_t itemEntityId, const ItemStack& stack) override;
 
         // MC Panda.canPerformAction.
         bool CanPerformAction() const {
@@ -1039,8 +1625,7 @@ namespace Game {
 
         // MC Panda.mobInteract — bamboo feeding (the item exists as a block
         // item): stand a rolled-over panda up, age a cub, court an adult, and
-        // sit a fed one down. The mouth-item/eat half of the else-branch is
-        // skipped at its site (no mob-held-item system).
+        // sit a fed one down to chew the bamboo (the old paw item dropped).
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
 
         // MC render-state ramps (updateSitAmount & friends run both sides).
@@ -1097,12 +1682,17 @@ namespace Game {
         }
         void HandleRoll();
         void UpdateRamps();
+        // MC Panda.handleEating / addEatingParticles / afterSneeze's gift.
+        void HandleEating();
+        void AddEatingParticles();
+        void DropSneezeGift();
 
         Gene m_mainGene = Gene::Normal;
         Gene m_hiddenGene = Gene::Normal;
         uint8_t m_flags = 0;
         int  m_unhappyCounter = 0;
         int  m_sneezeCounter = 0;
+        int  m_eatCounter = 0;      // MC EAT_COUNTER
         int  m_rollCounter = 0;
         glm::dvec3 m_rollDelta{0.0};
         bool m_didBite = false;
@@ -1183,11 +1773,14 @@ namespace Game {
     // CatRelaxOnOwnerGoal (the lieDown/relax ramp writers — the ramps tick
     // exactly as MC ticks them and idle at 0), CatLieOnBedGoal,
     // CatSitOnBlockGoal, and the morning gift (loot + sleep). The variant
-    // byte carries the 11-texture variant id (all textures exist in
-    // assets/textures/entity/cat/; the renderer's per-type texture table
-    // does not switch on it yet — the collar layer with it).
+    // byte carries the 11-texture variant id; the owner dyes the collar
+    // (DATA_COLLAR_COLOR, the anim byte's high nibble), which CatCollarLayer
+    // tints with the dye's texture-diffuse colour.
     class Cat : public Animal, public TamableAnimal {
     public:
+        // Mob::IsTamedPet — a tamed one never despawns (IsDespawnPersistent).
+        bool IsTamedPet() const override { return IsTame(); }
+
         // MC Cat.getAmbientSound / playEatingSound / hiss, classic sound set.
         const char* GetAmbientSound() const override;
         void PlayEatingSound() override;
@@ -1206,9 +1799,18 @@ namespace Game {
         // MC Cat.canMate: both cats tame + the base love test.
         bool CanMate(const Animal& other) const override;
 
-        // MC Cat.mobInteract — feed/sit-toggle when owned, fish-taming when
-        // wild (the dye collar branch is skipped with the collar layer).
+        // MC Cat.mobInteract — collar dye / feed / sit-toggle when owned,
+        // fish-taming when wild.
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // MC Cat.getCollarColor / setCollarColor (DyeColor ordinal, default
+        // RED) — DATA_COLLAR_COLOR, carried in the anim byte's high nibble.
+        uint8_t GetCollarColor() const { return m_collarColor; }
+        void    SetCollarColor(uint8_t c) { m_collarColor = static_cast<uint8_t>(c & 0x0F); }
+
+        // Breeding: MC Cat.getBreedOffspring mixes the parents' collars, so
+        // the partner is noted for the CreateBaby that follows.
+        void SpawnChildFromBreeding(Animal& partner) override;
 
         // MC Cat.setTame → reassessTameGoals. The hook rides
         // applyTamingSideEffects — the only live SetTame paths here (taming,
@@ -1227,9 +1829,14 @@ namespace Game {
         }
 
         // The tamable byte (bit 0 sitting pose, bit 1 tame) IS the cat's
-        // anim state byte — its first user.
-        uint8_t GetAnimStateByte() const override { return GetTamableAnimByte(); }
-        void    SetAnimStateByte(uint8_t v) override { SetTamableAnimByte(v); }
+        // anim state byte; bits 4-7 carry the collar colour.
+        uint8_t GetAnimStateByte() const override {
+            return static_cast<uint8_t>(GetTamableAnimByte() | (m_collarColor << 4));
+        }
+        void    SetAnimStateByte(uint8_t v) override {
+            SetTamableAnimByte(v);
+            m_collarColor = static_cast<uint8_t>((v >> 4) & 0x0F);
+        }
 
         // MC Cat.removeWhenFarAway: !tame && tickCount > 2400.
         bool RemoveWhenFarAway(double) const override {
@@ -1250,6 +1857,30 @@ namespace Game {
         float GetLieDownAmount(float partialTick) const;
         float GetLieDownAmountTail(float partialTick) const;
         float GetRelaxStateOneAmount(float partialTick) const;
+
+        // Mob::GetRenderPhase: the lying / relax flags and their ramps.
+        int GetRenderPhase(float* out) const override {
+            out[0] = m_lying ? 1.0f : 0.0f;
+            out[1] = m_relaxStateOne ? 1.0f : 0.0f;
+            out[2] = m_lieDownAmount;
+            out[3] = m_lieDownAmountO;
+            out[4] = m_lieDownAmountTail;
+            out[5] = m_lieDownAmountOTail;
+            out[6] = m_relaxStateOneAmount;
+            out[7] = m_relaxStateOneAmountO;
+            return 8;
+        }
+        void SetRenderPhase(const float* in, int count) override {
+            if (count < 8) return;
+            m_lying                = in[0] != 0.0f;
+            m_relaxStateOne        = in[1] != 0.0f;
+            m_lieDownAmount        = in[2];
+            m_lieDownAmountO       = in[3];
+            m_lieDownAmountTail    = in[4];
+            m_lieDownAmountOTail   = in[5];
+            m_relaxStateOneAmount  = in[6];
+            m_relaxStateOneAmountO = in[7];
+        }
 
         // MC Cat.tick — handleLieDown's ramps (the purr and the
         // lying-on-player scan wait on sounds/beds).
@@ -1277,6 +1908,8 @@ namespace Game {
         void TryToTame(LivingEntity& player);
 
         uint8_t m_variant = 0;
+        uint8_t m_collarColor = kDyeColorRed;   // MC DEFAULT_COLLAR_COLOR
+        const Cat* m_breedPartner = nullptr;     // set during SpawnChildFromBreeding
         // Owned by the goal selector; tracked so ReassessTameGoals can
         // remove it (MC keeps the same field).
         class CatAvoidEntityGoal* m_avoidPlayersGoal = nullptr;
@@ -1287,27 +1920,41 @@ namespace Game {
         float m_relaxStateOneAmount = 0.0f, m_relaxStateOneAmountO = 0.0f;
     };
 
-    // MC animal/equine/AbstractHorse — the shared equine base, promoted for
-    // the stand/eat/tail animation machinery: the EATING and STANDING flags
-    // (synced on the anim byte), the eatAnim/standAnim ramps ticked in
-    // tick() on both sides exactly as MC writes them, the 1-in-200 tail
-    // swish, the grass-eating roll, RandomStandGoal, and MC's goal table at
-    // MC's priorities. Built on GenericAnimal so the def's attributes
-    // (JUMP_STRENGTH and friends) still apply. Not modelled, each named at
-    // its site: taming/riding (MountPanicGoal's rider branch,
-    // RunAroundLikeCrazyGoal, temper, saddles, inventories — PanicGoal
-    // stands in for MountPanicGoal's panic half), the open-mouth flag (its
-    // only writers are eating-from-hand and rider interactions), and the
-    // per-breed variant rolls (the wire byte exists; the renderer draws one
-    // texture per type).
-    class AbstractHorse : public GenericAnimal {
+    // MC animal/equine/AbstractHorse — the shared equine base: the DATA_ID_FLAGS
+    // byte (eating, standing, open mouth on the anim byte; tame and bred on the
+    // server), the eat/stand/mouth ramps ticked on both sides exactly as MC
+    // writes them, the 1-in-200 tail swish, the grass-eating roll, taming by
+    // riding (HorseTaming), and riding itself: a saddled equine is steered by
+    // the player in its seat (getControllingPassenger), turns with the rider's
+    // view, strafes at half and backs at a quarter speed, and charges the
+    // riders' jump (PlayerRideableJumping — the jump bar) with the rear-up,
+    // the jump sound and the forward push. The gallop sounds count ridden
+    // steps. The spawn attribute rolls (randomizeAttributes), the herd baby
+    // roll, and breeding with inherited attributes (horse × donkey → mule)
+    // are MC's. Inventories, chests and armour are the equipment system's.
+    struct SoundType;
+
+    class AbstractHorse : public GenericAnimal, public HorseTaming, public PlayerRideableJumping {
     public:
+        // Mob::IsTamedPet — a tamed one never despawns (IsDespawnPersistent).
+        bool IsTamedPet() const override { return IsTamedHorse(); }
+
         AbstractHorse(EntityTypeId type, EntityLevel* level);
 
-        // ── MC DATA_ID_FLAGS: FLAG_EATING 16, FLAG_STANDING 32 ─────────────
-        bool IsEating()   const { return m_eating; }
-        bool IsStanding() const { return m_standing; }
+        // MC AbstractHorse.BACKWARDS_MOVE_SPEED_FACTOR / SIDEWAYS_MOVE_SPEED_FACTOR.
+        static constexpr float kBackwardsMoveSpeedFactor = 0.25f;
+        static constexpr float kSidewaysMoveSpeedFactor  = 0.5f;
+        // MC AbstractHorse.BABY_SCALE.
+        static constexpr float kBabyScale = 0.7f;
+
+        // ── MC DATA_ID_FLAGS: FLAG_TAME 2, FLAG_BRED 8, FLAG_EATING 16,
+        //    FLAG_STANDING 32, FLAG_OPEN_MOUTH 64 ──────────────────────────
+        bool IsEating()    const { return m_eating; }
+        bool IsStanding()  const { return m_standing; }
+        bool IsBred()      const { return m_bred; }
+        bool IsMouthOpen() const { return m_openMouth; }
         void SetEating(bool v) { m_eating = v; }
+        void SetBred(bool v) { m_bred = v; }
 
         // MC AbstractHorse.setStanding(ticks) / clearStanding.
         void SetStanding(int ticks) {
@@ -1317,13 +1964,13 @@ namespace Game {
         }
         void ClearStanding() { m_standing = false; m_standCounter = 0; }
 
-        // MC AbstractHorse.standIfPossible — rear for 20 ticks.
-        void StandIfPossible() {
-            if (CanPerformRearing() && IsEffectiveAi()) SetStanding(20);
-        }
+        // MC AbstractHorse.standIfPossible — rear for 20 ticks, where the
+        // kind rears and this side decides it (MC `isEffectiveAi() ||
+        // !isClientSide()`: the server, or the client steering it).
+        void StandIfPossible();
 
         // MC AbstractHorse.canPerformRearing — true for the whole family
-        // except the llama (a separate class here).
+        // except the llama (a separate class here) and the camel.
         virtual bool CanPerformRearing() const { return true; }
 
         // MC AbstractHorse.getAmbientSoundInterval: 400 (Animal's is 120).
@@ -1337,57 +1984,115 @@ namespace Game {
         // MC AbstractHorse.getAmbientStandInterval — the ambient interval.
         int GetAmbientStandInterval() const { return GetAmbientSoundInterval(); }
 
-        // Anim byte: bit 0 eating, bit 1 standing.
+        // Anim byte: bit 0 eating, bit 1 standing, bit 2 open mouth (the
+        // synched DATA_ID_FLAGS bits the client reads); bit 3 FLAG_TAME
+        // (kAnimTameBit — canUseSlot(SADDLE), and so isSaddled, read it on
+        // the steering client); bit 7 the chested equines' DATA_ID_CHEST
+        // (kAnimChestBit).
         uint8_t GetAnimStateByte() const override {
-            return static_cast<uint8_t>((m_eating ? 1 : 0) | (m_standing ? 2 : 0));
+            return static_cast<uint8_t>((m_eating ? 1 : 0) | (m_standing ? 2 : 0) | (m_openMouth ? 4 : 0) |
+                                        (IsTamedHorse() ? kAnimTameBit : 0) |
+                                        (m_mountInventory.HasChest() ? kAnimChestBit : 0));
         }
         void SetAnimStateByte(uint8_t v) override {
             m_eating = (v & 1) != 0;
             m_standing = (v & 2) != 0;
+            m_openMouth = (v & 4) != 0;
+            SetTamedHorse((v & kAnimTameBit) != 0);
+            if (m_mountInventory.CanCarryChest()) m_mountInventory.SetChest((v & kAnimChestBit) != 0);
         }
+        // The synced tame and chest flags' bits on the anim byte (the
+        // llamas' too).
+        static constexpr uint8_t kAnimTameBit  = 0x08;
+        static constexpr uint8_t kAnimChestBit = 0x80;
 
         // MC AbstractHorse.hurtServer: 1-in-3 hits make the horse rear.
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
 
-        // MC AbstractHorse.isImmobile — an eating or rearing horse plants
-        // its feet (the isVehicle && isSaddled half rides the riding system).
+        // MC AbstractHorse.isImmobile, verbatim precedence:
+        // `super.isImmobile() && isVehicle() && isSaddled() || isEating() || isStanding()`.
         bool IsImmobile() const override {
-            return Animal::IsImmobile() || IsEating() || IsStanding();
+            return (Animal::IsImmobile() && IsVehicle() && IsSaddled()) || IsEating() || IsStanding();
         }
 
-        // MC AbstractHorse.tick — the counters and all three ramps (the
-        // mouth ramp's writers are interaction-gated and skipped).
+        // MC AbstractHorse.isPushable: never while carrying anyone.
+        bool IsPushable() const override { return !IsVehicle(); }
+
+        // MC AbstractHorse.isFood — ItemTags.HORSE_FOOD (the zombie horse's
+        // ZOMBIE_HORSE_FOOD).
+        bool IsFood(uint32_t itemId) const override;
+
+        // MC AbstractHorse.canMate: false — only the horse and the donkey
+        // breed (with each other too), when both canParent.
+        bool CanMate(const Animal& other) const override { (void)other; return false; }
+        // MC AbstractHorse.canParent.
+        bool CanParent() const;
+        // Breeding threads the partner through to CreateBaby (the mule, the
+        // inherited attributes and coat) — MC getBreedOffspring(partner).
+        void SpawnChildFromBreeding(Animal& partner) override;
+
+        // MC AbstractHorse.finalizeSpawn: AgeableMobGroupData(0.2) unless the
+        // caller brought one, randomizeAttributes, then AgeableMob's herd baby
+        // roll.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        // Equines sync their rolled speed / jump / health to the client that
+        // steers them (UpdateAttributesS2C).
+        bool SyncsAttributesToClient() const override { return true; }
+
+        // MC AbstractHorse.tick — the counters and the three ramps.
         void Tick() override;
 
         // MC AbstractHorse.aiStep — the tail roll (both sides, MC's own
-        // arrangement: each side rolls its own 1-in-200) and the server's
-        // grass-eating roll. (The 1-in-900 self-heal waits on nothing and is
-        // kept; followMommy needs the bred flag, which taming sets.)
+        // arrangement: each side rolls its own 1-in-200), the server's slow
+        // heal and grass-eating roll.
         void AiStep() override;
 
         // MC AbstractHorse.canEatGrass.
         virtual bool CanEatGrass() const { return true; }
 
-        // ── Taming / temper (interaction wave) ─────────────────────────────
-        // MC tames equines through riding attempts (temper vs a random roll
-        // in RunAroundLikeCrazyGoal / tameWithName) — player mounting does
-        // not exist, so ONLY the feeding half of temper is live: golden
-        // apples/carrots and the rest of handleEating raise it, and the
-        // stored value is ready the day riding lands. isTamed stays false
-        // until then (nothing else can set it).
-        bool IsTamedHorse() const { return m_tamedHorse; }
-        void SetTamedHorse(bool v) { m_tamedHorse = v; }
-        int  GetTemper() const { return m_temper; }
-        void SetTemper(int temper) { m_temper = temper; }
-        int  ModifyTemper(int amount);
-        // MC AbstractHorse.getMaxTemper: 100.
-        virtual int GetMaxTemper() const { return 100; }
+        // ── Taming / temper (HorseTaming) ──────────────────────────────────
+        // MC tames equines by riding them: feeding raises temper, an empty
+        // hand mounts (doPlayerRide), and RunAroundLikeCrazyGoal rolls temper
+        // against nextInt(getMaxTemper()) while the untamed horse bolts —
+        // tameWithName, or the rider thrown and temper + 5.
+        bool IsTamedHorse() const { return IsTamed(); }
+        void SetTamedHorse(bool v) { SetTamed(v); }
 
-        // MC Horse/AbstractChestedHorse.mobInteract's shared shape: food →
-        // fedFood; a non-food click on an untamed horse → makeMad (the
-        // mount-to-tame attempt is skipped with riding, commented in the
-        // .cpp). SkeletonHorse overrides (untamed → Pass, per its source).
+        // MC Horse / AbstractChestedHorse / ZombieHorse → AbstractHorse
+        // .mobInteract: ridden or a baby → Animal's; tamed + sneaking → the
+        // inventory screen; food → fedFood; any other item on an untamed one
+        // → makeMad; otherwise the item's own interaction, then
+        // doPlayerRide. SkeletonHorse overrides (untamed → Pass).
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // MC AbstractHorse.doPlayerRide: stop eating/rearing, seat the player.
+        void DoPlayerRide(LivingEntity& player);
+
+        // MC AbstractHorse.isMobControlled: false (the zombie horse: a mob
+        // rides it).
+        virtual bool IsMobControlled() const { return false; }
+
+        // PlayerRideable — MC positionRider: the type's passenger attachment
+        // (EntityTypes .passengerAttachments, the baby dimensions' own),
+        // AbstractHorse's rear lean (0, 0.15, -0.7) * standAnimO turned to the
+        // body's yaw, less the player's 0.6 vehicle attachment.
+        glm::dvec3 PlayerRiderPosition() const override;
+        // MC AbstractHorse.positionRider: seated as any rider, and a living
+        // rider's body turns with the mount (yBodyRot).
+        void PositionRider(Entity& passenger) override;
+        // MC AbstractHorse.getDismountLocationForPassenger (the llama is one).
+        glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const override {
+            return EquineDismountLocation(*this, passenger);
+        }
+        // MC entity events 7 / 6: the taming hearts / smoke.
+        void HandleEntityEvent(uint8_t id) override;
+        void ClearReferenceTo(const Entity* entity) override {
+            GenericAnimal::ClearReferenceTo(entity);
+            ClearOwnerReferenceTo(entity);
+            if (m_breedPartner == entity) m_breedPartner = nullptr;
+        }
 
         // MC AbstractHorse.fedFood / handleEating — the per-item
         // heal/ageUp/temper table, verbatim.
@@ -1396,7 +2101,69 @@ namespace Game {
 
         // MC AbstractHorse.makeMad — rear up and voice the angry sound
         // (server only).
-        void MakeMad();
+        void MakeMad() override;
+
+        // ── Riding (MC getControllingPassenger / travelRidden hooks) ───────
+        // MC getControllingPassenger: the player in the first seat of a
+        // SADDLED equine steers it.
+        bool CanBeSteeredBy(const RiderControl& rider) const override { (void)rider; return IsSaddled(); }
+        // MC getRiddenInput: nothing while planted rearing on the ground (no
+        // jump pending, not sliding off a jump's rear); otherwise sideways
+        // at half, backwards at a quarter.
+        glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) override;
+        // MC tickRidden: the rider's view turns the mount (pitch halved),
+        // and on the simulating side the gallop counter resets while not
+        // going forward and a charged jump fires from the ground.
+        void TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) override;
+        // MC getRiddenSpeed: the MOVEMENT_SPEED attribute.
+        float GetRiddenSpeed(const RiderControl& rider) const override;
+
+        // ── PlayerRideableJumping (the jump bar) ───────────────────────────
+        void OnPlayerJump(int jumpAmount) override;
+        bool CanJump() const override { return IsSaddled(); }
+        void HandleStartJump(int jumpScale) override;
+        void HandleStopJump() override {}
+        // MC PlayerRideableJumping.getPlayerJumpPendingScale.
+        static float PlayerJumpPendingScale(int jumpAmount) {
+            return jumpAmount >= 90 ? 1.0f : 0.4f + 0.4f * static_cast<float>(jumpAmount) / 90.0f;
+        }
+
+        // ── Equipment and inventory (MC AbstractHorse /
+        //    AbstractChestedHorse; the system is MountInventory's) ───────────
+        // MC AbstractHorse.canUseSlot: the saddle only for a live, grown,
+        // tamed one (Horse, SkeletonHorse and ZombieHorse: every slot).
+        bool CanUseSlot(EquipmentSlot slot) const override {
+            if (slot != EquipmentSlot::SADDLE) return GenericAnimal::CanUseSlot(slot);
+            return IsAlive() && !IsBaby() && IsTamedHorse();
+        }
+        // MC AbstractHorse.canDispenserEquipIntoSlot.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return ((slot == EquipmentSlot::BODY || slot == EquipmentSlot::SADDLE) && IsTamedHorse()) ||
+                   GenericAnimal::CanDispenserEquipIntoSlot(slot);
+        }
+        // MC AbstractHorse.getEquipSound: HORSE_SADDLE for the saddle.
+        std::string GetEquipSound(EquipmentSlot slot, const ItemStack& stack,
+                                  const Equippable& equippable) const override {
+            return slot == EquipmentSlot::SADDLE ? std::string(SoundEvents::HORSE_SADDLE)
+                                                 : GenericAnimal::GetEquipSound(slot, stack, equippable);
+        }
+        // MC AbstractHorse.equipBodyArmor: an equippable body piece goes on
+        // (setItemSlotAndDropWhenKilled of consumeAndReturn(1)).
+        void EquipBodyArmor(LivingEntity& player, ItemStack& held);
+
+        MountInventory*       GetMountInventory() override       { return &m_mountInventory; }
+        const MountInventory* GetMountInventory() const override { return &m_mountInventory; }
+        // MC AbstractChestedHorse.hasChest (DATA_ID_CHEST) — false for the
+        // unchested kinds.
+        bool HasChest() const { return m_mountInventory.HasChest(); }
+        // MC getInventoryColumns: AbstractChestedHorse's 5 while chested.
+        int GetInventoryColumns() const override {
+            return m_mountInventory.CanCarryChest() && m_mountInventory.HasChest() ? 5 : 0;
+        }
+        bool HasCustomInventoryScreen() const override { return true; }
+        // MC AbstractHorse.openCustomInventoryScreen: server, nobody else
+        // aboard, tamed.
+        void OpenCustomInventoryScreen(LivingEntity& player) override;
 
         // ── Sounds ────────────────────────────────────────────────────────
         // MC AbstractHorse.getEatingSound / getAngrySound: null here; each
@@ -1406,120 +2173,290 @@ namespace Game {
         // MC AbstractHorse.getAmbientStandSound — RandomStandGoal's rear.
         const char* GetAmbientStandSound() const { return GetAmbientSound(); }
 
-        // MC AbstractHorse.playStepSound, unridden half: the wood clop on
-        // the wood sound types, else the hoof step; a snow layer on top
-        // wins. (The ridden gallop counter waits on riding.)
+        // MC AbstractHorse.playStepSound: ridden (and able to gallop) the
+        // first five steps clop on wood and every third one after gallops;
+        // otherwise the wood clop on the wood sound types, else the hoof
+        // step; a snow layer on top wins.
         void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
 
         // MC AbstractHorse.causeFallDamage: HORSE_LAND past one block, then
         // hurt + the block fall sound — no generic fall thud.
         bool CauseFallDamage(double fallDist, float damageMultiplier) override;
 
-        // ── Renderer inputs (MC HorseRenderer/extractRenderState) ─────────
+        // ── Renderer inputs (MC AbstractHorseRenderer.extractRenderState) ──
         float GetEatAnim(float partialTick) const;
         float GetStandAnim(float partialTick) const;
+        float GetMouthAnim(float partialTick) const;
         bool  IsAnimatingTail() const { return m_tailCounter > 0; }
+
+    protected:
+        // MC AbstractHorse.mobInteract itself (below the Horse / chested /
+        // zombie fronts): Animal's while ridden or a foal, the tamed sneak's
+        // inventory, the held item's own interaction, then doPlayerRide.
+        UseResult BaseMobInteract(LivingEntity& player, ItemStack& held);
+        // MC AbstractHorse.randomizeAttributes — nothing on the base; each
+        // equine rolls its own (MC's static generators, HorseTaming).
+        virtual void RandomizeAttributes(JavaRandom& rng) { (void)rng; }
+        // MC AbstractHorse.playJumpSound (Donkey/Mule/SkeletonHorse override).
+        virtual void PlayJumpSound() { PlaySound(SoundEvents::HORSE_JUMP, 0.4f, 1.0f); }
+        // MC AbstractHorse.playGallopSound (Horse adds the breath).
+        virtual void PlayGallopSound(const SoundType& type);
+        // MC AbstractHorse.executeRidersJump.
+        void ExecuteRidersJump(float amount, const glm::dvec3& input);
+        // MC LivingEntity.getJumpPower(multiplier): JUMP_STRENGTH * multiplier
+        // (no block jump factor in this engine) + the jump-boost power.
+        float JumpPower(float multiplier) const;
+        // The partner of the breeding in flight (SpawnChildFromBreeding →
+        // CreateBaby), null outside it.
+        const AbstractHorse* BreedPartner() const { return m_breedPartner; }
+
+        // MC AbstractHorse.canGallop (AbstractChestedHorse: false).
+        bool m_canGallop = true;
+        // MC AbstractHorse.gallopSoundCounter — mutable: the skeleton horse
+        // counts it from its (const) swim sound, as MC's getSwimSound does.
+        mutable int m_gallopSoundCounter = 0;
 
     private:
         void RegisterHorseGoals();
 
-        // MC AbstractHorse.eating — the chew sound (the open-mouth flag's
-        // only reader is the skipped mouth ramp).
+        // MC AbstractHorse.eating — open the mouth and play the chew sound.
         void Eating();
-
-        // MC AbstractHorse.temper / tamed — see the taming block above.
-        int  m_temper = 0;
-        bool m_tamedHorse = false;
+        // MC AbstractHorse.openMouth (server).
+        void OpenMouth();
 
         bool m_eating = false;
         bool m_standing = false;
+        bool m_bred = false;
+        bool m_openMouth = false;
         int  m_standCounter = 0;
         int  m_eatingCounter = 0;
+        int  m_mouthCounter = 0;
         int  m_tailCounter = 0;
+        // MC AbstractHorse.sprintCounter — counted up to 300 once started;
+        // nothing in 26.3 starts it, kept for the tick's arithmetic.
+        int  m_sprintCounter = 0;
+        // MC playerJumpPendingScale / allowStandSliding.
+        float m_playerJumpPendingScale = 0.0f;
+        bool  m_allowStandSliding = false;
         float m_eatAnim = 0.0f, m_eatAnimO = 0.0f;
         float m_standAnim = 0.0f, m_standAnimO = 0.0f;
+        float m_mouthAnim = 0.0f, m_mouthAnimO = 0.0f;
+        const AbstractHorse* m_breedPartner = nullptr;
+        // MC AbstractHorse.inventory; AbstractChestedHorse (the donkey and
+        // the mule) carries the chest.
+        MountInventory m_mountInventory{GetType() == EntityTypeId::Donkey || GetType() == EntityTypeId::Mule};
     };
 
-    // The concrete equines. Each is one MC class; the bespoke pieces beyond
-    // the shared base (horse variants, chests, skeleton-trap, conversion)
-    // ride systems named in the base comment. CreateBaby is per-type so a
-    // foal is the promoted class, not a GenericAnimal.
+    // The concrete equines, one MC class each.
+    //
+    // MC Horse: the coat (Variant: white, creamy, chestnut, brown, black,
+    // gray, dark brown) and the markings (none, white, white field, white
+    // dots, black dots), MC's DATA_ID_TYPE_VARIANT int `variant | markings <<
+    // 8`, saved as "Variant" and carried on the wire's variant byte as
+    // `variant | markings << 4`.
     class Horse : public AbstractHorse {
     public:
+        static constexpr int kVariantCount = 7;
+        static constexpr int kMarkingsCount = 5;
+
         explicit Horse(EntityLevel* level)
             : AbstractHorse(EntityTypeId::Horse, level) {}
-        std::unique_ptr<Animal> CreateBaby() override {
-            return std::make_unique<Horse>(m_level);
+        // MC Horse.canUseSlot: every slot, tamed or not.
+        bool CanUseSlot(EquipmentSlot) const override { return true; }
+
+        // MC getVariant / getMarkings (ByIdMap WRAP) and the raw int.
+        int  GetVariantId()  const { return WrapId(m_typeVariant & 0xFF, kVariantCount); }
+        int  GetMarkingsId() const { return WrapId((m_typeVariant & 0xFF00) >> 8, kMarkingsCount); }
+        int  GetTypeVariant() const { return m_typeVariant; }
+        void SetTypeVariant(int v) { m_typeVariant = v; }
+        // MC setVariantAndMarkings / setVariant.
+        void SetVariantAndMarkings(int variant, int markings) {
+            m_typeVariant = (variant & 0xFF) | ((markings << 8) & 0xFF00);
         }
+        void SetVariant(int variant) { m_typeVariant = (variant & 0xFF) | (m_typeVariant & ~0xFF); }
+
+        uint8_t GetVariantByte() const override {
+            return static_cast<uint8_t>((GetVariantId() & 0x0F) | ((GetMarkingsId() & 0x0F) << 4));
+        }
+        void SetVariantByte(uint8_t v) override { SetVariantAndMarkings(v & 0x0F, (v >> 4) & 0x0F); }
+        // The coat and markings sheets (HorseRenderer LOCATION_BY_VARIANT,
+        // HorseMarkingLayer LOCATION_BY_MARKINGS; "" for no markings).
+        static const char* VariantTexture(int variant);
+        static const char* MarkingsTexture(int markings);
+
+        // MC Horse.canMate: a horse or a donkey, both able to parent.
+        bool CanMate(const Animal& other) const override;
+        // MC Horse.getBreedOffspring: a mule with a donkey, else a foal with
+        // the coat (4/9 this, 4/9 partner, 1/9 random) and markings (2/5,
+        // 2/5, 1/5) — then the inherited attributes.
+        std::unique_ptr<Animal> CreateBaby() override;
+        // MC Horse.finalizeSpawn: the herd's coat (HorseGroupData), random
+        // markings.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
         const char* GetEatingSound() const override {
             return IsBaby() ? SoundEvents::HORSE_EAT_BABY : SoundEvents::HORSE_EAT;
         }
         const char* GetAngrySound() const override {
             return IsBaby() ? SoundEvents::HORSE_ANGRY_BABY : SoundEvents::HORSE_ANGRY;
         }
+
+    protected:
+        // MC Horse.randomizeAttributes: health, speed and jump.
+        void RandomizeAttributes(JavaRandom& rng) override;
+        // MC Horse.playGallopSound: + a 1-in-10 breath.
+        void PlayGallopSound(const SoundType& type) override;
+
+    private:
+        static int WrapId(int id, int count) { return ((id % count) + count) % count; }
+        int m_typeVariant = 0;
     };
 
+    // MC AbstractChestedHorse's shared rules for the donkey and the mule: no
+    // gallop sounds, health-only attribute rolls. (The chest itself is the
+    // equipment system's.)
     class Donkey : public AbstractHorse {
     public:
         explicit Donkey(EntityLevel* level)
-            : AbstractHorse(EntityTypeId::Donkey, level) {}
-        std::unique_ptr<Animal> CreateBaby() override {
-            return std::make_unique<Donkey>(m_level);
-        }
+            : AbstractHorse(EntityTypeId::Donkey, level) { m_canGallop = false; }
+        // MC Donkey.canMate: a donkey or a horse, both able to parent.
+        bool CanMate(const Animal& other) const override;
+        // MC Donkey.getBreedOffspring: a mule with a horse, else a donkey —
+        // with the inherited attributes.
+        std::unique_ptr<Animal> CreateBaby() override;
         const char* GetEatingSound() const override { return SoundEvents::DONKEY_EAT; }
         const char* GetAngrySound() const override { return SoundEvents::DONKEY_ANGRY; }
+    protected:
+        void RandomizeAttributes(JavaRandom& rng) override;
+        void PlayJumpSound() override { PlaySound(SoundEvents::DONKEY_JUMP, 0.4f, 1.0f); }
     };
 
-    // MC mules are horse x donkey and infertile; same-species breeding is
-    // the port's only pairing, so a mule simply cannot mate.
+    // MC Mule: AbstractHorse.canMate (never breeds); its getBreedOffspring
+    // would be a mule.
     class Mule : public AbstractHorse {
     public:
         explicit Mule(EntityLevel* level)
-            : AbstractHorse(EntityTypeId::Mule, level) {}
-        bool CanMate(const Animal&) const override { return false; }
-        std::unique_ptr<Animal> CreateBaby() override { return nullptr; }
+            : AbstractHorse(EntityTypeId::Mule, level) { m_canGallop = false; }
+        std::unique_ptr<Animal> CreateBaby() override;
         const char* GetEatingSound() const override { return SoundEvents::MULE_EAT; }
         const char* GetAngrySound() const override { return SoundEvents::MULE_ANGRY; }
+    protected:
+        void RandomizeAttributes(JavaRandom& rng) override;
+        void PlayJumpSound() override { PlaySound(SoundEvents::MULE_JUMP, 0.4f, 1.0f); }
     };
 
     class SkeletonHorse : public AbstractHorse {
     public:
         explicit SkeletonHorse(EntityLevel* level)
             : AbstractHorse(EntityTypeId::SkeletonHorse, level) {}
+        // MC SkeletonHorse.canUseSlot: every slot, tamed or not.
+        bool CanUseSlot(EquipmentSlot) const override { return true; }
+
+        // ── The skeleton trap (MC SkeletonHorse.isTrap / SkeletonTrapGoal) ─
+        //
+        // A thunderstorm's lightning spawns a trap horse (ServerLevel
+        // .tickThunder, with setAge(0)). While trapped it carries the
+        // SkeletonTrapGoal at priority 1: the moment a live non-spectator
+        // player comes within 10 blocks, a visual-only bolt strikes and the
+        // horse (tamed, adult) takes an iron-helmeted skeleton rider, joined
+        // by three more tamed skeleton horses with riders, all persistent
+        // and 60 ticks invulnerable, the riders' weapon and helmet enchanted
+        // from MOB_SPAWN_EQUIPMENT. An unsprung trap that is not persistent
+        // vanishes after TRAP_MAX_LIFE (18000) ticks. Saved as SkeletonTrap /
+        // SkeletonTrapTime.
+        static constexpr int kTrapMaxLife = 18000;
+        bool IsTrap() const { return m_isTrap; }
+        void SetTrap(bool trap);
+        int  GetTrapTime() const { return m_trapTime; }
+        void SetTrapTime(int ticks) { m_trapTime = ticks; }
+
+        void AiStep() override;
         // MC SkeletonHorse.mobInteract: an untamed skeleton horse ignores
-        // every click (no feeding, no mounting) — and untamed is the only
-        // kind that exists until riding lands.
+        // every click; a tamed one (the trap's) goes straight to
+        // AbstractHorse.mobInteract — no feeding front, so it is ridden,
+        // saddled or opened, never fed.
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override {
             if (!IsTamedHorse()) return UseResult::Pass;
-            return AbstractHorse::MobInteract(player, held);
+            return BaseMobInteract(player, held);
         }
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<SkeletonHorse>(m_level);
         }
-        // MC SkeletonHorse.getSwimSound / playSwimSound: wading hooves on
-        // the bottom (the ridden gallop-in-water counter waits on riding),
-        // the swim stroke otherwise, capped quiet.
-        const char* GetSwimSound() const override {
-            return onGround ? SoundEvents::SKELETON_HORSE_STEP_WATER : SoundEvents::SKELETON_HORSE_SWIM;
-        }
+        // MC SkeletonHorse.canAgeUp: false — a skeleton foal stays one.
+        bool CanAgeUp() const override { return false; }
+        // MC SkeletonHorse.getWaterSlowDown: 0.96 — it walks the sea floor
+        // (no FloatGoal) nearly unslowed.
+        float GetWaterSlowDown() const override { return 0.96f; }
+        // MC SkeletonHorse.getSwimSound: on the bottom, the wading step —
+        // or, ridden, the same five-then-every-third gallop count as on land
+        // (the water gallop); the swim stroke otherwise.
+        const char* GetSwimSound() const override;
     protected:
+        // MC SkeletonHorse.playSwimSound: 0.3 on the bottom, else capped quiet.
         void PlaySwimSound(float volume) override {
             AbstractHorse::PlaySwimSound(onGround ? 0.3f : std::min(0.1f, volume * 25.0f));
         }
+        // MC SkeletonHorse.randomizeAttributes: the jump only.
+        void RandomizeAttributes(JavaRandom& rng) override;
+        // MC SkeletonHorse.playJumpSound: the water jump while in water.
+        void PlayJumpSound() override {
+            if (IsInWater()) PlaySound(SoundEvents::SKELETON_HORSE_JUMP_WATER, 0.4f, 1.0f);
+            else AbstractHorse::PlayJumpSound();
+        }
+
+    private:
+        bool  m_isTrap = false;
+        int   m_trapTime = 0;
+        // The live SkeletonTrapGoal while trapped (owned by the selector).
+        Goal* m_trapGoal = nullptr;
+        // The goal un-traps the horse from inside its own tick; removing it
+        // there would free the running goal, so the removal waits for the
+        // next AiStep, before the selector runs again.
+        bool  m_trapGoalRemovalPending = false;
     };
 
     class ZombieHorse : public AbstractHorse {
     public:
         explicit ZombieHorse(EntityLevel* level)
             : AbstractHorse(EntityTypeId::ZombieHorse, level) {}
+        // MC ZombieHorse.canUseSlot: every slot, tamed or not.
+        bool CanUseSlot(EquipmentSlot) const override { return true; }
         // MC ZombieHorse.removeWhenFarAway: true — the one equine that
         // despawns (it only exists via /summon or a rider).
         bool RemoveWhenFarAway(double) const override { return true; }
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<ZombieHorse>(m_level);
         }
+        // MC ZombieHorse.finalizeSpawn: a NATURAL spawn arrives with a zombie
+        // rider holding an iron spear. Defined in Monsters.cpp (it builds a
+        // Zombie).
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC ZombieHorse.interact: any interaction makes it persistent, then
+        // ZombieHorse.mobInteract (feeding red mushrooms, makeMad) →
+        // AbstractHorse's.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC ZombieHorse.isMobControlled: a mob (its zombie) rides it.
+        bool IsMobControlled() const override;
+        // MC ZombieHorse.canBeLeashed: tamed, or not carrying its zombie.
+        bool CanBeLeashed() const override { return IsTamedHorse() || !IsMobControlled(); }
+        // MC ZombieHorse.canFallInLove / canAgeUp: false.
+        bool CanFallInLove() const override { return false; }
+        bool CanAgeUp() const override { return false; }
+        // EntityTypeTags.BURN_IN_DAYLIGHT; MC ZombieHorse.sunProtectionSlot:
+        // what shades it is its BODY armour.
+        bool BurnsInDaylight() const override { return true; }
+        EquipmentSlot SunProtectionSlot() const override { return EquipmentSlot::BODY; }
+        // MC ZombieHorse.chargeSpeedModifier — how much faster the spear
+        // charge of its rider runs.
+        float ChargeSpeedModifier() const override { return 1.4f; }
         const char* GetEatingSound() const override { return SoundEvents::ZOMBIE_HORSE_EAT; }
         const char* GetAngrySound() const override { return SoundEvents::ZOMBIE_HORSE_ANGRY; }
+    protected:
+        // MC ZombieHorse.randomizeAttributes: its own jump and speed rolls.
+        void RandomizeAttributes(JavaRandom& rng) override;
     };
 
 } // namespace Game
+

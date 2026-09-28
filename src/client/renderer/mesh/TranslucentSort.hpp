@@ -6,18 +6,21 @@
 //   net/minecraft/client/renderer/chunk/TranslucencyPointOfView
 //   net/minecraft/client/renderer/LevelRenderer (scheduleResort throttling)
 //
-// WHY a translucent surface has to be drawn far-to-near even when it looks
-// opaque: the mipmap pipeline's scaleAlphaToCoverage adds a flat +0.025 to
-// every texel's alpha above level 0 (MipmapGenerator.java, vanilla's own
-// constant). Glass's interior is alpha 0 at level 0 but ~0.025 from level 1
-// on, and the translucent pass's cutout threshold is 0.01 — so past the first
-// mip the interior stops being discarded, draws at ~2.5% alpha (invisible) and
-// WRITES DEPTH. Anything behind it is then occluded by a pane you cannot see.
+// WHY a translucent surface has to be drawn far-to-near: the translucent
+// pass writes depth (MC TRANSLUCENT_TERRAIN keeps the default depth write),
+// so every texel that survives the pass's cutout occludes whatever is drawn
+// after it. Blending is only right if the far quads are already in the
+// colour buffer when a near one lands — stained glass drawn before the
+// water behind it hides that water outright.
 //
-// Vanilla has the identical texture data and the identical 0.01 threshold. It
-// gets away with it purely because the far quads are already in the colour
-// buffer by the time that invisible near one writes depth. Sorting is not a
-// polish pass here; it is what makes depth-writing translucency work at all.
+// The cutout is what keeps CLEAR texels out of this: the translucent
+// shader discards below MC 26.3's TRANSLUCENT_TERRAIN threshold of 0.1
+// (26.1 had 0.01, which the flat +0.025 scaleAlphaToCoverage adds to
+// cutout-strategy mips above level 0 could clear — MipmapGenerator.java).
+// Glass's interior (alpha 0; glass.png.mcmeta mipmaps it by "mean") is
+// therefore discarded at every mip and writes no depth. Without that cutout
+// (the translucent shader once had none) a pane's invisible interior hid the
+// water behind it whenever the pane's quad sorted first.
 #pragma once
 
 #include <cstdint>
@@ -45,8 +48,18 @@ namespace Render::TranslucentSort {
         bool IsAxisAligned() const { return x == 0 || y == 0 || z == 0; }
     };
 
-    // sectionOrigin is the section's minimum block corner.
-    PointOfView MakePointOfView(const glm::vec3& cameraPos, const glm::ivec3& sectionOrigin);
+    // cameraPos is the WORLD camera (double, like MC's Vec3); sectionOrigin
+    // is the section's minimum block corner.
+    PointOfView MakePointOfView(const glm::dvec3& cameraPos, const glm::ivec3& sectionOrigin);
+
+    // MC SectionRenderDispatcher.createVertexSorting: the camera relative to
+    // the section's minimum corner, subtracted in double and only then
+    // narrowed, so the sort keys keep full float precision anywhere in the
+    // world. Centroids are section-relative too (the TerrainVertex positions
+    // decoded without the origin), exactly as MC's are.
+    inline glm::vec3 SectionRelativeCamera(const glm::dvec3& cameraPos, const glm::ivec3& sectionOrigin) {
+        return glm::vec3(cameraPos - glm::dvec3(sectionOrigin));
+    }
 
     // MC MeshData.unpackQuadCentroids: the midpoint of vertices 0 and 2, the
     // quad's diagonal. Assumes quad k owns vertices 4k..4k+3, which is what
@@ -55,6 +68,9 @@ namespace Render::TranslucentSort {
                           std::vector<glm::vec3>& outCentroids);
 
     // Rebuilds `outIndices` with the quads ordered farthest-first.
+    // `centroids` and `cameraPos` share one frame: section-relative
+    // (SectionRelativeCamera). Ties keep emission order (stable, as MC's
+    // IntArrays.mergeSort), so equal keys never swap between sorts.
     //
     // MC sorts DESCENDING by squared distance (VertexSorting.byDistance ->
     // Floats.compare(keys[o2], keys[o1])) and re-emits each quad's six indices

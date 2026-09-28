@@ -23,7 +23,8 @@
 //     ClientboundPlayerPositionPacket; deferred to Phase 6 with the visuals).
 //   • Floor / ceiling portals (the camera math is materially harder; vertical
 //     walls only for Phase 2 — clicks on top/bottom faces fizzle).
-//   • Persistence — pairs live for the session only; world reload clears them.
+//   • (Persistence has since landed: Load/Save below, data/portal_gun.json.
+//     A pair's lifetime is its gun's — see PortalGunTracker.hpp.)
 //
 // THREADING
 //   All operations run on the server thread. The registry is a process-global
@@ -42,6 +43,7 @@
 #if ENABLE_PORTAL_GUN
 
 #include <cstdint>
+#include <string>
 #include <unordered_map>
 #include "common/world/level/DimensionId.hpp"
 #include <glm/glm.hpp>
@@ -114,9 +116,38 @@ namespace Game::Portal {
         Game::DimensionId dimension = Game::DimensionId::Overworld;
     };
 
+    // Where a gun's stack was last confirmed to be. Maintained by the gun
+    // tracker (PortalGunTracker.cpp) so a pair can close when its gun is
+    // destroyed, and saved with the pair so the knowledge survives a
+    // relaunch. Only the four live kinds can ever prove a gun gone; Unknown
+    // and Stored mean "the server cannot see it right now" and never close a
+    // pair on their own.
+    struct GunWhereabouts {
+        enum class Kind : uint8_t {
+            Unknown    = 0,   // never located this session (or handed to a holder we cannot see)
+            Player     = 1,   // a player's inventory / cursor / open menu (`player` = name)
+            ItemEntity = 2,   // a dropped item (`entityId`, last `pos`)
+            Container  = 3,   // a block container at `pos`
+            Entity     = 4,   // held by an entity (item frame, armor stand, mob) — `entityId`, last `pos`
+            Stored     = 5,   // saved to disk with the chunk around `pos`
+        };
+        Kind              kind      = Kind::Unknown;
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
+        glm::ivec3        pos{0};
+        int32_t           entityId  = 0;     // session handle; never saved
+        std::string       player;
+        // Consecutive tracker checks that could not find the gun anywhere
+        // live, starting from a live location. Runtime only.
+        int               misses    = 0;
+    };
+
     struct PortalPair {
         Portal blue;
         Portal orange;
+        // Name of the player who last fired this gun ("" for pairs saved
+        // before owners were recorded). /portalgun close <player> uses it.
+        std::string    owner;
+        GunWhereabouts seen;
     };
 
     class PortalRegistry {
@@ -139,7 +170,9 @@ namespace Game::Portal {
                                 const BlockHitResult& hit, PortalColor color,
                                 Server::ServerPlayer* player);
 
-        // Wipe both portals belonging to a gun. Used by the shift+right-click
+        // Wipe both portals belonging to a gun. Also how the gun tracker
+        // (PortalGunTracker.hpp) and /portalgun close a lost gun's pair.
+        // Used by the shift+right-click
         // gesture (the user's "clear my portals" input). Drops any cached
         // per-player crossing state for the affected pair so a future re-fire
         // starts with a clean baseline.
@@ -151,6 +184,16 @@ namespace Game::Portal {
         // requested behaviour: blue stays put as the anchor, orange is the
         // moving target).
         const PortalPair* TryGetPair(uint64_t gunId) const;
+        PortalPair*       TryGetPairMutable(uint64_t gunId);
+
+        // The next id AllocId will hand out: every gun id below it existed
+        // when this was read (the orphan sweep's candidate fence).
+        uint64_t PeekNextId() const { return m_nextId; }
+
+        // The one-time orphan sweep (PortalGunTracker.cpp) — persisted in
+        // portal_gun.json so a world is swept once, not on every load.
+        bool OrphanSweepDone() const { return m_orphanSweepDone; }
+        void SetOrphanSweepDone(bool done) { m_orphanSweepDone = done; }
 
         // Per-tick: detect player crossings + dispatch teleports. Walks every
         // active session via the server's session manager and updates the
@@ -162,6 +205,20 @@ namespace Game::Portal {
         // freshly-arrived client renders the existing portals immediately
         // (rather than waiting for someone to re-fire them).
         void SyncToClient(Server::ServerConnection* connection) const;
+
+        // Move one or both portals of a gun by whole blocks along world axes
+        // (/portalgun move). Each moved portal must pass the placement rules
+        // PlacePortal uses — a solid full block behind both cells, air in
+        // front of both — and the two portals may not end up on the same
+        // wall cell; `force` skips all three. On success everything a
+        // re-fire does happens: close burst at the old spot, PortalSetS2C
+        // to every client, immersive surfaces rebuilt (the old ones removed
+        // whatever the mode), crossing state reset, portal_gun.json saved.
+        // The portal keeps its gun and partner. False with `error` set (and
+        // nothing changed) otherwise.
+        bool MovePortals(uint64_t gunId, bool moveBlue, const glm::ivec3& blueDelta,
+                         bool moveOrange, const glm::ivec3& orangeDelta,
+                         bool force, std::string& error);
 
         // Read-only iteration. Phase 4+ visuals key off it for rendering.
         const std::unordered_map<uint64_t, PortalPair>& All() const { return m_pairs; }
@@ -188,6 +245,7 @@ namespace Game::Portal {
     private:
         uint64_t m_nextId = 1;
         std::unordered_map<uint64_t, PortalPair> m_pairs;
+        bool     m_orphanSweepDone = false;
 
         // For each player, the player's center-of-body position (waist) on
         // the previous tick, per portal we're tracking against. Used to

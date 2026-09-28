@@ -36,6 +36,10 @@ namespace Game {
         explicit Snowball(EntityLevel* level)
             : ThrowableProjectile(EntityTypeId::Snowball, level) {}
 
+    public:
+        // MC Snowball.handleEntityEvent(3): the 8-puff burst on impact.
+        void HandleEntityEvent(uint8_t id) override;
+
     protected:
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
@@ -49,6 +53,9 @@ namespace Game {
         explicit ThrownEgg(EntityLevel* level)
             : ThrowableProjectile(EntityTypeId::Egg, level) {}
 
+        // MC ThrownEgg.handleEntityEvent(3): 8 egg shards on impact.
+        void HandleEntityEvent(uint8_t id) override;
+
     protected:
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHit(const HitResult& hit) override;
@@ -57,8 +64,7 @@ namespace Game {
     // MC ThrownEnderpearl. 0 damage on a direct hit; on ANY hit the OWNER is
     // pulled to the pearl's pre-impact position — the 5% endermite, the 5.0
     // teleport damage and the fall-distance reset included. Ported minus,
-    // each noted at its site: the 32 PORTAL impact particles (no such
-    // ParticleKind), the teleport sound (sound system stub), MC 1.21's
+    // each noted at its site: the teleport sound (sound system stub), MC 1.21's
     // pearl chunk tickets / owner-logout survival / ENDER_PEARLS_VANISH_ON_
     // DEATH gamerule (pearls here live like every other projectile, in
     // loaded chunks with a live owner reference), and dimension travel (the
@@ -96,8 +102,8 @@ namespace Game {
     //   lingering: an AreaEffectCloud (radius 3, radiusOnUse -0.5, 600
     //              ticks, wait 10, shrinking to nothing over its life) that
     //              carries the stack's contents and duration scale (0.25).
-    // Not modelled: the splash particle / sound level events (2002 / 2007 /
-    // 1053 / 1054 — no particle system for them).
+    // The splash particles are level event 2002 / 2007 in the potion's
+    // colour; the break sound is a plain sound (1053 / 1054's).
     class ThrownSplashPotion : public ThrowableProjectile {
     public:
         explicit ThrownSplashPotion(EntityLevel* level);

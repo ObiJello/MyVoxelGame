@@ -31,6 +31,13 @@ namespace Game {
     bool RedstoneComponentCanSurvive(const IBlockAccess& level, const glm::ivec3& pos,
                                      BlockState state);
     bool HasRedstoneSurvivalRule(BlockID id);
+
+    // MC LightningRodBlock — the eight copper stages of the rod.
+    bool IsLightningRodBlock(BlockID id);
+    // MC LightningRodBlock.onLightningStrike: POWERED for 8 ticks (strong
+    // power into the block behind it), the neighbours told, the electric
+    // sparks (level event 3002). Called by the LightningBolt's first tick.
+    void LightningRodOnLightningStrike(ILevelWrite& level, const glm::ivec3& pos, BlockState state);
     // redstone_plus: run the delayed components' re-checks that were deferred
     // during this tick's update cascades (see RedstoneComponents.cpp).
     void RedstoneFlushDeferredChecks(ILevelWrite& level);
@@ -52,6 +59,13 @@ namespace Game {
     // MC RepeaterBlock.getStateForPlacement's LOCKED half.
     BlockState RepeaterPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
                                       BlockState state);
+
+    // MC ButtonBlock / LeverBlock.onExplosionHit for a blast that can
+    // trigger blocks (a wind charge): press the button (unless already
+    // pressed) / pull the lever, exactly as a click would — neighbours and
+    // the block it hangs on updated, the release tick scheduled, the click
+    // sounded. False for any other block, or a button already down.
+    bool RedstoneComponentOnExplosionHit(ILevelWrite& level, const glm::ivec3& pos, BlockState state);
 
     // MC TripWireHookBlock.setPlacedBy / DiodeBlock.setPlacedBy — the bits of
     // placement that need a writable level, run by the server after the

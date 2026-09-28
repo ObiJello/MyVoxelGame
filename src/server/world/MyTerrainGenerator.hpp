@@ -39,6 +39,7 @@
 #include <atomic>
 #include <functional>
 #include <vector>
+#include "platform/CrashHandler.hpp"
 
 namespace Game {
 
@@ -74,14 +75,17 @@ namespace Game {
             return static_cast<size_t>(std::max(1u, hw - 1u));
         }
 
-        explicit BackgroundExecutor(size_t numThreads = DefaultThreadCount(), bool elevated = false)
-            : m_running(true), m_elevated(elevated)
+        // name: the Tracy thread name, a string literal (Tracy keeps the pointer).
+        explicit BackgroundExecutor(size_t numThreads = DefaultThreadCount(), bool elevated = false,
+                                    const char* name = "TerrainWorker")
+            : m_running(true), m_elevated(elevated), m_name(name)
         {
             for (size_t i = 0; i < numThreads; ++i) {
                 m_workers.emplace_back([this, i]() { workerLoop(i); });
             }
         }
         bool m_elevated = false;
+        const char* m_name = "TerrainWorker";
 
         ~BackgroundExecutor() { shutdown(); }
 
@@ -164,14 +168,16 @@ namespace Game {
             // Without a name these threads show up in Tracy as bare numeric ids
             // with no zones — which is exactly why the most expensive work in the
             // program stayed invisible across several captures.
-            TERRAIN_THREAD("TerrainWorker");
-            if (m_elevated) Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);   // decoration pool: performance cores
-            // QoS stays DEFAULT on purpose. Elevated (tried 2026-08-30) put all
-            // nine threads on the four performance cores in competition with
-            // the render thread and the serial worldgen lane, and fresh
-            // generation measured ~10% SLOWER (2,540 vs 2,762 chunks / 30 s
-            // on a cool machine); at default the bulk noise work spreads onto
-            // the efficiency cores and the lane keeps a fast core.
+            TERRAIN_THREAD(m_name);
+            if (m_elevated) Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);   // lane / decoration pool: performance cores
+            Platform::InstallThreadCrashStack();   // worldgen recursion / faults still write a crash report
+            // The shared pool's QoS stays DEFAULT on purpose. Elevated (tried
+            // 2026-08-30) put all nine threads on the four performance cores
+            // in competition with the render thread and the serial worldgen
+            // lane, and fresh generation measured ~10% SLOWER (2,540 vs 2,762
+            // chunks / 30 s on a cool machine); at default the bulk noise work
+            // spreads onto the efficiency cores. The lane's own two threads
+            // (SharedLaneExecutor) are elevated: they are the serial path.
 
             while (true) {
                 Task task;
@@ -189,10 +195,18 @@ namespace Game {
                     // for stages that carry no zone of their own. The per-stage
                     // breakdown comes from ChunkStatusTasks.h nested inside this.
                     TERRAIN_ZONE_N("TerrainTask");
+                    if (!s_probeEnabled || index >= kMaxProbe) {
+                        // The per-task CPU/wall clocks feed only the pool
+                        // probe (DebugProbe); reading this thread's CPU time
+                        // is a kernel call on macOS, twice per task, and the
+                        // serial lane runs ~30 tasks per chunk.
+                        try { task(); } catch (...) {}
+                        continue;
+                    }
                     const auto w0 = std::chrono::steady_clock::now();
                     const int64_t c0 = ThreadCpuNs();
                     try { task(); } catch (...) {}
-                    if (index < kMaxProbe) {
+                    {
                         m_cpuNs[index].fetch_add(ThreadCpuNs() - c0, std::memory_order_relaxed);
                         m_wallNs[index].fetch_add(std::chrono::duration_cast<std::chrono::nanoseconds>(
                             std::chrono::steady_clock::now() - w0).count(), std::memory_order_relaxed);
@@ -201,7 +215,7 @@ namespace Game {
                         // tasks/s, so "every 25 tasks" was 5,352 spins of 4-13 ms
                         // in 26 s — 33.5 s of CPU, 23% of the whole terrain
                         // pool's busy time, spent measuring core speed.
-                        if (s_probeEnabled && ++taskCount % 25 == 0) {
+                        if (++taskCount % 25 == 0) {
                             m_probeNs[index].store(RunProbe(), std::memory_order_relaxed);
                         }
                     }
@@ -260,6 +274,7 @@ namespace Game {
     public:
         using Task = std::function<void()>;
 
+        explicit SharedExecutorLease(BackgroundExecutor& pool = SharedBackgroundExecutor()) : m_pool(pool) {}
         ~SharedExecutorLease() { closeAndWait(); }
 
         void submit(Task task) {
@@ -268,7 +283,7 @@ namespace Game {
                 if (m_closed) return;
                 ++m_pending;
             }
-            SharedBackgroundExecutor().submit([this, task = std::move(task)]() {
+            m_pool.submit([this, task = std::move(task)]() {
                 // The pool swallows exceptions around the whole lambda, so the
                 // decrement has to be protected here — losing one would hang
                 // closeAndWait() forever.
@@ -298,6 +313,7 @@ namespace Game {
         }
 
     private:
+        BackgroundExecutor& m_pool;
         std::mutex m_mutex;
         std::condition_variable m_cv;
         int  m_pending = 0;
@@ -766,6 +782,9 @@ namespace Game {
         std::vector<Math::ChunkPos> m_handedOff;
 
         std::unique_ptr<SharedExecutorLease> m_backgroundLease;
+        // The library's serial schedulers (dispatcher mailbox + worldgen lane)
+        // on SharedLaneExecutor; null = they share m_backgroundLease's pool.
+        std::unique_ptr<SharedExecutorLease> m_laneLease;
         std::unique_ptr<BackgroundExecutor> m_decorationPool;   // OBEY_DECO_THREADS=n: elevated-QoS decoration threads
         std::unique_ptr<MainThreadExecutor> m_mainThreadExecutor;
         std::unique_ptr<minecraft::server::level::ServerChunkCache> m_chunkCache;

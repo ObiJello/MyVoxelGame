@@ -714,7 +714,9 @@ std::unique_ptr<ProtoChunk> SerializableChunkData::read(
     for (const auto& blockEntity : m_blockEntities) {
         const core::BlockPos pos(blockEntity->getIntOr("x", 0), blockEntity->getIntOr("y", 0),
                                  blockEntity->getIntOr("z", 0));
-        chunk->setBlockEntityNbt(pos, nbt::canonical::serializeBlockEntity(*blockEntity));
+        // ChunkAccess.setBlockEntityNbt: a stored block entity comes back as
+        // a PENDING tag, not a live one.
+        chunk->setPendingBlockEntityNbt(pos, nbt::canonical::serializeBlockEntity(*blockEntity));
     }
 
     for (const auto& area : m_spawnAreas) {

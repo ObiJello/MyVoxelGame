@@ -181,6 +181,16 @@ namespace Game {
         EffectAbsorption  = 25,
         EffectLuck        = 26,
         EffectUnluck      = 27,
+        // MC "minecraft:armor.body" (EquipmentSlotGroup.BODY) — the armour a
+        // mob's BODY slot adds (the wolf's wolf armor). Well clear of the
+        // sequential ids above, which parallel work appends to.
+        BodyArmorEquipment = 0x8000,
+        // A mob's humanoid equipment (Mob::SetEquipment): the worn item's
+        // modifiers per slot — MC's "minecraft:armor.<piece>" and
+        // "base_attack_damage" / "base_attack_speed". The id of modifier `k`
+        // (0 armor / attack damage, 1 toughness / attack speed, 2 knockback
+        // resistance) in slot `s` is MobEquipmentBase + s * 4 + k.
+        MobEquipmentBase   = 0x8100,
         // The first id of the enchantment-modifier range (see
         // EnchantmentModifierId below). Everything at or above it belongs
         // to an item's enchantments, never to a named modifier above.

@@ -12,6 +12,7 @@
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "../world/watch/ChunkTrackingView.hpp"
 #include "../world/watch/ChunkLoader.hpp"
+#include "common/portal/PortalRoute.hpp"
 #include <glm/glm.hpp>
 #include <functional>
 #include <array>
@@ -229,6 +230,20 @@ namespace Server {
             const std::function<void(Game::DimensionId, Game::Math::ChunkPos, bool stillLoaded)>& onLeave,
             const std::function<void(Game::DimensionId, Game::Math::ChunkPos)>& onSimulationEnter);
 
+        // The routes through every portal this player could look through
+        // (Game::PortalRoute), set by the server on every watch pass
+        // beside the loaders (IntegratedServer::ComputeChunkLoaders). They
+        // change the SEND ORDER only — a far side's chunks go out ranked by
+        // the distance to the portal plus their distance from its far
+        // point, interleaved with the player's own ring, instead of by the
+        // distance from their loader's centre. Membership is the loaders'.
+        void SetSendRoutes(std::vector<Game::PortalRoute::Route> routes) { m_sendRoutes = std::move(routes); }
+        const std::vector<Game::PortalRoute::Route>& GetSendRoutes() const { return m_sendRoutes; }
+        // One line per send route: of the 5x5 chunks around where its view
+        // comes out, how many are watched, loaded (queued or sent) and sent.
+        // Logged when the client reports its level loaded (the hand-over).
+        void LogSendRouteCoverage(const char* when) const;
+
         // Is (dimension, chunk) inside any of this session's VISIBLE loaders?
         // This is the authority for "does this player see chunk X" — there is
         // no reverse index. Chunks held only for simulation are not watched.
@@ -316,6 +331,7 @@ namespace Server {
         size_t m_unchangedSent = 0;
         // [ChunkOrder] log: batches left to report after a tracking re-centre
         // (teleport, dimension change, join) — see SendNextChunks.
+        static constexpr int kChunkOrderLogBatches = 12;
         int m_chunkOrderLogBatches = 0;
         float GetBatchQuota() const { return m_batchQuota; }
         int GetMaxUnackedBatches() const { return m_maxUnackedBatches; }
@@ -377,6 +393,10 @@ namespace Server {
         void VeinMineFrom(Game::World* world, const glm::ivec3& origin,
                           Game::BlockID kind, uint8_t face, bool creativeBreak);
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
+        // MC LeadItem.bindPlayerMobs for this player at a fence (FenceBlock.
+        // useWithoutItem and LeadItem.useOn): the mobs they lead go onto the
+        // fence's knot. Pass when there is nothing to tie.
+        Game::UseResult BindLeashedMobsToFence(const glm::ivec3& fencePos);
         // Use item in air — mirrors ServerGamePacketListenerImpl.handleUseItem
         // (ServerGamePacketListenerImpl.java:1329-1354) + the useItem game-mode
         // logic (ServerPlayerGameMode.java:290-327).
@@ -582,6 +602,16 @@ namespace Server {
         // === GETTERS ===
 
         uint32_t GetPlayerId() const { return m_playerId; }
+        // MC LivingEntity.isSwinging for this player, as the server knows it:
+        // a swing reported on the move packet runs the 6-tick swing
+        // (getCurrentSwingDuration). Read by AvatarRenderer.getArmPose's
+        // crossbow-hold rule when the arm poses are broadcast.
+        bool IsSwinging() const { return m_swingTicksLeft > 0; }
+        void NoteSwing() { m_swingTicksLeft = 6; }
+        void TickSwing() { if (m_swingTicksLeft > 0) --m_swingTicksLeft; }
+    private:
+        int m_swingTicksLeft = 0;
+    public:
         uint32_t GetConnectionId() const { return m_connectionId; }
         ServerPlayer* GetPlayer() const { return m_player; }
         ServerConnection* GetConnection() const { return m_connection; }
@@ -656,6 +686,21 @@ namespace Server {
         // through it, so it is worth one accessor rather than repeating the
         // g_integratedServer null-dance at each site.
         ItemEntityManager* ItemEntitiesOrNull() const;
+
+        // MC ServerPlayerGameMode's isDestroyingBlock / destroyPos: a survival
+        // dig from its START to its STOP or ABORT, for the per-tick crack
+        // particles and hit sound (levelEvent 2019 / 2020) the other players
+        // see. `face` is a Direction ordinal; `ticks` the ticks spent.
+        struct DigEffects {
+            bool              active = false;
+            glm::ivec3        pos{0};
+            int               face = 1;
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            int               ticks = 0;
+        };
+        DigEffects m_dig;
+        void StartDigEffects(Game::World& world, const glm::ivec3& pos, uint8_t face);
+        void TickDigEffects();
 
         // MC ServerPlayer.startSleepInBed: the check chain (alive, in range,
         // not obstructed, night, no monsters near), the respawn point, then
@@ -755,9 +800,17 @@ namespace Server {
         std::array<DimensionSendState, Game::kDimensionCount> m_dimState;
         DimensionSendState&       Dim(Game::DimensionId d)       { return m_dimState[Game::DimensionSlot(d)]; }
         const DimensionSendState& Dim(Game::DimensionId d) const { return m_dimState[Game::DimensionSlot(d)]; }
-        // Squared chunk distance from `pos` to the nearest loader centre in
-        // `dimension` — the send order (nearest first, per the mod).
-        int DistanceSqToNearestLoader(Game::DimensionId dimension, Game::Math::ChunkPos pos) const;
+        // The send-order key, in chunks: the smallest of the distance from
+        // `pos` to the player's own loader centre (in its dimension), every
+        // portal route into `dimension` (entry leg + far leg, see
+        // PortalRoute.hpp), and — for a portal loader no route reaches (its
+        // portal is behind the player) — the distance from that loader's
+        // centre, as before. `outRoute` (optional) gets the index of the
+        // winning route in m_sendRoutes, or -1 when no route won; `outDirect`
+        // the plain player-loader distance (+inf in another dimension).
+        double SendPriorityDistance(Game::DimensionId dimension, Game::Math::ChunkPos pos,
+                                    int* outRoute = nullptr, double* outDirect = nullptr) const;
+        std::vector<Game::PortalRoute::Route> m_sendRoutes;
         // Drop everything sent/pending for one dimension WITHOUT telling the
         // client (it is freeing the whole level). Loaders there are removed.
         std::set<Game::DimensionId> m_globalPortalsSynced;
@@ -848,6 +901,12 @@ namespace Server {
         // the block's centre (getExperienceAmount's halved-plus-random roll)
         // and levelEvent 1042 there. Run straight after every DoClick.
         void ApplyGrindstoneTake(const Game::ContainerClickResult& result);
+        // A cartography table result was taken (cartographyUsed): the take
+        // sound at the table, at most once per game tick (MC lastSoundTime).
+        void ApplyCartographyTake(const Game::ContainerClickResult& result);
+        void ApplyLoomTake(const Game::ContainerClickResult& result);
+        int64_t m_lastCartographySoundTime = -1;
+        int64_t m_lastLoomSoundTime = -1;
 
         // ── Merchant menu (MenuType::Merchant) ───────────────────────────
         // The trading mob, by entity id in the dimension it was opened in —
@@ -861,6 +920,31 @@ namespace Server {
         bool CloseMerchantMenuIfInvalid();
         // MC Player.sendMerchantOffers.
         void SendMerchantOffers();
+
+        // ── Vehicle container menu (chest boat, chest / hopper minecart) ──
+        // The vehicle by entity id in the dimension it was opened in, and the
+        // menu that was opened over it (to see it close, whatever closed it).
+        int32_t m_vehicleMenuEntityId  = -1;
+        int8_t  m_vehicleMenuDimension = 0;
+        const void* m_vehicleMenu      = nullptr;
+        // MC ContainerEntity.isChestVehicleStillValid each tick and before a
+        // click; CONTAINER_CLOSE (Container.stopOpen) once the menu is gone.
+        bool CloseVehicleMenuIfInvalid();
+
+        // ── Mount menu (MC HorseInventoryMenu / NautilusInventoryMenu) ────
+        // The mount by entity id in the dimension it was opened in, and the
+        // menu opened over it (MountInventoryMenu).
+        int32_t m_mountMenuEntityId  = -1;
+        int8_t  m_mountMenuDimension = 0;
+        const void* m_mountMenu      = nullptr;
+        // MC ServerPlayer.openHorseInventory / openNautilusInventory: close
+        // what is open, the menu over `mountId`, ClientboundMountScreenOpen-
+        // Packet (MountScreenOpenS2C) and the contents.
+        void OpenMountMenu(int32_t mountId);
+        // MC AbstractMountInventoryMenu.stillValid each tick and before a
+        // click: the mount's inventory not re-created, the mount alive, the
+        // player within 4 blocks of entity reach.
+        bool CloseMountMenuIfInvalid();
         // MC resendOffersToTradingPlayer: the villager's offers or level
         // changed while the screen is open (AbstractVillager::OffersRevision).
         void ResendMerchantOffersIfChanged();

@@ -6,6 +6,7 @@
 #include "../RenderBackend.hpp"
 #include <vulkan/vulkan.h>
 #include <unordered_map>
+#include <deque>
 #include <vector>
 #include <optional>
 #include <array>
@@ -95,8 +96,21 @@ namespace Render {
         RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& desc) override;
         void DestroyRenderTarget(RenderTargetHandle rt) override;
         void BindRenderTarget(RenderTargetHandle rt) override;
+        bool CopyFramebufferToRenderTarget(RenderTargetHandle dst) override;
         TextureHandle GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
         void ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
+        // Improved Transparency: MC 26.3 OIT (see RenderBackend.hpp and the
+        // notes at m_frameDepthPreserved / m_oitSlots below).
+        void SetFrameDepthPreserved(bool preserved) override { m_frameDepthPreservedWanted = preserved; }
+        bool FrameDepthPreserved() const override { return m_frameDepthPreserved; }
+        void SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) override;
+        bool OitEnsureTargets(int width, int height) override;
+        void OitDestroyTargets() override;
+        bool OitBeginPass(OitPass pass, bool clearColor) override;
+        void OitEndPass() override;
+        TextureHandle OitTexture(OitImage image) const override;
+        ShaderHandle CreateOitShaderFromFiles(const std::string& vertexPath,
+                                              const std::string& fragmentPath) override;
 
         // Shaders
         ShaderHandle CreateShader(const std::string& vertexSource,
@@ -218,6 +232,9 @@ namespace Render {
         std::array<VkImage, MAX_FRAMES_IN_FLIGHT>        m_depthImages{};
         std::array<VkDeviceMemory, MAX_FRAMES_IN_FLIGHT> m_depthMemory{};
         std::array<VkImageView, MAX_FRAMES_IN_FLIGHT>    m_depthImageViews{};
+        // Depth-aspect views of the same images, made only while the frame's
+        // depth is preserved (Improved Transparency samples it).
+        std::array<VkImageView, MAX_FRAMES_IN_FLIGHT>    m_depthSampleViews{};
         VkFormat m_depthFormat = VK_FORMAT_D32_SFLOAT;
 
         // ====================================================================
@@ -230,7 +247,37 @@ namespace Render {
         // against m_renderPass is compatible with it (VK render pass
         // compatibility ignores load/store ops and initial layouts).
         VkRenderPass m_renderPassLoad = VK_NULL_HANDLE;
-        bool CreateRenderPassVariant(bool loadContents, VkRenderPass& out);
+        // `keepDepth`: depth and stencil STORED at the end of the pass
+        // instead of discarded (Improved Transparency, below).
+        bool CreateRenderPassVariant(bool loadContents, VkRenderPass& out, bool keepDepth = false);
+
+        // ── Frame depth preserved (Improved Transparency) ──────────────
+        // The frame pass normally discards its depth (DONT_CARE) and a
+        // resume after a render-target interruption starts from a cleared
+        // one. Improved Transparency needs the frame's depth to survive
+        // those interruptions (each sorting layer is its own target) and
+        // to be copied out (each layer starts from it, the composite reads
+        // it). While preserved: the frame begins and resumes in the
+        // keep-depth variants below, and the per-slot depth images carry
+        // SAMPLED (m_depthSampleViews). SetFrameDepthPreserved only records the wish; the
+        // next BeginFrame rebuilds the depth images and framebuffers
+        // (ApplyFrameDepthPreserved, after a device idle — a settings
+        // toggle, never a per-frame cost). Off, everything is as before:
+        // the same passes, images and usage flags.
+        bool m_frameDepthPreserved       = false;
+        bool m_frameDepthPreservedWanted = false;
+        VkRenderPass m_renderPassKeepDepth     = VK_NULL_HANDLE;   // CLEAR, depth STORED
+        VkRenderPass m_renderPassLoadKeepDepth = VK_NULL_HANDLE;   // LOAD,  depth STORED
+        void ApplyFrameDepthPreserved();
+        void DestroyKeepDepthPasses();
+        VkRenderPass FrameBeginPass() const {
+            return (m_frameDepthPreserved && m_renderPassKeepDepth != VK_NULL_HANDLE)
+                       ? m_renderPassKeepDepth : m_renderPass;
+        }
+        VkRenderPass FrameResumePass() const {
+            return (m_frameDepthPreserved && m_renderPassLoadKeepDepth != VK_NULL_HANDLE)
+                       ? m_renderPassLoadKeepDepth : m_renderPassLoad;
+        }
         // One per (frame slot, swapchain image): the colour attachment is the
         // acquired image, the depth attachment the frame slot's own (see
         // m_depthImages). Index slot * imageCount + image — FrameFramebuffer().
@@ -243,15 +290,21 @@ namespace Render {
         bool m_swapchainTransferSrc = false;
         bool m_anisotropySupported = false;   // samplerAnisotropy feature enabled on the device
 
+        // Read-backs in flight, oldest first (RequestBackbufferReadback /
+        // TakeBackbufferReadback), and the host buffers of taken ones kept
+        // for reuse — the panorama capture requests a tile row every frame.
         struct BackbufferReadback {
             VkBuffer       buffer = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
+            VkDeviceSize   capacity = 0;
             int            width = 0, height = 0;
             uint32_t       frameSlot = 0;   // whose fence proves the copy is done
             uint64_t       frameNumber = 0; // the frame that recorded the copy
-            bool           pending = false;
-        } m_readback;
-        void DestroyReadback(bool waitForGpu);
+        };
+        static constexpr size_t kMaxReadbacksInFlight = 4;
+        std::deque<BackbufferReadback> m_readbacks;
+        std::vector<BackbufferReadback> m_readbackFree;
+        void DestroyReadbacks(bool waitForGpu);
 
         // ====================================================================
         // COMMAND BUFFERS
@@ -768,6 +821,81 @@ namespace Render {
         const VKShaderInfo* m_boundShaderInfo = nullptr;
         VkPipelineLayout    m_boundLayout     = VK_NULL_HANDLE;
         bool                m_boundIsPortal   = false;
+        bool                m_boundNeedsOitSet = false;       // layoutType 3 / 4
+
+        // ── Improved Transparency: MC 26.3 wavelet OIT ──────────────────
+        // One set of targets per frame slot (the frame-overlap rule): the
+        // depth bounds and culled depth bounds (RGBA32F), the two
+        // transmittance coefficient targets and the accumulation (RGBA16F),
+        // the clouds' depth. Colour images rest SHADER_READ_ONLY between
+        // passes; the OIT passes attach the slot's own frame depth image
+        // (MC attaches its main depth), which is why the frame's depth must
+        // be preserved while this is on. Nothing here exists until
+        // OitEnsureTargets; OitDestroyTargets frees all of it.
+        struct OitColor {
+            VkImage        image  = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            VkImageView    view   = VK_NULL_HANDLE;
+            TextureHandle  texture = INVALID_TEXTURE;   // sampled through this entry (view not owned by it)
+        };
+        struct OitSlot {
+            OitColor depthBounds, culled, coeff0, coeff1, accumulate;
+            VkImage        cloudDepthImage  = VK_NULL_HANDLE;   // rests DEPTH_STENCIL_ATTACHMENT
+            VkDeviceMemory cloudDepthMemory = VK_NULL_HANDLE;
+            VkImageView    cloudDepthView   = VK_NULL_HANDLE;
+            TextureHandle  frameDepthTexture = INVALID_TEXTURE; // m_depthSampleViews[slot]
+            std::array<VkFramebuffer, 7>   framebuffers{};      // by OitPass
+            std::array<VkDescriptorSet, 3> stageSets{};         // set 6 for DB / T / A
+            VkBuffer       paramsBuffer = VK_NULL_HANDLE;       // set 6 binding 3: OitProjParams
+            VkDeviceMemory paramsMemory = VK_NULL_HANDLE;
+            void*          paramsMapped = nullptr;
+        };
+        std::array<OitSlot, MAX_FRAMES_IN_FLIGHT> m_oitSlots{};
+        bool m_oitCreated = false;
+        int  m_oitWidth = 0, m_oitHeight = 0;
+        // Pass configurations: 0 = one RGBA32F (depth bounds, cull, clouds'
+        // depth bounds), 1 = two RGBA16F (transmittance), 2 = one RGBA16F
+        // (accumulate); [config][0 = load, 1 = clear]. Built on first use
+        // (the depth attachment's format is the frame's).
+        std::array<std::array<VkRenderPass, 2>, 3> m_oitPasses{};
+        VkDescriptorSetLayout m_oitSetLayout   = VK_NULL_HANDLE;   // set 6: 3 samplers + params UBO
+        VkDescriptorSetLayout m_emptySetLayout = VK_NULL_HANDLE;   // pads the unused set numbers
+        VkPipelineLayout m_portalOitPipelineLayout = VK_NULL_HANDLE;   // layoutType 3
+        VkPipelineLayout m_blockOitPipelineLayout  = VK_NULL_HANDLE;   // layoutType 4
+        VkDescriptorPool m_oitPool = VK_NULL_HANDLE;                   // per target set; freed with it
+        TextureHandle    m_oitDummy = INVALID_TEXTURE;                 // 1x1: samplers no stage reads
+        OitStage  m_oitStage = OitStage::None;
+        OitStage  m_oitSamplerStage = OitStage::None;   // last non-None: which set 6 is bound
+        glm::vec4 m_oitProjParams{0.0f};
+        bool      m_oitDbWritesDepth = false;
+        bool      m_oitPassOpen = false;
+        OitPass   m_oitOpenPass = OitPass::DepthBounds;
+        bool      m_oitSkipDraw = false;                // the stage's shader has no variant
+        struct OitVariantSet { std::array<ShaderHandle, 4> shader{}; std::array<bool, 4> tried{}; };
+        std::unordered_map<uint32_t, OitVariantSet> m_oitVariants;
+        // Pipelines built against an OIT pass (by configuration): kept apart
+        // from m_pipelines — never in the warm-up manifest, all destroyed
+        // with the targets.
+        std::array<std::unordered_map<size_t, PipelineRecord>, 3> m_oitPipelines;
+        PipelineState m_requestedPipelineState;   // the caller's, re-spliced on a stage change
+        struct OitPipelineTarget {
+            VkRenderPass renderPass = VK_NULL_HANDLE;
+            uint32_t     colorCount = 1;
+            bool         blendMax   = false;         // the depth bounds: MAX, not ADD
+        };
+        static int OitPassConfig(OitPass pass) {
+            switch (pass) {
+                case OitPass::Transmittance: case OitPass::CloudTransmittance: return 1;
+                case OitPass::Accumulate:    case OitPass::CloudAccumulate:    return 2;
+                default: return 0;
+            }
+        }
+        bool EnsureOitLayouts();
+        void DestroyOitPasses();
+        void DestroyOitLayouts();
+        void DestroyOitPipelines();
+        ShaderHandle OitVariantFor(ShaderHandle engine);
+        void BindOitSet(VkCommandBuffer cmd);
 
         // Last state recorded into the ACTIVE command buffer, so a draw that
         // repeats the previous draw's bindings records nothing for them. All
@@ -1040,7 +1168,8 @@ namespace Render {
 
         // Pipeline creation
         VkPipeline GetOrCreatePipeline(const PipelineState& state, ShaderHandle shader);
-        VkPipeline CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader);
+        VkPipeline CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader,
+                                          const OitPipelineTarget* oit = nullptr);
         size_t HashPipelineState(const PipelineState& state, ShaderHandle shader) const;
 
         // Push the per-draw stencil reference + read/write masks. The

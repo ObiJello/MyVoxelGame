@@ -18,7 +18,12 @@
 namespace Server {
 
     void SetBlockCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("setblock", SetBlockCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC SetBlockCommand: <pos> <block> [destroy|keep|replace].
+        dispatcher.RegisterCommand("setblock", SetBlockCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("pos", Cmd::Arg::BlockPos)
+                .Then(Cmd::Argument("block", Cmd::Arg::Block).Executes()
+                    .Then(Cmd::Literals({"destroy", "keep", "replace"})))));
     }
 
     void SetBlockCommand::Execute(const CommandSourceStack& source,
@@ -77,7 +82,11 @@ namespace Server {
             connection.SendChatMessage("Could not set the block", 1);
             return;
         }
-        if (!world->SetBlock(pos.x, pos.y, pos.z, state, Game::World::UpdateFlags::All)) {
+        // BlockInput.place(level, pos, 2 | 256): the replaced block's entity
+        // goes without its side effects — a chest overwritten by /setblock
+        // spills nothing (only `destroy` drops, through destroyBlock above).
+        if (!world->SetBlock(pos.x, pos.y, pos.z, state,
+                             Game::World::UpdateFlags::All | Game::World::UpdateFlags::SkipBlockEntitySideEffects)) {
             connection.SendChatMessage("Could not set the block", 1);
             return;
         }

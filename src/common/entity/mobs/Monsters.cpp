@@ -1,6 +1,8 @@
 // File: src/common/entity/mobs/Monsters.cpp
 #include "common/entity/mobs/Monsters.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/level/Explosion.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/DragonFight.hpp"
@@ -16,6 +18,7 @@
 #include "common/entity/ai/goals/EvokerGoals.hpp"
 #include "common/entity/ai/goals/IllusionerGoals.hpp"
 #include "common/entity/ai/goals/DoorGoals.hpp"
+#include "common/entity/ai/goals/RaiderGoals.hpp"
 #include "common/entity/ai/goals/WitherGoals.hpp"
 #include "common/entity/ai/goals/StriderGoals.hpp"
 #include "common/entity/ai/goals/AnimalGoals.hpp"
@@ -28,13 +31,22 @@
 #include "common/entity/projectile/Arrow.hpp"
 #include "common/entity/projectile/ThrowableProjectile.hpp"
 #include "common/entity/projectile/ThrownTrident.hpp"
+#include "common/entity/ai/goals/SpearGoals.hpp"
 #include "common/entity/Item.hpp"
+#include "common/entity/HorseTaming.hpp"            // IsSecondaryUseActive (Strider mounting)
+#include "common/entity/vehicle/VehicleEntity.hpp"   // DismountHelper (Strider dismount)
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/SnowLayerBlock.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/World.hpp"   // World::UpdateFlags
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/entity/ai/navigation/AmphibiousPathNavigation.hpp"
 #include "common/entity/ai/navigation/WaterBoundPathNavigation.hpp"
 #include "common/world/spawn/SpawnPlacements.hpp"
+#include "common/world/spawn/GeneratedSpawnTags.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/physics/Physics.hpp"
@@ -42,6 +54,7 @@
 #include "common/core/Mth.hpp"
 #include "common/sound/EntitySounds.hpp"
 #include "common/sound/LevelEventSounds.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
@@ -74,6 +87,27 @@ namespace Game {
         // rule Mob.hpp states).
     }
 
+    // ── ZombieHorse's rider (Animals.hpp) ──────────────────────────────────
+
+    std::shared_ptr<SpawnGroupData>
+    ZombieHorse::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // MC ZombieHorse.finalizeSpawn: a natural zombie horse carries a
+        // zombie (finalized with the horse's reason) holding an iron spear —
+        // added with the horse (addFreshEntityWithPassengers).
+        if (reason == SpawnReason::Natural && m_level) {
+            auto zombie = std::make_unique<Zombie>(m_level);
+            zombie->position = position;
+            zombie->yRot = zombie->yBodyRot = zombie->yHeadRot = yRot;
+            zombie->xRot = 0.0f;
+            zombie->FinalizeSpawn(reason, nullptr);
+            zombie->SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::IronSpear, 1));
+            Zombie* rider = zombie.get();
+            m_level->AddFreshEntity(std::move(zombie));
+            rider->StartRiding(*this, /*force=*/false);
+        }
+        return AbstractHorse::FinalizeSpawn(reason, std::move(groupData));
+    }
+
     // ── Zombie variants ────────────────────────────────────────────────────
 
     Drowned::Drowned(EntityLevel* level) : Zombie(EntityTypeId::Drowned, level) {
@@ -98,14 +132,62 @@ namespace Game {
     Drowned::FinalizeSpawn(SpawnReason reason,
                            std::shared_ptr<SpawnGroupData> groupData) {
         auto data = Zombie::FinalizeSpawn(reason, std::move(groupData));
-        // MC Drowned.populateDefaultEquipmentSlots: 10% roll a held weapon,
-        // and 10-in-16 of those a trident — 6.25% overall. The same two draws
-        // in the same order, minus the fishing rod (no mob equipment system;
-        // the flag IS the trident).
-        if (m_level && m_level->Random().NextFloat() > 0.9f) {
-            m_hasTrident = m_level->Random().NextInt(16) < 10;
+        if (!m_level) return data;
+        JavaRandom& rng = m_level->Random();
+        // MC Drowned.finalizeSpawn: a 3% nautilus shell in an empty off hand,
+        // always dropped.
+        if (GetOffhandEquipment().IsEmpty() && rng.NextFloat() < 0.03f) {
+            SetEquipment(EquipmentSlot::OFFHAND, ItemStack(Items::NautilusShell, 1));
+            SetGuaranteedDrop(EquipmentSlot::OFFHAND);
+        }
+        // A natural / structure trident drowned rides a zombie nautilus half
+        // the time — adults only, outside #more_frequent_drowned_spawns
+        // (the rivers).
+        if ((reason == SpawnReason::Natural || reason == SpawnReason::Structure) && HasTrident() &&
+            rng.NextFloat() < 0.5f && !IsBaby()) {
+            const glm::ivec3 at = BlockPosition();
+            const IBlockAccess* blocks = m_level->Blocks();
+            const std::string_view biome = blocks
+                ? std::string_view(BiomeRegistry::Get(blocks->GetBiome(at.x, at.y, at.z)).name)
+                : std::string_view{};
+            if (!SpawnTags::MoreFrequentDrownedSpawns(biome)) {
+                if (std::unique_ptr<Mob> nautilus = MakeGenericMob(EntityTypeId::ZombieNautilus, m_level)) {
+                    if (reason == SpawnReason::Structure) nautilus->SetPersistenceRequired(true);
+                    nautilus->position = position;
+                    nautilus->yRot = nautilus->yBodyRot = nautilus->yHeadRot = yRot;
+                    nautilus->xRot = 0.0f;
+                    nautilus->FinalizeSpawn(reason, nullptr);
+                    Mob* placed = nautilus.get();
+                    m_level->AddFreshEntity(std::move(nautilus));
+                    StartRiding(*placed, /*force=*/false);
+                }
+            }
         }
         return data;
+    }
+
+    void Drowned::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        // MC Drowned.populateDefaultEquipmentSlots (no armour: Mob's roll is
+        // not called): 10% a held item — 10 in 16 a trident, else a fishing
+        // rod.
+        (void)difficulty;
+        if (static_cast<double>(random.NextFloat()) > 0.9) {
+            const int rand = random.NextInt(16);
+            SetEquipment(EquipmentSlot::MAINHAND, ItemStack(rand < 10 ? Items::Trident : Items::FishingRod, 1));
+        }
+    }
+
+    bool Drowned::CanReplaceCurrentItem(const ItemStack& newStack, const ItemStack& current,
+                                        EquipmentSlot slot) const {
+        return current.itemId == Items::NautilusShell ? false
+                                                      : Zombie::CanReplaceCurrentItem(newStack, current, slot);
+    }
+
+    bool Drowned::WantsToPickUp(const ItemStack& stack) const {
+        if (DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:spears")) {
+            return false;
+        }
+        return Zombie::WantsToPickUp(stack);
     }
 
     void Drowned::PerformRangedAttack(LivingEntity& target, float power) {
@@ -115,6 +197,17 @@ namespace Game {
         auto trident = std::make_unique<ThrownTrident>(m_level);
         trident->SetOwner(this);
         trident->position = glm::dvec3(position.x, GetEyeY() - 0.1, position.z);
+        // MC: new ThrownTrident(level, this, tridentItemStack.copyWithCount(1))
+        // — the held trident (a plain one if the hand holds something else):
+        // its Impaling, Loyalty and glint ride the thrown one. A mob's throw
+        // is Pickup.DISALLOWED (AbstractArrow's owner constructor). The
+        // drowned keeps its own.
+        {
+            ItemStack thrown = HasTrident() ? GetMainHandEquipment() : ItemStack(Items::Trident, 1);
+            thrown.count = 1;
+            trident->SetTridentItem(thrown);
+            trident->SetPickup(Arrow::Pickup::Disallowed);
+        }
 
         // MC: aim a third of the way up the target's box with the standard
         // 0.2-per-horizontal-block loft.
@@ -135,32 +228,70 @@ namespace Game {
     bool Husk::DoHurtTarget(Entity& target) {
         // MC Husk.doHurtTarget: super first, then HUNGER on a landed hit.
         const bool result = Zombie::DoHurtTarget(target);
-        if (result) {
-            // MC gates on getMainHandItem().isEmpty() — a husk holding a
-            // weapon does not sting. No mob equipment system exists, so every
-            // husk's hand is empty, which is also MC's common case.
+        // MC gates on getMainHandItem().isEmpty() — a husk holding a weapon
+        // does not sting.
+        if (result && GetMainHandEquipment().IsEmpty() && m_level) {
             if (auto* living = dynamic_cast<LivingEntity*>(&target)) {
-                // MC: 140 * (int)effectiveDifficulty ticks of HUNGER I.
-                // Regional difficulty (chunk inhabited time, moon) is not
-                // modelled; these are the fresh-world base values —
-                // EASY 0.75, NORMAL 1.5, HARD 2.25 — truncated: 0 / 1 / 2.
-                int effectiveDifficulty = 0;
-                if (m_level) {
-                    switch (m_level->GetDifficulty()) {
-                        case Difficulty::Normal: effectiveDifficulty = 1; break;
-                        case Difficulty::Hard:   effectiveDifficulty = 2; break;
-                        default: break;
-                    }
-                }
-                if (effectiveDifficulty > 0) {
-                    living->AddEffect(
-                        MobEffectInstance(MobEffectId::Hunger,
-                                          140 * effectiveDifficulty),
-                        this);
-                }
+                // MC: 140 * (int)effectiveDifficulty ticks of HUNGER I, the
+                // local difficulty at the husk.
+                const float effectiveDifficulty =
+                    m_level->GetCurrentDifficultyAt(BlockPosition()).GetEffectiveDifficulty();
+                living->AddEffect(
+                    MobEffectInstance(MobEffectId::Hunger,
+                                      140 * static_cast<int>(effectiveDifficulty)),
+                    this);
             }
         }
         return result;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Husk::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        groupData = Zombie::FinalizeSpawn(reason, std::move(groupData));
+        if (!m_level) return groupData;
+        JavaRandom& rng = m_level->Random();
+        const float difficultyModifier = CurrentDifficulty().GetSpecialMultiplier();
+        // MC Husk.finalizeSpawn rolls canPickUpLoot a second time.
+        if (reason != SpawnReason::Conversion) {
+            SetCanPickUpLoot(rng.NextFloat() < 0.55f * difficultyModifier);
+        }
+        // MC wraps the zombie token in a fresh HuskGroupData every time, whose
+        // triedToSpawnCamelHusk is false only for a NATURAL spawn — so each
+        // naturally spawned husk tries once, where a camel husk's box fits.
+        auto* zombieData = dynamic_cast<ZombieGroupData*>(groupData.get());
+        if (zombieData && reason == SpawnReason::Natural) {
+            const glm::ivec3 pos = BlockPosition();
+            // EntityTypes.CAMEL_HUSK.getSpawnAABB(x + 0.5, y, z + 0.5): the
+            // camel husk's box centred on the block, feet on it.
+            const EntityTypeInfo& camelType = GetEntityTypeInfo(EntityTypeId::CamelHusk);
+            AABB box;
+            const float halfWidth = camelType.width * 0.5f;
+            box.min = glm::vec3(static_cast<float>(pos.x) + 0.5f - halfWidth, static_cast<float>(pos.y),
+                                static_cast<float>(pos.z) + 0.5f - halfWidth);
+            box.max = glm::vec3(static_cast<float>(pos.x) + 0.5f + halfWidth,
+                                static_cast<float>(pos.y) + camelType.height,
+                                static_cast<float>(pos.z) + 0.5f + halfWidth);
+            PhysicsContext phys = m_level->Physics();
+            if (!Game::CollidesAt(box, phys) && rng.NextFloat() < 0.1f) {
+                SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::IronSpear, 1));
+                if (std::unique_ptr<Mob> camelHusk = MakeGenericMob(EntityTypeId::CamelHusk, m_level)) {
+                    camelHusk->position = position;
+                    camelHusk->FinalizeSpawn(reason, nullptr);
+                    Mob* camel = camelHusk.get();
+                    m_level->AddFreshEntity(std::move(camelHusk));
+                    StartRiding(*camel, /*force=*/true);
+                    auto parched = std::make_unique<Parched>(m_level);
+                    parched->position = position;
+                    parched->yRot = parched->yBodyRot = parched->yHeadRot = yRot;
+                    parched->xRot = 0.0f;
+                    parched->FinalizeSpawn(reason, nullptr);
+                    Parched* rider = parched.get();
+                    m_level->AddFreshEntity(std::move(parched));
+                    rider->StartRiding(*camel, /*force=*/false);
+                }
+            }
+        }
+        return groupData;
     }
 
     // ── In-water conversion (MC Zombie.tick / convertToZombieType) ─────────
@@ -208,10 +339,14 @@ namespace Game {
         if (IsRemoved() || !replacement || !m_level) return;
 
         CopyConversionState(*replacement);
+        // SINGLE(keepEquipment = true): the worn armour and held weapon move
+        // over with their drop chances.
+        MoveEquipmentTo(*replacement);
         replacement->SetBaby(IsBaby());
         replacement->SetCanBreakDoors(CanBreakDoors());
+        // MC: the local difficulty's special multiplier at the new body.
         replacement->HandleAttributes(
-            GetSpecialMultiplier(m_level->GetDifficulty()),
+            m_level->GetCurrentDifficultyAt(replacement->BlockPosition()).GetSpecialMultiplier(),
             SpawnReason::Conversion);
         FinishConversion(std::move(replacement));
     }
@@ -236,9 +371,8 @@ namespace Game {
     }
 
     void ZombifiedPiglin::AddBehaviourGoals() {
-        // MC ZombifiedPiglin.addBehaviourGoals, priority for priority
-        // (SpearUseGoal(1) omitted — no spear item, matching the zombie's
-        // omission).
+        // MC ZombifiedPiglin.addBehaviourGoals, priority for priority.
+        m_goalSelector.AddGoal(1, std::make_unique<SpearUseGoal>(this, 1.0, 1.0, 10.0f, 2.0f));
         m_goalSelector.AddGoal(2, std::make_unique<ZombieAttackGoal>(this, 1.0, false));
         m_goalSelector.AddGoal(7, std::make_unique<WaterAvoidingRandomStrollGoal>(this, 1.0));
 
@@ -392,8 +526,8 @@ namespace Game {
     }
 
     void Zombie::RegisterGoals() {
-        // MC Zombie.registerGoals. SpearUseGoal(2) omitted — no spear item.
-        // Everything else is priority-for-priority.
+        // MC Zombie.registerGoals, priority for priority (the spear's
+        // SpearUseGoal rides addBehaviourGoals).
         m_goalSelector.AddGoal(4, std::make_unique<ZombieAttackTurtleEggGoal>(this, 1.0, 3));
         m_goalSelector.AddGoal(8, std::make_unique<LookAtPlayerGoal>(this, 8.0f));
         m_goalSelector.AddGoal(8, std::make_unique<RandomLookAroundGoal>(this));
@@ -402,7 +536,13 @@ namespace Game {
 
     void Zombie::AddBehaviourGoals() {
         // MC addBehaviourGoals. MoveThroughVillageGoal(6) omitted — no
-        // villages or doors for it to path between.
+        // villages or doors for it to path between. SpearUseGoal(2): a
+        // zombie holding a spear charges with it (SpearGoals.hpp). (Not the
+        // drowned's: MC Drowned.addBehaviourGoals replaces this set, and
+        // borrows only the melee through the base call here.)
+        if (GetType() != EntityTypeId::Drowned) {
+            m_goalSelector.AddGoal(2, std::make_unique<SpearUseGoal>(this, 1.0, 1.0, 10.0f, 2.0f));
+        }
         m_goalSelector.AddGoal(3, std::make_unique<ZombieAttackGoal>(this, 1.0, false));
         m_goalSelector.AddGoal(7, std::make_unique<WaterAvoidingRandomStrollGoal>(this, 1.0));
 
@@ -446,7 +586,9 @@ namespace Game {
         if (!m_level) return groupData;
 
         JavaRandom& rng = m_level->Random();
-        const float difficultyModifier = GetSpecialMultiplier(m_level->GetDifficulty());
+        // MC finalizeSpawn's `difficulty`: the local difficulty here.
+        const DifficultyInstance difficulty = CurrentDifficulty();
+        const float difficultyModifier = difficulty.GetSpecialMultiplier();
 
         if (reason != SpawnReason::Conversion) {
             SetCanPickUpLoot(rng.NextFloat() < 0.55f * difficultyModifier);
@@ -496,13 +638,45 @@ namespace Game {
             }
 
             SetCanBreakDoors(rng.NextFloat() < difficultyModifier * 0.1f);
-            // populateDefaultEquipmentSlots / enchantments omitted — no mob
-            // equipment system yet.
+            if (reason != SpawnReason::Conversion) {
+                PopulateDefaultEquipmentSlots(rng, difficulty);
+                PopulateDefaultEquipmentEnchantments(rng, difficulty);
+            }
         }
 
-        // Halloween pumpkin heads omitted with equipment.
+        // SpecialDates.isHalloween: a 25% pumpkin head on an empty head.
+        MaybeWearHalloweenHead(rng);
         HandleAttributes(difficultyModifier, reason);
         return groupData;
+    }
+
+    void Zombie::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        Monster::PopulateDefaultEquipmentSlots(random, difficulty);
+        const bool hard = m_level && m_level->GetDifficulty() == Difficulty::Hard;
+        if (random.NextFloat() < (hard ? 0.05f : 0.01f)) {
+            const int rand = random.NextInt(6);
+            const ItemID weapon = rand == 0 ? Items::IronSword : rand == 1 ? Items::IronSpear : Items::IronShovel;
+            SetEquipment(EquipmentSlot::MAINHAND, ItemStack(weapon, 1));
+        }
+    }
+
+    bool Zombie::CanHoldItem(const ItemStack& stack) const {
+        // MC: stack.is(ItemTags.EGGS) && isBaby() && isPassenger() → false.
+        if (IsBaby() && IsPassenger() &&
+            DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:eggs")) {
+            return false;
+        }
+        return Monster::CanHoldItem(stack);
+    }
+
+    bool Zombie::WantsToPickUp(const ItemStack& stack) const {
+        return stack.itemId == Items::GlowInkSac ? false : Monster::WantsToPickUp(stack);
+    }
+
+    void ZombifiedPiglin::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)difficulty;
+        SetEquipment(EquipmentSlot::MAINHAND,
+                     ItemStack(random.NextInt(20) == 0 ? Items::GoldenSpear : Items::GoldenSword, 1));
     }
 
     void Zombie::RandomizeReinforcementsChance() {
@@ -624,12 +798,13 @@ namespace Game {
             // "reinforcement_callee_charge" id (Zombie.java:294,502). The ids
             // must differ: a callee later promoted to caller stacks both,
             // and one id clobbered the other.
+            // MC reads the caller-charge modifier's amount back (it is saved
+            // with the zombie — EntityNbt's permanent modifiers).
             double existing = 0.0;
-            if (m_attributes.HasModifier(Attribute::SpawnReinforcements,
-                                         ModifierId::ZombieSpawnReinf)) {
-                // MC reads the modifier's amount back; the map has no getter
-                // for that, so the accumulated charge is mirrored here.
-                existing = m_reinforcementCallerCharge;
+            if (const AttributeInstance* reinf = m_attributes.Find(Attribute::SpawnReinforcements)) {
+                for (const AttributeModifier& mod : reinf->Modifiers()) {
+                    if (mod.id == static_cast<uint32_t>(ModifierId::ZombieSpawnReinf)) existing = mod.amount;
+                }
             }
             m_reinforcementCallerCharge = existing - 0.05;
             m_attributes.RemoveModifier(Attribute::SpawnReinforcements,
@@ -646,24 +821,17 @@ namespace Game {
     }
 
     bool Zombie::DoHurtTarget(Entity& target) {
-        // MC Zombie.doHurtTarget: super first, then the fire hand-off — an
+        // MC Zombie.doHurtTarget: super first (a held weapon's damage and
+        // enchantments ride Mob::DoHurtTarget), then the fire hand-off — an
         // on-fire, EMPTY-HANDED zombie ignites its victim for
         // 2 * (int)effectiveDifficulty seconds with chance
-        // effectiveDifficulty * 0.3. No mob equipment system exists, so the
-        // mainhand is always empty (also MC's common case). Regional
-        // difficulty is not modelled; these are the fresh-world base values —
-        // EASY 0.75, NORMAL 1.5, HARD 2.25 — the same convention the husk's
-        // HUNGER hit uses.
+        // effectiveDifficulty * 0.3, the local difficulty at the zombie.
         const bool result = Monster::DoHurtTarget(target);
-        if (result && m_level && IsOnFire()) {
-            float effectiveDifficulty = 0.0f;
-            switch (m_level->GetDifficulty()) {
-                case Difficulty::Easy:   effectiveDifficulty = 0.75f; break;
-                case Difficulty::Normal: effectiveDifficulty = 1.5f;  break;
-                case Difficulty::Hard:   effectiveDifficulty = 2.25f; break;
-                default: break;
-            }
-            if (m_level->Random().NextFloat() < effectiveDifficulty * 0.3f) {
+        if (result && m_level) {
+            const float effectiveDifficulty =
+                m_level->GetCurrentDifficultyAt(BlockPosition()).GetEffectiveDifficulty();
+            if (GetMainHandEquipment().IsEmpty() && IsOnFire() &&
+                m_level->Random().NextFloat() < effectiveDifficulty * 0.3f) {
                 target.IgniteForSeconds(2 * static_cast<int>(effectiveDifficulty));
             }
         }
@@ -693,10 +861,53 @@ namespace Game {
 
     // ── WitherSkeleton ─────────────────────────────────────────────────────
 
+    WitherSkeleton::WitherSkeleton(EntityLevel* level)
+        : Skeleton(EntityTypeId::WitherSkeleton, level) {
+        // MC WitherSkeleton: setPathfindingMalus(LAVA, 8.0F) — it lives in
+        // the nether; AbstractSkeleton's goals and weapon reassessment.
+        SetPathfindingMalus(PathType::Lava, 8.0f);
+        RegisterGoals();
+    }
+
+    namespace {
+        constexpr EntityTypeId kAbstractPiglinTargets[] = { EntityTypeId::Piglin, EntityTypeId::PiglinBrute };
+    }
+
+    void WitherSkeleton::RegisterGoals() {
+        m_targetSelector.AddGoal(3, std::make_unique<NearestAttackableTargetGoal>(
+                                        this, kAbstractPiglinTargets, 2, true));
+        Skeleton::RegisterGoals();
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    WitherSkeleton::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        groupData = Skeleton::FinalizeSpawn(reason, std::move(groupData));
+        // MC: ATTACK_DAMAGE base 4.0, then reassessWeaponGoal().
+        m_attributes.SetBaseValue(Attribute::AttackDamage, 4.0);
+        ReassessWeaponGoal();
+        return groupData;
+    }
+
+    void WitherSkeleton::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)random; (void)difficulty;
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::StoneSword, 1));
+    }
+
+    bool WitherSkeleton::CanHoldItem(const ItemStack& stack) const {
+        return !DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId),
+                                 "minecraft:wither_skeleton_disliked_weapons") &&
+               Skeleton::CanHoldItem(stack);
+    }
+
+    void WitherSkeleton::CustomizeArrow(Arrow& arrow) {
+        // MC WitherSkeleton.getArrow: arrow.igniteForSeconds(100.0F).
+        arrow.IgniteForSeconds(100.0f);
+    }
+
     bool WitherSkeleton::DoHurtTarget(Entity& target) {
         // MC WitherSkeleton.doHurtTarget: super first, then WITHER for 200
         // ticks (amplifier 0) on any living target — no difficulty gate.
-        if (!GenericMonster::DoHurtTarget(target)) return false;
+        if (!Skeleton::DoHurtTarget(target)) return false;
         if (auto* living = dynamic_cast<LivingEntity*>(&target)) {
             living->AddEffect(MobEffectInstance(MobEffectId::Wither, 200), this);
         }
@@ -762,6 +973,15 @@ namespace Game {
         arrow->SetOwner(this);
         arrow->position = glm::dvec3(position.x, GetEyeY() - 0.1, position.z);
         arrow->SetBaseDamageFromMob(power);
+        // MC ProjectileUtil.getMobArrow(mob, projectile, power, weapon): the
+        // arrow is fired from the bow in getWeaponHoldingHand(this, BOW) —
+        // the main hand when it holds one, else the off hand — so its Power
+        // and Punch ride the arrow to the hit.
+        {
+            const ItemStack& bow = GetMainHandEquipment().itemId == Items::Bow ? GetMainHandEquipment()
+                                                                                : GetOffhandEquipment();
+            if (!bow.IsEmpty()) arrow->SetFiredFromWeapon(bow);
+        }
         // MC routes arrow creation through getArrow so subclasses can tip it.
         CustomizeArrow(*arrow);
 
@@ -793,12 +1013,6 @@ namespace Game {
         // MC: 3 AvoidEntityGoal(Wolf.class, 6.0F, 1.0, 1.2).
         m_goalSelector.AddGoal(3, std::make_unique<AvoidEntityGoal>(this, kWolfAvoid, 1,
                                                                     6.0f, 1.0, 1.2));
-        // MC reassessWeaponGoal: getHardAttackInterval() on HARD (20; the
-        // Bogged's 50), getAttackInterval() otherwise (40; Bogged 70).
-        const int interval = (m_level && m_level->GetDifficulty() == Difficulty::Hard)
-            ? GetHardAttackInterval() : GetAttackInterval();
-        m_goalSelector.AddGoal(4, std::make_unique<RangedBowAttackGoal>(
-                                      this, this, 1.0, interval, 15.0f));
         m_goalSelector.AddGoal(5, std::make_unique<WaterAvoidingRandomStrollGoal>(this, 1.0));
         m_goalSelector.AddGoal(6, std::make_unique<LookAtPlayerGoal>(this, 8.0f));
         m_goalSelector.AddGoal(6, std::make_unique<RandomLookAroundGoal>(this));
@@ -809,6 +1023,67 @@ namespace Game {
         // 3 waits on the baby-on-land selector.)
         m_targetSelector.AddGoal(3, std::make_unique<NearestAttackableTargetGoal>(
                                         this, kIronGolemTargets, 1, true));
+        // MC's AbstractSkeleton constructor ends with reassessWeaponGoal():
+        // the priority-4 weapon goal (melee for the empty-handed mob a
+        // constructor makes; finalizeSpawn / the save's equipment hand it a
+        // bow and reassess again).
+        ReassessWeaponGoal();
+    }
+
+    void Skeleton::ReassessWeaponGoal() {
+        if (!m_level || m_level->IsClientSide()) return;
+        if (m_meleeGoal) { m_goalSelector.RemoveGoal(m_meleeGoal); m_meleeGoal = nullptr; }
+        if (m_bowGoal)   { m_goalSelector.RemoveGoal(m_bowGoal);   m_bowGoal = nullptr; }
+        // getItemInHand(ProjectileUtil.getWeaponHoldingHand(this, BOW)).
+        const bool holdsBow = GetMainHandEquipment().itemId == Items::Bow ||
+                              GetOffhandEquipment().itemId == Items::Bow;
+        if (holdsBow) {
+            // getHardAttackInterval() (20; the Bogged's 50) unless the level
+            // is not HARD, then getAttackInterval() (40; Bogged 70).
+            const int minAttackInterval = m_level->GetDifficulty() != Difficulty::Hard
+                ? GetAttackInterval() : GetHardAttackInterval();
+            auto bow = std::make_unique<RangedBowAttackGoal>(this, this, 1.0, minAttackInterval, 15.0f);
+            m_bowGoal = bow.get();
+            m_goalSelector.AddGoal(4, std::move(bow));
+        } else {
+            // MeleeAttackGoal(this, 1.2, false) — its start/stop set the
+            // aggressive flag, as AbstractSkeleton's anonymous subclass does.
+            auto melee = std::make_unique<MeleeAttackGoal>(this, 1.2, false);
+            m_meleeGoal = melee.get();
+            m_goalSelector.AddGoal(4, std::move(melee));
+        }
+    }
+
+    void Skeleton::OnEquipItem(EquipmentSlot slot, const ItemStack& oldStack, const ItemStack& newStack) {
+        Monster::OnEquipItem(slot, oldStack, newStack);
+        if (m_level && !m_level->IsClientSide()) ReassessWeaponGoal();
+    }
+
+    void Skeleton::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        Monster::PopulateDefaultEquipmentSlots(random, difficulty);
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::Bow, 1));
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Skeleton::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        groupData = Monster::FinalizeSpawn(reason, std::move(groupData));
+        if (!m_level) return groupData;
+        JavaRandom& rng = m_level->Random();
+        const DifficultyInstance difficulty = CurrentDifficulty();
+        PopulateDefaultEquipmentSlots(rng, difficulty);
+        PopulateDefaultEquipmentEnchantments(rng, difficulty);
+        ReassessWeaponGoal();
+        SetCanPickUpLoot(rng.NextFloat() < 0.55f * difficulty.GetSpecialMultiplier());
+        MaybeWearHalloweenHead(rng);
+        return groupData;
+    }
+
+    bool Skeleton::WantsToPickUp(const ItemStack& stack) const {
+        // MC AbstractSkeleton.wantsToPickUp: never #spears.
+        if (DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:spears")) {
+            return false;
+        }
+        return Monster::WantsToPickUp(stack);
     }
 
     // The Creeper/Wither explosion helpers that used to live here — a
@@ -883,7 +1158,10 @@ namespace Game {
             if (m_ignited) SetSwellDir(1);
 
             // MC: the hiss as the fuse starts.
-            if (m_swellDir > 0 && m_swell == 0) PlaySound(SoundEvents::CREEPER_PRIMED, 1.0f, 0.5f);
+            if (m_swellDir > 0 && m_swell == 0) {
+                PlaySound(SoundEvents::CREEPER_PRIMED, 1.0f, 0.5f);
+                GameEvent(GameEventId::PrimeFuse);   // a no-op on the client copy
+            }
 
             m_swell += m_swellDir;
             if (m_swell < 0) m_swell = 0;
@@ -908,7 +1186,8 @@ namespace Game {
         // terrain alone, which is decided inside Explode rather than here.
         ExplosionParams params;
         params.center       = position;
-        params.radius       = static_cast<float>(kExplosionRadius);
+        // MC: `float explosionMultiplier = isPowered() ? 2.0F : 1.0F;`
+        params.radius       = static_cast<float>(kExplosionRadius) * (m_powered ? 2.0f : 1.0f);
         params.source       = this;
         params.attributedTo = this;
         params.interaction  = ExplosionInteraction::Mob;
@@ -927,6 +1206,32 @@ namespace Game {
         // exactly as if it had been killed.
         TriggerOnDeathMobEffects(RemovalReason::Killed);
         Discard();
+    }
+
+    void Creeper::KilledEntity(LivingEntity& victim) {
+        Monster::KilledEntity(victim);
+        // shouldDropLoot (Monster: the mob_drops rule), isPowered,
+        // !droppedSkulls; then entity.dropFromLootTable(CHARGED_CREEPER) —
+        // loot_table/charged_creeper/root.json's alternatives by the victim's
+        // type, each one fixed head — spawned at the victim.
+        if (!m_level || m_level->IsClientSide()) return;
+        if (!Rules::GetBool(Rules::Id::MobDrops) || !m_powered || m_droppedSkulls) return;
+        BlockID head = BlockID::Air;
+        switch (victim.GetType()) {
+            case EntityTypeId::Piglin:         head = BlockID::PiglinHead; break;
+            case EntityTypeId::Creeper:        head = BlockID::CreeperHead; break;
+            case EntityTypeId::Skeleton:       head = BlockID::SkeletonSkull; break;
+            case EntityTypeId::WitherSkeleton: head = BlockID::WitherSkeletonSkull; break;
+            case EntityTypeId::Zombie:         head = BlockID::ZombieHead; break;
+            default: return;
+        }
+        m_level->SpawnItemStackDrop(victim.position, ItemStack(ItemRegistry::FromBlock(head), 1));
+        m_droppedSkulls = true;
+    }
+
+    void Creeper::ThunderHit(Entity* bolt) {
+        Monster::ThunderHit(bolt);
+        m_powered = true;
     }
 
     void Creeper::SpawnLingeringCloud() {
@@ -1107,7 +1412,18 @@ namespace Game {
         velocity = glm::dvec3(0.0);
         ResetFallDistance();
         needsSync = true;
+        // MC Enderman.teleport: level.gameEvent(TELEPORT, oldPos, Context.of(this)).
+        if (ILevelWrite* write = m_level->MutableBlocks()) {
+            write->GameEvent(GameEventId::Teleport, from, GameEventContext::Of(this));
+        }
         if (!IsSilent()) {
+            // levelEvent 2018 at the old cell with the clamped packed
+            // difference to the new one (BlockUtil.clampedPackDifference-
+            // InPosition, radius 127): the portal streak between them.
+            const glm::ivec3 oldCell(static_cast<int>(std::floor(from.x)), static_cast<int>(std::floor(from.y)),
+                                     static_cast<int>(std::floor(from.z)));
+            const int packed = ClampedPackDifferenceInPosition(oldCell, BlockPosition(), 127, 127, 127);
+            m_level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_ENDERMAN_TELEPORT, oldCell, packed);
             m_level->PlaySound(nullptr, from, SoundEvents::ENDERMAN_TELEPORT, GetSoundSource(), 1.0f, 1.0f);
             PlaySound(SoundEvents::ENDERMAN_TELEPORT, 1.0f, 1.0f);
         }
@@ -1140,13 +1456,27 @@ namespace Game {
         // EVERY tick — an enderman never jumps, it teleports; without this a
         // jump latched by the shared jump control would carry over.
         jumping = false;
-        // MC: updatePersistentAnger BEFORE super (the client half is the
-        // portal particles — none yet).
+        // MC: the client half is two PORTAL particles a tick; the server
+        // half updatePersistentAnger, both BEFORE super.
+        if (m_level && m_level->IsClientSide()) {
+            JavaRandom& r = m_level->Random();
+            const double w = static_cast<double>(GetBbWidth()), h = static_cast<double>(GetBbHeight());
+            for (int i = 0; i < 2; ++i) {
+                const double px = position.x + w * (2.0 * r.NextDouble() - 1.0) * 0.5;
+                const double py = position.y + h * r.NextDouble() - 0.25;
+                const double pz = position.z + w * (2.0 * r.NextDouble() - 1.0) * 0.5;
+                m_level->AddParticle(ParticleKind::Portal, px, py, pz, (r.NextDouble() - 0.5) * 2.0, -r.NextDouble(),
+                                     (r.NextDouble() - 0.5) * 2.0);
+            }
+        }
         if (m_level && !m_level->IsClientSide()) {
             UpdatePersistentAnger(/*stayAngryIfTargetPresent=*/true);
         }
-        // MC isSensitiveToWater: one drowning point per tick in contact.
-        if (m_level && !m_level->IsClientSide() && IsAlive() && IsInWater()) {
+        // MC isSensitiveToWater: one drowning point per tick in water or
+        // rain (LivingEntity.aiStep's isInWaterOrRain) — and every drowning
+        // point is environmental damage, so Hurt blinks it away 9 times in
+        // 10: an enderman caught in the rain teleports until it finds cover.
+        if (m_level && !m_level->IsClientSide() && IsAlive() && IsInWaterOrRain()) {
             Hurt(MobDamageSource::Drown, 1.0f, nullptr);
         }
         Monster::AiStep();
@@ -1156,7 +1486,11 @@ namespace Game {
         // MC: daylight teleport — the enderman's answer to sunrise, gated on
         // 600 ticks since it last acquired a target so a fight is not ended
         // by dawn mid-swing.
-        if (m_level && m_level->IsDay() && tickCount >= m_targetChangeTime + kMinDeaggressionTime) {
+        // Level.isBrightOutside: no fixed time and skyDarken below 4 — which
+        // the weather darkens, so a thunderstorm keeps endermen around.
+        const bool brightOutside = m_level && !DimensionFixedTime(m_level->Dimension()).has_value() &&
+                                   m_level->GetSkyDarken() < 4;
+        if (brightOutside && tickCount >= m_targetChangeTime + kMinDeaggressionTime) {
             const glm::ivec3 p = BlockPosition();
             const float brightness = LightLevelDependentMagicValue(*m_level, p.x, p.y, p.z);
             if (brightness > 0.5f && m_level->CanSeeSky(p.x, p.y, p.z) &&
@@ -1373,8 +1707,21 @@ namespace Game {
                     m_spikesAnimation += (1.0f - m_spikesAnimation) * 0.06f;
                 }
 
-                // MC's swim-bubble trail and the beam's bubble line need the
-                // particle system.
+                // MC's swim-bubble trail: two BUBBLEs a block and a half
+                // behind the view while it swims. (The beam's bubble line
+                // needs the target entity, which the client is not sent —
+                // only the has-target flag.)
+                if (IsMoving() && IsInWater()) {
+                    const glm::vec3 view = Mth::ViewVector(xRot, yRot);
+                    JavaRandom& r = m_level->Random();
+                    const double w = static_cast<double>(GetBbWidth());
+                    for (int i = 0; i < 2; ++i) {
+                        const double px = position.x + w * (2.0 * r.NextDouble() - 1.0) * 0.5 - view.x * 1.5;
+                        const double py = position.y + static_cast<double>(GetBbHeight()) * r.NextDouble() - view.y * 1.5;
+                        const double pz = position.z + w * (2.0 * r.NextDouble() - 1.0) * 0.5 - view.z * 1.5;
+                        m_level->AddParticle(ParticleKind::Bubble, px, py, pz, 0.0, 0.0, 0.0);
+                    }
+                }
 
                 // MC: the client counts its own attack time up toward the
                 // duration while a beam target is synced — the renderer's
@@ -1384,7 +1731,6 @@ namespace Game {
                     m_clientSideAttackTime < GetAttackDuration()) {
                     ++m_clientSideAttackTime;
                 }
-                // MC's per-particle beam line needs the particle system.
             }
 
             if (IsInWater()) {
@@ -1436,7 +1782,9 @@ namespace Game {
         // Generic.
         if (m_level && !m_level->IsClientSide() && !IsMoving() &&
             (source == MobDamageSource::MobAttack ||
-             source == MobDamageSource::PlayerAttack)) {
+             source == MobDamageSource::PlayerAttack ||
+             source == MobDamageSource::MaceSmash ||
+             source == MobDamageSource::Spear)) {
             if (auto* living = dynamic_cast<LivingEntity*>(attacker)) {
                 living->Hurt(MobDamageSource::Generic, 2.0f, this);
             }
@@ -1566,7 +1914,7 @@ namespace Game {
         if (!groupData) {
             auto data = std::make_shared<SpiderEffectsGroupData>();
             if (m_level->GetDifficulty() == Difficulty::Hard &&
-                rng.NextFloat() < 0.1f * GetSpecialMultiplier(m_level->GetDifficulty())) {
+                rng.NextFloat() < 0.1f * CurrentDifficulty().GetSpecialMultiplier()) {
                 data->SetRandomEffect(rng);
             }
             groupData = std::move(data);
@@ -1829,7 +2177,7 @@ namespace Game {
         out.Register(Attribute::StepHeight,           1.0);
     }
 
-    Ravager::Ravager(EntityLevel* level) : Monster(EntityTypeId::Ravager, level) {
+    Ravager::Ravager(EntityLevel* level) : Raider(EntityTypeId::Ravager, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
         // MC's constructor: xpReward 20 (ours comes from the entity type
@@ -1841,9 +2189,9 @@ namespace Game {
 
     void Ravager::RegisterGoals() {
         // MC Ravager.registerGoals. super.registerGoals() is
-        // Raider.registerGoals (ObtainRaidLeaderBannerGoal, PathfindToRaidGoal,
-        // RaiderMoveThroughVillageGoal, LongDistancePatrolGoal) — SKIPPED: all
-        // four need the raid system.
+        // Raider.registerGoals: the patrol goal (the raid goals wait on
+        // raids — Raider.hpp).
+        Raider::RegisterGoals();
         m_goalSelector.AddGoal(0, std::make_unique<FloatGoal>(this));
         m_goalSelector.AddGoal(4, std::make_unique<MeleeAttackGoal>(this, 1.0, true));
         m_goalSelector.AddGoal(5, std::make_unique<WaterAvoidingRandomStrollGoal>(this, 0.4));
@@ -1851,25 +2199,24 @@ namespace Game {
         // MC 10 LookAtPlayerGoal(Mob.class, 8.0F) — our LookAtPlayerGoal
         // targets players only; the any-mob glance is not modelled.
 
-        // MC 2 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers() —
-        // the Raider exemption and the cross-type alert need the raid roster;
-        // SetAlertOthers here wakes other ravagers, the same-species subset.
+        // MC 2 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers():
+        // a raider's hit is never answered; the alert wakes other ravagers
+        // (mob.getClass()).
         auto hurtBy = std::make_unique<HurtByTargetGoal>(this);
-        hurtBy->SetAlertOthers();
+        hurtBy->SetIgnoreDamageFrom(&Raiders::IsRaider).SetAlertOthers();
         m_targetSelector.AddGoal(2, std::move(hurtBy));
         m_targetSelector.AddGoal(3, std::make_unique<NearestAttackableTargetGoal>(this, true));
-        // MC gates the villager goal on !target.isBaby(); TargetingConditions
-        // has no baby filter yet, so baby villagers are targeted too (no baby
-        // villagers exist here either).
-        m_targetSelector.AddGoal(4, std::make_unique<NearestAttackableTargetGoal>(
-                                        this, kRavagerVillagerTargets, 2, true));
+        // MC's selector on the villager goal: (target, level) -> !target.isBaby().
+        auto villagers = std::make_unique<NearestAttackableTargetGoal>(this, kRavagerVillagerTargets, 2, true);
+        villagers->SetSelector([](Mob&, const LivingEntity& target) { return !target.IsBaby(); });
+        m_targetSelector.AddGoal(4, std::move(villagers));
         m_targetSelector.AddGoal(4, std::make_unique<NearestAttackableTargetGoal>(
                                         this, kRavagerGolemTargets, 1, true));
     }
 
     void Ravager::AiStep() {
         // MC Ravager.aiStep — super FIRST, then everything below.
-        Monster::AiStep();
+        Raider::AiStep();
         if (!IsAlive()) return;
 
         // The hunt-speed lerp: rooted while a clock runs, otherwise the BASE
@@ -1910,8 +2257,19 @@ namespace Game {
 
         if (m_stunnedTick > 0) {
             --m_stunnedTick;
-            // MC stunEffect: the grey entity-effect particle — no particle
-            // system yet.
+            // MC stunEffect: a grey ENTITY_EFFECT puff over the head, one
+            // tick in six (the client copy draws it).
+            if (m_level && m_level->Random().NextInt(6) == 0) {
+                JavaRandom& r = m_level->Random();
+                const double bodyRad = static_cast<double>(yBodyRot * 0.017453292f);
+                const double w = static_cast<double>(GetBbWidth());
+                const double headX = position.x - w * std::sin(bodyRad) + (r.NextDouble() * 0.6 - 0.3);
+                const double headY = position.y + static_cast<double>(GetBbHeight()) - 0.3;
+                const double headZ = position.z + w * std::cos(bodyRad) + (r.NextDouble() * 0.6 - 0.3);
+                m_level->AddParticle(ParticleOptions::Color(ParticleKind::EntityEffect, 0.49803922f, 0.5137255f,
+                                                            0.57254905f),
+                                     headX, headY, headZ, 0.0, 0.0, 0.0);
+            }
             if (m_stunnedTick == 0) {
                 PlaySound(SoundEvents::RAVAGER_ROAR, 1.0f, 1.0f);
                 m_roarTick = 20;
@@ -1953,6 +2311,7 @@ namespace Game {
                 StrongKnockback(*living);
             }
         }
+        GameEvent(GameEventId::EntityAction);   // MC roar: gameEvent(ENTITY_ACTION)
         m_level->BroadcastEntityEvent(*this, 69);
     }
 
@@ -1997,13 +2356,24 @@ namespace Game {
     }
 
     void Ravager::HandleEntityEvent(uint8_t id) {
-        // MC Ravager.handleEntityEvent, verbatim (the attack/roar sounds and
-        // the 40 POOF roar particles wait on their systems).
+        // MC Ravager.handleEntityEvent, verbatim (the attack/roar sounds wait
+        // on their systems).
         if (id == 4) {
             m_attackTick = 10;
         } else if (id == 39) {
             m_stunnedTick = 40;
         } else if (id == 69) {
+            // addRoarParticleEffects: 40 POOF bursting from the box centre.
+            if (m_level) {
+                JavaRandom& r = m_level->Random();
+                const double cy = position.y + static_cast<double>(GetBbHeight()) * 0.5;
+                for (int i = 0; i < 40; ++i) {
+                    const double vx = r.NextGaussian() * 0.2;
+                    const double vy = r.NextGaussian() * 0.2;
+                    const double vz = r.NextGaussian() * 0.2;
+                    m_level->AddParticle(ParticleKind::Poof, position.x, cy, position.z, vx, vy, vz);
+                }
+            }
             ApplyRoarKnockbackClient();
         } else {
             Monster::HandleEntityEvent(id);
@@ -2051,8 +2421,7 @@ namespace Game {
 
     void Blaze::AiStep() {
         // MC Blaze.aiStep head, BOTH sides: every falling tick is damped to
-        // 60% — the hover; then the client's 1-in-24 burn crackle. (The smoke
-        // particles wait on particles.)
+        // 60% — the hover; then the client's 1-in-24 burn crackle and smoke.
         if (!onGround && velocity.y < 0.0) {
             velocity.y *= 0.6;
         }
@@ -2063,6 +2432,14 @@ namespace Game {
                 const float pitch = rng.NextFloat() * 0.7f + 0.3f;
                 m_level->PlayLocalSound(position + glm::dvec3(0.5), SoundEvents::BLAZE_BURN,
                                         GetSoundSource(), volume, pitch, false);
+            }
+            // Two LARGE_SMOKE puffs a tick over the body.
+            const double w = static_cast<double>(GetBbWidth()), h = static_cast<double>(GetBbHeight());
+            for (int i = 0; i < 2; ++i) {
+                const double px = position.x + w * (2.0 * rng.NextDouble() - 1.0) * 0.5;
+                const double py = position.y + h * rng.NextDouble();
+                const double pz = position.z + w * (2.0 * rng.NextDouble() - 1.0) * 0.5;
+                m_level->AddParticle(ParticleKind::LargeSmoke, px, py, pz, 0.0, 0.0, 0.0);
             }
         }
         Monster::AiStep();
@@ -2213,6 +2590,7 @@ namespace Game {
         }
         if (m_level && m_level->IsClientSide()) return UseResult::Success;
         Shear();
+        GameEvent(GameEventId::Shear, &player);   // MC: gameEvent(SHEAR, player)
         // MC itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot()).
         HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
         return UseResult::Success;
@@ -2265,8 +2643,27 @@ namespace Game {
             Hurt(MobDamageSource::Fire, 1.0f, nullptr);
         }
 
-        // MC leaves a snow-layer trail here (mobGriefing-gated); no snow
-        // layer block exists in this engine yet.
+        // MC SnowGolem.aiStep's trail, behind mobGriefing: the four cells a
+        // quarter block out from the golem's feet each take a single snow
+        // layer where they are air and snow could stand there
+        // (setBlockAndUpdate — flag 3, so the grass under it turns snowy).
+        // The BLOCK_PLACE game event has no listener system to reach.
+        if (!m_level->MobGriefing()) return;
+        ILevelWrite* blocks = m_level->MutableBlocks();
+        if (!blocks) return;
+        const BlockState snow = BlockStates::Default(BlockID::SnowLayer);
+        for (int i = 0; i < 4; ++i) {
+            const int xx = static_cast<int>(std::floor(
+                position.x + static_cast<double>(static_cast<float>(i % 2 * 2 - 1) * 0.25f)));
+            const int yy = static_cast<int>(std::floor(position.y));
+            const int zz = static_cast<int>(std::floor(
+                position.z + static_cast<double>(static_cast<float>(i / 2 % 2 * 2 - 1) * 0.25f)));
+            if (blocks->GetBlock(xx, yy, zz) != BlockID::Air) continue;
+            if (!SnowLayer::CanSurvive(*blocks, glm::ivec3(xx, yy, zz))) continue;
+            blocks->SetBlock(xx, yy, zz, snow, World::UpdateFlags::All);
+            // MC: level.gameEvent(BLOCK_PLACE, snowPos, Context.of(this, snow)).
+            blocks->GameEvent(GameEventId::BlockPlace, glm::ivec3(xx, yy, zz), GameEventContext::Of(this, snow));
+        }
     }
 
     // ── Witch ──────────────────────────────────────────────────────────────
@@ -2277,16 +2674,17 @@ namespace Game {
         out.Register(Attribute::MovementSpeed, 0.25);
     }
 
-    Witch::Witch(EntityLevel* level) : Monster(EntityTypeId::Witch, level) {
+    Witch::Witch(EntityLevel* level) : Raider(EntityTypeId::Witch, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
         RegisterGoals();
     }
 
     void Witch::RegisterGoals() {
-        // MC Witch.registerGoals (the Raider base's raid goals are the raid
-        // system's and are skipped with it):
+        // MC Witch.registerGoals, after Raider's (the patrol goal; the raid
+        // goals are the raid system's and wait on it — Raider.hpp):
         //   target 2 NearestHealableRaiderTargetGoal — SKIPPED with raids.
+        Raider::RegisterGoals();
         m_goalSelector.AddGoal(1, std::make_unique<FloatGoal>(this));
         m_goalSelector.AddGoal(2, std::make_unique<RangedAttackGoal>(
                                       this, this, 1.0, 60, 10.0f));
@@ -2295,7 +2693,10 @@ namespace Game {
         m_goalSelector.AddGoal(3, std::make_unique<LookAtPlayerGoal>(this, 8.0f));
         m_goalSelector.AddGoal(3, std::make_unique<RandomLookAroundGoal>(this));
 
-        m_targetSelector.AddGoal(1, std::make_unique<HurtByTargetGoal>(this));
+        // MC 1 new HurtByTargetGoal(this, Raider.class) — no alert.
+        auto hurtBy = std::make_unique<HurtByTargetGoal>(this);
+        hurtBy->SetIgnoreDamageFrom(&Raiders::IsRaider);
+        m_targetSelector.AddGoal(1, std::move(hurtBy));
         m_targetSelector.AddGoal(3, std::make_unique<NearestAttackableWitchTargetGoal>(
                                         this, /*mustSee=*/true, /*mustReach=*/false,
                                         /*randomInterval=*/10));
@@ -2310,14 +2711,17 @@ namespace Game {
 
             if (m_isDrinking) {
                 if (m_usingTime-- <= 0) {
-                    // Drink complete: MC reads the effects back off the
-                    // main-hand potion stack; the pending list stands in for
-                    // the stack (no item system).
+                    // Drink complete: the main-hand potion comes down and its
+                    // effects (at the stack's duration scale) apply.
                     m_isDrinking = false;
-                    for (const MobEffectInstance& e : m_drinkPotion) {
-                        AddEffect(e, this);
+                    const ItemStack drunk = GetMainHandEquipment();
+                    SetEquipment(EquipmentSlot::MAINHAND, ItemStack{});
+                    if (drunk.itemId == Items::Potion) {
+                        GetPotionContents(drunk).ForEachEffect(
+                            [this](MobEffectInstance e) { AddEffect(e, this); },
+                            GetPotionDurationScale(drunk));
                     }
-                    m_drinkPotion.clear();
+                    GameEvent(GameEventId::Drink);   // MC Witch.aiStep: gameEvent(DRINK)
                     m_attributes.RemoveModifier(Attribute::MovementSpeed,
                                                 ModifierId::WitchDrinkingSlowdown);
                 }
@@ -2325,37 +2729,34 @@ namespace Game {
                 // MC's pick chain — each else-if draws its own nextFloat, so
                 // the RNG stream shape matches the original exactly.
                 //
-                // Potion payloads are Potions.java verbatim: water breathing
-                // 3600, fire resistance 3600, healing (instant, 1), swiftness
-                // 3600.
-                std::vector<MobEffectInstance> potion;
+                // Potions.WATER_BREATHING / FIRE_RESISTANCE / HEALING /
+                // SWIFTNESS — PotionContents.createItemStack(POTION, potion).
+                std::optional<PotionId> potion;
                 if (rng.NextFloat() < 0.15f && IsInWater() &&
                     !HasEffect(MobEffectId::WaterBreathing)) {
                     // MC tests isEyeInFluid(WATER) — the drowning position.
                     // No per-block fluid heights exist; IsInWater is the
-                    // closest test. The air-supply system this potion guards
-                    // against is itself a later wave, but the branch is live
-                    // so the witch's behaviour (and RNG draws) already match.
-                    potion.emplace_back(MobEffectId::WaterBreathing, 3600);
+                    // closest test.
+                    potion = PotionId::WaterBreathing;
                 } else if (rng.NextFloat() < 0.15f &&
                            (IsOnFire() ||
                             (HasLastDamageSource() &&
                              GetLastDamageSource() == MobDamageSource::Fire)) &&
                            !HasEffect(MobEffectId::FireResistance)) {
-                    potion.emplace_back(MobEffectId::FireResistance, 3600);
+                    potion = PotionId::FireResistance;
                 } else if (rng.NextFloat() < 0.05f && GetHealth() < GetMaxHealth()) {
-                    potion.emplace_back(MobEffectId::InstantHealth, 1);
+                    potion = PotionId::Healing;
                 } else if (rng.NextFloat() < 0.5f && GetTarget() &&
                            !HasEffect(MobEffectId::Speed) &&
                            GetTarget()->DistanceToSqr(*this) > 121.0) {
-                    potion.emplace_back(MobEffectId::Speed, 3600);
+                    potion = PotionId::Swiftness;
                 }
 
-                if (!potion.empty()) {
-                    m_drinkPotion = std::move(potion);
-                    // MC: usingTime = getMainHandItem().getUseDuration() — 32
-                    // ticks for a potion. The bottle-in-hand visual and the
-                    // DATA_USING_ITEM sync wait on mob equipment/client sync.
+                if (potion) {
+                    // The bottle goes up in the main hand (synced — the
+                    // WitchItemLayer draws it); usingTime is its use duration,
+                    // 32 ticks for a potion.
+                    SetEquipment(EquipmentSlot::MAINHAND, CreatePotionItemStack(Items::Potion, *potion));
                     m_usingTime = 32;
                     m_isDrinking = true;
                     if (!IsSilent()) {
@@ -2381,7 +2782,7 @@ namespace Game {
             }
         }
 
-        Monster::AiStep();
+        Raider::AiStep();
     }
 
     void Witch::HandleEntityEvent(uint8_t id) {
@@ -2509,6 +2910,8 @@ namespace Game {
         // MC setRawPeekAmount: the server voices the lid.
         if (m_level && !m_level->IsClientSide()) {
             PlaySound(amount == 0 ? SoundEvents::SHULKER_CLOSE : SoundEvents::SHULKER_OPEN, 1.0f, 1.0f);
+            // MC setRawPeekAmount: gameEvent(CONTAINER_CLOSE / CONTAINER_OPEN).
+            GameEvent(amount == 0 ? GameEventId::ContainerClose : GameEventId::ContainerOpen);
         }
         m_peekAmount = std::clamp(amount, 0, 100);
         UpdateCoveredArmor();
@@ -2571,6 +2974,13 @@ namespace Game {
             // MC: SHULKER_TELEPORT as it leaves.
             PlaySound(SoundEvents::SHULKER_TELEPORT, 1.0f, 1.0f);
             position = glm::dvec3(target.x + 0.5, target.y, target.z + 0.5);
+            // MC: level.gameEvent(TELEPORT, oldPos, Context.of(this)).
+            if (ILevelWrite* write = m_level->MutableBlocks()) {
+                write->GameEvent(GameEventId::Teleport, current, GameEventContext::Of(this));
+            }
+            // levelEvent 2016 at the old cell: the portal streak to the new.
+            m_level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_SHULKER_TELEPORT, current,
+                                    ClampedPackDifferenceInPosition(current, target, 8, 8, 8));
             SetRawPeekAmount(0);
             SetTarget(nullptr);
             needsSync = true;
@@ -2667,6 +3077,27 @@ namespace Game {
                                   6.0 + static_cast<double>(m_size));
     }
 
+    void Phantom::Tick() {
+        Mob::Tick();
+        if (!m_level || !m_level->IsClientSide()) return;
+        // getUniqueFlapTickOffset = id * 3.
+        const float offset = static_cast<float>(GetId() * 3);
+        const float anim = std::cos((offset + static_cast<float>(tickCount)) * 7.448451f * 0.017453292f + 3.1415927f);
+        const float nextAnim =
+            std::cos((offset + static_cast<float>(tickCount + 1)) * 7.448451f * 0.017453292f + 3.1415927f);
+        JavaRandom& r = m_level->Random();
+        if (anim > 0.0f && nextAnim <= 0.0f) {
+            m_level->PlayLocalSoundFromEntity(*this, SoundEvents::PHANTOM_FLAP, GetSoundSource(),
+                                              0.95f + r.NextFloat() * 0.05f, 0.95f + r.NextFloat() * 0.05f);
+        }
+        const float width = GetBbWidth() * 1.48f;
+        const float c = std::cos(yRot * 0.017453292f) * width;
+        const float sn = std::sin(yRot * 0.017453292f) * width;
+        const float h = (0.3f + anim * 0.45f) * GetBbHeight() * 2.5f;
+        m_level->AddParticle(ParticleKind::Mycelium, position.x + c, position.y + h, position.z + sn, 0.0, 0.0, 0.0);
+        m_level->AddParticle(ParticleKind::Mycelium, position.x - c, position.y + h, position.z - sn, 0.0, 0.0, 0.0);
+    }
+
     void Phantom::Travel(const glm::dvec3& input) {
         // MC Phantom.travel: travelFlying(input, 0.2F) — no gravity, air drag
         // 0.91 (0.8 in water, 0.5 in lava). Same shape as the ghast's 0.02.
@@ -2698,7 +3129,7 @@ namespace Game {
     // ── SpellcasterIllager ─────────────────────────────────────────────────
 
     SpellcasterIllager::SpellcasterIllager(EntityTypeId type, EntityLevel* level)
-        : Monster(type, level) {}
+        : AbstractIllager(type, level) {}
 
     bool SpellcasterIllager::IsCastingSpell() const {
         // MC isCastingSpell: the client answers from the synced spell id, the
@@ -2707,6 +3138,28 @@ namespace Game {
             return m_clientSpellId != 0;
         }
         return m_spellCastingTickCount > 0;
+    }
+
+    void SpellcasterIllager::Tick() {
+        AbstractIllager::Tick();
+        if (!m_level || !m_level->IsClientSide() || !IsCastingSpell()) return;
+        // MC IllagerSpell.spellColor.
+        static constexpr float kSpellColor[6][3] = {
+            {0.0f, 0.0f, 0.0f}, {0.7f, 0.7f, 0.8f}, {0.4f, 0.3f, 0.35f},
+            {0.7f, 0.5f, 0.2f}, {0.3f, 0.3f, 0.8f}, {0.1f, 0.1f, 0.2f},
+        };
+        const int spell = std::min<int>(static_cast<int>(GetCurrentSpell()), 5);
+        const float* c = kSpellColor[spell];
+        const float bodyAngle = yBodyRot * 0.017453292f + std::cos(static_cast<float>(tickCount) * 0.6662f) * 0.25f;
+        const float cs = std::cos(bodyAngle);
+        const float sn = std::sin(bodyAngle);
+        const double handDistance = 0.6 * static_cast<double>(scale);
+        const double handHeight = 1.8 * static_cast<double>(scale);
+        const ParticleOptions particle = ParticleOptions::Color(ParticleKind::EntityEffect, c[0], c[1], c[2]);
+        m_level->AddParticle(particle, position.x + cs * handDistance, position.y + handHeight,
+                             position.z + sn * handDistance, 0.0, 0.0, 0.0);
+        m_level->AddParticle(particle, position.x - cs * handDistance, position.y + handHeight,
+                             position.z - sn * handDistance, 0.0, 0.0, 0.0);
     }
 
     SpellcasterIllager::IllagerSpell SpellcasterIllager::GetCurrentSpell() const {
@@ -2719,7 +3172,7 @@ namespace Game {
     void SpellcasterIllager::CustomServerAiStep() {
         // MC SpellcasterIllager.customServerAiStep: super, then count the
         // cast timer down.
-        Monster::CustomServerAiStep();
+        AbstractIllager::CustomServerAiStep();
         if (m_spellCastingTickCount > 0) {
             --m_spellCastingTickCount;
         }
@@ -2749,9 +3202,9 @@ namespace Game {
     }
 
     void Evoker::RegisterGoals() {
-        // MC Evoker.registerGoals, priority for priority.
-        // super.registerGoals() is Raider/AbstractIllager machinery (raid
-        // goals) — SKIPPED with the raid system.
+        // MC Evoker.registerGoals, priority for priority, after super's
+        // (AbstractIllager → Raider → PatrollingMonster: the patrol goal).
+        SpellcasterIllager::RegisterGoals();
         m_goalSelector.AddGoal(0, std::make_unique<FloatGoal>(this));
         m_goalSelector.AddGoal(1, std::make_unique<EvokerCastingSpellGoal>(this));
         m_goalSelector.AddGoal(2, std::make_unique<AvoidEntityGoal>(this, 8.0f, 0.6, 1.0));
@@ -2765,11 +3218,10 @@ namespace Game {
         // MC 10 LookAtPlayerGoal(Mob.class, 8.0F) — our LookAtPlayerGoal
         // targets players only; the any-mob glance is not modelled.
 
-        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers() —
-        // the Raider exemption needs the raid roster; SetAlertOthers wakes
-        // other evokers, the same-species subset.
+        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers():
+        // a raider's hit is never answered; the alert wakes other evokers.
         auto hurtBy = std::make_unique<HurtByTargetGoal>(this);
-        hurtBy->SetAlertOthers();
+        hurtBy->SetIgnoreDamageFrom(&Raiders::IsRaider).SetAlertOthers();
         m_targetSelector.AddGoal(1, std::move(hurtBy));
         // MC: player target with a 300-tick unseen memory.
         m_targetSelector.AddGoal(2, std::make_unique<NearestAttackableTargetGoalWithMemory>(
@@ -2780,6 +3232,16 @@ namespace Game {
         m_targetSelector.AddGoal(3, std::make_unique<NearestAttackableTargetGoal>(
                                         this, kIronGolemTargets, 1,
                                         /*mustSee=*/false));
+    }
+
+    bool Evoker::ConsidersEntityAsAlly(const Entity& other) const {
+        if (&other == this) return true;
+        if (SpellcasterIllager::ConsidersEntityAsAlly(other)) return true;
+        if (const auto* vex = dynamic_cast<const Vex*>(&other)) {
+            const Mob* owner = vex->GetVexOwner();
+            return owner ? ConsidersEntityAsAlly(*owner) : false;
+        }
+        return false;
     }
 
     void Evoker::ClearReferenceTo(const Entity* entity) {
@@ -2800,35 +3262,35 @@ namespace Game {
     }
 
     Vindicator::Vindicator(EntityLevel* level)
-        : Monster(EntityTypeId::Vindicator, level) {
+        : AbstractIllager(EntityTypeId::Vindicator, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
         RegisterGoals();
     }
 
     void Vindicator::RegisterGoals() {
-        // MC Vindicator.registerGoals, priority for priority.
-        // super.registerGoals() is Raider/AbstractIllager machinery — SKIPPED
-        // with the raid system, as are:
-        //   3 AbstractIllager.RaiderOpenDoorGoal (raids + door-USE interact),
-        //   4 Raider.HoldGroundAttackGoal (raid celebrate machinery),
-        //   target 4 VindicatorJohnnyAttackGoal (armed only by the "Johnny"
-        //     custom name — no custom-name system, so it could never start).
+        // MC Vindicator.registerGoals, priority for priority, after super's
+        // (AbstractIllager → Raider → PatrollingMonster: the patrol goal).
+        // Not ported:
+        //   3 AbstractIllager.RaiderOpenDoorGoal (gated on an active raid),
+        //   target 4 VindicatorJohnnyAttackGoal (the "Johnny" name's
+        //     attack-anything mode).
+        AbstractIllager::RegisterGoals();
         m_goalSelector.AddGoal(0, std::make_unique<FloatGoal>(this));
         m_goalSelector.AddGoal(1, std::make_unique<AvoidEntityGoal>(this, kCreakingAvoid, 1,
                                                                     8.0f, 1.0, 1.2));
         m_goalSelector.AddGoal(2, std::make_unique<VindicatorBreakDoorGoal>(this));
+        m_goalSelector.AddGoal(4, std::make_unique<HoldGroundAttackGoal>(this, 10.0f));
         m_goalSelector.AddGoal(5, std::make_unique<MeleeAttackGoal>(this, 1.0, false));
         m_goalSelector.AddGoal(8, std::make_unique<RandomStrollGoal>(this, 0.6));
         m_goalSelector.AddGoal(9, std::make_unique<LookAtPlayerGoal>(this, 3.0f, 1.0f));
         // MC 10 LookAtPlayerGoal(Mob.class, 8.0F) — our LookAtPlayerGoal
         // targets players only; the any-mob glance is not modelled.
 
-        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers() —
-        // the Raider exemption needs the raid roster; SetAlertOthers wakes
-        // other vindicators, the same-species subset.
+        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers():
+        // a raider's hit is never answered; the alert wakes other vindicators.
         auto hurtBy = std::make_unique<HurtByTargetGoal>(this);
-        hurtBy->SetAlertOthers();
+        hurtBy->SetIgnoreDamageFrom(&Raiders::IsRaider).SetAlertOthers();
         m_targetSelector.AddGoal(1, std::move(hurtBy));
         m_targetSelector.AddGoal(2, std::make_unique<NearestAttackableTargetGoal>(
                                         this, /*mustSee=*/true));
@@ -2841,15 +3303,26 @@ namespace Game {
     std::shared_ptr<SpawnGroupData>
     Vindicator::FinalizeSpawn(SpawnReason reason,
                               std::shared_ptr<SpawnGroupData> groupData) {
-        groupData = Monster::FinalizeSpawn(reason, std::move(groupData));
+        groupData = AbstractIllager::FinalizeSpawn(reason, std::move(groupData));
         // MC Vindicator.finalizeSpawn: getNavigation().setCanOpenDoors(true).
         // MC's customServerAiStep then re-gates the flag on isRaided() every
         // tick — SKIPPED (DEVIATION, see the class comment): with no raid
         // system that override would immediately kill the door pathing, so
         // the finalizeSpawn value stands.
         GetNavigation().SetCanOpenDoors(true);
-        // The iron-axe equipment roll — no mob equipment system.
+        if (m_level) {
+            JavaRandom& rng = m_level->Random();
+            const DifficultyInstance difficulty = CurrentDifficulty();
+            PopulateDefaultEquipmentSlots(rng, difficulty);
+            PopulateDefaultEquipmentEnchantments(rng, difficulty);
+        }
         return groupData;
+    }
+
+    void Vindicator::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        // `if (getCurrentRaid() == null)` — there are no raids.
+        (void)random; (void)difficulty;
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::IronAxe, 1));
     }
 
     // ── Illusioner ─────────────────────────────────────────────────────────
@@ -2863,21 +3336,42 @@ namespace Game {
         out.Register(Attribute::MaxHealth,    32.0);
     }
 
+    std::shared_ptr<SpawnGroupData>
+    Illusioner::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::Bow, 1));
+        return SpellcasterIllager::FinalizeSpawn(reason, std::move(groupData));
+    }
+
     Illusioner::Illusioner(EntityLevel* level)
         : SpellcasterIllager(EntityTypeId::Illusioner, level) {
         CreateAttributes(m_attributes);
         m_health = GetMaxHealth();
-        // MC xpReward 5 — ours comes from the entity type table.
-        // MC finalizeSpawn's setItemSlot(MAINHAND, BOW) — no mob equipment
-        // system; RangedBowAttackGoal treats the bow as permanently held (the
-        // skeleton precedent, which is also MC's steady state).
+        // MC xpReward 5 — ours comes from the entity type table. The bow is
+        // handed over in FinalizeSpawn.
         RegisterGoals();
     }
 
+    void Illusioner::AiStep() {
+        SpellcasterIllager::AiStep();
+        if (!m_level || !m_level->IsClientSide() || !IsEffectInvisible()) return;
+        if (hurtTime != 1 && tickCount % 1200 != 0) return;
+        JavaRandom& r = m_level->Random();
+        const double w = static_cast<double>(GetBbWidth()), h = static_cast<double>(GetBbHeight());
+        for (int i = 0; i < 16; ++i) {
+            // getRandomX(0.5), getRandomY(), getZ(0.5) — MC's z is the fixed
+            // half-width offset, not random.
+            const double px = position.x + w * (2.0 * r.NextDouble() - 1.0) * 0.5;
+            const double py = position.y + h * r.NextDouble();
+            const double pz = position.z + w * 0.5;
+            m_level->AddParticle(ParticleKind::Cloud, px, py, pz, 0.0, 0.0, 0.0);
+        }
+        m_level->PlayLocalSound(position, SoundEvents::ILLUSIONER_MIRROR_MOVE, GetSoundSource(), 1.0f, 1.0f, false);
+    }
+
     void Illusioner::RegisterGoals() {
-        // MC Illusioner.registerGoals, priority for priority.
-        // super.registerGoals() is Raider/AbstractIllager machinery (raid
-        // goals) — SKIPPED with the raid system.
+        // MC Illusioner.registerGoals, priority for priority, after super's
+        // (AbstractIllager → Raider → PatrollingMonster: the patrol goal).
+        SpellcasterIllager::RegisterGoals();
         m_goalSelector.AddGoal(0, std::make_unique<FloatGoal>(this));
         m_goalSelector.AddGoal(1, std::make_unique<SpellcasterCastingSpellGoal>(this));
         m_goalSelector.AddGoal(3, std::make_unique<AvoidEntityGoal>(this, kCreakingAvoid, 1,
@@ -2891,11 +3385,10 @@ namespace Game {
         // MC 10 LookAtPlayerGoal(Mob.class, 8.0F) — our LookAtPlayerGoal
         // targets players only; the any-mob glance is not modelled.
 
-        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers() —
-        // the Raider exemption needs the raid roster; SetAlertOthers wakes
-        // other illusioners, the same-species subset.
+        // MC 1 (new HurtByTargetGoal(this, Raider.class)).setAlertOthers():
+        // a raider's hit is never answered; the alert wakes other illusioners.
         auto hurtBy = std::make_unique<HurtByTargetGoal>(this);
-        hurtBy->SetAlertOthers();
+        hurtBy->SetIgnoreDamageFrom(&Raiders::IsRaider).SetAlertOthers();
         m_targetSelector.AddGoal(1, std::move(hurtBy));
         // MC: player target with a 300-tick unseen memory, villagers and the
         // golem likewise (the illusioner's golem goal carries the memory too,
@@ -2942,6 +3435,26 @@ namespace Game {
         CreateMonsterAttributes(out);
         out.Register(Attribute::MaxHealth,    14.0);
         out.Register(Attribute::AttackDamage,  4.0);
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Vex::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        if (m_level) {
+            JavaRandom& rng = m_level->Random();
+            const DifficultyInstance difficulty = CurrentDifficulty();
+            PopulateDefaultEquipmentSlots(rng, difficulty);
+            PopulateDefaultEquipmentEnchantments(rng, difficulty);
+        }
+        return Monster::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void Vex::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)random; (void)difficulty;
+        // The Hush's echo wraith rides the vex class under its own id; its
+        // spawn gear is its own (none).
+        if (GetType() != EntityTypeId::Vex) return;
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::IronSword, 1));
+        SetEquipmentDropChance(EquipmentSlot::MAINHAND, 0.0f);
     }
 
     Vex::Vex(EntityLevel* level, EntityTypeId type) : Monster(type, level) {
@@ -3216,7 +3729,8 @@ namespace Game {
                 std::vector<LivingEntity*> players;
                 m_level->GetPlayers(players);
                 for (LivingEntity* player : players) {
-                    if (player && player->GetAABB().Intersects(box)) {
+                    // getEntitiesOfClass: EntitySelector.NO_SPECTATORS.
+                    if (player && !player->IsSpectator() && player->GetAABB().Intersects(box)) {
                         consider(player);
                     }
                 }
@@ -3411,13 +3925,20 @@ namespace Game {
     }
 
     void Strider::RegisterGoals() {
-        // MC Strider.registerGoals, priority for priority:
-        //   3 TemptGoal(1.4, STRIDER_TEMPT_ITEMS, false) — SKIPPED: no warped
-        //     fungus item exists (IsFood is empty for the same reason, which
-        //     also parks BreedGoal — registered so the table reads like MC's,
-        //     it simply never finds a lover without food).
+        // MC Strider.registerGoals, priority for priority. The tempt goal's
+        // STRIDER_TEMPT_ITEMS (#strider_food + warped_fungus_on_a_stick) is
+        // two goals at 3, one per item (the Pig precedent): the food one
+        // tests IsFood, the other the rod.
         m_goalSelector.AddGoal(1, std::make_unique<PanicGoal>(this, 1.65));
         m_goalSelector.AddGoal(2, std::make_unique<BreedGoal>(this, 1.0));
+        {
+            auto food = std::make_unique<TemptGoal>(this, 1.4, false);
+            m_temptGoal = food.get();
+            m_goalSelector.AddGoal(3, std::move(food));
+            auto rod = std::make_unique<TemptGoal>(this, 1.4, false, Items::WarpedFungusOnAStick);
+            m_temptGoalRod = rod.get();
+            m_goalSelector.AddGoal(3, std::move(rod));
+        }
         m_goalSelector.AddGoal(4, std::make_unique<StriderGoToLavaGoal>(this, 1.0));
         m_goalSelector.AddGoal(5, std::make_unique<FollowParentGoal>(this, 1.0));
         m_goalSelector.AddGoal(7, std::make_unique<RandomStrollGoal>(this, 1.0, 60));
@@ -3434,8 +3955,169 @@ namespace Game {
         // MOVEMENT_SPEED while cold. Applied by re-basing (the Ravager
         // precedent) — no per-mob modifier id burned for one flag.
         m_attributes.SetBaseValue(Attribute::MovementSpeed,
-                                  v ? 0.175 * (1.0 - 0.34) : 0.175);
-        needsSync = true;
+                                  v ? 0.175 * (1.0 - 0.3400000035762787) : 0.175);
+        if (m_level && !m_level->IsClientSide()) needsSync = true;
+    }
+
+    bool Strider::IsFood(uint32_t itemId) const {
+        // MC ItemTags.STRIDER_FOOD: minecraft:warped_fungus (a block item).
+        static const ItemID kWarpedFungus = ItemRegistry::FromBlock(BlockID::WarpedFungus);
+        return itemId != 0 && itemId == kWarpedFungus;
+    }
+
+    bool Strider::IsBeingTempted() const {
+        return (m_temptGoal && m_temptGoal->IsRunning()) || (m_temptGoalRod && m_temptGoalRod->IsRunning());
+    }
+
+    bool Strider::IsOnLavaSurface() const {
+        if (!m_level || !m_level->Blocks()) return false;
+        const glm::ivec3 p = BlockPosition();
+        return onGround && m_level->Blocks()->GetBlock(p.x, p.y, p.z) != BlockID::Lava &&
+               m_level->Blocks()->GetBlock(p.x, p.y - 1, p.z) == BlockID::Lava &&
+               position.y - std::floor(position.y) < 1.0e-3;
+    }
+
+    const char* Strider::GetAmbientSound() const {
+        // MC: `!isPanicking() && !isBeingTempted() ? STRIDER_AMBIENT : null`.
+        return !IsPanicking() && !IsBeingTempted() ? SoundEvents::STRIDER_AMBIENT : "";
+    }
+
+    void Strider::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        (void)pos; (void)state;
+        PlaySound(IsInLava() || IsOnLavaSurface() ? SoundEvents::STRIDER_STEP_LAVA : SoundEvents::STRIDER_STEP,
+                  1.0f, 1.0f);
+    }
+
+    // ── Strider riding (MC Strider: ItemSteerable over ItemBasedSteering) ──
+
+    bool Strider::CanBeSteeredBy(const RiderControl& rider) const {
+        // MC getControllingPassenger: isSaddled() and the player holds a
+        // warped fungus on a stick in either hand (isHolding).
+        return IsSaddled() && (rider.mainHandItem == Items::WarpedFungusOnAStick ||
+                               rider.offHandItem == Items::WarpedFungusOnAStick);
+    }
+
+    glm::dvec3 Strider::GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) {
+        (void)rider; (void)selfInput;
+        return glm::dvec3(0.0, 0.0, 1.0);
+    }
+
+    void Strider::TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) {
+        // MC Strider.tickRidden: setRot (each angle `% 360`), the body and
+        // head with it, the boost clock — then super.
+        yRot = std::fmod(rider.yRot, 360.0f);
+        xRot = std::fmod(rider.xRot * 0.5f, 360.0f);
+        yRotO = yBodyRot = yHeadRot = yRot;
+        m_steering.TickBoost();
+        Animal::TickRidden(rider, riddenInput);
+    }
+
+    float Strider::GetRiddenSpeed(const RiderControl& rider) const {
+        (void)rider;
+        return static_cast<float>(GetAttributeValue(Attribute::MovementSpeed) *
+                                  static_cast<double>(m_suffocating ? 0.35f : 0.55f) *
+                                  static_cast<double>(m_steering.BoostFactor()));
+    }
+
+    bool Strider::Boost() {
+        return m_level && m_steering.Boost(m_level->Random());
+    }
+
+    void Strider::SetCarriedBlockRaw(uint32_t raw) {
+        // Client: MC Strider.onSyncedDataUpdated(DATA_BOOST_TIME) → onSynced.
+        if (m_level && m_level->IsClientSide()) {
+            m_steering.ApplySyncedBoostTimeTotal(static_cast<int>(raw));
+        }
+    }
+
+    UseResult Strider::MobInteract(LivingEntity& player, ItemStack& held) {
+        const bool hasFood = IsFood(held.itemId);
+        if (!hasFood && IsSaddled() && !IsVehicle() && !HorseTaming::IsSecondaryUseActive(player)) {
+            if (m_level && !m_level->IsClientSide()) m_level->StartPlayerRiding(player, *this);
+            return UseResult::Success;
+        }
+        // super.mobInteract; a PASS reaches the held item's own
+        // interactLivingEntity (the saddle) on the server.
+        const UseResult result = Animal::MobInteract(player, held);
+        if (ConsumesAction(result) && hasFood && !IsSilent() && m_level) {
+            JavaRandom& rng = m_level->Random();
+            m_level->PlaySound(nullptr, position, SoundEvents::STRIDER_EAT, GetSoundSource(), 1.0f,
+                               1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+        }
+        return result;
+    }
+
+    bool Strider::CanAddPassenger(const Entity& passenger) const {
+        (void)passenger;
+        return !IsVehicle() && !IsEyeInLava();
+    }
+
+    glm::dvec3 Strider::GetPassengerAttachmentPoint(const Entity& passenger) const {
+        // EntityTypes STRIDER: no explicit passenger attachment — AT_HEIGHT
+        // (bbHeight); BABY_DIMENSIONS attaches its passenger at 0.65625.
+        (void)passenger;
+        glm::dvec3 local(0.0, IsBaby() ? 0.65625 : static_cast<double>(GetBbHeight()), 0.0);
+        if (m_level && m_level->IsClientSide()) {
+            // The walk bob, client side only (MC: the server keeps the
+            // plain seat).
+            const float animSpeed = std::min(0.25f, walkAnimation.speed);
+            const float animPos = walkAnimation.position;
+            const float offset = 0.12f * std::cos(animPos * 1.5f) * 2.0f * animSpeed;
+            local.y += static_cast<double>(offset * scale);
+        }
+        const double a = -static_cast<double>(yRot) * static_cast<double>(Mth::kDegToRad);
+        return glm::dvec3(local.x * std::cos(a) + local.z * std::sin(a), local.y,
+                          local.z * std::cos(a) - local.x * std::sin(a));
+    }
+
+    glm::dvec3 Strider::GetDismountLocationForPassenger(const LivingEntity& passenger) const {
+        // MC Strider.getDismountLocationForPassenger.
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        const AABBd box = GetAABBd();
+        if (!blocks) return glm::dvec3(position.x, box.max.y, position.z);
+        const double mountWidth = GetBbWidth();
+        const double riderWidth = VehicleEntity::PassengerWidth(passenger);
+        const float yaw = passenger.yRot;
+        const glm::dvec3 directions[] = {
+            VehicleEntity::CollisionHorizontalEscapeVector(mountWidth, riderWidth, yaw),
+            VehicleEntity::CollisionHorizontalEscapeVector(mountWidth, riderWidth, yaw - 22.5f),
+            VehicleEntity::CollisionHorizontalEscapeVector(mountWidth, riderWidth, yaw + 22.5f),
+            VehicleEntity::CollisionHorizontalEscapeVector(mountWidth, riderWidth, yaw - 45.0f),
+            VehicleEntity::CollisionHorizontalEscapeVector(mountWidth, riderWidth, yaw + 45.0f),
+        };
+        // The LinkedHashSet of candidate cells: each direction's column from
+        // the strider's top down to half a block below its feet, in order,
+        // duplicates dropped.
+        std::vector<glm::ivec3> targets;
+        const double colliderTop = box.max.y;
+        const double colliderBottom = box.min.y - 0.5;
+        for (const glm::dvec3& direction : directions) {
+            glm::ivec3 cell(static_cast<int>(std::floor(position.x + direction.x)),
+                            static_cast<int>(std::floor(colliderTop)),
+                            static_cast<int>(std::floor(position.z + direction.z)));
+            for (double y = colliderTop; y > colliderBottom; --y) {
+                if (std::find(targets.begin(), targets.end(), cell) == targets.end()) targets.push_back(cell);
+                --cell.y;
+            }
+        }
+        std::vector<double> heights;
+        VehicleEntity::DismountPoseHeights(passenger, heights);
+        const double halfWidth = riderWidth * 0.5;
+        for (const glm::ivec3& target : targets) {
+            if (blocks->GetBlock(target.x, target.y, target.z) == BlockID::Lava) continue;
+            const double floor = VehicleEntity::BlockFloorHeight(*blocks, target);
+            if (!VehicleEntity::IsBlockFloorValid(floor)) continue;
+            // Vec3.upFromBottomCenterOf(pos, floor).
+            const glm::dvec3 location(static_cast<double>(target.x) + 0.5,
+                                      static_cast<double>(target.y) + floor,
+                                      static_cast<double>(target.z) + 0.5);
+            for (double height : heights) {
+                const AABBd poseBox = AABBd::FromMinMax(location - glm::dvec3(halfWidth, 0.0, halfWidth),
+                                                        location + glm::dvec3(halfWidth, height, halfWidth));
+                if (VehicleEntity::CanDismountTo(*blocks, poseBox)) return location;
+            }
+        }
+        return glm::dvec3(position.x, box.max.y, position.z);
     }
 
     bool Strider::IsInLava() const {
@@ -3472,34 +4154,40 @@ namespace Game {
     }
 
     void Strider::Tick() {
-        // MC Strider.tick: the happy/retreat sound rolls (the tempted half
-        // needs a tempt-goal handle; the panic half is live), then the
-        // warm-block check drives the shiver.
-        if (m_level && IsPanicking() && m_level->Random().NextInt(60) == 0) {
-            MakeSound(SoundEvents::STRIDER_RETREAT);
+        // MC Strider.tick: the happy (tempted, 1 in 140) / retreat (panicking,
+        // 1 in 60) sound rolls, then the warm-block check drives the shiver.
+        if (m_level) {
+            if (IsBeingTempted() && m_level->Random().NextInt(140) == 0) {
+                MakeSound(SoundEvents::STRIDER_HAPPY);
+            } else if (IsPanicking() && m_level->Random().NextInt(60) == 0) {
+                MakeSound(SoundEvents::STRIDER_RETREAT);
+            }
         }
         if (!IsNoAi()) {
-            // MC STRIDER_WARM_BLOCKS is lava (+ magma in datapacks); with no
-            // block tags the check reduces to lava contact — feet cell,
-            // stand-on cell, or any lava fluid height. (The
-            // riding-a-suffocating-strider propagation goes with strider
-            // stacking, which the jockey spawn can produce — propagated
-            // below.)
-            bool inWarmBlocks = false;
-            if (m_level && m_level->Blocks()) {
+            // MC: the block inside or the one stood on (getBlockStateOnLegacy,
+            // 0.2 below the feet) is #strider_warm_blocks, or any lava fluid
+            // height — or the strider rides a warm (not suffocating) strider.
+            bool inWarmBlocks = GetFluidHeight(FluidType::Lava) > 0.0;
+            if (!inWarmBlocks && m_level && m_level->Blocks()) {
                 const IBlockAccess& blocks = *m_level->Blocks();
+                const auto isWarm = [&blocks](int x, int y, int z) {
+                    const std::string_view slug = BlockRegistry::Get(blocks.GetBlock(x, y, z)).registrySlug;
+                    return !slug.empty() &&
+                           DataTags::HasTag(DataTags::Registry::Block, slug, "minecraft:strider_warm_blocks");
+                };
                 const glm::ivec3 p = BlockPosition();
-                inWarmBlocks =
-                    blocks.GetBlock(p.x, p.y, p.z) == BlockID::Lava ||
-                    blocks.GetBlock(p.x, p.y - 1, p.z) == BlockID::Lava;
+                const int onX = static_cast<int>(std::floor(position.x));
+                const int onY = static_cast<int>(std::floor(position.y - 0.2));
+                const int onZ = static_cast<int>(std::floor(position.z));
+                inWarmBlocks = isWarm(p.x, p.y, p.z) || isWarm(onX, onY, onZ);
             }
-            bool vehicleSuffocating = false;
+            bool onWarmStrider = false;
             if (const auto* vehicle = dynamic_cast<const Strider*>(GetVehicle())) {
-                vehicleSuffocating = vehicle->IsSuffocating();
+                onWarmStrider = !vehicle->IsSuffocating();
             }
-            if (m_level && !m_level->IsClientSide()) {
-                SetSuffocating(!inWarmBlocks || vehicleSuffocating);
-            }
+            // The server decides; DATA_SUFFOCATING reaches the client copies
+            // through the variant byte (SetVariantByte → SetSuffocating).
+            if (m_level && !m_level->IsClientSide()) SetSuffocating(!inWarmBlocks && !onWarmStrider);
         }
 
         Animal::Tick();
@@ -3562,9 +4250,9 @@ namespace Game {
         JavaRandom& rng = m_level->Random();
 
         if (rng.NextInt(30) == 0) {
-            // MC: a zombified-piglin jockey with a warped fungus on a stick
-            // and a saddled strider (both item halves wait on mob equipment;
-            // the RIDING half is live). The jockey's group token pins the
+            // MC: a zombified-piglin jockey holding a warped fungus on a stick
+            // on a saddled strider (the saddle a guaranteed drop). The
+            // jockey's group token pins the
             // pack's baby roll and forbids chicken jockeys, exactly as MC
             // passes ZombieGroupData(getSpawnAsBabyOdds(random), false).
             auto jockey = std::make_unique<ZombifiedPiglin>(m_level);
@@ -3573,6 +4261,9 @@ namespace Game {
             jockey->FinalizeSpawn(
                 SpawnReason::Jockey,
                 std::make_shared<ZombieGroupData>(rng.NextFloat() < 0.05f, false));
+            jockey->SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::WarpedFungusOnAStick, 1));
+            SetEquipment(EquipmentSlot::SADDLE, ItemStack(Items::Saddle, 1));
+            SetGuaranteedDrop(EquipmentSlot::SADDLE);
             ZombifiedPiglin* placed = jockey.get();
             m_level->AddFreshEntity(std::move(jockey));
             placed->StartRiding(*this, /*force=*/true);
@@ -4699,7 +5390,17 @@ namespace Game {
         void DragonDeathPhase::DoServerTick() {
             // MC DragonDeathPhase.doServerTick: dive at the podium with
             // health pinned to 1; arrival (or a wall) is the actual death.
-            // (doClientTick's explosion-emitter shower — no particle system.)
+            // doClientTick's explosion-emitter shower (every 10th tick) is
+            // sent from here: the client has no phase of its own.
+            if (m_time % 10 == 0 && m_dragon->Level()) {
+                JavaRandom& r = m_dragon->Level()->Random();
+                const float xo = (r.NextFloat() - 0.5f) * 8.0f;
+                const float yo = (r.NextFloat() - 0.5f) * 4.0f;
+                const float zo = (r.NextFloat() - 0.5f) * 8.0f;
+                const glm::dvec3& p = m_dragon->position;
+                m_dragon->Level()->SendParticles(ParticleOptions(ParticleKind::ExplosionEmitter), p.x + xo,
+                                                 p.y + 2.0 + yo, p.z + zo, 0, 0.0, 0.0, 0.0, 0.0);
+            }
             ++m_time;
             if (!m_hasTarget) {
                 const glm::ivec3 egg = m_dragon->GetPodiumPos();
@@ -5110,10 +5811,55 @@ namespace Game {
 
         oFlapTime = flapTime;
         if (IsDeadOrDying()) {
-            // MC: random explosion particles around the corpse — the client's
-            // renderer keys them off the synced deathTime. The float-up, XP
-            // shower and fight hand-off run in TickDeath (via BaseTick).
+            // MC: an EXPLOSION puff somewhere around the corpse every tick
+            // (drawn by the client copy). The float-up, XP shower and fight
+            // hand-off run in TickDeath (via BaseTick).
+            if (m_level) {
+                JavaRandom& r = m_level->Random();
+                const float xo = (r.NextFloat() - 0.5f) * 8.0f;
+                const float yo = (r.NextFloat() - 0.5f) * 4.0f;
+                const float zo = (r.NextFloat() - 0.5f) * 8.0f;
+                m_level->AddParticle(ParticleKind::Explosion, position.x + xo, position.y + 2.0 + yo,
+                                     position.z + zo, 0.0, 0.0, 0.0);
+            }
             return;
+        }
+
+        // The phases' doClientTick particles: Landing streams DRAGON_BREATH
+        // from the jaws every tick; SittingFlaming breathes six-deep puffs
+        // on its even ticks under 10.
+        if (clientSide) {
+            const DragonPhase phase = GetPhase();
+            if (static_cast<uint8_t>(phase) != m_clientParticlePhase) {
+                m_clientParticlePhase = static_cast<uint8_t>(phase);
+                m_clientFlameTicks = 0;
+            }
+            if (phase == DragonPhase::Landing || phase == DragonPhase::SittingFlaming) {
+                JavaRandom& r = m_level->Random();
+                const glm::dvec3 look = glm::normalize(GetHeadLookVector());
+                const glm::dvec3 head = GetHeadPosition() + glm::dvec3(0.0, 0.5, 0.0);
+                const ParticleOptions breath = ParticleOptions::Power(ParticleKind::DragonBreath, 1.0f);
+                if (phase == DragonPhase::Landing) {
+                    for (int i = 0; i < 8; ++i) {
+                        const double px = head.x + r.NextGaussian() / 2.0;
+                        const double py = head.y + r.NextGaussian() / 2.0;
+                        const double pz = head.z + r.NextGaussian() / 2.0;
+                        m_level->AddParticle(breath, px, py, pz, -look.x * 0.07999999821186066 + velocity.x,
+                                             -look.y * 0.30000001192092896 + velocity.y,
+                                             -look.z * 0.07999999821186066 + velocity.z);
+                    }
+                } else if (++m_clientFlameTicks % 2 == 0 && m_clientFlameTicks < 10) {
+                    for (int i = 0; i < 8; ++i) {
+                        const double px = head.x + r.NextGaussian() / 2.0;
+                        const double py = head.y + r.NextGaussian() / 2.0;
+                        const double pz = head.z + r.NextGaussian() / 2.0;
+                        for (int j = 0; j < 6; ++j) {
+                            m_level->AddParticle(breath, px, py, pz, -look.x * 0.07999999821186066 * j,
+                                                 -look.y * 0.6000000238418579, -look.z * 0.07999999821186066 * j);
+                        }
+                    }
+                }
+            }
         }
 
         // MC checkCrystals — both sides: the server heals off the nearest
@@ -5358,6 +6104,17 @@ namespace Game {
 
         ++deathTime;
 
+        // MC: the last second of the cinematic bursts EXPLOSION_EMITTERs
+        // around the corpse (the client copy draws them).
+        if (deathTime >= 180 && deathTime <= 200 && m_level) {
+            JavaRandom& r = m_level->Random();
+            const float xo = (r.NextFloat() - 0.5f) * 8.0f;
+            const float yo = (r.NextFloat() - 0.5f) * 4.0f;
+            const float zo = (r.NextFloat() - 0.5f) * 8.0f;
+            m_level->AddParticle(ParticleKind::ExplosionEmitter, position.x + xo, position.y + 2.0 + yo,
+                                 position.z + zo, 0.0, 0.0, 0.0);
+        }
+
         // MC: 12,000 on a world's first kill, 500 on every respawned kill.
         int xpCount = 500;
         if (fight != nullptr && !fight->HasPreviouslyKilledDragon()) {
@@ -5394,6 +6151,7 @@ namespace Game {
             // spawns, the egg on a first kill.
             if (fight) fight->SetDragonKilled(*this);
             Remove(RemovalReason::Killed);
+            GameEvent(GameEventId::EntityDie);   // MC tickDeath: gameEvent(ENTITY_DIE)
         }
     }
 
@@ -5406,7 +6164,8 @@ namespace Game {
         std::vector<LivingEntity*> players;
         m_level->GetPlayers(players);
         for (LivingEntity* p : players) {
-            if (p && p->GetAABB().Intersects(box)) nearby.push_back(p);
+            // getEntities(this, box): EntitySelector.NO_SPECTATORS.
+            if (p && !p->IsSpectator() && p->GetAABB().Intersects(box)) nearby.push_back(p);
         }
 
         // MC uses the BODY part's centre; the whole box's centre is the same
@@ -5453,7 +6212,6 @@ namespace Game {
     bool EnderDragon::CheckWalls(const AABB& box) {
         // MC checkWalls: smash every non-immune, non-transparent block the
         // box overlaps (mobGriefing); an immune block registers as a wall.
-        // Level event 2008 (the block-break puff) — no particle system.
         if (!m_level || !m_level->Blocks()) return false;
         const IBlockAccess& blocks = *m_level->Blocks();
 
@@ -5464,6 +6222,7 @@ namespace Game {
         const int y1 = static_cast<int>(std::floor(box.max.y));
         const int z1 = static_cast<int>(std::floor(box.max.z));
         bool hitWall = false;
+        bool destroyedAny = false;
 
         const bool griefing = m_level->MobGriefing();
         for (int x = x0; x <= x1; ++x) {
@@ -5472,13 +6231,21 @@ namespace Game {
                     const BlockID id = blocks.GetBlock(x, y, z);
                     if (IsDragonTransparentBlock(id)) continue;
                     if (griefing && !IsDragonImmuneBlock(id)) {
-                        // MC removeBlock(pos, false) — no drops.
-                        m_level->DestroyBlock(glm::ivec3(x, y, z), false);
+                        // MC removeBlock(pos, false) — no drops, and no
+                        // break puff (the 2008 below is the dragon's).
+                        m_level->SetBlock(glm::ivec3(x, y, z), BlockID::Air);
+                        destroyedAny = true;
                     } else {
                         hitWall = true;
                     }
                 }
             }
+        }
+        // MC: a smashed wall puffs level event 2008 at a random cell of the box.
+        if (destroyedAny) {
+            JavaRandom& r = m_level->Random();
+            const glm::ivec3 puff(x0 + r.NextInt(x1 - x0 + 1), y0 + r.NextInt(y1 - y0 + 1), z0 + r.NextInt(z1 - z0 + 1));
+            m_level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_DRAGON_BLOCK_BREAK, puff, 0);
         }
         return hitWall;
     }

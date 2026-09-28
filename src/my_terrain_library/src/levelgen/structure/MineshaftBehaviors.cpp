@@ -2,6 +2,7 @@
 #include "nbt/AllTags.h"
 
 #include "levelgen/structure/OrientedPieceBehavior.h"
+#include "levelgen/structure/StructureEntities.h"
 #include "levelgen/structure/StructureSet.h"
 #include "levelgen/WorldGenLevel.h"
 #include "levelgen/WorldgenRandom.h"
@@ -14,6 +15,8 @@
 #include "world/biome/Biome.h"
 
 #include <algorithm>
+#include <cstdint>
+#include <utility>
 
 // Reference: net/minecraft/world/level/levelgen/structure/structures/
 // MineshaftPieces.java - block placement half (B6). Layout lives in
@@ -280,8 +283,17 @@ private:
     bool m_hasPlacedSpider = false;
     int m_numSections;
 
-    // Reference: MineShaftCorridor.createChest override - rail with random
-    // straight shape + chest MINECART entity (skipped; loot nextLong drawn).
+    // Reference: MineShaftCorridor.createChest override - a rail with a
+    // random straight shape under a chest MINECART:
+    //   EntityTypes.CHEST_MINECART.create(level, CHUNK_GENERATION)
+    //   chest.setInitialPos(x + 0.5, y + 0.5, z + 0.5)
+    //   chest.setLootTable(ABANDONED_MINESHAFT, random.nextLong())
+    //   level.addFreshEntity(chest)
+    // The cart is handed over as the compound it saves as
+    // (ContainerEntity.addChestVehicleSaveData: LootTable, and LootTableSeed
+    // only when non-zero); the loot is rolled engine-side on first open.
+    // No finalizeSpawn: a minecart is no Mob. pos is inside chunkBB, so the
+    // cart files under the chunk being decorated.
     bool createCorridorChest(WorldGenLevel* level, const BoundingBox& chunkBB,
                              WorldgenRandom& random, int x, int y, int z) const {
         core::BlockPos pos = worldPos(x, y, z);
@@ -294,7 +306,13 @@ private:
                            random.nextBoolean() ? RS(RS::NORTH_SOUTH)
                                                 : RS(RS::EAST_WEST));
             placeBlock(level, rail, x, y, z, chunkBB);
-            (void)random.nextLong();  // MinecartChest.setLootTable seed
+            auto chest = StructureEntities::mobTag(
+                "minecraft:chest_minecart", pos.getX() + 0.5, pos.getY() + 0.5,
+                pos.getZ() + 0.5, 0.0f, 0.0f, /*persistenceRequired=*/false);
+            chest->putString("LootTable", "minecraft:chests/abandoned_mineshaft");
+            const int64_t lootTableSeed = random.nextLong();
+            if (lootTableSeed != 0) chest->putLong("LootTableSeed", lootTableSeed);
+            StructureEntities::addFreshEntity(level, std::move(chest), /*finalizeSpawn=*/false);
             return true;
         }
         return false;

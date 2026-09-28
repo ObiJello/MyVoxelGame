@@ -14,6 +14,7 @@
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/World.hpp"
 #include "client/world/ClientLevel.hpp"
+#include "client/world/ClientParticleTicks.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "client/portal/ClientImmersivePortals.hpp"
 #include "common/portal/ImmersivePortal.hpp"
@@ -58,7 +59,12 @@ namespace Client {
 
             const Game::BlockState state = blocks.GetBlockState(pos.x, pos.y, pos.z);
             const Game::BlockID    id    = state.Block();
-            if (id == Game::BlockID::Air) return;   // the overwhelmingly common case
+            if (id == Game::BlockID::Air) {
+                // The overwhelmingly common case: nothing to animate, but the
+                // air is where the biome's ambient particles float.
+                ParticleTicks::AmbientParticles(pos, state, sink, random);
+                return;
+            }
 
             const Game::Block& def = Game::BlockRegistry::Get(id);
             if (def.animateTick) def.animateTick(sink, pos, state, random);
@@ -68,7 +74,12 @@ namespace Client {
             // .animateTick(...)` — flowing water's burble and lava's pops,
             // waterlogged blocks included.
             const Game::FluidState fluid = Game::FluidStateOf(state);
-            if (!fluid.IsEmpty()) Game::FluidAnimateTickSounds(sink, pos, fluid, random);
+            if (!fluid.IsEmpty()) {
+                Game::FluidAnimateTickSounds(sink, pos, fluid, random);
+                // ... then `fluidState.getDripParticle()` through the block
+                // underneath (ClientLevel.trySpawnDripParticles).
+                ParticleTicks::FluidDrip(pos, state, fluid, blocks, sink, random);
+            }
 
             // MC doAnimateTick's last step: `if (markerParticleTarget ==
             // state.getBlock()) addParticle(new BlockParticleOption(
@@ -78,6 +89,10 @@ namespace Client {
                                             static_cast<double>(pos.y) + 0.5,
                                             static_cast<double>(pos.z) + 0.5);
             }
+
+            // ... and the biome's AMBIENT_PARTICLES in a cell that is not a
+            // full collision block (the nether biomes' ash and spores).
+            ParticleTicks::AmbientParticles(pos, state, sink, random);
         }
 
 #if ENABLE_IMMERSIVE_PORTALS

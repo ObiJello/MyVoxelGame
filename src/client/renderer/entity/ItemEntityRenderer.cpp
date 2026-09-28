@@ -12,6 +12,8 @@
 #include "../viewmodel/HeldItemSpriteMesh.hpp"
 #include "../viewmodel/ItemMeshBuilder.hpp"
 #include "client/entity/ItemEntityManager.hpp"
+#include "client/entity/ClientMobManager.hpp"
+#include "common/entity/OminousItemSpawner.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/ItemEntity.hpp"
 #include "common/core/Log.hpp"
@@ -248,7 +250,7 @@ namespace Render {
         const auto& entities = Client::g_itemEntityManager->GetEntities();
         m_tally.entities = static_cast<int>(entities.size());
         const auto& pickups  = Client::g_itemEntityManager->GetPickups();
-        if (entities.empty() && pickups.empty()) return;
+        if (entities.empty() && pickups.empty() && !HasOminousItemSpawners()) return;
 
         const glm::mat4 viewProj = projection * view;
         const float maxDistSq = m_maxRenderDistance * m_maxRenderDistance;
@@ -355,6 +357,66 @@ namespace Render {
                      viewProj, cameraPos, pass);
         }
 
+        // ── Ominous item spawners (the ominous trial's falling items) ─────
+        DrawOminousItemSpawners(viewProj, cameraPos, partialTick, frustum, pass);
+
+        if (pass.begun) g_renderBackend->UnbindMesh();
+    }
+
+    bool ItemEntityRenderer::HasOminousItemSpawners() const {
+        if (!Client::g_clientMobManager) return false;
+        for (const auto& [id, entry] : Client::g_clientMobManager->All()) {
+            if (entry.mob && entry.mob->GetType() == Game::EntityTypeId::OminousItemSpawner) return true;
+        }
+        return false;
+    }
+
+    void ItemEntityRenderer::DrawOminousItemSpawners(const glm::mat4& viewProj, const glm::vec3& cameraPos,
+                                                     float partialTick, const ::Frustum& frustum,
+                                                     PassState& pass) {
+        if (!Client::g_clientMobManager) return;
+        const float maxDistSq = m_maxRenderDistance * m_maxRenderDistance;
+        // MC OminousItemSpawnerRenderer.submit: submitMultipleFromCount at
+        // 15728880 — full bright.
+        const glm::vec3 fullBright = EntityEnvironment::LightColor(15728880);
+        for (const auto& [id, entry] : Client::g_clientMobManager->All()) {
+            const auto* spawner = dynamic_cast<const Game::OminousItemSpawner*>(entry.mob.get());
+            if (!spawner || spawner->GetItem().IsEmpty()) continue;
+            const glm::dvec3 posD = glm::mix(entry.renderPrevPosition, spawner->position,
+                                             static_cast<double>(partialTick));
+            const glm::vec3 pos(posD);
+            const glm::vec3 d = pos - cameraPos;
+            if (glm::dot(d, d) > maxDistSq) continue;
+            const glm::vec3 half(0.625f);   // the 0.25 box inflated by 0.5, as for items
+            if (!EntityCulling::PassesCrossingFilter(pos - half, pos + half)) continue;
+            if (frustum.TestAABB(pos - half, pos + half) == FrustumResult::Outside) continue;
+            if (!EntityCulling::BoxTouchesVisibleSection(pos - half, pos + half)) continue;
+
+            // ageInTicks <= 50: scale up from nothing; spin wrapDegrees(age * 40).
+            const float age = static_cast<float>(spawner->tickCount) + partialTick;
+            const float scale = age <= 50.0f ? std::min(age, 50.0f) / 50.0f : 1.0f;
+            float spin = std::fmod(age * 40.0f, 360.0f);
+            if (spin >= 180.0f) spin -= 360.0f;
+            if (spin < -180.0f) spin += 360.0f;
+            ClusterPose cluster;
+            cluster.yRotRad = glm::radians(spin);
+            cluster.light = fullBright;
+            DrawItem(spawner->GetItem(), Render::ToRender(posD), age, 0.0f, viewProj, cameraPos, pass,
+                     scale, &cluster);
+        }
+    }
+
+    void ItemEntityRenderer::RenderCluster(const Game::ItemStack& stack, const glm::dvec3& worldPos,
+                                           float yRotDeg, float scale, const glm::vec3& light,
+                                           const glm::mat4& projection, const glm::mat4& view,
+                                           const glm::vec3& cameraPos) {
+        if (!m_initialized || !g_renderBackend || stack.IsEmpty()) return;
+        PassState pass;
+        ClusterPose cluster;
+        cluster.yRotRad = glm::radians(yRotDeg);
+        cluster.light = light;
+        DrawItem(stack, Render::ToRender(worldPos), 0.0f, 0.0f, projection * view, cameraPos, pass, scale,
+                 &cluster);
         if (pass.begun) g_renderBackend->UnbindMesh();
     }
 
@@ -376,14 +438,16 @@ namespace Render {
                                       float bobOffs,
                                       const glm::mat4& viewProj,
                                       const glm::vec3& cameraPos,
-                                      PassState& pass, float scale) {
+                                      PassState& pass, float scale,
+                                      const ClusterPose* cluster) {
             const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
 
             // Bob: sin(age/10 + phase) * 0.1 + 0.1, so it oscillates in
-            // [0, 0.2] and never dips below the ground.
-            const float bob = std::sin(ageTicks / 10.0f + bobOffs) * 0.1f + 0.1f;
+            // [0, 0.2] and never dips below the ground. A caller-posed
+            // cluster has neither bob nor this spin.
+            const float bob = cluster ? 0.0f : std::sin(ageTicks / 10.0f + bobOffs) * 0.1f + 0.1f;
             // Spin: age/20 + phase, in RADIANS about Y.
-            const float spin = ageTicks / 20.0f + bobOffs;
+            const float spin = cluster ? cluster->yRotRad : ageTicks / 20.0f + bobOffs;
 
             const int copies = RenderedAmount(stack.count);
             Jitter jitter(SeedForStack(stack));
@@ -502,7 +566,7 @@ namespace Render {
 
             // MC getPackedLightCoords: the light at the item's eye (ITEM's
             // eyeHeight 0.2125), times the lightmap — per item.
-            EntityEnvironment::SetDrawLight(m_shader, EntityEnvironment::LitAt(
+            EntityEnvironment::SetDrawLight(m_shader, cluster ? cluster->light : EntityEnvironment::LitAt(
                 Render::ToWorld(pos) + glm::dvec3(0.0, 0.2125 * static_cast<double>(scale), 0.0)));
 
             // MC ItemEntityRenderer: lift so the model's lowest point sits
@@ -510,7 +574,8 @@ namespace Render {
             // AFTER the ground transform. For a full cube this works out to
             // zero, which is why a dropped block rests 1/16 off the floor.
             const float transformedMinY = groundLift + groundScale * (modelMinY - 0.5f);
-            const float minOffsetY = -transformedMinY + 0.0625f;
+            // renderMultipleFromCount alone (a cluster) has no hover lift.
+            const float minOffsetY = cluster ? 0.0f : -transformedMinY + 0.0625f;
 
             // MC FLAT_ITEM_DEPTH_THRESHOLD: thin models fan along their own Z
             // instead of scattering, so a stack of swords reads as a fanned

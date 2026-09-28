@@ -2,6 +2,7 @@
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/Mth.hpp"
+#include "common/particle/LevelParticles.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -30,12 +31,33 @@ namespace Game {
 
     void AreaEffectCloud::Tick() {
         // MC AreaEffectCloud.tick: super.tick() (baseTick), then the server
-        // half. clientTick() is the particle field — no particle system, so
-        // the client copy only ages.
+        // half. clientTick() is the particle field — sent from here to the
+        // clients around (SendParticleField), so the client copy only ages.
         BaseTick();
         if (m_level && !m_level->IsClientSide()) {
             ServerTick();
+            if (!IsRemoved()) SendParticleField(tickCount < m_waitTime);
         }
+    }
+
+    ParticleOptions AreaEffectCloud::GetParticle() const {
+        if (m_customParticle) return *m_customParticle;
+        // ARGB.opaque(potionContents.getColor()).
+        const uint32_t color = static_cast<uint32_t>(m_potionContents.GetColor()) | 0xFF000000u;
+        return ParticleOptions::Color(ParticleKind::EntityEffect, color);
+    }
+
+    void AreaEffectCloud::SendParticleField(bool waiting) {
+        Particles::ServerParticleSink* sink = Particles::GetServerSink();
+        if (!sink || !m_level) return;
+        Particles::ParticleBurst burst;
+        burst.options = GetParticle();
+        burst.alwaysShow = true;                 // addAlwaysVisibleParticle
+        burst.pos = position;
+        burst.dist = glm::vec3(m_radius, waiting ? 1.0f : 0.0f, 0.0f);
+        burst.count = 1;
+        burst.randomization = Particles::Randomization::EffectCloud;
+        sink->SendParticles(m_level->Dimension(), burst);
     }
 
     void AreaEffectCloud::ServerTick() {
@@ -89,7 +111,8 @@ namespace Game {
         m_level->GetPlayers(players);
         const AABB box = GetAABB();
         for (LivingEntity* player : players) {
-            if (player && player->GetAABB().Intersects(box)) {
+            // getEntitiesOfClass: EntitySelector.NO_SPECTATORS.
+            if (player && !player->IsSpectator() && player->GetAABB().Intersects(box)) {
                 nearby.push_back(player);
             }
         }

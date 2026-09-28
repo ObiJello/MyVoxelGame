@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/brain/CommonBehaviors.cpp
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
+#include "common/entity/MobCrossbow.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/Animal.hpp"
@@ -635,6 +636,12 @@ namespace Game {
 
         auto* target = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget));
         if (!target) return false;
+        // MC !isHoldingUsableNonMeleeWeapon(body): a mob holding a weapon it
+        // fires (a piglin's crossbow) leaves the melee to nobody.
+        if (mob->CanUseNonMeleeWeapon(mob->GetMainHandEquipment()) ||
+            mob->CanUseNonMeleeWeapon(mob->GetOffhandEquipment())) {
+            return false;
+        }
         if (!mob->IsWithinMeleeAttackRange(*target)) return false;
 
         // MC requires the target to be in the VISIBLE set, not merely named by
@@ -680,8 +687,10 @@ namespace Game {
         const NearestVisibleLivingEntities* visible =
             brain->GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
         // MC contains applies the query-time visibility predicate too.
+        // BehaviorUtils.isWithinAttackRange(body, target, 1): a fired weapon's
+        // range less one block, else the melee reach.
         if (visible && visible->Contains(target) && visible->IsVisible(target) &&
-            mob->IsWithinMeleeAttackRange(*target)) {
+            MobCrossbow::IsWithinAttackRange(*mob, *target, 1)) {
             // Already in reach — stop walking so the mob stands and swings
             // instead of shoving its target around.
             brain->EraseMemory(MemoryModule::WalkTarget);
@@ -1061,7 +1070,8 @@ namespace Game {
         LivingEntity* best = nullptr;
         double bestDistSq = kTemptationRange * kTemptationRange;
         for (LivingEntity* p : players) {
-            if (!p->IsAlive()) continue;
+            // MC TemptingSensor: `filter(EntitySelector.NO_SPECTATORS)`.
+            if (!p->IsAlive() || p->IsSpectator()) continue;
             if (!m_pred || !m_pred(level.GetHeldItemId(*p))) continue;
             const double d = body.DistanceToSqr(*p);
             if (d < bestDistSq) { bestDistSq = d; best = p; }

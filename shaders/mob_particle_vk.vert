@@ -17,9 +17,16 @@ layout(push_constant) uniform PC {
     float uLineWidth;    // 72
     float uAlphaTest;    // 76
     vec4  uColor;        // 80
-    vec4  uUVRange;      // 96
+    vec4  uUVRange;      // 96 — here: the portal clip plane (uEntityClipPlane)
     vec4  uScalars;      // 112 — x: the draw's light (uEntityLight)
 } pc;
+
+// gl_ClipDistance must be advertised explicitly — see block_vk.vert.
+out gl_PerVertex {
+    vec4  gl_Position;
+    float gl_PointSize;
+    float gl_ClipDistance[1];
+};
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
@@ -30,4 +37,9 @@ void main() {
     vUV = aUV;
     vColor = aColor;
     vRenderPos = aPos;
+    // A portal view's clip plane in render space (uEntityClipPlane rides
+    // uUVRange, as entity_vk.vert's). Zero = no clipping.
+    gl_ClipDistance[0] = (any(notEqual(pc.uUVRange.xyz, vec3(0.0))))
+        ? dot(pc.uUVRange.xyz, aPos) + pc.uUVRange.w
+        : 1.0;
 }

@@ -9,6 +9,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/world/pathfinder/NodeEvaluator.hpp"
+#include "common/world/pathfinder/PathTypeTable.hpp"
 
 #include <cmath>
 #include <vector>
@@ -44,9 +45,10 @@ namespace Game {
 
     bool TamableAnimal::UnableToMoveToOwner() const {
         // MC: isOrderedToSit() || isPassenger() || mayBeLeashed() ||
-        // (owner && owner.isSpectator()). No leash system, noted in the header.
+        // (owner && owner.isSpectator()).
         if (IsOrderedToSit()) return true;
         if (m_tamableSelf->IsPassenger()) return true;
+        if (m_tamableSelf->MayBeLeashed()) return true;
         const LivingEntity* owner = GetOwner();
         return owner && owner->IsSpectator();
     }
@@ -102,10 +104,13 @@ namespace Game {
             return false;
         }
 
-        // MC also refuses a leaves block below unless canFlyToOwner() (the
-        // parrot may perch). No leaves classification exists on BlockID here,
-        // so a ground tamable can in principle land on a treetop MC would
-        // reject — WALKABLE already filters everything else.
+        // MC: a LeavesBlock below refuses the spot unless canFlyToOwner()
+        // (the parrot may perch on a treetop). The path-type table already
+        // classifies every *_leaves block, which is the LeavesBlock family.
+        if (!CanFlyToOwner() &&
+            GetPathTypeFromBlock(blocks->GetBlock(x, y - 1, z)) == PathType::Leaves) {
+            return false;
+        }
 
         // MC level.noCollision(this, boundingBox.move(delta)).
         const double half = m_tamableSelf->GetBbWidth() * 0.5;

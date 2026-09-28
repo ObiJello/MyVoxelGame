@@ -13,6 +13,9 @@
 #include "../entity/MorphCarry.hpp"
 #include "../entity/MorphBlockAnchor.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/mobs/Fish.hpp"
+#include "SnbtParser.hpp"
+#include "../world/storage/anvil/EntityNbt.hpp"
 #include "common/entity/Morph.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/ai/Controls.hpp"
@@ -27,6 +30,7 @@
 #include "common/core/Log.hpp"
 
 #include <cctype>
+#include <optional>
 #include <string>
 
 namespace Server {
@@ -37,11 +41,36 @@ namespace Server {
             for (char c : text) s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             return s;
         }
-        const char* kUsage = "Usage: /morph [baby] <entity> | item <item> | block <block> | xp | herobrine | off";
+        const char* kUsage = "Usage: /morph [baby] <entity> [<nbt>] | item <item> | block <block> | xp | herobrine | off";
+
+        // The morph's look off a built instance of its mob (Game::Morph::
+        // DefaultVariantOf's per-type meaning).
+        int32_t MorphVariantOf(const Game::Mob& mob, uint32_t code) {
+            if (const auto* fish = dynamic_cast<const Game::TropicalFish*>(&mob)) {
+                return fish->GetPackedVariant();
+            }
+            if (const auto* salmon = dynamic_cast<const Game::Salmon*>(&mob)) {
+                return static_cast<int32_t>(salmon->GetSize());
+            }
+            return Game::Morph::DefaultVariantOf(code);
+        }
     }
 
     void MorphCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("morph", MorphCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // The player-facing forms. lock / unlock / ability / boom / rotate
+        // are the client's key bindings talking to the server, not typed,
+        // so the tree leaves them out.
+        dispatcher.RegisterCommand("morph", MorphCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literals({"off", "herobrine", "xp"}))
+                .Then(Cmd::Literal("item").Then(Cmd::Argument("item", Cmd::Arg::Item).Executes()))
+                .Then(Cmd::Literal("block").Then(Cmd::Argument("block", Cmd::Arg::Block).Executes()))
+                .Then(Cmd::Literal("baby").Then(Cmd::Argument("entity", Cmd::Arg::EntityType).Executes()))
+                .Then(Cmd::Argument("entity", Cmd::Arg::EntityType).Executes()
+                    .Then(Cmd::Literal("baby").Executes()
+                        .Then(Cmd::Argument("nbt", Cmd::Arg::EntityNbt).Executes()))
+                    .Then(Cmd::Argument("nbt", Cmd::Arg::EntityNbt).Executes())));
     }
 
     void MorphCommand::Execute(const CommandSourceStack& source,
@@ -62,10 +91,14 @@ namespace Server {
         // The code rides the next PlayerUpdateS2C broadcast for everyone
         // else; the morphed client itself learns its new body from the
         // abilities packet sent here.
-        auto apply = [&](uint32_t code, float walkSpeed, const std::string& what) {
+        // `look`: the mob morph's rolled variant (MorphVariantOf); absent =
+        // setMorph's rule (a new body starts from its default look).
+        auto apply = [&](uint32_t code, float walkSpeed, const std::string& what,
+                         std::optional<int32_t> look = std::nullopt) {
             // A different morph is not the locked block any more.
             if (g_integratedServer) g_integratedServer->BlockAnchor().Unlock(connection.GetPlayerId());
             player->setMorph(code, walkSpeed);
+            if (look) player->setMorphVariant(*look);
             // A fresh item waits like a fresh drop before anyone can pick it
             // up (MC ItemEntity pickupDelay); the carry manager also lets a
             // held player go on its next tick when they stop being an item.
@@ -396,6 +429,24 @@ namespace Server {
         // form. Whether the type HAS one is the mob's own answer below
         // (Mob::SetBaby is a no-op on a mob with no baby form — the spawn-
         // egg-on-parent rule), so nothing here keeps a list.
+        // `/morph <entity> [baby] {…}`: an SNBT compound, from the first
+        // token that opens one to the end (the dispatcher splits on spaces),
+        // read onto the mob exactly as /summon's is — how a look is chosen
+        // (`/morph tropical_fish {Variant:117506305}`).
+        std::shared_ptr<const ::World::NBTTagCompound> nbt;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i].empty() || args[i][0] != '{') continue;
+            std::string text = args[i];
+            for (size_t j = i + 1; j < args.size(); ++j) text += " " + args[j];
+            std::string error;
+            nbt = Snbt::ParseCompound(text, error);
+            if (!nbt) {
+                connection.SendChatMessage(error, 1);
+                return;
+            }
+            break;
+        }
+
         std::string entityArg = args[0];
         bool baby = false;
         if (first == "baby") {
@@ -424,6 +475,8 @@ namespace Server {
         // item does (speed 0 → PlayerPhysics keeps the walk factor at 1).
         float speed = 0.0f;
         bool  built = false;
+        int32_t variant = 0;
+        bool    rolled = false;
         ServerLevel* level = g_integratedServer ? g_integratedServer->GetLevel(source.dimension) : nullptr;
         if (level && level->MobLevel()) {
             if (std::unique_ptr<Game::Mob> mob = MakeMobForLoad(type, level->MobLevel())) {
@@ -438,6 +491,19 @@ namespace Server {
                         return;
                     }
                 }
+                // The look: a fish's own finalizeSpawn roll (MC's rules — a
+                // tropical fish's 90% named variant / 10% random one, a
+                // salmon's 30/50/15 size; nothing else of a fish's spawn
+                // reaches past this throwaway instance), unless the compound
+                // names it, as /summon's does (no finalizeSpawn then).
+                if (nbt) {
+                    Game::Anvil::ApplyMobNbt(*nbt, *mob);
+                } else if (dynamic_cast<Game::Fish*>(mob.get())) {
+                    mob->FinalizeSpawn(Game::SpawnReason::Command, nullptr);
+                }
+                variant = MorphVariantOf(*mob, Game::Morph::Encode(Game::Morph::Kind::Mob,
+                                                                   static_cast<uint32_t>(type)));
+                rolled = true;
                 if (mob->HasAiControls()) {
                     float land = mob->GetLandSpeedFactor();
                     if (const auto* swim = dynamic_cast<const Game::SmoothSwimmingMoveControl*>(&mob->GetMoveControl())) {
@@ -453,7 +519,8 @@ namespace Server {
         }
         const uint32_t code = Game::Morph::WithBaby(
             Game::Morph::Encode(Game::Morph::Kind::Mob, static_cast<uint32_t>(type)), baby);
-        apply(code, speed, std::string("You are now a ") + (baby ? "baby " : "") + slug);
+        apply(code, speed, std::string("You are now a ") + (baby ? "baby " : "") + slug,
+              rolled ? std::optional<int32_t>(variant) : std::nullopt);
     }
 
 } // namespace Server

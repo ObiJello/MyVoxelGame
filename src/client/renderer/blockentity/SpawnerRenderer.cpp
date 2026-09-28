@@ -5,6 +5,7 @@
 #include "client/renderer/entity/MobRenderer.hpp"
 #include "common/entity/Morph.hpp"
 #include "common/world/block/entity/SpawnerBlockEntity.hpp"
+#include "common/world/block/entity/TrialSpawnerBlockEntity.hpp"
 
 #include <algorithm>
 #include <vector>
@@ -31,19 +32,38 @@ namespace Render {
                                  const glm::mat4& proj, const glm::mat4& view,
                                  const glm::vec3& cameraPos) {
         if (!g_mobRenderer) return;
-        const auto* spawner = dynamic_cast<const Game::SpawnerBlockEntity*>(&be);
-        if (!spawner || !spawner->HasNextSpawnData()) return;
-        const Game::SpawnData& data = spawner->GetNextSpawnData();
-        if (!data.hasType) return;   // getOrCreateDisplayEntity: no id, no entity
+        Game::EntityTypeId displayType{};
+        bool displayBaby = false;
+        double spin0 = 0.0, spin1 = 0.0;
+        if (const auto* spawner = dynamic_cast<const Game::SpawnerBlockEntity*>(&be)) {
+            if (!spawner->HasNextSpawnData()) return;
+            const Game::SpawnData& data = spawner->GetNextSpawnData();
+            if (!data.hasType) return;   // getOrCreateDisplayEntity: no id, no entity
+            displayType = data.type;
+            displayBaby = data.baby;
+            spin0 = spawner->GetOSpin();
+            spin1 = spawner->GetSpin();
+        } else if (const auto* trial = dynamic_cast<const Game::TrialSpawnerBlockEntity*>(&be)) {
+            // MC TrialSpawnerRenderer: the display entity exists only in a
+            // state with a spinning mob (waiting_for_players, active) and
+            // only when the next SpawnData names one.
+            if (!Game::TrialSpawnerStates::HasSpinningMob(trial->GetClientState())) return;
+            if (!trial->HasDisplayEntity()) return;
+            displayType = trial->GetDisplayType();
+            displayBaby = trial->IsDisplayBaby();
+            spin0 = trial->GetOSpin();
+            spin1 = trial->GetSpin();
+        } else {
+            return;
+        }
 
         const uint32_t code = Game::Morph::WithBaby(
-            Game::Morph::Encode(Game::Morph::Kind::Mob, static_cast<uint32_t>(data.type)), data.baby);
+            Game::Morph::Encode(Game::Morph::Kind::Mob, static_cast<uint32_t>(displayType)), displayBaby);
         if (!Game::Morph::IsValid(code)) return;
 
         // TrialSpawnerRenderer.extractSpawnerData: spin in degrees, the
         // cage scale shrunk for anything longer than a block.
-        const float spin = static_cast<float>(spawner->GetOSpin() +
-                               (spawner->GetSpin() - spawner->GetOSpin()) * partialTick) * 10.0f;
+        const float spin = static_cast<float>(spin0 + (spin1 - spin0) * partialTick) * 10.0f;
         const Game::Morph::Dims dims = Game::Morph::DimsOf(code);
         float scale = 0.53125f;
         const float maxLength = std::max(dims.width, dims.height);

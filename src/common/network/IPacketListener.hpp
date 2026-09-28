@@ -12,6 +12,7 @@ namespace Network {
     // Forward declarations for packet types
     struct ChunkDataS2CPacket;
     struct WorldgenIdsS2CPacket;
+    struct CommandsS2CPacket;
     struct ChunkUnchangedS2CPacket;
     struct LightUpdateS2CPacket;
     struct ChunksBiomesS2CPacket;
@@ -37,6 +38,18 @@ namespace Network {
     struct EntityEventS2CPacket;
     struct HurtAnimationS2CPacket;
     struct PlayerSleepS2CPacket;
+    struct PlayerMountS2CPacket;
+    struct SetPassengersS2CPacket;
+    struct MoveVehicleS2CPacket;
+    struct VehicleDataS2CPacket;
+    struct PlayerInputC2SPacket;
+    struct MoveVehicleC2SPacket;
+    struct PaddleBoatC2SPacket;
+    struct RidingCommandC2SPacket;
+    struct MountScreenOpenS2CPacket;
+    struct UpdateAttributesS2CPacket;
+    struct PlayerSwingS2CPacket;
+    struct ShoulderParrotsS2CPacket;
     struct OpenSignEditorS2CPacket;
     struct SignUpdateC2SPacket;
     struct ControlS2CPacket;
@@ -47,15 +60,23 @@ namespace Network {
     struct UpdateMobEffectS2CPacket;
     struct SoundS2CPacket;
     struct SoundEntityS2CPacket;
+    struct LevelEventS2CPacket;
+    struct JukeboxSongS2CPacket;
+    struct LevelParticlesS2CPacket;
+    struct SelfParticleStateS2CPacket;
     struct OpenBookS2CPacket;
     struct EditBookC2SPacket;
     struct ContainerButtonClickC2SPacket;
     struct MerchantOffersS2CPacket;
     struct SelectTradeC2SPacket;
+    struct SetCameraS2CPacket;
+    struct SpectatorActionC2SPacket;
+    struct TeleportToEntityC2SPacket;
     struct RenameItemC2SPacket;
     struct RemoveMobEffectS2CPacket;
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
+    struct GameEventS2CPacket;
     struct ChangeDimensionS2CPacket;
     struct DimensionScopeS2CPacket;
     struct ExplodeS2CPacket;
@@ -63,6 +84,11 @@ namespace Network {
     struct EndCrystalBeamS2CPacket;
     struct ArmorStandDataS2CPacket;
     struct ItemFrameDataS2CPacket;
+    struct FishingHookDataS2CPacket;
+    struct MapItemDataS2CPacket;
+    struct SetEntityLinkS2CPacket;
+    struct BodyArmorS2CPacket;
+    struct FireworkRocketDataS2CPacket;
     struct InteractC2SPacket;
     struct HotbarSyncS2CPacket;
     struct InventoryFullS2CPacket;
@@ -133,7 +159,7 @@ namespace Network {
         virtual void onLightUpdateS2C(const LightUpdateS2CPacket& packet) {}
         virtual void onChunksBiomesS2C(const ChunksBiomesS2CPacket& packet) {}
         virtual void onChunkBatchStart() {}
-        virtual void onChunkBatchFinished(int batchSize) {}
+        virtual void onChunkBatchFinished(int batchSize, uint32_t serverSendMicros) {}
         
         // Block updates
         virtual void onBlockChangeS2C(const BlockChangeS2CPacket& packet) {}
@@ -171,6 +197,21 @@ namespace Network {
         virtual void onHurtAnimationS2C(const HurtAnimationS2CPacket& packet) {}
         // A player lay down in / got up from a bed (PlayerSleepS2CPacket.hpp)
         virtual void onPlayerSleepS2C(const PlayerSleepS2CPacket& packet) {}
+        // A player sat on / got off a vehicle entity (PlayerMountS2CPacket.hpp)
+        virtual void onPlayerMountS2C(const PlayerMountS2CPacket& packet) {}
+        // Riding and vehicles (VehiclePackets.hpp): a vehicle's passengers, the
+        // server's correction of the vehicle this client drives, a vehicle's
+        // synched data.
+        virtual void onSetPassengersS2C(const SetPassengersS2CPacket& packet) {}
+        virtual void onMountScreenOpenS2C(const MountScreenOpenS2CPacket& packet) {}
+        // A mob's syncable attributes (UpdateAttributesS2CPacket.hpp)
+        virtual void onUpdateAttributesS2C(const UpdateAttributesS2CPacket& packet) {}
+        virtual void onMoveVehicleS2C(const MoveVehicleS2CPacket& packet) {}
+        virtual void onVehicleDataS2C(const VehicleDataS2CPacket& packet) {}
+        // Another player swung an arm (PlayerSwingS2CPacket.hpp)
+        virtual void onPlayerSwingS2C(const PlayerSwingS2CPacket& packet) {}
+        // The parrots on a player's shoulders (ShoulderParrotsS2CPacket.hpp)
+        virtual void onShoulderParrotsS2C(const ShoulderParrotsS2CPacket& packet) {}
         // Open the sign editor (OpenSignEditorS2CPacket.hpp)
         virtual void onOpenSignEditorS2C(const OpenSignEditorS2CPacket& packet) {}
         // /control (ControlPackets.hpp)
@@ -185,10 +226,21 @@ namespace Network {
         // Sounds (SoundPackets.hpp) — MC handleSoundEvent / handleSoundEntityEvent
         virtual void onSoundS2C(const SoundS2CPacket& packet) {}
         virtual void onSoundEntityS2C(const SoundEntityS2CPacket& packet) {}
+        // Level events with a client half beyond a sound — the jukebox song
+        // (LevelEventS2CPacket.hpp) — MC handleLevelEvent
+        virtual void onLevelEventS2C(const LevelEventS2CPacket& packet) {}
+        // Every jukebox song everywhere, for "Jukebox Range: Global" (JukeboxSongS2CPacket.hpp)
+        virtual void onJukeboxSongS2C(const JukeboxSongS2CPacket& packet) {}
+        // ServerLevel.sendParticles (LevelParticlePackets.hpp) — MC handleParticleEvent
+        virtual void onLevelParticlesS2C(const LevelParticlesS2CPacket& packet) {}
+        // The local player's own particle state (/invisible).
+        virtual void onSelfParticleStateS2C(const SelfParticleStateS2CPacket& packet) {}
         // Show the written book in a hand (BookPackets.hpp) — MC handleOpenBook
         virtual void onOpenBookS2C(const OpenBookS2CPacket& packet) {}
         // A merchant's offers (MerchantPackets.hpp) — MC handleMerchantOffers
         virtual void onMerchantOffersS2C(const MerchantOffersS2CPacket& packet) {}
+        // Spectator mode (SpectatorPackets.hpp).
+        virtual void onSetCameraS2C(const SetCameraS2CPacket& packet) {}
         virtual void onRemoveMobEffectS2C(const RemoveMobEffectS2CPacket& packet) {}
 
         // ── End dragon fight ───────────────────────────────────────────────
@@ -198,8 +250,20 @@ namespace Network {
         virtual void onArmorStandDataS2C(const ArmorStandDataS2CPacket& packet) {}
         // Item frame's framed item (ItemFrameDataS2CPacket.hpp)
         virtual void onItemFrameDataS2C(const ItemFrameDataS2CPacket& packet) {}
+        // A fishing bobber's synched state (FishingHookDataS2CPacket.hpp)
+        virtual void onFishingHookDataS2C(const FishingHookDataS2CPacket& packet) { (void)packet; }
+        // One map's colour patch / decorations (MapItemDataS2CPacket.hpp)
+        virtual void onMapItemDataS2C(const MapItemDataS2CPacket& packet) {}
+        // A leashed mob's holder (SetEntityLinkS2CPacket.hpp)
+        virtual void onSetEntityLinkS2C(const SetEntityLinkS2CPacket& packet) {}
+        // A mob's BODY equipment slot (BodyArmorS2CPacket.hpp)
+        virtual void onBodyArmorS2C(const BodyArmorS2CPacket& packet) {}
+        // A firework rocket's synched data (FireworkRocketDataS2CPacket.hpp)
+        virtual void onFireworkRocketDataS2C(const FireworkRocketDataS2CPacket& packet) { (void)packet; }
         virtual void onTickingStateS2C(const TickingStateS2CPacket& packet) {}
         virtual void onTickingStepS2C(const TickingStepS2CPacket& packet) {}
+        // MC ClientboundGameEventPacket — the weather events (GameEventS2CPacket.hpp).
+        virtual void onGameEventS2C(const GameEventS2CPacket& packet) { (void)packet; }
 
         // The player moved to another dimension. The handler must clear every
         // cached world object before the first chunk of the new dimension
@@ -260,8 +324,9 @@ namespace Network {
 
         // View distance
         virtual void onSetChunkCacheRadiusS2C(int viewDistance) {}
-        // Command names this server accepts — drives chat tab-completion.
-        virtual void onCommandsS2C(const std::vector<std::string>& commandNames) {}
+        // The commands this server accepts and their argument trees — drives
+        // the chat's usage hint and tab-completion.
+        virtual void onCommandsS2C(const CommandsS2CPacket& packet) {}
         virtual void onWorldgenIdsS2C(const WorldgenIdsS2CPacket& packet) {}
         
         // Connection management
@@ -288,6 +353,12 @@ namespace Network {
         virtual void onPlayerActionC2S(const PlayerActionC2SPacket& packet) {}
         virtual void onPlayerAbilitiesC2S(const PlayerAbilitiesC2SPacket& packet) {}
         virtual void onPlayerPauseC2S(const PlayerPauseC2SPacket& packet) {}
+        // Riding and vehicles (VehiclePackets.hpp): the movement keys, the
+        // driven vehicle's move, the boat's paddles.
+        virtual void onPlayerInputC2S(const PlayerInputC2SPacket& packet) {}
+        virtual void onMoveVehicleC2S(const MoveVehicleC2SPacket& packet) {}
+        virtual void onPaddleBoatC2S(const PaddleBoatC2SPacket& packet) {}
+        virtual void onRidingCommandC2S(const RidingCommandC2SPacket& packet) {}
         virtual void onInteractC2S(const InteractC2SPacket& packet) {}
         
         // Play phase - Player updates
@@ -314,6 +385,9 @@ namespace Network {
         virtual void onContainerButtonClickC2S(const ContainerButtonClickC2SPacket& packet) {}
         // A trade picked in the list (MerchantPackets.hpp) — MC handleSelectTrade
         virtual void onSelectTradeC2S(const SelectTradeC2SPacket& packet) {}
+        // Spectator mode (SpectatorPackets.hpp).
+        virtual void onSpectatorActionC2S(const SpectatorActionC2SPacket& packet) {}
+        virtual void onTeleportToEntityC2S(const TeleportToEntityC2SPacket& packet) {}
         virtual void onRenameItemC2S(const RenameItemC2SPacket& packet) {}
 
         // Play phase - Inventory clicks

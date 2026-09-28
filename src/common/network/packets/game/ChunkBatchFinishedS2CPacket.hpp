@@ -13,9 +13,15 @@ namespace Network {
 
     struct ChunkBatchFinishedS2CPacket {
         int32_t batchSize = 0;
+        // Trailing (not in MC's packet): how long the server took to hand the
+        // batch to its connection, start packet to finish packet. The client
+        // subtracts it from the batch's arrival span to see what the LINK
+        // added (ClientPacketHandler's batch-rate estimator). 0 = not sent.
+        uint32_t serverSendMicros = 0;
 
         ChunkBatchFinishedS2CPacket() = default;
-        explicit ChunkBatchFinishedS2CPacket(int32_t size) : batchSize(size) {}
+        ChunkBatchFinishedS2CPacket(int32_t size, uint32_t sendMicros)
+            : batchSize(size), serverSendMicros(sendMicros) {}
     };
 
     namespace Serialization {
@@ -23,6 +29,7 @@ namespace Network {
         inline std::vector<uint8_t> Serialize(const ChunkBatchFinishedS2CPacket& packet) {
             Network::PacketBuffer buffer;
             buffer.WriteInt(packet.batchSize);
+            buffer.WriteInt(packet.serverSendMicros);
             return buffer.GetData();
         }
 
@@ -30,6 +37,7 @@ namespace Network {
             Network::PacketReader reader(data);
             ChunkBatchFinishedS2CPacket packet;
             packet.batchSize = reader.ReadInt();
+            if (reader.Remaining() >= 4) packet.serverSendMicros = reader.ReadInt();
             return packet;
         }
 

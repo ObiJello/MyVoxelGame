@@ -6,6 +6,9 @@
 
 #include "ImmersivePortalRegistry.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/entity/PlayerRiding.hpp"
+#include "server/level/MobLevelTransfer.hpp"
+#include "server/level/PortalTravel.hpp"
 #include "server/level/ServerLevel.hpp"
 #include "server/entity/MobManager.hpp"
 #include "server/entity/ItemEntityManager.hpp"
@@ -194,6 +197,8 @@ namespace Server {
             const glm::dvec3 lastEye = track.eye;
             track.eye = eye;
             if (track.cooldownUntil > serverTick) continue;
+            // A rider crosses with its vehicle (TickMobs), never on its own.
+            if (player->isPassenger()) continue;
 
             const Portal* crossed = nullptr;
             {
@@ -356,10 +361,12 @@ namespace Server {
         for (Game::Mob* mob : list) {
             if (!mob || !mob->IsAlive() || mob->IsDeadOrDying()) continue;
             if (mob->portal.IsOnCooldown()) continue;
-            // Riders and vehicles cross as a unit only in the mod's later
-            // versions; here neither crosses. The player's mount is the
-            // common case and the player's own crossing dismounts them.
-            if (mob->IsPassenger() || mob->IsVehicle()) continue;
+            // MC Entity.canUsePortal — a fishing bobber never travels.
+            if (!mob->CanUsePortal(false)) continue;
+            // Riders cross with their vehicle (MC 26.x Entity.teleport
+            // carries the passengers): only a root entity is tested, and
+            // MoveMob takes everything on it along.
+            if (mob->IsPassenger()) continue;
 
             const glm::dvec3 from = EyeOf(*mob, mob->oldPosition);
             const glm::dvec3 to   = EyeOf(*mob, mob->position);
@@ -473,20 +480,45 @@ namespace Server {
         const int32_t id = mob.GetId();
         const bool crossDimension = (to != &from);
 
-        std::unique_ptr<Game::Mob> owned;
-        if (crossDimension) {
-            // Out of the old level first: the tracker tells every watcher of
-            // the old dimension the entity is gone, before the new level's
-            // tracker announces it there.
-            std::vector<EntityPacketOut> outgoing;
-            if (from.MobTracker()) from.MobTracker()->RemoveEntity(id, outgoing);
-            for (auto& packet : outgoing) {
-                m_deferredRemovals.push_back(DeferredPacket{from.Dimension(), packet.connectionId,
-                                                            static_cast<uint8_t>(packet.packetId),
-                                                            std::move(packet.payload)});
+        // The players riding it (anywhere in its passenger tree): where each
+        // sat relative to it, and the way each looks through the surface.
+        struct CarriedRider {
+            ServerPlayer* player;
+            std::shared_ptr<PlayerSession> session;
+            glm::dvec3 offset;
+            int32_t vehicleId;
+            float newYaw, newPitch;
+        };
+        std::vector<CarriedRider> riders;
+        {
+            PlayerSessionManager* sessions = m_server.GetSessionManager();
+            std::vector<Game::Entity*> stack(mob.GetPassengers().begin(), mob.GetPassengers().end());
+            while (!stack.empty()) {
+                Game::Entity* e = stack.back();
+                stack.pop_back();
+                if (!e) continue;
+                for (Game::Entity* p : e->GetPassengers()) stack.push_back(p);
+                auto* view = dynamic_cast<PlayerEntityView*>(e);
+                ServerPlayer* player = view ? view->GetPlayer() : nullptr;
+                if (!player || !view->GetVehicle() || !sessions) continue;
+                auto session = sessions->GetSessionByConnection(static_cast<uint32_t>(view->GetId()));
+                if (!session) continue;
+                const glm::vec3 fwd = Game::Mth::ViewVector(player->getPitch(), player->getYaw());
+                const glm::dvec3 mapped = glm::normalize(portal.TransformLocalVecNonScale(glm::dvec3(fwd)));
+                riders.push_back(CarriedRider{player, session, player->getPosition() - mob.position,
+                                              view->GetVehicle()->GetId(),
+                                              Game::Mth::YRotFromVector(glm::vec3(mapped)),
+                                              Game::Mth::XRotFromVector(glm::vec3(mapped))});
             }
-            owned = from.Mobs()->Extract(id);
-            if (!owned) return false;
+        }
+        const glm::dvec3 rootFrom = mob.position;
+
+        if (crossDimension) {
+            // Every player off before the vehicle leaves (their views stay
+            // behind, their bodies cross as players below); then the mob and
+            // its mob riders move levels together, links intact.
+            for (CarriedRider& r : riders) PlayerRiding::CarryAcross(*r.session, r.vehicleId, dest);
+            if (!MobLevelTransfer::TransferTree(from, *to, mob)) return false;
         }
 
         mob.position    = newFeet;
@@ -509,29 +541,37 @@ namespace Server {
             mob.needsSync = true;
         }
 
-        if (crossDimension) {
-            // Nothing of the old level may be remembered across: the goals,
-            // the brain and the target keep raw pointers to the entities
-            // they watch, flee or hunt — other mobs, the players' views —
-            // and those belong to a level this mob is no longer in. The old
-            // level clears such pointers among ITS mobs when an entity goes
-            // (a player leaving takes its view with it); a mob that had
-            // already moved on was out of that sweep, and held the freed
-            // view until its next goal tick cast it. (Dropped items are not
-            // Entities and are never held this way.)
-            for (PlayerEntityView* view : from.MobLevel()->PlayerViews()) mob.ClearReferenceTo(view);
-            for (const auto& [otherId, other] : from.Mobs()->All()) {
-                if (other.get() != &mob) mob.ClearReferenceTo(other.get());
-            }
-            mob.SetLevel(to->MobLevel());
-            if (!to->Mobs()->AddExisting(std::move(owned))) {
-                // Cannot happen with process-wide ids; if it does, the mob is
-                // gone rather than duplicated.
-                Log::Warning("[ImmersivePortals] Mob #%d lost crossing #%u: id taken in %s",
-                             id, portal.id, std::string(Game::DimensionName(dest)).c_str());
-                return false;
+        // The mob riders follow their seats on the next passenger tick; their
+        // old positions go with them so nothing lerps across the gap.
+        {
+            std::vector<Game::Entity*> stack(mob.GetPassengers().begin(), mob.GetPassengers().end());
+            while (!stack.empty()) {
+                Game::Entity* e = stack.back();
+                stack.pop_back();
+                if (!e) continue;
+                for (Game::Entity* p : e->GetPassengers()) stack.push_back(p);
+                if (e->IsPlayer()) continue;
+                e->position = newFeet + (e->position - rootFrom);
+                e->oldPosition = e->position;
+                e->portal.SetCooldown(kMobCooldownTicks);
+                e->portal.MarkCrossedSurface();
+                e->needsSync = true;
             }
         }
+        // The riding players: through as players and seated again on the
+        // far side (cross-dimension), or carried in their seats with their
+        // views turned (a gun portal within the level).
+        for (CarriedRider& r : riders) {
+            r.player->setRotation(r.newYaw, r.newPitch);
+            if (crossDimension) {
+                // Their view is still in the level being left (CarryAcross
+                // unlinked it there); PortalTravel moves the player itself.
+                if (PlayerEntityView* view = from.MobLevel()->GetPlayerView(r.session->GetConnectionId())) {
+                    PortalTravel::ArriveAt(m_server, from, *to, *view, newFeet + r.offset, newVel);
+                }
+            }
+        }
+        if (!crossDimension && !riders.empty()) PlayerRiding::OnVehicleTeleported(mob);
 
         // A chase that reached the portal: its target is now on the far side.
         for (Chase& chase : m_chases) {

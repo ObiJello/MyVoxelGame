@@ -5,6 +5,7 @@
 #include "common/core/Log.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/CandleBlocks.hpp"
 #include "common/world/block/ShapeOcclusion.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/DimensionId.hpp"
@@ -661,8 +662,12 @@ namespace Game {
             if (BlockRegistry::ContainsWater(state)) return false;
             if (!(fluid.type == FluidType::Water && fluid.IsSource())) return false;
             if (!level.IsClientSide()) {
-                level.SetBlock(pos.x, pos.y, pos.z, BlockRegistry::WithWaterlogged(state, true),
-                               World::UpdateFlags::All);
+                // MC CandleBlock.placeLiquid: a lit candle is put out
+                // (extinguish — the hiss and the smoke) rather than written.
+                if (!Candles::CandlePlaceLiquid(level, pos, state)) {
+                    level.SetBlock(pos.x, pos.y, pos.z, BlockRegistry::WithWaterlogged(state, true),
+                                   World::UpdateFlags::All);
+                }
                 ScheduleTick(level, pos, FluidType::Water);
             }
             return true;

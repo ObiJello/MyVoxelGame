@@ -140,6 +140,12 @@ namespace Game::Anvil {
                               ? data.lastPlayed
                               : static_cast<int64_t>(std::time(nullptr)) * 1000);
 
+        // MC PrimaryLevelData's wandering-trader clock (the save's 26.1
+        // stamp predates WanderingTraderData; 26.3's
+        // LevelDatToSavedDataPreparationFix moves these on upgrade).
+        w.Int("WanderingTraderSpawnDelay",  data.wanderingTraderSpawnDelay);
+        w.Int("WanderingTraderSpawnChance", data.wanderingTraderSpawnChance);
+
         // Spawn, written TWICE on purpose.
         //
         // At DataVersion 4548 and above MC reads the `spawn` RespawnData
@@ -162,13 +168,12 @@ namespace Game::Anvil {
         w.Int  ("SpawnZ", data.spawnZ);
         w.Float("SpawnAngle", data.spawnYaw);
 
-        // Weather. The engine has no weather system, so these round-trip as
-        // "clear forever" rather than being omitted and defaulted to random.
-        w.Int ("clearWeatherTime", 0);
-        w.Int ("rainTime",     0);
-        w.Bool("raining",      false);
-        w.Int ("thunderTime",  0);
-        w.Bool("thundering",   false);
+        // Weather — MC PrimaryLevelData's five keys (Server::ServerWeather).
+        w.Int ("clearWeatherTime", data.clearWeatherTime);
+        w.Int ("rainTime",     data.rainTime);
+        w.Bool("raining",      data.raining);
+        w.Int ("thunderTime",  data.thunderTime);
+        w.Bool("thundering",   data.thundering);
 
         w.BeginCompound("WorldGenSettings");
         w.Long("seed", data.seed);
@@ -235,6 +240,8 @@ namespace Game::Anvil {
         w.Bool("shared_vitals",     data.sharedVitals);
         w.Bool("twilight_forest",   data.twilightForestEnabled);
         w.Bool("aether",            data.aetherEnabled);
+        w.Bool("guest_commands",    data.guestCommandAccess);
+        // Kept for builds that predate guest_commands (they read only this).
         w.Bool("guest_command_access", data.guestCommandAccess);
         w.EndCompound();
 
@@ -358,6 +365,13 @@ namespace Game::Anvil {
         out.time          = data->GetValue<int64_t>("Time", out.time);
         out.dayTime       = data->GetValue<int64_t>("DayTime", out.dayTime);
         out.lastPlayed    = data->GetValue<int64_t>("LastPlayed", out.lastPlayed);
+        if (data->GetTag("WanderingTraderSpawnDelay") || data->GetTag("WanderingTraderSpawnChance")) {
+            out.hasWanderingTraderData = true;
+            out.wanderingTraderSpawnDelay  = data->GetValue<int32_t>("WanderingTraderSpawnDelay",
+                                                                     out.wanderingTraderSpawnDelay);
+            out.wanderingTraderSpawnChance = data->GetValue<int32_t>("WanderingTraderSpawnChance",
+                                                                     out.wanderingTraderSpawnChance);
+        }
         if (data->GetTag("SpawnX") && data->GetTag("SpawnY") && data->GetTag("SpawnZ")) {
             out.spawnX   = data->GetValue<int32_t>("SpawnX", out.spawnX);
             out.spawnY   = data->GetValue<int32_t>("SpawnY", out.spawnY);
@@ -365,6 +379,15 @@ namespace Game::Anvil {
             out.hasSpawn = true;
         }
         out.spawnYaw      = data->GetValue<float>("SpawnAngle", out.spawnYaw);
+        // MC PrimaryLevelData's weather keys.
+        out.hasWeatherData = data->GetTag("clearWeatherTime") || data->GetTag("rainTime") ||
+                             data->GetTag("raining") || data->GetTag("thunderTime") ||
+                             data->GetTag("thundering");
+        out.clearWeatherTime = data->GetValue<int32_t>("clearWeatherTime", out.clearWeatherTime);
+        out.rainTime         = data->GetValue<int32_t>("rainTime", out.rainTime);
+        out.raining          = data->GetValue<int8_t>("raining", out.raining ? 1 : 0) != 0;
+        out.thunderTime      = data->GetValue<int32_t>("thunderTime", out.thunderTime);
+        out.thundering       = data->GetValue<int8_t>("thundering", out.thundering ? 1 : 0) != 0;
         // DataVersion 4548+ (MC RespawnData): the `spawn` compound wins over
         // the legacy keys when both are present (this writer emits both).
         if (const auto spawn = Compound(*data, "spawn")) {
@@ -424,7 +447,10 @@ namespace Game::Anvil {
         out.sharedVitals     = RuleBool(obey.get(), {"shared_vitals"},     out.sharedVitals);
         out.twilightForestEnabled = RuleBool(obey.get(), {"twilight_forest"}, out.twilightForestEnabled);
         out.aetherEnabled    = RuleBool(obey.get(), {"aether"},            out.aetherEnabled);
-        out.guestCommandAccess = RuleBool(obey.get(), {"guest_command_access"}, out.guestCommandAccess);
+        // Only the explicit guest_commands key is a host's choice; a world
+        // saved before it (guest_command_access alone, always written with
+        // the old off default) gets the new default.
+        out.guestCommandAccess = RuleBool(obey.get(), {"guest_commands"}, out.guestCommandAccess);
         return true;
     }
 

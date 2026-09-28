@@ -10,7 +10,9 @@
 namespace Server {
 
     void DifficultyCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("difficulty", DifficultyCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("difficulty", DifficultyCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Literals({"peaceful", "easy", "normal", "hard"})));
     }
 
     namespace {

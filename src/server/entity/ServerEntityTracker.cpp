@@ -4,8 +4,20 @@
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/network/packets/game/VehiclePackets.hpp"
+#include "server/entity/PlayerRiding.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/OminousItemSpawner.hpp"
 #include "common/network/packets/game/ItemFrameDataS2CPacket.hpp"
+#include "common/network/packets/game/FishingHookDataS2CPacket.hpp"
+#include "common/entity/projectile/FishingHook.hpp"
+#include "common/network/packets/game/SetEntityLinkS2CPacket.hpp"
+#include "common/network/packets/game/BodyArmorS2CPacket.hpp"
+#include "common/network/packets/game/UpdateAttributesS2CPacket.hpp"
+#include "common/network/packets/game/FireworkRocketDataS2CPacket.hpp"
+#include "common/entity/projectile/FireworkRocket.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/network/packets/game/DragonPackets.hpp"
@@ -29,6 +41,10 @@ namespace Server {
         constexpr uint8_t kFlagAggressive = 0x02;
         constexpr uint8_t kFlagOnFire     = 0x04;
         constexpr uint8_t kFlagAgeLocked  = 0x08;   // MC AgeableMob.AGE_LOCKED
+        // MC DATA_LIVING_ENTITY_FLAGS bits 1 (using an item) and 2 (with the
+        // off hand) — a spear-charging mob's lowered spear.
+        constexpr uint8_t kFlagUsingItem  = 0x10;
+        constexpr uint8_t kFlagUseOffhand = 0x20;
 
         int64_t Encode(double v) { return Network::EncodeEntityPos(v); }
     }
@@ -39,6 +55,10 @@ namespace Server {
         if (mob.IsAggressive()) flags |= kFlagAggressive;
         if (mob.IsOnFire())     flags |= kFlagOnFire;
         if (mob.IsAgeLocked())  flags |= kFlagAgeLocked;
+        if (mob.IsUsingItem()) {
+            flags |= kFlagUsingItem;
+            if (mob.GetUsedItemHand() == Game::EquipmentSlot::OFFHAND) flags |= kFlagUseOffhand;
+        }
         return flags;
     }
 
@@ -62,6 +82,30 @@ namespace Server {
         return mob.GetVariantByte();
     }
 
+    namespace {
+        // A firework rocket's synched data (FireworkRocketDataS2CPacket.hpp).
+        Network::FireworkRocketDataS2CPacket BuildFireworkRocketData(const Game::FireworkRocket& rocket, int32_t id) {
+            Network::FireworkRocketDataS2CPacket p;
+            p.entityId = id;
+            p.item = rocket.GetItem();
+            p.attachedToId = rocket.GetAttachedToId();
+            p.shotAtAngle = rocket.IsShotAtAngle();
+            p.lifetime = rocket.GetLifetime();
+            return p;
+        }
+
+        // A fishing bobber's synched state (FishingHookDataS2CPacket.hpp).
+        Network::FishingHookDataS2CPacket BuildFishingHookData(const Game::FishingHook& hook, int32_t id) {
+            Network::FishingHookDataS2CPacket p;
+            p.entityId = id;
+            p.ownerId  = hook.GetOwnerNetId();
+            p.hookedId = hook.GetHookedNetId();
+            if (hook.IsBiting()) p.flags |= Network::FishingHookDataS2CPacket::kFlagBiting;
+            if (hook.GetOwnerHand() != 0) p.flags |= Network::FishingHookDataS2CPacket::kFlagOffhand;
+            return p;
+        }
+    }
+
     Network::AddEntityS2CPacket ServerEntityTracker::BuildAddPacket(const Game::Mob& mob,
                                                                     const glm::dvec3& base) {
         Network::AddEntityS2CPacket p;
@@ -81,6 +125,25 @@ namespace Server {
         p.yRot       = Game::Mth::PackDegrees(mob.yRot);
         p.xRot       = Game::Mth::PackDegrees(mob.xRot);
         p.yHeadRot   = Game::Mth::PackDegrees(mob.GetYHeadRot());
+        // The exact angles and the body yaw (appended field — see the
+        // packet): what the entity looks like on first sight is what it
+        // looks like here, to the degree, body included.
+        p.hasExactRot   = true;
+        p.exactYRot     = mob.yRot;
+        p.exactXRot     = mob.xRot;
+        p.exactYHeadRot = mob.GetYHeadRot();
+        p.exactYBodyRot = mob.yBodyRot;
+        p.walkPosition  = mob.walkAnimation.position;
+        p.walkSpeed     = mob.walkAnimation.speed;
+        p.walkSpeedOld  = mob.walkAnimation.speedOld;
+        p.walkScale     = mob.walkAnimation.positionScale;
+        p.animAge       = mob.viewAge >= 0 ? mob.viewAge + mob.tickCount : -1;
+        {
+            float phase[Game::Mob::kRenderPhaseMax] = {};
+            const int n = std::clamp(mob.GetRenderPhase(phase), 0, Game::Mob::kRenderPhaseMax);
+            p.renderPhaseCount = static_cast<uint8_t>(n);
+            for (int i = 0; i < n; ++i) p.renderPhase[i] = phase[i];
+        }
         p.health     = mob.GetHealth();
         p.flags      = PackFlags(mob);
         p.variantData = VariantData(mob);
@@ -130,6 +193,54 @@ namespace Server {
     }
 
     namespace {
+        // A boat's / minecart's synched entity data (VehicleDataS2C).
+        std::vector<uint8_t> VehicleDataPayload(const Game::VehicleEntity& vehicle, int32_t id) {
+            Game::VehicleSyncedData d;
+            vehicle.FillSyncedData(d);
+            Network::VehicleDataS2CPacket p;
+            p.entityId = id;
+            p.hurtTime = d.hurtTime;
+            p.hurtDir = d.hurtDir;
+            p.damage = d.damage;
+            p.paddleLeft = d.paddleLeft;
+            p.paddleRight = d.paddleRight;
+            p.paddleReverse = d.paddleReverse;
+            p.bubbleTime = d.bubbleTime;
+            p.hasCustomDisplay = d.hasCustomDisplay;
+            p.customDisplay = d.customDisplay;
+            p.displayOffset = d.displayOffset;
+            p.hasFuel = d.hasFuel;
+            return Network::Serialization::Serialize(p);
+        }
+
+        // MC ClientboundSetPassengersPacket for a vehicle: the passengers in
+        // seat order, a player by its player id.
+        std::vector<uint8_t> SetPassengersPayload(const Game::VehicleEntity& vehicle, int32_t id) {
+            Network::SetPassengersS2CPacket p;
+            p.vehicleId = id;
+            vehicle.CollectPassengerWireIds(p.passengerIds, &PlayerRiding::PlayerIdOfView);
+            return Network::Serialization::Serialize(p);
+        }
+
+        // A mob's passengers as the wire names them (players by player id).
+        std::vector<int32_t> PassengerWireIds(const Game::Entity& vehicle) {
+            std::vector<int32_t> ids;
+            for (const Game::Entity* p : vehicle.GetPassengers()) {
+                if (!p) continue;
+                if (p->IsPlayer()) {
+                    const int32_t pid = PlayerRiding::PlayerIdOfView(*p);
+                    if (pid > 0) ids.push_back(pid);
+                } else {
+                    ids.push_back(p->GetId());
+                }
+            }
+            return ids;
+        }
+        bool HasPlayerWireId(const std::vector<int32_t>& ids) {
+            for (int32_t id : ids) if (id > 0 && id < Game::kItemEntityIdBase) return true;
+            return false;
+        }
+
         // MC ChunkMap.TrackedEntity.getEffectiveRange — this entity's own
         // tracking range, widened to the largest of anything riding it, so a
         // small mob on a big vehicle is not culled before its ride is. MC
@@ -207,6 +318,7 @@ namespace Server {
             // appear 150 ms late. At a million parked TNT this is most of
             // the tracker's tick.
             if (!firstSight && mob.physicsParked && !mob.needsSync && !mob.hurtMarked &&
+                mob.GetLeashHolderNetId() == tracked.lastLeashHolderId &&
                 ((static_cast<uint32_t>(tracked.tickCount) + static_cast<uint32_t>(id)) & 3u) != 0u) {
                 ++tracked.tickCount;
                 continue;
@@ -243,6 +355,22 @@ namespace Server {
                     const auto& p = players[pi];
                     t_memoSent[pi] = (p.sentChunks == nullptr) ||
                                      (p.sentChunks->count(mobChunk) != 0) ? 1 : 0;
+                }
+            }
+
+            // ── Lead (MC ClientboundSetEntityLinkPacket) ──────────────────
+            // A holder change goes to everyone already watching (MC sends it
+            // from setLeashedTo / dropLeash); a watcher added below gets the
+            // current link with its AddEntity instead (sendPairingData).
+            // Checked before the watch-set walk so nobody gets it twice.
+            const int32_t leashHolderId = mob.GetLeashHolderNetId();
+            if (leashHolderId != tracked.lastLeashHolderId) {
+                tracked.lastLeashHolderId = leashHolderId;
+                const auto payload = Network::Serialization::Serialize(
+                    Network::SetEntityLinkS2CPacket{id, leashHolderId});
+                for (uint32_t connId : tracked.watchers) {
+                    EmitTo(connId, Network::PacketId::SetEntityLinkS2C,
+                           payload, EntityPacketOut::Kind::Data, out);
                 }
             }
 
@@ -290,6 +418,14 @@ namespace Server {
                     EmitTo(connId, Network::PacketId::AddEntityS2C,
                            Network::Serialization::Serialize(BuildAddPacket(mob, basePos)),
                            EntityPacketOut::Kind::Add, out);
+                    // MC ServerEntity.sendPairingData: a leashed mob's link
+                    // follows its add.
+                    if (leashHolderId != -1) {
+                        EmitTo(connId, Network::PacketId::SetEntityLinkS2C,
+                               Network::Serialization::Serialize(
+                                   Network::SetEntityLinkS2CPacket{id, leashHolderId}),
+                               EntityPacketOut::Kind::Data, out);
+                    }
                     // MC sends a crystal's DATA_BEAM_TARGET with the entity
                     // data on tracking start; here it is its own packet (see
                     // DragonPackets.hpp). Only when a target is set — the
@@ -302,6 +438,46 @@ namespace Server {
                                Network::Serialization::Serialize(BuildArmorStandData(*stand, id)),
                                EntityPacketOut::Kind::Data, out);
                     }
+                    // A boat's or minecart's synched data and its seat
+                    // order (MC sendPairingData: the entity data and
+                    // ClientboundSetPassengersPacket).
+                    if (Game::IsVehicleEntityType(mob.GetType())) {
+                        if (const auto* vehicle = dynamic_cast<const Game::VehicleEntity*>(&mob)) {
+                            EmitTo(connId, Network::PacketId::VehicleDataS2C, VehicleDataPayload(*vehicle, id),
+                                   EntityPacketOut::Kind::Data, out);
+                            EmitTo(connId, Network::PacketId::SetPassengersS2C, SetPassengersPayload(*vehicle, id),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                    // A mount with players aboard: its seat order (MC
+                    // sendPairingData's ClientboundSetPassengersPacket).
+                    else if (mob.IsVehicle()) {
+                        const std::vector<int32_t> wire = PassengerWireIds(mob);
+                        if (HasPlayerWireId(wire)) {
+                            EmitTo(connId, Network::PacketId::SetPassengersS2C,
+                                   Network::Serialization::Serialize(Network::SetPassengersS2CPacket{id, wire}),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                    // A fishing bobber's owner, hooked entity and bite (MC
+                    // sends the owner as the add packet's data, the rest as
+                    // entity data) follow its add (FishingHookDataS2C).
+                    if (mob.GetType() == Game::EntityTypeId::FishingBobber) {
+                        EmitTo(connId, Network::PacketId::FishingHookDataS2C,
+                               Network::Serialization::Serialize(BuildFishingHookData(
+                                   static_cast<const Game::FishingHook&>(mob), id)),
+                               EntityPacketOut::Kind::Data, out);
+                    }
+                    // A firework rocket's item, attachment and angle flag (MC
+                    // entity data) follow its add (FireworkRocketDataS2C) —
+                    // the client needs the stack for its look and its
+                    // explosions, the attachment to ride with its glider.
+                    if (mob.GetType() == Game::EntityTypeId::FireworkRocket) {
+                        EmitTo(connId, Network::PacketId::FireworkRocketDataS2C,
+                               Network::Serialization::Serialize(BuildFireworkRocketData(
+                                   static_cast<const Game::FireworkRocket&>(mob), id)),
+                               EntityPacketOut::Kind::Data, out);
+                    }
                     // An item frame's framed item follows the same way
                     // (ItemFrameDataS2C) — only when there is one; the
                     // client's default is an empty frame.
@@ -310,6 +486,63 @@ namespace Server {
                         EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
                                Network::Serialization::Serialize(Network::ItemFrameDataS2CPacket{id, frame->GetItem()}),
                                EntityPacketOut::Kind::Data, out);
+                    }
+                    // An ominous item spawner's item (MC DATA_ITEM) rides the
+                    // same "displayed item" packet.
+                    if (const auto* spawner = dynamic_cast<const Game::OminousItemSpawner*>(&mob);
+                        spawner && !spawner->GetItem().IsEmpty()) {
+                        EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
+                               Network::Serialization::Serialize(Network::ItemFrameDataS2CPacket{id, spawner->GetItem()}),
+                               EntityPacketOut::Kind::Data, out);
+                    }
+                    // A mob's worn / held humanoid equipment (BodyArmorS2C
+                    // with the slot — MC ClientboundSetEquipmentPacket), one
+                    // packet per non-empty slot; the client's default is bare.
+                    for (int slotIndex = 0; slotIndex < Game::Mob::kEquipmentSlotCount; ++slotIndex) {
+                        const auto slot = static_cast<Game::EquipmentSlot>(slotIndex);
+                        const Game::ItemStack& stack = mob.GetEquipment(slot);
+                        if (stack.IsEmpty()) continue;
+                        Network::BodyArmorS2CPacket equipment{id, stack};
+                        equipment.slot = slot;
+                        EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                               Network::Serialization::Serialize(equipment),
+                               EntityPacketOut::Kind::Data, out);
+                    }
+                    // MC ServerEntity.sendPairingData: the syncable
+                    // attributes (UpdateAttributesS2C) of a mob whose client
+                    // copy needs them (a mount's rolled speed / jump / health).
+                    if (mob.SyncsAttributesToClient()) {
+                        Network::UpdateAttributesS2CPacket attributes;
+                        attributes.entityId = id;
+                        attributes.attributes = Network::SyncableAttributes(mob.Attributes());
+                        if (!attributes.attributes.empty()) {
+                            EmitTo(connId, Network::PacketId::UpdateAttributesS2C,
+                                   Network::Serialization::Serialize(attributes),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                    // An allay's held item (BodyArmorS2C, slot MAINHAND) —
+                    // only when it holds one; the client's default is empty.
+                    if (mob.GetType() == Game::EntityTypeId::Allay) {
+                        if (const auto* allay = dynamic_cast<const Game::Allay*>(&mob);
+                            allay && !allay->GetMainHandItem().IsEmpty()) {
+                            Network::BodyArmorS2CPacket held{id, allay->GetMainHandItem()};
+                            held.slot = Game::EquipmentSlot::MAINHAND;
+                            EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                                   Network::Serialization::Serialize(held),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                    // A wolf's armour (BodyArmorS2C) — only when it wears
+                    // some; the client's default is an empty BODY slot.
+                    if (mob.GetType() == Game::EntityTypeId::Wolf) {
+                        const auto& wolf = static_cast<const Game::Wolf&>(mob);
+                        if (wolf.IsWearingBodyArmor()) {
+                            EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                                   Network::Serialization::Serialize(
+                                       Network::BodyArmorS2CPacket{id, wolf.GetBodyArmorItem()}),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
                     }
                     if (const auto* crystal =
                             dynamic_cast<const Game::EndCrystal*>(&mob);
@@ -369,6 +602,144 @@ namespace Server {
                     EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
                            payload, EntityPacketOut::Kind::Data, out);
                 }
+            }
+            // The same for an ominous item spawner that let its item go.
+            if (auto* spawner = dynamic_cast<Game::OminousItemSpawner*>(mobPtr);
+                spawner && spawner->ConsumeItemDirty()) {
+                const auto payload = Network::Serialization::Serialize(
+                    Network::ItemFrameDataS2CPacket{id, spawner->GetItem()});
+                for (uint32_t connId : tracked.watchers) {
+                    EmitTo(connId, Network::PacketId::ItemFrameDataS2C,
+                           payload, EntityPacketOut::Kind::Data, out);
+                }
+            }
+
+            // Humanoid equipment that changed this tick (equipped from a
+            // table, dropped preserved, emptied at death) tells every current
+            // watcher, slot by slot.
+            // Syncable attributes that changed since the last look (a bred
+            // foal's inherited speed, an effect's modifier) tell every
+            // current watcher — MC sendDirtyEntityData's attribute half. The
+            // first look only records: every watcher so far had them at
+            // pairing.
+            if (mobPtr->SyncsAttributesToClient()) {
+                const uint64_t signature = Network::SyncableAttributesSignature(mobPtr->Attributes());
+                if (tracked.attributesSignatureKnown && signature != tracked.lastAttributesSignature &&
+                    !tracked.watchers.empty()) {
+                    Network::UpdateAttributesS2CPacket attributes;
+                    attributes.entityId = id;
+                    attributes.attributes = Network::SyncableAttributes(mobPtr->Attributes());
+                    const auto payload = Network::Serialization::Serialize(attributes);
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::UpdateAttributesS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+                tracked.lastAttributesSignature = signature;
+                tracked.attributesSignatureKnown = true;
+            }
+
+            if (const uint8_t equipmentMask = mobPtr->ConsumeEquipmentDirtyMask()) {
+                for (int slotIndex = 0; slotIndex < Game::Mob::kEquipmentSlotCount; ++slotIndex) {
+                    if ((equipmentMask & (1u << slotIndex)) == 0) continue;
+                    const auto slot = static_cast<Game::EquipmentSlot>(slotIndex);
+                    Network::BodyArmorS2CPacket equipment{id, mobPtr->GetEquipment(slot)};
+                    equipment.slot = slot;
+                    const auto payload = Network::Serialization::Serialize(equipment);
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+            }
+
+            // An allay whose held item changed this tick (given, taken
+            // back, dropped at death) tells every current watcher.
+            if (mobPtr->GetType() == Game::EntityTypeId::Allay) {
+                if (auto* allay = dynamic_cast<Game::Allay*>(mobPtr); allay && allay->ConsumeHandItemDirty()) {
+                    Network::BodyArmorS2CPacket held{id, allay->GetMainHandItem()};
+                    held.slot = Game::EquipmentSlot::MAINHAND;
+                    const auto payload = Network::Serialization::Serialize(held);
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+            }
+
+            // A firework rocket whose synched data changed this tick tells
+            // every current watcher.
+            if (mobPtr->GetType() == Game::EntityTypeId::FireworkRocket) {
+                auto& rocket = static_cast<Game::FireworkRocket&>(*mobPtr);
+                if (rocket.ConsumeDataDirty()) {
+                    const auto payload = Network::Serialization::Serialize(BuildFireworkRocketData(rocket, id));
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::FireworkRocketDataS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+            }
+
+            // A fishing bobber whose synched state changed this tick (hooked,
+            // unhooked, a bite starting or ending) tells every current watcher.
+            if (mobPtr->GetType() == Game::EntityTypeId::FishingBobber) {
+                auto& hook = static_cast<Game::FishingHook&>(*mobPtr);
+                if (hook.ConsumeSyncDirty()) {
+                    const auto payload = Network::Serialization::Serialize(BuildFishingHookData(hook, id));
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::FishingHookDataS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+            }
+
+            // A wolf whose armour changed this tick (equipped, worn down,
+            // repaired, sheared off, broken) tells every current watcher.
+            if (mobPtr->GetType() == Game::EntityTypeId::Wolf) {
+                auto& wolf = static_cast<Game::Wolf&>(*mobPtr);
+                if (wolf.ConsumeBodyArmorDirty()) {
+                    const auto payload = Network::Serialization::Serialize(
+                        Network::BodyArmorS2CPacket{id, wolf.GetBodyArmorItem()});
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::BodyArmorS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+            }
+
+            // A vehicle's synched data or passenger list changed: every
+            // current watcher (MC sendDirtyEntityData / the passengers
+            // packet ServerEntity.sendChanges sends on a change).
+            if (Game::IsVehicleEntityType(mobPtr->GetType())) {
+                if (const auto* vehicle = dynamic_cast<const Game::VehicleEntity*>(mobPtr)) {
+                    if (vehicle->ConsumeDataDirty()) {
+                        const auto payload = VehicleDataPayload(*vehicle, id);
+                        for (uint32_t connId : tracked.watchers) {
+                            EmitTo(connId, Network::PacketId::VehicleDataS2C, payload, EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                    if (vehicle->ConsumePassengersDirty(&PlayerRiding::PlayerIdOfView)) {
+                        const auto payload = SetPassengersPayload(*vehicle, id);
+                        for (uint32_t connId : tracked.watchers) {
+                            EmitTo(connId, Network::PacketId::SetPassengersS2C, payload, EntityPacketOut::Kind::Data, out);
+                        }
+                    }
+                }
+            }
+
+            // Any other mob's passenger order, when it changes and a player
+            // is (or was) aboard — the mounts a player rides and steers.
+            if (!Game::IsVehicleEntityType(mobPtr->GetType()) &&
+                (mobPtr->IsVehicle() || !tracked.lastPassengerWire.empty())) {
+                std::vector<int32_t> wire = PassengerWireIds(*mobPtr);
+                if (wire != tracked.lastPassengerWire &&
+                    (HasPlayerWireId(wire) || HasPlayerWireId(tracked.lastPassengerWire))) {
+                    const auto payload = Network::Serialization::Serialize(Network::SetPassengersS2CPacket{id, wire});
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::SetPassengersS2C, payload, EntityPacketOut::Kind::Data, out);
+                    }
+                }
+                tracked.lastPassengerWire = std::move(wire);
             }
 
             if (auto* stand = dynamic_cast<Game::ArmorStand*>(mobPtr);

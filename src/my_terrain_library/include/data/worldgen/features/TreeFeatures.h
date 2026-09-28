@@ -70,6 +70,16 @@ public:
     // =========================================================================
     static levelgen::ConfiguredFeature* CRIMSON_FUNGUS;
     static levelgen::ConfiguredFeature* WARPED_FUNGUS;
+    // planted = true: what a bone-mealed fungus grows (NetherFungusBlock)
+    static levelgen::ConfiguredFeature* CRIMSON_FUNGUS_PLANTED;
+    static levelgen::ConfiguredFeature* WARPED_FUNGUS_PLANTED;
+
+    // =========================================================================
+    // SAPLING-ONLY TREES - Reference: TreeFeatures.java / TreeGrower.java
+    // (never placed by worldgen)
+    // =========================================================================
+    static levelgen::ConfiguredFeature* JUNGLE_TREE_NO_VINE;
+    static levelgen::ConfiguredFeature* PALE_OAK_BONEMEAL;
 
     // =========================================================================
     // LEAF LITTER VARIANTS (no bees) - Reference: TreeFeatures.java

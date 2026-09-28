@@ -29,7 +29,17 @@ uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 =
 uniform vec4 uOverlayColor;
 
 // Output
+#ifndef OIT_ALPHA_ONLY
 out vec4 FragColor;
+#endif
+
+// Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency): the
+// OIT variants of this shader are its source with `#define OIT` and a stage
+// define; the backend splices shaders/oit_lib.glsl in here. The engine's own
+// compile never sees any of it.
+#ifdef OIT
+#pragma oit_library
+#endif
 
 float linearFog(float d, float s, float e) {
     if (d <= s) return 0.0;
@@ -45,6 +55,10 @@ void main() {
     if (textureColor.a < uAlphaTest) {
         discard;
     }
+#ifdef OIT_ALPHA_ONLY
+    // MC item.fsh: the depth-bounds / transmittance stages read alpha only.
+    executeAlphaOnlyPhase(gl_FragCoord.z, textureColor.a * fragColor.a);
+#else
 
     // Vertex color already contains: biome tint * AO * directional face shade
     // This matches Minecraft's approach — all lighting is baked per-vertex
@@ -73,4 +87,10 @@ void main() {
 
     // Output final color with original alpha
     FragColor = vec4(finalColor, textureColor.a * fragColor.a);
+#ifdef OIT_ACCUMULATE
+    // MC calculateFinalColor: premultiplied, weighted by the transmittance
+    // in front of it (the fog is already in the colour).
+    FragColor = sampleColorForAccumulation(FragColor);
+#endif
+#endif
 }

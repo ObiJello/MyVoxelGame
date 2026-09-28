@@ -22,6 +22,7 @@ namespace Game {
     class PathfinderMob;
     class Rabbit;
     struct IBlockAccess;
+    struct EntityLevel;
 
     class MoveToBlockGoal : public Goal {
     public:
@@ -83,6 +84,15 @@ namespace Game {
         void Tick() override;
         const char* Name() const override { return "RemoveBlockGoal"; }
 
+        // MC RemoveBlockGoal.playDestroyProgressSound / playBreakSound —
+        // silent in the base goal; the zombie's egg attack overrides both.
+        virtual void PlayDestroyProgressSound(EntityLevel& level, const glm::ivec3& pos) {
+            (void)level; (void)pos;
+        }
+        virtual void PlayBreakSound(EntityLevel& level, const glm::ivec3& pos) {
+            (void)level; (void)pos;
+        }
+
     protected:
         bool IsValidTarget(const IBlockAccess& blocks, const glm::ivec3& pos) const override;
 
@@ -130,6 +140,12 @@ namespace Game {
             : RemoveBlockGoal(BlockID::TurtleEgg, mob, speedModifier, verticalSearchRange) {}
 
         const char* Name() const override { return "ZombieAttackTurtleEggGoal"; }
+
+        // ZOMBIE_DESTROY_EGG (HOSTILE, 0.5, 0.9 + zombie random × 0.2) while
+        // stomping; TURTLE_EGG_BREAK (BLOCKS, 0.7, 0.9 + level random × 0.2)
+        // when the egg goes.
+        void PlayDestroyProgressSound(EntityLevel& level, const glm::ivec3& pos) override;
+        void PlayBreakSound(EntityLevel& level, const glm::ivec3& pos) override;
 
     protected:
         double AcceptedDistance() const override { return 1.14; }

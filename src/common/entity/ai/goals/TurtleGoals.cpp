@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/goals/TurtleGoals.cpp
 #include "common/entity/ai/goals/TurtleGoals.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -10,6 +11,9 @@
 #include "common/core/Mth.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/block/BlockState.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/World.hpp"
 
 #include <cmath>
 
@@ -154,18 +158,26 @@ namespace Game {
             if (m_turtle->GetLayEggCounter() < 1) {
                 m_turtle->SetLayingEgg(true);
             } else if (m_turtle->GetLayEggCounter() > AdjustedTickDelay(200)) {
-                // MC: place the turtle_egg one above the dug sand. (MC rolls
-                // 1-4 eggs into the block's EGGS state; block-state
-                // properties do not reach the mob seam, so one egg block
-                // stands for the clutch. The BLOCK_PLACE game event waits on
-                // game events.)
+                // MC: place the turtle_egg one above the dug sand, with a
+                // clutch of 1-4 eggs in its EGGS state (setBlockAndUpdate).
                 EntityLevel* level = m_turtle->Level();
                 if (level) {
                     level->PlaySound(nullptr, m_turtle->BlockPosition(), SoundEvents::TURTLE_LAY_EGG,
                                      SoundSource::Blocks, 0.3f, 0.9f + level->Random().NextFloat() * 0.2f);
                     const glm::ivec3 eggPos(m_blockPos.x, m_blockPos.y + 1,
                                             m_blockPos.z);
-                    level->SetBlock(eggPos, BlockID::TurtleEgg);
+                    // Blocks.TURTLE_EGG.defaultBlockState().setValue(EGGS,
+                    // turtle.random.nextInt(4) + 1) — EGGS runs 1..4, so the
+                    // value index is the roll itself.
+                    const BlockState eggState = BlockStates::Default(BlockID::TurtleEgg)
+                        .SetIndex(PropertyId::EGGS, level->Random().NextInt(4));
+                    if (ILevelWrite* write = level->MutableBlocks()) {
+                        write->SetBlock(eggPos.x, eggPos.y, eggPos.z, eggState, World::UpdateFlags::All);
+                        // MC: level.gameEvent(BLOCK_PLACE, eggPos, Context.of(turtle, eggState)).
+                        write->GameEvent(GameEventId::BlockPlace, eggPos, GameEventContext::Of(m_turtle, eggState));
+                    } else {
+                        level->SetBlock(eggPos, BlockID::TurtleEgg);
+                    }
                 }
                 m_turtle->SetHasEgg(false);
                 m_turtle->SetLayingEgg(false);

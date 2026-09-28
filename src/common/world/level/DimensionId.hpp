@@ -200,6 +200,22 @@ namespace Game {
         return 384;
     }
 
+    // MC ServerLevel.getSeaLevel — the dimension's noise settings `sea_level`
+    // (overworld.json 63, nether.json 32, end.json 0; the engine's own
+    // dimensions from their generator settings). Read by the natural spawner
+    // and by Biome temperature (snow line = sea level + 17).
+    inline constexpr int DimensionSeaLevel(DimensionId d) {
+        switch (d) {
+            case DimensionId::Nether:         return 32;
+            case DimensionId::End:            return 0;
+            case DimensionId::Hush:           return 50;    // MyTerrainGenerator's hush settings
+            case DimensionId::TwilightForest: return 0;     // twilight_noise_gen.json sea_level
+            case DimensionId::Aether:         return -64;   // skylands.json sea_level (no sea)
+            case DimensionId::Overworld:      return 63;
+        }
+        return 63;
+    }
+
     // MC DimensionType.hasSkyLight / hasCeiling. The nether is the only one
     // with a bedrock roof, and the only one lit entirely by block light. The
     // Hush is an open-sky world under a fixed night. The End HAS sky light in
@@ -211,6 +227,24 @@ namespace Game {
     }
     inline constexpr bool DimensionHasCeiling(DimensionId d) {
         return d == DimensionId::Nether;
+    }
+
+    // MC Level.canHaveWeather: `hasSkyLight() && !hasCeiling() && dimension
+    // != END` — the Overworld, and by the same formula both ported mods'
+    // dimensions (twilight_forest_type and the_aether are sky-lit and open).
+    // The Hush is the one exception, the engine's own call: a silent world
+    // frozen under a starry night whose only "weather" is its stillness
+    // (docs/the-hush.md) — rain and thunder would break both.
+    //
+    // Every such level SHARES the server's one WeatherData (MC keeps it on
+    // MinecraftServer); the Aether does the same in the mod (AetherLevelData
+    // wraps the Overworld's level data and blocks its own advance_weather so
+    // the cycle advances once), and so does this engine: the Overworld's
+    // tick advances the cycle, every weather level lerps its own rain and
+    // thunder levels toward it (Server::ServerWeather).
+    inline constexpr bool DimensionCanHaveWeather(DimensionId d) {
+        return d == DimensionId::Overworld || d == DimensionId::TwilightForest ||
+               d == DimensionId::Aether;
     }
 
     // MC DimensionType.ambientLight — 0.1 in the Nether, 0 everywhere else.

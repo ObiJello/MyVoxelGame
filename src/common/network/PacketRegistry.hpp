@@ -77,10 +77,30 @@
             ControlViewS2C         = 0x56, // /control: the controlled client's view frame, relayed to the controller
             MorphHeldS2C           = 0x57, // /morph item: picked up by / let go of a player — see MorphHeldS2CPacket.hpp
             MorphPickupS2C         = 0x58, // /morph item: the pickup fly-in, to the dimension — see MorphPickupS2CPacket.hpp
+            PlayerSwingS2C         = 0x5D, // Another player swung an arm — MC ClientboundAnimatePacket SWING_*_HAND, see PlayerSwingS2CPacket.hpp
+            PlayerMountS2C         = 0x5C, // A player sat on a vehicle entity (the cushion) or got off — MC ClientboundSetPassengersPacket, see PlayerMountS2CPacket.hpp
             // 0x5E, not the next free 0x5A: parallel work is claiming the ids
             // straight after 0x59, and a duplicate enum value compiles clean
             // but silently steals the other packet's handler at runtime.
             HushStillnessS2C       = 0x5E, // The Hush's stillness began (remaining ticks) / lifted — see HushStillnessS2CPacket.hpp
+            // MC Player DATA_SHOULDER_PARROT_LEFT/RIGHT — the parrot variants
+            // on a player's shoulders, see ShoulderParrotsS2CPacket.hpp.
+            ShoulderParrotsS2C     = 0x61,
+            // MC ClientboundLevelEventPacket, for the level events whose
+            // client half is more than a sound — the jukebox's song start /
+            // stop (1010 / 1011). See LevelEventS2CPacket.hpp.
+            LevelEventS2C          = 0x5F,
+            // Every jukebox song's start / stop / progress, to every player
+            // in every dimension — the "Jukebox Range: Global" sound option.
+            // See JukeboxSongS2CPacket.hpp.
+            JukeboxSongS2C         = 0x60,
+            // MC ClientboundLevelParticlesPacket (ServerLevel.sendParticles):
+            // a particle type with its options, spread / speed / count — see
+            // LevelParticlePackets.hpp.
+            LevelParticlesS2C      = 0x5A,
+            // The local player's own particle-relevant state (/invisible —
+            // no sprint / landing dust for a hidden player). Same header.
+            SelfParticleStateS2C   = 0x5B,
             // Status effects — MC ClientboundUpdateMobEffectPacket /
             // ClientboundRemoveMobEffectPacket, see MobEffectPackets.hpp.
             // 0x70/0x71, well clear of the 0x5A.. ids parallel work claims.
@@ -90,6 +110,10 @@
             // arrow bursts, the echo compass's target; one packet, a kind
             // byte. See HushSignalS2CPacket.hpp.
             HushSignalS2C          = 0x72,
+            // MC ClientboundCooldownPacket — an item cooldown group started
+            // (or cancelled, duration 0) on this player. See
+            // CooldownS2CPacket.hpp.
+            CooldownS2C            = 0x78,
             // Sounds — MC ClientboundSoundPacket / ClientboundSoundEntityPacket,
             // see SoundPackets.hpp. 0x7A/0x7B, clear of the ids straight after
             // 0x72 that parallel work may claim next.
@@ -120,6 +144,9 @@
             // MerchantPackets.hpp. 0x6C, clear of the ids parallel work
             // claims after 0x5E / 0x6A / 0x72 / 0x7B.
             MerchantOffersS2C      = 0x6C,
+            // Spectator mode — MC ClientboundSetCameraPacket, see
+            // SpectatorPackets.hpp. 0x6B.
+            SetCameraS2C           = 0x6B,
             OpenSignEditorS2C      = 0x53, // Open the sign editor at a position, front or back — MC ClientboundOpenSignEditorPacket
             BlockEntityDataS2C     = 0x30, // BE create / state update — mirrors MC ClientboundBlockEntityDataPacket
             BlockEntityRemoveS2C   = 0x31, // BE destroyed (block changed to non-BE) — explicit teardown signal
@@ -178,6 +205,17 @@
             EndCrystalBeamS2C      = 0x49, // crystal beam target (MC DATA_BEAM_TARGET)
             ArmorStandDataS2C      = 0x59, // armor stand poses + equipment — see ArmorStandDataS2CPacket.hpp
             ItemFrameDataS2C       = 0x65, // an item frame's framed item (MC DATA_ITEM) — see ItemFrameDataS2CPacket.hpp
+            FishingHookDataS2C     = 0x67, // a fishing bobber's owner / hooked entity / bite (MC DATA_HOOKED_ENTITY, DATA_BITING) — see FishingHookDataS2CPacket.hpp
+            MapItemDataS2C         = 0x6D, // MC ClientboundMapItemDataPacket — see MapItemDataS2CPacket.hpp
+            SetEntityLinkS2C       = 0x68, // MC ClientboundSetEntityLinkPacket: a leashed mob's holder (leads) — see SetEntityLinkS2CPacket.hpp
+            // Riding and vehicles — see VehiclePackets.hpp.
+            SetPassengersS2C       = 0x62, // MC ClientboundSetPassengersPacket: a vehicle's passengers in seat order (players by player id)
+            MoveVehicleS2C         = 0x69, // MC ClientboundMoveVehiclePacket: the server's correction of the vehicle this client drives
+            VehicleDataS2C         = 0x6E, // a boat's / minecart's synched entity data (hurt shake, paddles, display block, fuel)
+            MountScreenOpenS2C     = 0x74, // MC ClientboundMountScreenOpenPacket: a mount's inventory screen (horse, llama, …)
+            UpdateAttributesS2C    = 0x75, // MC ClientboundUpdateAttributesPacket: a mob's syncable attributes — see UpdateAttributesS2CPacket.hpp
+            BodyArmorS2C           = 0x63, // a mob's BODY equipment slot (the wolf's wolf armor) — see BodyArmorS2CPacket.hpp
+            FireworkRocketDataS2C  = 0x73, // a firework rocket's item / attached entity / shot-at-angle (MC DATA_ID_FIREWORKS_ITEM …) — see FireworkRocketDataS2CPacket.hpp
 
             // ── Immersive portals (see-through / walk-through surfaces) ────
             // Full-record upsert and removal of Game::Immersive::Portal,
@@ -249,6 +287,15 @@
             SelectTradeC2S          = 0xBC,
             // Anvil — MC ServerboundRenameItemPacket, see AnvilPackets.hpp.
             RenameItemC2S           = 0xBD,
+            // Spectator mode — MC ServerboundSpectatorActionPacket and
+            // ServerboundTeleportToEntityPacket, see SpectatorPackets.hpp.
+            SpectatorActionC2S      = 0xA0,
+            TeleportToEntityC2S     = 0xA1,
+            // Riding and vehicles — see VehiclePackets.hpp.
+            PlayerInputC2S          = 0xA4,  // MC ServerboundPlayerInputPacket: the movement keys, on change
+            MoveVehicleC2S          = 0xA5,  // MC ServerboundMoveVehiclePacket: where the driving client moved its vehicle
+            PaddleBoatC2S           = 0xA6,  // MC ServerboundPaddleBoatPacket: which paddles row
+            RidingCommandC2S        = 0xA7,  // MC ServerboundPlayerCommandPacket START/STOP_RIDING_JUMP
         };
 
         // Convert PacketId to string for logging
@@ -291,6 +338,11 @@
                 case PacketId::EndCrystalBeamS2C: return "EndCrystalBeamS2C";
                 case PacketId::ArmorStandDataS2C: return "ArmorStandDataS2C";
                 case PacketId::ItemFrameDataS2C: return "ItemFrameDataS2C";
+                case PacketId::FishingHookDataS2C: return "FishingHookDataS2C";
+                case PacketId::MapItemDataS2C: return "MapItemDataS2C";
+                case PacketId::SetEntityLinkS2C: return "SetEntityLinkS2C";
+                case PacketId::BodyArmorS2C: return "BodyArmorS2C";
+                case PacketId::FireworkRocketDataS2C: return "FireworkRocketDataS2C";
                 case PacketId::EntityDestroy: return "EntityDestroy";
                 case PacketId::ChatMessageS2C: return "ChatMessageS2C";
                 case PacketId::TimeUpdate: return "TimeUpdate";
@@ -318,6 +370,18 @@
                 case PacketId::WorldRulesS2C: return "WorldRulesS2C";
                 case PacketId::ServerPausedS2C: return "ServerPausedS2C";
                 case PacketId::PlayerSleepS2C: return "PlayerSleepS2C";
+                case PacketId::PlayerMountS2C: return "PlayerMountS2C";
+                case PacketId::SetPassengersS2C: return "SetPassengersS2C";
+                case PacketId::MoveVehicleS2C:   return "MoveVehicleS2C";
+                case PacketId::VehicleDataS2C:   return "VehicleDataS2C";
+                case PacketId::PlayerInputC2S:   return "PlayerInputC2S";
+                case PacketId::MoveVehicleC2S:   return "MoveVehicleC2S";
+                case PacketId::PaddleBoatC2S:    return "PaddleBoatC2S";
+                case PacketId::RidingCommandC2S:   return "RidingCommandC2S";
+                case PacketId::MountScreenOpenS2C: return "MountScreenOpenS2C";
+                case PacketId::UpdateAttributesS2C: return "UpdateAttributesS2C";
+                case PacketId::PlayerSwingS2C: return "PlayerSwingS2C";
+                case PacketId::ShoulderParrotsS2C: return "ShoulderParrotsS2C";
                 case PacketId::ControlS2C:            return "ControlS2C";
                 case PacketId::ControlInputS2C:       return "ControlInputS2C";
                 case PacketId::ControlViewS2C:        return "ControlViewS2C";
@@ -325,12 +389,18 @@
                 case PacketId::MorphPickupS2C:        return "MorphPickupS2C";
                 case PacketId::UpdateMobEffectS2C:    return "UpdateMobEffectS2C";
                 case PacketId::RemoveMobEffectS2C:    return "RemoveMobEffectS2C";
+                case PacketId::CooldownS2C:           return "CooldownS2C";
                 case PacketId::SoundS2C:              return "SoundS2C";
                 case PacketId::SoundEntityS2C:        return "SoundEntityS2C";
+                case PacketId::LevelEventS2C:         return "LevelEventS2C";
+                case PacketId::JukeboxSongS2C:        return "JukeboxSongS2C";
                 case PacketId::AurelithS2C:           return "AurelithS2C";
                 case PacketId::WorldgenIdsS2C:        return "WorldgenIdsS2C";
                 case PacketId::OpenBookS2C:           return "OpenBookS2C";
                 case PacketId::MerchantOffersS2C:     return "MerchantOffersS2C";
+                case PacketId::SetCameraS2C:          return "SetCameraS2C";
+                case PacketId::SpectatorActionC2S:    return "SpectatorActionC2S";
+                case PacketId::TeleportToEntityC2S:   return "TeleportToEntityC2S";
                 case PacketId::ControlInputC2S:       return "ControlInputC2S";
                 case PacketId::ControlViewC2S:        return "ControlViewC2S";
                 case PacketId::OpenSignEditorS2C: return "OpenSignEditorS2C";
@@ -565,6 +635,19 @@
                 WriteInt(value & 0xFFFFFFFF);
             }
 
+            // `count` longs, big-endian, as `count` WriteLong calls would
+            // write them — in one resize instead of 8 push_backs a word (a
+            // chunk packet carries thousands of palette words).
+            void WriteLongs(const uint64_t* values, size_t count) {
+                const size_t at = m_data.size();
+                m_data.resize(at + count * 8);
+                uint8_t* out = m_data.data() + at;
+                for (size_t i = 0; i < count; ++i, out += 8) {
+                    const uint64_t v = values[i];
+                    for (int b = 0; b < 8; ++b) out[b] = static_cast<uint8_t>(v >> (56 - 8 * b));
+                }
+            }
+
             void WriteVarInt(uint32_t value) {
                 VarInt::Encode(value, m_data);
             }
@@ -645,6 +728,21 @@
                 return value;
             }
 
+            // `count` big-endian longs, as `count` ReadLong calls would read
+            // them, bounds-checked once.
+            void ReadLongs(uint64_t* out, size_t count) {
+                if (count > (m_data.size() - m_pos) / 8) {
+                    throw std::runtime_error("PacketReader: out of bounds");
+                }
+                const uint8_t* in = m_data.data() + m_pos;
+                for (size_t i = 0; i < count; ++i, in += 8) {
+                    uint64_t v = 0;
+                    for (int b = 0; b < 8; ++b) v = (v << 8) | in[b];
+                    out[i] = v;
+                }
+                m_pos += count * 8;
+            }
+
             uint32_t ReadVarInt() {
                 size_t bytesRead = 0;
                 uint32_t value = VarInt::Decode(m_data.data() + m_pos, bytesRead);
@@ -701,6 +799,17 @@
                 std::string str(m_data.begin() + m_pos, m_data.begin() + m_pos + length);
                 m_pos += length;
                 return str;
+            }
+
+            // The next `length` bytes, in place: valid while the source buffer
+            // lives. For a caller that copies them anyway (one copy, not two).
+            const uint8_t* ReadSpan(size_t length) {
+                if (length > m_data.size() - m_pos) {
+                    throw std::runtime_error("PacketReader: bytes out of bounds");
+                }
+                const uint8_t* p = m_data.data() + m_pos;
+                m_pos += length;
+                return p;
             }
 
             void ReadBytes(uint8_t* buffer, size_t length) {

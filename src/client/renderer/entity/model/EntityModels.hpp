@@ -130,6 +130,21 @@ namespace Render {
         // renderer actually varies.
         ArmPose rightArmPose = ArmPose::Empty;
         ArmPose leftArmPose  = ArmPose::Empty;
+        // MC HumanoidRenderState.useItemHand (0 main, 1 off), ticksUsingItem
+        // and maxCrossbowChargeDuration — the crossbow charge pose's clock.
+        int   useItemHand = 0;
+        float ticksUsingItem = 0.0f;
+        float maxCrossbowChargeDuration = 25.0f;
+        // The items the two arms hold (ArmedEntityRenderState's
+        // getItemHeldByArm) — what the SPEAR pose reads its KINETIC_WEAPON
+        // sway off (SpearAnimations.thirdPersonHandUse). 0 = empty.
+        uint32_t rightArmItem = 0;
+        uint32_t leftArmItem  = 0;
+        // MC LivingEntityRenderState.ticksSinceKineticHitFeedback and
+        // isAutoSpinAttack (a riptide: setupRotations lays the body along
+        // the look and spins it — EntityMatrix; the SpinAttackEffectLayer).
+        float ticksSinceKineticHitFeedback = 0.0f;
+        bool  isAutoSpinAttack = false;
 
         // MC SkeletonRenderState.isHoldingBow. It gates the melee arm-raise:
         // a skeleton with a bow poses from the ArmPose instead.
@@ -163,6 +178,14 @@ namespace Render {
         // outer-layer overlay tilts with the body from the same numbers.
         float swimPitchDeg = 0.0f;
         float swimPivotY = 0.0f;
+        // MC CodRenderer / SalmonRenderer / TropicalFishRenderer
+        // .setupRotations' own tail of the pose stack, after the base
+        // rotations and the swim tilt's slot: a yaw of fishYawDeg (the body
+        // wobble), then — beached — translate(fishLandOffset) in the scaled
+        // frame and a 90° roll about Z.
+        float     fishYawDeg = 0.0f;
+        bool      fishLandRoll = false;
+        glm::vec3 fishLandOffset{0.0f};
 
         bool isCrouching  = false;
         bool isSprinting  = false;
@@ -205,6 +228,7 @@ namespace Render {
         float jumpCooldown = 0.0f;       // camel
         float headRollAngle = 0.0f;      // wolf
         float tailAngle = 0.0f;          // wolf
+        float shakeAnim = 0.0f;          // wolf: MC WolfRenderState.shakeAnim (the wet shake, 0..2)
         float lieDownAmount = 0.0f;      // cat/ocelot
         float lieDownAmountTail = 0.0f;
         float relaxStateOneAmount = 0.0f;
@@ -242,7 +266,10 @@ namespace Render {
         bool isSheared = false;          // bogged
         bool isUnhappy = false;          // villager head shake
         bool isCharging = false;         // vex
-        bool isRidden = false;           // strider
+        bool isRidden = false;           // strider, equine / camel reins, happy ghast goggles
+        // MC HappyGhastRenderState.bodyItem non-empty — HappyGhastModel's
+        // body squeeze under a worn harness.
+        bool hasBodyItem = false;
         bool isCreepy = false;           // enderman
         bool isDancing = false;          // allay/piglin
         bool isFaceplanted = false;      // fox
@@ -356,6 +383,12 @@ namespace Render {
         // Returns false for models that hold nothing, which is all of them
         // except the skeleton.
         virtual bool RightHandMatrix(glm::mat4& out) const { (void)out; return false; }
+        // The same for the LEFT hand (MC translateToHand(state, LEFT, …)).
+        virtual bool LeftHandMatrix(glm::mat4& out) const { (void)out; return false; }
+        // Either hand — HumanoidArm.LEFT when `left`.
+        bool HandMatrix(bool left, glm::mat4& out) const {
+            return left ? LeftHandMatrix(out) : RightHandMatrix(out);
+        }
 
     protected:
         ModelPart m_root;
@@ -370,6 +403,9 @@ namespace Render {
         explicit HumanoidModel(bool slim);
         void SetupAnim(const EntityRenderState& state) override;
         bool BecomeBaby() override;
+        // MC HumanoidModel.translateToHand: root, then the arm.
+        bool RightHandMatrix(glm::mat4& out) const override;
+        bool LeftHandMatrix(glm::mat4& out) const override;
 
     protected:
         // MC HumanoidModel.poseRightArm / poseLeftArm / setupAttackAnimation.
@@ -379,6 +415,10 @@ namespace Render {
         void PoseRightArm(const EntityRenderState& state);
         void PoseLeftArm(const EntityRenderState& state);
         void SetupAttackAnimation(const EntityRenderState& state);
+        // MC HumanoidModel.poseBlockingArm (the shield's BLOCK pose).
+        void PoseBlockingArm(ModelPart* arm, bool right);
+        // MC SpearAnimations.thirdPersonHandUse (the SPEAR pose).
+        void PoseSpearArm(ModelPart* arm, bool right, const EntityRenderState& state);
 
         ModelPart* m_head = nullptr;
         ModelPart* m_hat = nullptr;
@@ -432,7 +472,7 @@ namespace Render {
         // MC ArmorStandModel.translateToHand: the arm's chain whether or not
         // the arm is drawn (an armless stand still holds its items).
         bool RightHandMatrix(glm::mat4& out) const override;
-        bool LeftHandMatrix(glm::mat4& out) const;
+        bool LeftHandMatrix(glm::mat4& out) const override;
         bool HeadMatrix(glm::mat4& out) const;
 
     private:
@@ -457,6 +497,8 @@ namespace Render {
         // shoving the arm one pixel outward before composing its matrix. That
         // pixel is what seats the bow in the fist instead of inside the bone.
         bool RightHandMatrix(glm::mat4& out) const override;
+        // The left arm's shove is one pixel the other way (offset -1).
+        bool LeftHandMatrix(glm::mat4& out) const override;
     };
 
     // MC QuadrupedModel — cow, pig, sheep (and the creeper, which reuses the
@@ -566,6 +608,8 @@ namespace Render {
         // outward first, exactly like the hand-written SkeletonModel does;
         // IllagerModel and the zombie family use the plain chain.
         bool RightHandMatrix(glm::mat4& out) const override;
+        // The "left_arm" chain, the skeleton shove mirrored (-1 pixel).
+        bool LeftHandMatrix(glm::mat4& out) const override;
         bool CullBackFaces() const override { return m_cull; }
 
     private:
@@ -609,6 +653,7 @@ namespace Render {
         // Root-to-right_arm part chain (empty when the mesh has no right_arm)
         // plus the per-model translateToHand arm shove — see RightHandMatrix.
         std::vector<const ModelPart*> m_rightArmChain;
+        std::vector<const ModelPart*> m_leftArmChain;
         glm::vec3 m_handOffset{0.0f};
     };
 
@@ -627,6 +672,47 @@ namespace Render {
     private:
         ModelPart* m_leftBlueFin = nullptr;
         ModelPart* m_rightBlueFin = nullptr;
+    };
+
+    // MC TropicalFishSmallModel / TropicalFishLargeModel (model A / model B,
+    // LayerDefinitions TROPICAL_FISH_SMALL / _LARGE), transcribed number for
+    // number. `grow` is the layer's CubeDeformation: 0 for the body, MC's
+    // FISH_PATTERN_DEFORMATION (0.008) for the *_PATTERN rows the
+    // TropicalFishPatternLayer draws over it. Both classes share one
+    // setupAnim — the tail wag, half again as wide out of water.
+    class TropicalFishModel : public EntityModel {
+    public:
+        static constexpr float kPatternDeformation = 0.008f;   // LayerDefinitions.FISH_PATTERN_DEFORMATION
+
+        TropicalFishModel(bool large, float grow);
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_tail = nullptr;
+    };
+
+    // MC WolfModel / AdultWolfModel / BabyWolfModel — the generated mesh and
+    // its compiled setupAnim, plus the one thing the compiler cannot carry:
+    // shakeOffWater. WolfRenderState.getBodyRollAngle(offset) is a method of
+    // the render state, so the generator folds it to 0 (no shake); this
+    // model re-poses the rolled parts from the state's shakeAnim after the
+    // program has run — AdultWolfModel's body / real_head / upper_body /
+    // real_tail, or BabyWolfModel's body / head / tail (the 26.x baby mesh,
+    // which has no real_head). The classic baby is the adult mesh through
+    // the baby transform and keeps the adult's part names.
+    class WolfModel : public GeneratedModel {
+    public:
+        explicit WolfModel(std::string_view slug, std::string_view animSlug = {});
+        void SetupAnim(const EntityRenderState& state) override;
+
+        // WolfRenderState.getBodyRollAngle.
+        static float BodyRollAngle(float shakeAnim, float offset);
+
+    private:
+        ModelPart* m_body      = nullptr;
+        ModelPart* m_head      = nullptr;   // real_head (adult) or head (26.x baby)
+        ModelPart* m_upperBody = nullptr;   // adult only
+        ModelPart* m_tail      = nullptr;   // real_tail (adult) or tail (26.x baby)
     };
 
     // MC ChickenVariant.ModelType: NORMAL, COLD (ColdChickenModel — a tail

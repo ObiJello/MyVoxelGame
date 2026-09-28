@@ -2,7 +2,10 @@
 #pragma once
 
 #include "../RenderBackend.hpp"
+#include <array>
+#include <deque>
 #include <glad/glad.h>
+#include <string>
 #include <unordered_map>
 #include <mutex>
 
@@ -107,6 +110,17 @@ namespace Render {
                                                           TextureHandle depth) override;
         void SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) override;
         void BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) override;
+        bool CopyFramebufferToRenderTarget(RenderTargetHandle dst) override;
+        // Improved Transparency: MC 26.3 OIT (see RenderBackend.hpp).
+        void SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) override;
+        bool OitEnsureTargets(int width, int height) override;
+        void OitDestroyTargets() override;
+        bool OitBeginPass(OitPass pass, bool clearColor) override;
+        void OitEndPass() override;
+        TextureHandle OitTexture(OitImage image) const override;
+        ShaderHandle CreateOitShaderFromFiles(const std::string& vertexPath,
+                                              const std::string& fragmentPath) override;
+        bool FrameDepthPreserved() const override { return true; }   // FBO 0 keeps its depth
         void SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) override;
         void SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) override;
         void ClearShaderOverrides() override;
@@ -218,6 +232,9 @@ namespace Render {
         bool               m_overrideMode = false;
         RenderTargetHandle m_overrideDefaultTarget = INVALID_RENDER_TARGET;
         ShaderHandle ResolveShader(ShaderHandle handle) const {
+            // An OIT stage (Improved Transparency) draws the engine shader's
+            // variant; uniforms set on the engine handle land there.
+            if (m_oitStage != OitStage::None) return ResolveOit(handle);
             if (!m_overrideMode) return handle;
             auto it = m_shaderOverrides.find(handle);
             return it != m_shaderOverrides.end() && it->second.shader != INVALID_SHADER ? it->second.shader : handle;
@@ -278,6 +295,42 @@ namespace Render {
         };
         StencilOverride m_stencilOverride;
 
+        // ── Improved Transparency: MC 26.3 OIT ──────────────────────────
+        // One target set (OpenGL has no frame overlap). The OIT passes can't
+        // attach FBO 0's depth, so they test against `depthCopy`, a D24S8
+        // snapshot of it taken when the depth-bounds pass opens (the cull
+        // writes into the snapshot; the composite writes the frame's).
+        struct OitTargets {
+            int width = 0, height = 0;
+            TextureHandle depthBounds = INVALID_TEXTURE, culled = INVALID_TEXTURE;
+            TextureHandle coeff0 = INVALID_TEXTURE, coeff1 = INVALID_TEXTURE, accumulate = INVALID_TEXTURE;
+            TextureHandle depthCopy = INVALID_TEXTURE, cloudDepth = INVALID_TEXTURE;
+            TextureHandle dummy = INVALID_TEXTURE;       // 1x1: a sampler no stage reads
+            std::array<RenderTargetHandle, 7> fbos{};    // by OitPass
+        };
+        OitTargets    m_oit;
+        // Texture units of the stage samplers (MC's DepthBoundsSampler,
+        // Coeff0, Coeff1) — above every unit the engine's renderers use.
+        static constexpr uint32_t kOitUnitDepthBounds = 12;
+        static constexpr uint32_t kOitUnitCoeff0 = 13;
+        static constexpr uint32_t kOitUnitCoeff1 = 14;
+        bool          m_oitPassOpen = false;
+        OitStage      m_oitStage = OitStage::None;
+        OitStage      m_oitSamplerStage = OitStage::None;   // last non-None: which samplers are bound
+        glm::vec4     m_oitProjParams{0.0f};
+        bool          m_oitDbWritesDepth = false;
+        bool          m_oitSkipDraw = false;                // bound shader has no OIT variant
+        // Per engine shader, its variant per stage (INVALID = compile failed
+        // or never asked; `tried` separates the two).
+        struct OitVariants { std::array<ShaderHandle, 4> shader{}; std::array<bool, 4> tried{}; };
+        std::unordered_map<uint32_t, OitVariants> m_oitVariants;
+        std::string   m_oitLibrary;                         // shaders/oit_lib.glsl, read once
+        PipelineState m_requestedState;                     // the caller's, re-spliced on a stage change
+        ShaderHandle  OitVariantFor(ShaderHandle engine);
+        bool          SpliceOitLibrary(std::string& fragmentSource);
+        void          AssignOitSamplerUnits(ShaderHandle shader);
+        ShaderHandle  ResolveOit(ShaderHandle handle) const;
+
         // Window reference
         GLFWwindow* m_window = nullptr;
         // Tracked from SetViewport so SetScissorRect can flip a top-left rect
@@ -285,10 +338,13 @@ namespace Render {
         // driver round-trip; this costs a store per viewport change.
         int m_viewportHeight = 0;
 
-        // The last RequestBackbufferReadback, rows top to bottom, until taken.
-        std::vector<uint8_t> m_readbackPixels;
-        int  m_readbackW = 0, m_readbackH = 0;
-        bool m_readbackReady = false;
+        // Requested read-backs, oldest first. glReadPixels copies at the
+        // request, so each is ready at once; they wait here in order.
+        struct Readback {
+            std::vector<uint8_t> pixels;
+            int w = 0, h = 0;
+        };
+        std::deque<Readback> m_readbacks;
 
         // Currently bound handles
         ShaderHandle m_boundShader = INVALID_SHADER;

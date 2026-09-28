@@ -15,7 +15,20 @@
 namespace Server {
 
     void TickCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("tick", TickCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC TickCommand: query | rate <rate> | freeze | unfreeze |
+        // step [<time>|stop] | sprint (<time>|stop).
+        dispatcher.RegisterCommand("tick", TickCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literals({"query", "freeze", "unfreeze"}))
+                .Then(Cmd::Literal("rate").Then(Cmd::Argument("rate", Cmd::Arg::Float)
+                    .Suggests({"1", "10", "20", "100"}).Executes()))
+                .Then(Cmd::Literal("step").Executes()
+                    .Then(Cmd::Literal("stop").Executes())
+                    .Then(Cmd::Argument("time", Cmd::Arg::Time).Suggests({"1t", "1s"}).Executes()))
+                .Then(Cmd::Literal("sprint")
+                    .Then(Cmd::Literal("stop").Executes())
+                    .Then(Cmd::Argument("time", Cmd::Arg::Time).Suggests({"60s", "1d", "3d"}).Executes())));
     }
 
     namespace {

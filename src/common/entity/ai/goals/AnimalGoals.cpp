@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/goals/AnimalGoals.cpp
 #include "common/entity/ai/goals/AnimalGoals.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/entity/Animal.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
@@ -341,9 +342,11 @@ namespace Game {
         if (IsEdibleForSheep(blocks->GetBlock(p.x, p.y, p.z))) {
             if (level->MobGriefing()) level->DestroyBlock(p, false);
             m_animal->OnEatBlock();
+            m_animal->GameEvent(GameEventId::Eat);   // Mob.ate: gameEvent(EAT)
         } else if (blocks->GetBlock(below.x, below.y, below.z) == BlockID::Grass) {
             if (level->MobGriefing()) level->SetBlock(below, BlockID::Dirt);
             m_animal->OnEatBlock();
+            m_animal->GameEvent(GameEventId::Eat);   // Mob.ate: gameEvent(EAT)
         }
     }
 

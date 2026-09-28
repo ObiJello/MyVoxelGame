@@ -177,14 +177,27 @@ namespace Game::Lighting {
                         const int va = la.Get(ax, ly, az);
                         const int vb = lb.Get(bx, ly, bz);
                         const int y = baseY + ly;
+                        // An entry is queued only if the engine's first step
+                        // (PropagateIncrease: fromLevel - Opacity(to) > toLevel)
+                        // could raise the cell across the border — the one
+                        // direction it may go. Air against stone is every
+                        // ground-level border cell, and each of those used to
+                        // be queued, popped and dropped: ~2 million entries for
+                        // a saved 32-chunk view whose light was already final.
                         if (va - 1 > vb) {
-                            const BlockState s = BlockState::FromRawId(StateIdAt(a, ax, y, az));
-                            engine.EnqueueIncrease(Pos::Pack(aBaseX + ax, y, aBaseZ + az),
-                                QueueEntry::IncreaseOnlyOneDirection(va, BlockLightProperties::IsEmptyShape(s), aToB));
+                            const BlockState to = BlockState::FromRawId(StateIdAt(b, bx, y, bz));
+                            if (va - BlockLightProperties::Opacity(to) > vb) {
+                                const BlockState s = BlockState::FromRawId(StateIdAt(a, ax, y, az));
+                                engine.EnqueueIncrease(Pos::Pack(aBaseX + ax, y, aBaseZ + az),
+                                    QueueEntry::IncreaseOnlyOneDirection(va, BlockLightProperties::IsEmptyShape(s), aToB));
+                            }
                         } else if (vb - 1 > va) {
-                            const BlockState s = BlockState::FromRawId(StateIdAt(b, bx, y, bz));
-                            engine.EnqueueIncrease(Pos::Pack(bBaseX + bx, y, bBaseZ + bz),
-                                QueueEntry::IncreaseOnlyOneDirection(vb, BlockLightProperties::IsEmptyShape(s), bToA));
+                            const BlockState to = BlockState::FromRawId(StateIdAt(a, ax, y, az));
+                            if (vb - BlockLightProperties::Opacity(to) > va) {
+                                const BlockState s = BlockState::FromRawId(StateIdAt(b, bx, y, bz));
+                                engine.EnqueueIncrease(Pos::Pack(bBaseX + bx, y, bBaseZ + bz),
+                                    QueueEntry::IncreaseOnlyOneDirection(vb, BlockLightProperties::IsEmptyShape(s), bToA));
+                            }
                         }
                     }
                 }

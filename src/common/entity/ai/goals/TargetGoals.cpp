@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/goals/TargetGoals.cpp
 #include "common/entity/ai/goals/TargetGoals.hpp"
+#include "common/entity/TamableAnimal.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/NeutralMob.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -72,6 +73,9 @@ namespace Game {
         LivingEntity* living = dynamic_cast<LivingEntity*>(attacker);
         if (!living || !living->IsAlive()) return false;
 
+        // MC: toIgnoreDamage — an attacker of an ignored class is let be.
+        if (m_ignoreDamage && m_ignoreDamage(*living)) return false;
+
         // MC TargetGoal.canAttack: an attacker OUTSIDE the mob's home
         // restriction is not pursued — the retaliation leash.
         if (!m_mob->IsWithinHome(living->BlockPosition())) return false;
@@ -127,6 +131,14 @@ namespace Game {
                 continue;
             }
             if (other->GetTarget()) continue;
+            // MC: a TamableAnimal only rallies its own household — the
+            // other must answer to the same owner (a wild wolf's is none,
+            // so a wild pack rallies wild wolves, and a hit on a stray never
+            // turns someone's pet against its owner).
+            if (const auto* tamable = dynamic_cast<const TamableAnimal*>(m_mob)) {
+                const auto* otherTamable = dynamic_cast<const TamableAnimal*>(other);
+                if (!otherTamable || tamable->GetOwner() != otherTamable->GetOwner()) continue;
+            }
             AlertOther(*other, *attacker);
         }
     }
@@ -323,7 +335,13 @@ namespace Game {
     LlamaAttackWolfGoal::LlamaAttackWolfGoal(Llama* llama)
         : NearestAttackableTargetGoal(llama, kWolfTargetList, 1,
                                       /*mustSee=*/false, /*mustReach=*/true,
-                                      /*randomInterval=*/16) {}
+                                      /*randomInterval=*/16) {
+        // MC's selector: `!((Wolf)target).isTame()` — a tamed wolf is safe.
+        SetSelector([](Mob&, const LivingEntity& target) {
+            const auto* wolf = dynamic_cast<const Wolf*>(&target);
+            return wolf && !wolf->IsTame();
+        });
+    }
 
     double LlamaAttackWolfGoal::GetFollowDistance() const {
         return NearestAttackableTargetGoal::GetFollowDistance() * 0.25;

@@ -70,6 +70,33 @@ namespace Game {
                            ((static_cast<uint64_t>(value) & m_mask) << bitIndex);
         }
 
+        // fn(value) for every entry in index order, word by word: the same
+        // values as Get(0..Size()-1) without re-deriving a word and bit
+        // offset per entry. (Counting a section's 4096 values through Get was
+        // most of a palette recount on every chunk load and send.)
+        template <typename Fn>
+        void ForEach(Fn&& fn) const {
+            if (m_bits <= 0) {
+                for (size_t i = 0; i < m_size; ++i) fn(uint32_t{0});
+                return;
+            }
+            if (m_bits >= 64) {   // one value per word: no shift to step by
+                for (size_t i = 0; i < m_size; ++i) fn(Get(i));
+                return;
+            }
+            size_t remaining = m_size;
+            for (uint64_t word : m_data) {
+                const size_t n = remaining < static_cast<size_t>(m_valuesPerLong)
+                                     ? remaining : static_cast<size_t>(m_valuesPerLong);
+                for (size_t k = 0; k < n; ++k) {
+                    fn(static_cast<uint32_t>(word & m_mask));
+                    word >>= m_bits;
+                }
+                remaining -= n;
+                if (remaining == 0) break;
+            }
+        }
+
         int    Bits() const { return m_bits; }
         size_t Size() const { return m_size; }
 

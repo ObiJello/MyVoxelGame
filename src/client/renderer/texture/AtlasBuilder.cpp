@@ -20,7 +20,34 @@
 // Include stb_image for PNG loading
 #include "../../../ext/stb_image/stb_image.h"
 
-// Include stb_image_write for debug output (optional)
+// stb_image_write (the atlas debug dumps and the last-world panorama). Its
+// PNG deflate is libdeflate's: stb's own compressor took ~480 ms for one
+// 3090x3090 panorama face at level 1 — the six faces were the whole ~3 s a
+// Quit Game waited on — against ~110 ms here, with smaller files (7.1 vs
+// 9.8 MB). The pixels and the PNG format are unchanged; only the deflate
+// stream inside it differs.
+#include <libdeflate.h>
+#include <cstdlib>
+namespace {
+    unsigned char* LibdeflateZlibCompress(unsigned char* data, int length, int* outLength, int quality) {
+        // stb passes stbi_write_png_compression_level; libdeflate takes 1..12.
+        const int level = quality < 1 ? 1 : (quality > 12 ? 12 : quality);
+        libdeflate_compressor* compressor = libdeflate_alloc_compressor(level);
+        if (!compressor) return nullptr;
+        const size_t bound = libdeflate_zlib_compress_bound(compressor, static_cast<size_t>(length));
+        // Freed by stb with STBIW_FREE (free).
+        unsigned char* out = static_cast<unsigned char*>(std::malloc(bound));
+        const size_t written = out ? libdeflate_zlib_compress(compressor, data, static_cast<size_t>(length), out, bound) : 0;
+        libdeflate_free_compressor(compressor);
+        if (written == 0) {
+            std::free(out);
+            return nullptr;   // stb then reports the write as failed
+        }
+        *outLength = static_cast<int>(written);
+        return out;
+    }
+}
+#define STBIW_ZLIB_COMPRESS LibdeflateZlibCompress
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "../ext/stb_image/stb_image_write.h"
 

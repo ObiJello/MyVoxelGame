@@ -1,17 +1,21 @@
 // File: src/common/entity/mobs/GenericMobs.cpp
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/particle/ParticleOptions.hpp"
+#include "common/core/JavaRandom.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/mobs/Pillager.hpp"
 #include "common/entity/mobs/HushMobs.hpp"
 #include "common/entity/mobs/HushCreatures.hpp"
 #include "common/entity/mobs/TwilightMobs.hpp"
 #include "common/entity/mobs/AetherMobs.hpp"
 #include "common/entity/mobs/TwilightHostiles.hpp"
 #include "common/entity/npc/Villager.hpp"
+#include "common/entity/npc/WanderingTrader.hpp"
 
 #include "common/entity/ai/goals/AnimalGoals.hpp"
 #include "common/entity/ai/goals/AttackGoals.hpp"
@@ -302,11 +306,27 @@ namespace Game {
 
     void Endermite::AiStep() {
         GenericMonster::AiStep();
-        // MC Endermite.aiStep: the client half scatters PORTAL particles (no
-        // particle system yet); the server half ages the mite out at 2400
-        // ticks, paused while persistence is required (a name tag).
-        if (!m_level || m_level->IsClientSide()) return;
-        if (!IsPersistenceRequired()) ++m_life;
+        // MC Endermite.aiStep: the client half scatters two PORTAL particles
+        // a tick; the server half ages the mite out at 2400 ticks, paused
+        // while persistence is required (a name tag) — and, by this
+        // engine's rule, whenever it has a custom name at all.
+        if (!m_level) return;
+        if (m_level->IsClientSide()) {
+            JavaRandom& r = m_level->Random();
+            const double w = static_cast<double>(GetBbWidth());
+            const double h = static_cast<double>(GetBbHeight());
+            for (int i = 0; i < 2; ++i) {
+                const double px = position.x + w * (2.0 * r.NextDouble() - 1.0) * 0.5;
+                const double py = position.y + h * r.NextDouble();
+                const double pz = position.z + w * (2.0 * r.NextDouble() - 1.0) * 0.5;
+                const double xa = (r.NextDouble() - 0.5) * 2.0;
+                const double ya = -r.NextDouble();
+                const double za = (r.NextDouble() - 0.5) * 2.0;
+                m_level->AddParticle(ParticleKind::Portal, px, py, pz, xa, ya, za);
+            }
+            return;
+        }
+        if (!IsPersistenceRequired() && !HasCustomName()) ++m_life;
         if (m_life >= kMaxLife) Discard();
     }
 
@@ -429,14 +449,17 @@ namespace Game {
             case EntityTypeId::Piglin:    return std::make_unique<Piglin>(level);
             case EntityTypeId::PiglinBrute:
                 return std::make_unique<PiglinBrute>(level);
+            // MC Pillager — the crossbow shooter (mobs/Pillager.hpp).
+            case EntityTypeId::Pillager:  return std::make_unique<Pillager>(level);
             case EntityTypeId::Allay:     return std::make_unique<Allay>(level);
             case EntityTypeId::Nautilus:  return std::make_unique<Nautilus>(level);
             case EntityTypeId::ZombieNautilus:
                 return std::make_unique<ZombieNautilus>(level);
             case EntityTypeId::Bee:       return std::make_unique<Bee>(level);
-            // Wolf keeps the def's goal set and adds the persistent-anger
-            // system (NeutralMob), the taming layer (TamableAnimal) and
-            // MC's leap + melee goals — see Animals.hpp.
+            // Wolf keeps the def's attributes and replaces its goal set with
+            // Wolf.registerGoals, over the persistent-anger system
+            // (NeutralMob) and the taming layer (TamableAnimal) — see
+            // Animals.hpp.
             case EntityTypeId::Wolf:      return std::make_unique<Wolf>(level);
             // Mooshroom keeps the def's goal set and adds the shears →
             // cow conversion (MushroomCow.mobInteract) — see Animals.hpp.
@@ -451,6 +474,11 @@ namespace Game {
             // full brain / trading / POI port lives in npc/Villager.hpp.
             case EntityTypeId::Villager:
                 return std::make_unique<Villager>(level);
+            // MC WanderingTrader extends AbstractVillager — a goal mob with
+            // the trader's drinks, avoidances and despawn timer
+            // (npc/WanderingTrader.hpp).
+            case EntityTypeId::WanderingTrader:
+                return std::make_unique<WanderingTrader>(level);
             // Silverfish stays generic: both of its bespoke goals need
             // infested blocks, which this engine does not have —
             // SilverfishWakeUpFriendsGoal bursts hidden silverfish OUT of

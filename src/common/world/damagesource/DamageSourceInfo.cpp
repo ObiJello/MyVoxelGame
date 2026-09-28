@@ -65,6 +65,14 @@ namespace Game {
             case MobDamageSource::FallingStalactite: return "minecraft:falling_stalactite";
             case MobDamageSource::Stalagmite:        return "minecraft:stalagmite";
             case MobDamageSource::Thorns:            return "minecraft:thorns";
+            // DamageSources.mace(attacker): MaceItem.getItemDamageSource.
+            case MobDamageSource::MaceSmash:         return "minecraft:mace_smash";
+            // DamageSources.fireworks(rocket, owner) / flyIntoWall().
+            case MobDamageSource::Fireworks:         return "minecraft:fireworks";
+            case MobDamageSource::FlyIntoWall:       return "minecraft:fly_into_wall";
+            case MobDamageSource::Lightning:         return "minecraft:lightning_bolt";
+            // The spears' DAMAGE_TYPE component (ItemStack.getDamageSource).
+            case MobDamageSource::Spear:             return "minecraft:spear";
             case MobDamageSource::Projectile:
                 break;
         }

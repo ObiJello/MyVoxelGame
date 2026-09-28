@@ -201,10 +201,13 @@ namespace Game {
 
     void BlockStateModels::Clear() {
         for (auto& v : s_stateModels) v.clear();
+        BlockModelRegistry::NoteChanged();
     }
 
     bool BlockStateModels::Load(const std::string& blockstatesPath) {
         Clear();
+        // Whichever way this returns, the state -> model map has changed.
+        struct NoteOnExit { ~NoteOnExit() { BlockModelRegistry::NoteChanged(); } } noteOnExit;
 
         if (!std::filesystem::exists(blockstatesPath)) {
             Log::Info("No blockstates directory at %s - blocks will use their default models",

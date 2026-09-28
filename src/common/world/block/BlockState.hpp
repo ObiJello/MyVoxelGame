@@ -39,6 +39,20 @@
 
 namespace Game {
 
+    namespace BlockStates::detail {
+        // Mirrors of the registry's hottest per-block arrays (BlockState.cpp),
+        // filled once by BlockStates::Init() and read-only after, so the
+        // accessors below inline to a load or two: the mesher asks them for
+        // every voxel and every neighbour it tests, and as out-of-line calls
+        // through the registry's function-local static they were 7-10% of a
+        // section build. Zero until Init, which is what the registry answered
+        // before Init too (no block has states yet: everything reads as air).
+        inline uint32_t        g_base[static_cast<size_t>(BlockID::Count)] = {};
+        inline uint32_t        g_count[static_cast<size_t>(BlockID::Count)] = {};
+        inline const uint16_t* g_blockOfState = nullptr;
+        inline uint32_t        g_total = 0;
+    }
+
     class BlockState {
     public:
         // Air's default state. Air has exactly one state and it is global id 0,
@@ -110,6 +124,12 @@ namespace Game {
 
     static_assert(sizeof(BlockState) == 4, "BlockState must stay palette-sized");
 
+    inline BlockID BlockState::Block() const {
+        return m_id < BlockStates::detail::g_total
+                   ? static_cast<BlockID>(BlockStates::detail::g_blockOfState[m_id])
+                   : BlockID::Air;
+    }
+
     namespace BlockStates {
 
         // Builds the global tables. Eager and explicit rather than a lazy magic
@@ -123,10 +143,16 @@ namespace Game {
         BlockState Default(BlockID id);
 
         // MC `getStateDefinition().getPossibleStates().size()`.
-        uint32_t Count(BlockID id);
+        inline uint32_t Count(BlockID id) {
+            const size_t b = static_cast<size_t>(id);
+            return b < static_cast<size_t>(BlockID::Count) ? detail::g_count[b] : 0;
+        }
 
         // The block's first global id. States of one block are contiguous.
-        uint32_t Base(BlockID id);
+        inline uint32_t Base(BlockID id) {
+            const size_t b = static_cast<size_t>(id);
+            return b < static_cast<size_t>(BlockID::Count) ? detail::g_base[b] : 0;
+        }
 
         // How many distinct states exist across every block — MC's
         // `Block.BLOCK_STATE_REGISTRY.size()`.
@@ -140,7 +166,12 @@ namespace Game {
         // This is the boundary conversion. Prefer passing BlockState around; a
         // call to this in the middle of the engine is a sign something still
         // speaks the old pair.
-        BlockState FromIndex(BlockID id, BlockStateIndex stateIndex);
+        inline BlockState FromIndex(BlockID id, BlockStateIndex stateIndex) {
+            const uint32_t n = Count(id);
+            if (n == 0) return BlockState{};                 // unregistered -> air
+            const uint32_t st = (stateIndex < n) ? stateIndex : n - 1;
+            return BlockState::FromRawId(Base(id) + st);
+        }
 
         // Resolve a state from the form MC uses on disk: a registry slug plus
         // property name/value strings. Unknown property names and unparseable
@@ -158,6 +189,10 @@ namespace Game {
         std::string_view PropertyValueName(PropertyId prop, uint16_t valueIndex);
 
     } // namespace BlockStates
+
+    inline BlockStateIndex BlockState::Index() const {
+        return static_cast<BlockStateIndex>(m_id - BlockStates::Base(Block()));
+    }
 
     // "This block, in its default state" as a within-block index — the thing
     // almost every caller means when it passes a bare BlockID. Spelled out as

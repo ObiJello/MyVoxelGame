@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/EvokerFangs.cpp
 #include "common/entity/projectile/EvokerFangs.hpp"
+#include "common/particle/ParticleOptions.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/mobs/Monsters.hpp"
@@ -26,10 +27,23 @@ namespace Game {
 
         if (m_level->IsClientSide()) {
             // MC's client half counts lifeTicks down once the attack starts
-            // (the 12 CRIT particles at lifeTicks == 14 need the particle
-            // system). The countdown drives GetAnimationProgress.
+            // (driving GetAnimationProgress) and at lifeTicks == 14 bursts 12
+            // CRIT particles up out of the jaws.
             if (m_clientSideAttackStarted) {
                 --m_lifeTicks;
+                if (m_lifeTicks == 14) {
+                    JavaRandom& r = m_level->Random();
+                    const double w = static_cast<double>(GetBbWidth());
+                    for (int i = 0; i < 12; ++i) {
+                        const double x = position.x + (r.NextDouble() * 2.0 - 1.0) * w * 0.5;
+                        const double y = position.y + 0.05 + r.NextDouble();
+                        const double z = position.z + (r.NextDouble() * 2.0 - 1.0) * w * 0.5;
+                        const double xd = (r.NextDouble() * 2.0 - 1.0) * 0.3;
+                        const double yd = 0.3 + r.NextDouble() * 0.3;
+                        const double zd = (r.NextDouble() * 2.0 - 1.0) * 0.3;
+                        m_level->AddParticle(ParticleKind::Crit, x, y + 1.0, z, xd, yd, zd);
+                    }
+                }
             }
             return;
         }

@@ -1,5 +1,12 @@
 // File: src/server/entity/ServerLevelBridge.cpp
 #include "server/entity/ServerLevelBridge.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "server/entity/ShoulderEntities.hpp"
+#include "common/world/damagesource/CombatTracker.hpp"
+#include "common/entity/PlayerRideable.hpp"
+#include "server/entity/PlayerRiding.hpp"
+#include "server/session/PlayerSession.hpp"
+#include "server/session/PlayerSessionManager.hpp"
 #include "common/world/lighting/ChunkLight.hpp"
 #include "common/world/level/GameRules.hpp"
 #include "common/entity/PrimedTnt.hpp"
@@ -15,6 +22,7 @@
 #include "server/session/PlayerSessionManager.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/network/ServerConnection.hpp"
+#include "common/network/packets/game/GameEventS2CPacket.hpp"
 #include "common/network/packets/game/MobEntityPackets.hpp"
 #include "common/core/Mth.hpp"
 #include "common/physics/Physics.hpp"
@@ -32,6 +40,7 @@
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/math/WorldCoordinates.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 
 #include <algorithm>
@@ -196,8 +205,57 @@ namespace Server {
         return m_player && m_player->getGameMode() == GameMode::SPECTATOR;
     }
 
+    bool PlayerEntityView::MayBuild() const {
+        // MC GameType.updatePlayerAbilities: mayBuild = !isBlockPlacingRestricted()
+        // — false in adventure and spectator.
+        if (!m_player) return true;
+        const GameMode mode = m_player->getGameMode();
+        return mode != GameMode::ADVENTURE && mode != GameMode::SPECTATOR;
+    }
+
     bool PlayerEntityView::IsAbilityFlying() const {
         return m_player && m_player->isFlying();
+    }
+
+    bool PlayerEntityView::IsFallFlying() const {
+        return m_player && m_player->isFallFlying();
+    }
+
+    bool PlayerEntityView::IsPushable() const {
+        return Game::LivingEntity::IsPushable() && !(m_player && m_player->isNoclip());
+    }
+
+    void PlayerEntityView::TickPushEntities() {
+        if (!m_player || !m_level || m_level->IsClientSide() || !IsAlive() || IsSpectator()) return;
+        if (m_player->isNoclip()) return;   // noclip: no collision, so no shoving
+        std::vector<Game::Entity*> list;
+        m_level->GetEntitiesInBox(GetAABB(), this, list);
+        // EntitySelector.pushableBy(this) — and no other player (theirs is
+        // their own clients' business).
+        std::erase_if(list, [](Game::Entity* e) { return !e || e->IsPlayer() || !e->IsPushable(); });
+        if (list.empty()) return;
+        // max_entity_cramming, as for any living entity.
+        const int maxEntityCramming = Game::Rules::GetInt(Game::Rules::Id::MaxEntityCramming);
+        if (maxEntityCramming > 0 && static_cast<int>(list.size()) > maxEntityCramming - 1 &&
+            m_level->Random().NextInt(4) == 0) {
+            int count = 0;
+            for (Game::Entity* e : list) if (!e->IsPassenger()) ++count;
+            if (count > maxEntityCramming - 1) Hurt(Game::MobDamageSource::Cramming, 6.0f, nullptr);
+        }
+        const glm::dvec3 saved = velocity;
+        for (Game::Entity* e : list) DoPush(*e);
+        velocity = saved;
+    }
+
+    void PlayerEntityView::StopRiding() {
+        Game::Entity* oldVehicle = GetVehicle();
+        // Entity.stopRiding → removeVehicle, skipping LivingEntity's mob
+        // dismount: the player's is PlayerRiding's.
+        Game::Entity::StopRiding();
+        // Player.removeVehicle: boardingCooldown = 0.
+        m_boardingCooldown = 0;
+        if (!oldVehicle || GetVehicle() == oldVehicle || !m_level || m_level->IsClientSide()) return;
+        PlayerRiding::OnViewDismounted(*this, *oldVehicle);
     }
 
     void PlayerEntityView::SyncFromPlayer() {
@@ -357,6 +415,9 @@ namespace Server {
         // attribute modifiers of whatever the player now wears.
         TickEnchantments();
 
+        // A riptide in flight: what the spin runs into takes its hit.
+        if (m_player && !m_player->isDead()) TickAutoSpinAttack();
+
         // MC Player.tick, after super.tick(): a TURTLE_HELMET worn with the
         // eye out of water tops WATER_BREATHING up to 10 s (turtleHelmetTick:
         // 200 ticks, amplifier 0, no particles, icon shown) — the helmet's
@@ -416,24 +477,12 @@ namespace Server {
         // going through this path.
         // Name the killer for the death broadcast. MC pulls this from
         // DamageSource.causingEntity in CombatTracker; we have no combat
-        // tracker, so it rides along with the damage call. The slug is
-        // title-cased ("zombie" -> "Zombie") to stand in for MC's translated
-        // entity name.
-        // A named attacker is its name (MC Entity.getDisplayName: the custom
-        // name before the type's).
+        // tracker, so it rides along with the damage call. MC
+        // Entity.getDisplayName: a player's name, a custom name, else the
+        // type's translated name ("Zombie") — the same naming the mobs'
+        // CombatTracker uses.
         std::string attackerName;
-        if (attacker && attacker->HasCustomName()) {
-            attackerName = *attacker->GetCustomName();
-        } else if (attacker) {
-            const std::string_view slug = attacker->TypeInfo().slug;
-            attackerName.assign(slug.begin(), slug.end());
-            bool upper = true;
-            for (char& c : attackerName) {
-                if (c == '_') { c = ' '; upper = true; continue; }
-                c = upper ? static_cast<char>(::toupper((unsigned char)c)) : c;
-                upper = false;
-            }
-        }
+        if (attacker) attackerName = Game::EntityDisplayName(*attacker, m_level);
         // Map the mob-system source onto ServerPlayer's own enum so the death
         // message tells the truth — a player killed by poison ticks reads
         // "was killed by magic", not "was slain by".
@@ -480,6 +529,29 @@ namespace Server {
                 break;
             case Game::MobDamageSource::Thorns:
                 playerSource = DamageSource::THORNS;
+                break;
+            case Game::MobDamageSource::MaceSmash:
+                playerSource = DamageSource::MACE_SMASH;
+                break;
+            case Game::MobDamageSource::Fireworks:
+                playerSource = DamageSource::FIREWORKS;
+                break;
+            case Game::MobDamageSource::FlyIntoWall:
+                playerSource = DamageSource::FLY_INTO_WALL;
+                break;
+            case Game::MobDamageSource::Lightning:
+                playerSource = DamageSource::LIGHTNING_BOLT;
+                break;
+            case Game::MobDamageSource::Spear:
+                playerSource = DamageSource::SPEAR;
+                break;
+            // DamageSources.trident(trident, owner): the thrown trident is
+            // the direct entity of the projectile hit.
+            case Game::MobDamageSource::Projectile:
+                if (const Game::Entity* direct = HurtDirectEntity();
+                    direct && direct->GetType() == Game::EntityTypeId::Trident) {
+                    playerSource = DamageSource::TRIDENT;
+                }
                 break;
             default:
                 break;
@@ -633,6 +705,33 @@ namespace Server {
 
         auto* bridge = static_cast<ServerLevelBridge*>(m_level);
         if (bridge) bridge->SendHurtAnimation(GetId(), hurtDir);
+    }
+
+    Game::ImpulseContext& PlayerEntityView::GetImpulseContext() {
+        return m_player ? m_player->impulseContext() : Game::LivingEntity::GetImpulseContext();
+    }
+
+    void PlayerEntityView::OnExplosionHit(Game::Entity* explosionCausedBy) {
+        // MC ServerPlayer.onExplosionHit: setIgnoreFallDamageFromCurrentImpulse(
+        //     explosionCausedBy != null && explosionCausedBy.is(WIND_CHARGE),
+        //     position()). Only the PLAYER's wind charge — not the breeze's.
+        const bool windCharge = explosionCausedBy &&
+                                explosionCausedBy->GetType() == Game::EntityTypeId::WindCharge;
+        GetImpulseContext().SetIgnoreFallDamage(windCharge, position);
+    }
+
+    void PlayerEntityView::SetDeltaMovementAndSync(const glm::dvec3& v) {
+        // The client owns the player's motion, so the new velocity only
+        // matters as the packet. The view's `velocity` is the accumulator of
+        // pushes NOT yet sent (see ConsumePendingKnockback); this one has
+        // been, so it is not left in it — a blast later this tick then adds
+        // only its own push on top, exactly as vanilla's client sees it.
+        if (auto* bridge = static_cast<ServerLevelBridge*>(m_level)) {
+            bridge->SendPlayerMotion(GetId(), v);
+        }
+        velocity = glm::dvec3(0.0);
+        m_pendingKnockback = glm::dvec3(0.0);
+        m_hasPendingKnockback = false;
     }
 
     Game::Difficulty PlayerEntityView::GetDifficultyOfLevel() const {
@@ -932,8 +1031,30 @@ namespace Server {
     int ServerLevelBridge::GetSkyDarken() const {
         // The curve lives on World (the grass spread tick reads it too);
         // 0 by day and 11 at night are what every spawn light test is
-        // calibrated against.
-        return Game::World::SkyDarkenForDayTime(GetDayTime());
+        // calibrated against — and the weather darkens it (a thunderstorm
+        // lets monsters spawn and players sleep at noon).
+        return m_world ? m_world->GetSkyDarken() : Game::World::SkyDarkenForDayTime(GetDayTime());
+    }
+
+    float ServerLevelBridge::GetRainLevel(float partialTick) const {
+        return m_world ? m_world->GetRainLevel(partialTick) : 0.0f;
+    }
+
+    float ServerLevelBridge::GetThunderLevel(float partialTick) const {
+        return m_world ? m_world->GetThunderLevel(partialTick) : 0.0f;
+    }
+
+    bool ServerLevelBridge::IsRaining() const {
+        return m_world && m_world->IsRaining();
+    }
+
+    bool ServerLevelBridge::IsThundering() const {
+        return m_world && m_world->IsThundering();
+    }
+
+    int ServerLevelBridge::PrecipitationAt(const glm::ivec3& pos) const {
+        if (!m_world) return kPrecipitationNone;
+        return static_cast<int>(m_world->PrecipitationAt(pos.x, pos.y, pos.z));
     }
 
     bool ServerLevelBridge::MonstersBurn() const {
@@ -1056,6 +1177,15 @@ namespace Server {
         return found;
     }
 
+    bool ServerLevelBridge::SetEntityOnShoulder(Game::LivingEntity& player, Game::Mob& entity) {
+        // Only a live player view standing in THIS level can take a rider.
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        if (!view || !view->GetPlayer() || view->Level() != this || view->IsFromEarlierVisit()) {
+            return false;
+        }
+        return ShoulderEntities::SetEntityOnShoulder(*view, entity, GetGameTime());
+    }
+
 
     uint32_t ServerLevelBridge::GetHeldItemId(const Game::LivingEntity& player) const {
         const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
@@ -1075,6 +1205,55 @@ namespace Server {
         const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
         if (!view || !view->GetPlayer()) return;
         view->GetPlayer()->DisplayClientMessage(text, actionBar);
+    }
+
+    void ServerLevelBridge::SendGameEvent(const Game::LivingEntity& player, uint8_t event,
+                                          float param) const {
+        // ServerPlayer.connection.send(ClientboundGameEventPacket) — on the
+        // id GameEventS2CPacket rides (PacketId::WeatherChange).
+        const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
+        if (!view || !view->GetPlayer() || !g_integratedServer) return;
+        auto* sessions = g_integratedServer->GetSessionManager();
+        if (!sessions) return;
+        auto session = sessions->GetSessionByConnection(view->GetPlayer()->getPlayerId());
+        if (!session) return;
+        if (auto* connection = session->GetConnection()) {
+            connection->SendPacket(static_cast<uint8_t>(Network::PacketId::WeatherChange),
+                                   Network::Serialization::Serialize(
+                                       Network::GameEventS2CPacket(event, param)));
+        }
+    }
+
+    void ServerLevelBridge::BroadcastSystemMessage(const std::string& text) const {
+        // MC death messages use the default white (not the join/leave yellow).
+        if (g_integratedServer) g_integratedServer->BroadcastSystemMessage(text, 0xFFFFFFFFu);
+    }
+
+    bool ServerLevelBridge::StartPlayerRiding(Game::LivingEntity& player, Game::Mob& vehicle) {
+        const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
+        if (!view || !view->GetPlayer() || !g_integratedServer) return false;
+        PlayerSessionManager* sessions = g_integratedServer->GetSessionManager();
+        if (!sessions) return false;
+        const std::shared_ptr<PlayerSession> session =
+            sessions->GetSessionByConnection(static_cast<uint32_t>(view->GetId()));
+        if (!session) return false;
+        // An equine's doPlayerRide (turn to the mount first); anything else —
+        // a boat, a minecart — MC Player.startRiding(vehicle).
+        if (auto* seat = dynamic_cast<Game::PlayerRideable*>(&vehicle)) {
+            return PlayerRiding::StartRiding(*session, vehicle, *seat);
+        }
+        return PlayerRiding::StartRiding(*session, static_cast<Game::Entity&>(vehicle), false);
+    }
+
+    bool ServerLevelBridge::IsPlayerSneaking(const Game::LivingEntity& player) const {
+        const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
+        return view && view->GetPlayer() && view->GetPlayer()->IsSneaking();
+    }
+
+    std::string ServerLevelBridge::GetPlayerName(const Game::LivingEntity& player) const {
+        const auto* view = dynamic_cast<const PlayerEntityView*>(&player);
+        if (!view || !view->GetPlayer()) return {};
+        return view->GetPlayer()->getName();
     }
 
     void ServerLevelBridge::GetItemEntitiesInBox(const Game::AABBd& box,
@@ -1106,8 +1285,15 @@ namespace Server {
         if (!e || e->stack.IsEmpty()) return 0;
         const int taken = std::min(count, e->stack.count);
         e->stack.count -= taken;
-        if (e->stack.count <= 0) e->stack.Clear();   // the manager's Tick erases it
+        if (e->stack.count <= 0) {
+            e->stack.Clear();   // the manager's Tick erases it
+            m_items->NoteTransferred(id);   // taken by a mob, not destroyed
+        }
         return taken;
+    }
+
+    void ServerLevelBridge::NoteItemEntityTaken(int32_t itemEntityId, int32_t collectorId, int amount) {
+        if (m_items && amount > 0) m_items->NoteTakenBy(itemEntityId, collectorId, amount);
     }
 
     bool ServerLevelBridge::AddItemEntityDeltaMovement(int32_t id, const glm::dvec3& delta) {
@@ -1117,6 +1303,28 @@ namespace Server {
         e->vel += delta;
         e->needsSync = true;   // the clients' copy moves with it
         return true;
+    }
+
+    int ServerLevelBridge::AddExperienceOrbDeltaMovementInBox(const Game::AABBd& box, double maxVy,
+                                                              const glm::dvec3& delta) {
+        if (!m_orbs) return 0;
+        int pushed = 0;
+        for (auto& [id, orb] : m_orbs->AllMutable()) {
+            (void)id;
+            if (orb.pickedUp) continue;
+            // The orb's 0.5 box (EntityType.EXPERIENCE_ORB) against `box`.
+            constexpr double h = Game::ExperienceOrb::kWidth * 0.5;
+            if (orb.pos.x + h <= box.min.x || orb.pos.x - h >= box.max.x ||
+                orb.pos.y + Game::ExperienceOrb::kHeight <= box.min.y || orb.pos.y >= box.max.y ||
+                orb.pos.z + h <= box.min.z || orb.pos.z - h >= box.max.z) {
+                continue;
+            }
+            if (!(orb.vel.y < maxVy)) continue;
+            orb.vel += delta;
+            orb.needsSync = true;   // the clients' copy moves with it
+            ++pushed;
+        }
+        return pushed;
     }
 
     const Game::ItemStack* ServerLevelBridge::GetItemEntityStack(int32_t id) const {
@@ -1130,7 +1338,10 @@ namespace Server {
         Game::ItemEntity* e = m_items->Find(id);
         if (!e) return false;
         e->stack = stack;
-        if (e->stack.count <= 0) e->stack.Clear();   // the manager's Tick erases it
+        if (e->stack.count <= 0) {
+            e->stack.Clear();   // the manager's Tick erases it
+            m_items->NoteTransferred(id);   // a hopper took all of it
+        }
         e->needsSync = true;
         return true;
     }
@@ -1154,7 +1365,48 @@ namespace Server {
         }
     }
 
+    void ServerLevelBridge::AddItemToPlayer(Game::LivingEntity& player, const Game::ItemStack& stack) {
+        // MC Player.addItem → Inventory.add (Inventory::AddStack keeps MC's
+        // slot priority and the stack's components). The overflow is lost,
+        // as MC's addItem result is ignored by its callers here.
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        if (!sp || stack.IsEmpty()) return;
+        sp->getInventory().AddStack(stack);
+    }
+
+    bool ServerLevelBridge::TryAddItemToPlayer(Game::LivingEntity& player, const Game::ItemStack& stack) {
+        // MC Inventory.add: true when the count went down (something fit),
+        // or — nothing fitting — for a player with infinite materials.
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        if (!sp || stack.IsEmpty()) return false;
+        const int leftover = sp->getInventory().AddStack(stack);
+        if (leftover < stack.count) return true;
+        return sp->isCreative();
+    }
+
     void ServerLevelBridge::BroadcastEntityEvent(const Game::Entity& entity, uint8_t event) {
+        // A player's view is no tracked entity, so the tracker has no
+        // watchers for it: the events a client acts on for a player (the
+        // totem's 35, a spear charge's 2) go straight to everyone watching
+        // its chunk, the player included — MC broadcastEntityEvent →
+        // sendToTrackingPlayersAndSelf. The rest (the view's swing and
+        // break stand-ins, which reach clients by their own packets) stay
+        // dropped, as before.
+        if (entity.IsPlayer()) {
+            if (g_integratedServer && (event == 2 || event == 35)) {
+                Network::EntityEventS2CPacket p;
+                p.entityId = entity.GetId();
+                p.event = event;
+                const Game::Math::ChunkPos cp{
+                    static_cast<int32_t>(std::floor(entity.position.x / 16.0)),
+                    static_cast<int32_t>(std::floor(entity.position.z / 16.0)) };
+                g_integratedServer->SendToChunkWatchersAt(Dimension(), cp, Network::PacketId::EntityEventS2C,
+                                                          Network::Serialization::Serialize(p));
+            }
+            return;
+        }
         m_pendingEvents.push_back({ entity.GetId(), event });
     }
 
@@ -1189,6 +1441,21 @@ namespace Server {
         p.yaw      = hurtDir;
         connection->SendPacketIn(Dimension(),
             static_cast<uint8_t>(Network::PacketId::HurtAnimationS2C),
+            Network::Serialization::Serialize(p));
+    }
+
+    void ServerLevelBridge::SendPlayerMotion(int32_t connectionId, const glm::dvec3& velocity) {
+        if (!m_sessions) return;
+        auto session = m_sessions->GetSessionByConnection(static_cast<uint32_t>(connectionId));
+        if (!session) return;
+        auto* connection = session->GetConnection();
+        if (!connection) return;
+
+        Network::SetEntityMotionS2CPacket p;
+        p.entityId = connectionId;
+        p.velocity = glm::vec3(velocity);
+        connection->SendPacketIn(Dimension(),
+            static_cast<uint8_t>(Network::PacketId::SetEntityMotionS2C),
             Network::Serialization::Serialize(p));
     }
 
@@ -1365,7 +1632,8 @@ namespace Server {
     }
 
     void ServerLevelBridge::BroadcastExplosion(const glm::dvec3& center, float radius,
-                                               int blockCount, bool small) {
+                                               int blockCount, bool small,
+                                               uint8_t particleSet, bool blockParticles) {
         if (!m_sessions) return;
 
         // MC sends to every player within 64 blocks (distanceToSqr < 4096).
@@ -1378,6 +1646,8 @@ namespace Server {
         packet.radius     = radius;
         packet.blockCount = blockCount;
         packet.small      = small;
+        packet.particleSet    = particleSet;
+        packet.blockParticles = blockParticles;
 
         for (PlayerEntityView* view : m_playerViewList) {
             if (!view) continue;
@@ -1407,6 +1677,15 @@ namespace Server {
 
     void ServerLevelBridge::DestroyBlock(const glm::ivec3& pos, bool dropResources) {
         if (!m_world) return;
+        // MC Level.destroyBlock: levelEvent 2001 for anything but fire.
+        {
+            const Game::BlockState was = m_world->GetBlockState(pos.x, pos.y, pos.z);
+            const Game::BlockID id = was.Block();
+            if (id != Game::BlockID::Air && id != Game::BlockID::Fire && id != Game::BlockID::SoulFire) {
+                Game::PlayLevelEventSound(*m_world, nullptr, Game::LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                          static_cast<int>(was.RawId()), m_world->Random());
+            }
+        }
         // MC Level.destroyBlock(pos, dropBlock). The sheep passes false, so
         // grazing a fern yields nothing — the wool IS the yield. The drop
         // itself is Block.popResource, behind the block_drops rule.
@@ -1486,6 +1765,14 @@ namespace Server {
 
     Game::Difficulty ServerLevelBridge::GetDifficulty() const {
         return m_world ? m_world->GetDifficulty() : Game::Difficulty::Normal;
+    }
+
+    bool ServerLevelBridge::GetChunkInhabitedTime(int chunkX, int chunkZ, int64_t& out) const {
+        if (!m_world) return false;
+        const auto chunk = m_world->GetLoadedChunk(chunkX, chunkZ);
+        if (!chunk) return false;
+        out = chunk->InhabitedTime();
+        return true;
     }
 
     // Each forwards to the world's rule, falling back to MC's default when
@@ -1570,6 +1857,21 @@ namespace Server {
         if (sp) sp->OpenMerchantMenu(merchant.GetId());
     }
 
+    void ServerLevelBridge::OpenMountInventory(Game::LivingEntity& player, Game::Mob& mount) {
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        if (sp && mount.GetMountInventory()) sp->OpenContainerEntityMenu(Game::MenuType::MountInventory, mount.GetId());
+    }
+
+    bool ServerLevelBridge::OpenContainerEntityMenu(Game::LivingEntity& player, Game::Mob& containerEntity) {
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        auto* vehicle = dynamic_cast<Game::VehicleEntity*>(&containerEntity);
+        if (!sp || !vehicle || !vehicle->GetVehicleContainer() || sp->isSpectator()) return false;
+        sp->OpenContainerEntityMenu(vehicle->GetContainerMenuType(), vehicle->GetId());
+        return true;
+    }
+
     void ServerLevelBridge::AwardExperience(const glm::dvec3& pos, int amount,
                                             int32_t /*creditPlayerEntityId*/) {
         if (amount <= 0) return;
@@ -1646,6 +1948,8 @@ namespace Server {
                 // player movement), so this is the only place its hurt flash
                 // and invulnerability window count down.
                 it->second->TickCombatState();
+                // …and the one where the player shoves the mobs it walks into.
+                it->second->TickPushEntities();
             }
 
             m_playerViewList.push_back(it->second.get());
@@ -1670,6 +1974,18 @@ namespace Server {
     }
 
     void ServerLevelBridge::ClearReferencesToPlayerView(PlayerEntityView* departing) {
+        // A view about to be freed must not stay in a vehicle's passenger
+        // list (nor carry riders of its own). The ride itself was already
+        // ended or moved on by Server::PlayerRiding; this only unlinks — no
+        // dismount, nobody moves.
+        if (departing) {
+            if (departing->IsPassenger()) departing->RemoveVehicle();
+            if (departing->IsVehicle()) {
+                for (Game::Entity* rider : std::vector<Game::Entity*>(departing->GetPassengers())) {
+                    if (rider) rider->RemoveVehicle();
+                }
+            }
+        }
         if (m_mobs) {
             for (const auto& [mobId, mob] : m_mobs->All()) {
                 mob->ClearReferenceTo(departing);
@@ -1691,6 +2007,33 @@ namespace Server {
                 for (const auto& [mobId, mob] : others->All()) mob->ClearReferenceTo(departing);
             });
         }
+    }
+
+    Game::Entity* ServerLevelBridge::ResolveEntityById(int32_t id) const {
+        if (id < 0) return nullptr;
+        if (Game::IsMobEntityId(id)) {
+            Game::Mob* mob = m_mobs ? m_mobs->Find(id) : nullptr;
+            return mob && !mob->IsRemoved() ? mob : nullptr;
+        }
+        // Player views are keyed by connection id, which is their entity id
+        // (MobManager::ResolveKiller's convention).
+        if (id < Game::kItemEntityIdBase) {
+            auto it = m_playerViews.find(static_cast<uint32_t>(id));
+            return it == m_playerViews.end() ? nullptr : it->second.get();
+        }
+        return nullptr;
+    }
+
+    Game::WardenSpawnTracker* ServerLevelBridge::GetWardenSpawnTracker(Game::LivingEntity& player) {
+        auto* view = dynamic_cast<PlayerEntityView*>(&player);
+        ServerPlayer* sp = view ? view->GetPlayer() : nullptr;
+        return sp ? &sp->getWardenSpawnTracker() : nullptr;
+    }
+
+    int PlayerEntityView::GetExperienceReward(Game::EntityLevel& /*level*/, Game::Entity* /*killer*/) {
+        if (!m_player) return 0;
+        if (Game::Rules::GetBool(Game::Rules::Id::KeepInventory) || IsSpectator()) return 0;
+        return std::min(m_player->getExperience().Level() * 7, 100);
     }
 
     PlayerEntityView* ServerLevelBridge::GetPlayerView(uint32_t connectionId) {

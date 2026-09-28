@@ -3,7 +3,9 @@
 // MC net.minecraft.world.entity.LightningBolt — see the header for the
 // timeline and what is not modelled.
 #include "common/entity/LightningBolt.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/entity/decoration/HangingEntity.hpp"
+#include "common/entity/decoration/BlockAttachedEntity.hpp"
 
 #include "common/sound/SoundEvents.hpp"
 #include "common/entity/Entity.hpp"
@@ -18,6 +20,9 @@
 #include "common/world/level/GameRules.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/world/block/CopperChestBlock.hpp"     // the copper weathering families
+#include "common/world/block/RedstoneComponents.hpp"  // LightningRodOnLightningStrike
 
 #include <cmath>
 #include <vector>
@@ -114,10 +119,10 @@ namespace Game {
                 if (difficulty == Difficulty::Normal || difficulty == Difficulty::Hard) {
                     SpawnFire(4);
                 }
-                // MC powerLightningRod (LightningRodBlock.onLightningStrike
-                // at getStrikePosition — BlockPos.containing(x, y - 1e-6, z))
-                // and clearCopperOnLightningStrike: SKIPPED — see the header.
-                // MC gameEvent(GameEvent.LIGHTNING_STRIKE): no game events.
+                PowerLightningRod();
+                ClearCopperOnLightningStrike();
+                // MC gameEvent(GameEvent.LIGHTNING_STRIKE).
+                GameEvent(GameEventId::LightningStrike);
             }
         }
 
@@ -152,10 +157,85 @@ namespace Game {
                 std::vector<Entity*> entities;
                 m_level->GetEntitiesInBox(box, this, entities);
                 for (Entity* entity : entities) {
-                    if (entity && entity->IsAlive()) ThunderHit(*entity);
+                    if (entity && entity->IsAlive()) entity->ThunderHit(this);
                 }
                 // MC hitEntities.addAll + CHANNELED_LIGHTNING for `cause`:
                 // advancement-only, not modelled.
+            }
+        }
+    }
+
+    glm::ivec3 LightningBolt::GetStrikePosition() const {
+        // MC getStrikePosition: BlockPos.containing(x, y - 1.0E-6, z) — the
+        // block the bolt stands on.
+        return glm::ivec3(static_cast<int>(std::floor(position.x)),
+                          static_cast<int>(std::floor(position.y - 1.0e-6)),
+                          static_cast<int>(std::floor(position.z)));
+    }
+
+    void LightningBolt::PowerLightningRod() {
+        // MC powerLightningRod: a lightning rod under the strike takes it.
+        ILevelWrite* level = m_level ? m_level->MutableBlocks() : nullptr;
+        if (!level) return;
+        const glm::ivec3 strike = GetStrikePosition();
+        if (!level->IsPositionLoaded(strike.x, strike.y, strike.z)) return;
+        const BlockState below = level->GetBlockState(strike.x, strike.y, strike.z);
+        if (IsLightningRodBlock(below.Block())) LightningRodOnLightningStrike(*level, strike, below);
+    }
+
+    void LightningBolt::ClearCopperOnLightningStrike() {
+        // MC clearCopperOnLightningStrike(level, getStrikePosition()): a
+        // strike on weathering copper scrapes it back to new, then 3..5
+        // random walks of 1..8 steps each clean one stage off the copper
+        // they cross (a waxed block is struck through: it starts the walks
+        // but keeps its own stage).
+        ILevelWrite* level = m_level ? m_level->MutableBlocks() : nullptr;
+        if (!level) return;
+        JavaRandom* random = level->Random();
+        if (!random) return;
+        const glm::ivec3 struck = GetStrikePosition();
+        if (!level->IsPositionLoaded(struck.x, struck.y, struck.z)) return;
+        const BlockState struckState = level->GetBlockState(struck.x, struck.y, struck.z);
+        const bool isWaxed = IsWaxedCopperBlock(struckState.Block());
+        const bool isWeatheringCopper = WeatheringCopperAge(struckState.Block()) >= 0;
+        if (!isWeatheringCopper && !isWaxed) return;
+        if (isWeatheringCopper) {
+            level->SetBlock(struck.x, struck.y, struck.z, WeatheringCopperFirstState(struckState),
+                            World::UpdateFlags::All);
+        }
+
+        // randomStepCleaningCopper: up to 10 random cells of the 3x3x3 cube
+        // around the walker; the first weathering copper one steps back a
+        // stage (getPrevious, if any), sparks (level event 3002, data -1)
+        // and becomes the walker's next position.
+        const auto randomStep = [&](const glm::ivec3& from, glm::ivec3& to) -> bool {
+            for (int i = 0; i < 10; ++i) {
+                const glm::ivec3 candidate(from.x - 1 + random->NextInt(3),
+                                           from.y - 1 + random->NextInt(3),
+                                           from.z - 1 + random->NextInt(3));
+                if (!level->IsPositionLoaded(candidate.x, candidate.y, candidate.z)) continue;
+                const BlockState state = level->GetBlockState(candidate.x, candidate.y, candidate.z);
+                if (WeatheringCopperAge(state.Block()) < 0) continue;
+                const BlockState previous = WeatheringCopperPreviousState(state);
+                if (previous.RawId() != state.RawId()) {
+                    level->SetBlock(candidate.x, candidate.y, candidate.z, previous, World::UpdateFlags::All);
+                }
+                level->PlayLevelEvent(SoundExcept(nullptr), LevelEvent::PARTICLES_ELECTRIC_SPARK, candidate, -1);
+                to = candidate;
+                return true;
+            }
+            return false;
+        };
+
+        const int strikesCount = random->NextInt(3) + 3;
+        for (int strike = 0; strike < strikesCount; ++strike) {
+            const int stepCount = random->NextInt(8) + 1;
+            // randomWalkCleaningCopper: every walk starts at the strike.
+            glm::ivec3 walker = struck;
+            for (int step = 0; step < stepCount; ++step) {
+                glm::ivec3 next;
+                if (!randomStep(walker, next)) break;
+                walker = next;
             }
         }
     }
@@ -180,9 +260,11 @@ namespace Game {
     }
 
     void LightningBolt::ThunderHit(Entity& victim) {
-        // MC BlockAttachedEntity.thunderHit is empty: lightning neither burns
-        // nor breaks a painting or an item frame.
-        if (dynamic_cast<const HangingEntity*>(&victim)) return;
+        victim.ThunderHit(nullptr);
+    }
+
+    void Entity::ThunderHit(Entity* bolt) {
+        (void)bolt;
         // MC Entity.thunderHit:
         //     setRemainingFireTicks(remainingFireTicks + 1);
         //     if (remainingFireTicks == 0) igniteForSeconds(8);
@@ -190,17 +272,17 @@ namespace Game {
         // MC's resting "not burning" value is -getFireImmuneTicks() = -1,
         // stamped by Entity.move; the engine rests at 0. So "+1 lands on 0"
         // is "was not burning" here, and a burning entity gains its one tick.
-        const int fireTicks = victim.GetRemainingFireTicks();
+        const int fireTicks = GetRemainingFireTicks();
         if (fireTicks <= 0) {
-            victim.IgniteForSeconds(8);
+            IgniteForSeconds(8);
         } else {
-            victim.SetRemainingFireTicks(fireTicks + 1);
+            SetRemainingFireTicks(fireTicks + 1);
         }
         // A player's fire lives on ServerPlayer, which the entity view does
         // not forward to (the same gap every mob-side ignition has); the
         // damage does reach the player through PlayerEntityView::Hurt.
-        if (LivingEntity* living = victim.AsLiving()) {
-            living->Hurt(MobDamageSource::Generic, kThunderDamage, nullptr);
+        if (LivingEntity* living = AsLiving()) {
+            living->Hurt(MobDamageSource::Lightning, LightningBolt::kThunderDamage, nullptr);
         }
     }
 

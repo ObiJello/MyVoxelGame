@@ -29,9 +29,12 @@
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
+#include <string>
 
 // The frame loop keeps the player and camera; the handler reads them
 // through these (set by PlatformMain each frame, see DebugScreen::Context).
@@ -93,7 +96,12 @@ namespace Render::DebugScreen {
         return mapping && mapping->key == Input::BoundKey::Keyboard(glfwKey);
     }
 
-    void DebugKeyHandler::NotifyGameMode(int mode) {
+    void DebugKeyHandler::NotifyGameMode(int mode, int serverPrevious) {
+        if (serverPrevious >= -1 && mode >= 0) {
+            m_currentGameMode  = mode;
+            m_previousGameMode = serverPrevious;
+            return;
+        }
         if (mode == m_currentGameMode) return;
         if (m_currentGameMode >= 0) m_previousGameMode = m_currentGameMode;
         m_currentGameMode = mode;
@@ -301,6 +309,14 @@ namespace Render::DebugScreen {
             Feedback(Debug::DebugSystem::IsDebugUIEnabled() ? "Debug panels: shown" : "Debug panels: hidden");
             debugAction = true;
         }
+        if (Matches(Binds::DebugFillMap, glfwKey) && hasLevel) {
+            // The server's /mapfill, gated like every command (cheats on, and
+            // allowed): fills in the held map, or — pressed again while a
+            // fill of it (or any fill this player started) runs — cancels.
+            // The server answers every case (no map, locked, explored).
+            if (m_cb.sendCommand) m_cb.sendCommand("/mapfill");
+            debugAction = true;
+        }
         if (Matches(Binds::DebugSwitchTranslucencyMode, glfwKey)) {
             // No improved-transparency (order-independent) pipeline exists in
             // this engine; the chord reports that instead of pretending.
@@ -376,10 +392,25 @@ namespace Render::DebugScreen {
 
             if (didDebugAction) {
                 // MC KeyMapping.set(key, false): the chord's key is not also
-                // its gameplay action this press.
+                // its gameplay action this press. Said in the log, so a key
+                // that "does nothing" (T not opening chat because the
+                // modifier read as held) shows up there.
                 CancelBoundKey(BoundKey::Keyboard(e.glfwKey));
                 m_consumedThisFrame = true;
             }
+        }
+
+        // The modifier's held state is built from press/release EVENTS, so a
+        // release that never reached this queue — dropped by
+        // ClearRawKeyEvents on the way to the title screen, which also keeps
+        // this handler's state across sessions — left it "held" for good,
+        // and every later press of a chord key (T, A, S, D…) became an F3
+        // chord instead of its binding. After this frame's events the latch
+        // must agree with the key's physical level (MC reads the modifier's
+        // live KeyMapping state the same way).
+        if (m_modifierDown && modifier && modifier->key.type == BoundKey::Type::Keyboard &&
+            !IsGlfwKeyDown(modifier->key.code)) {
+            m_modifierDown = false;
         }
     }
 

@@ -34,6 +34,7 @@ ChunkStatus::ChunkStatus(
     , m_parent(parent == nullptr ? this : parent)
     , m_chunkType(chunkType)
     , m_heightmapsAfter(std::move(heightmapsAfter))
+    , m_heightmapsAfterList(m_heightmapsAfter.begin(), m_heightmapsAfter.end())
     , m_name(name)
 {
 }

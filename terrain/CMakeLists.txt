@@ -30,12 +30,24 @@ endif()
 get_filename_component(GAME_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 set(TERRAIN_LIB_DIR "${GAME_ROOT}/src/my_terrain_library")
 
-find_package(ZLIB REQUIRED)
+# libdeflate for NBT / region compression (util/Deflate.h), pinned to the
+# game build's tag.
+include(FetchContent)
+set(LIBDEFLATE_BUILD_STATIC_LIB ON  CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_GZIP       OFF CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    libdeflate
+    GIT_REPOSITORY https://github.com/ebiggers/libdeflate.git
+    GIT_TAG v1.24
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(libdeflate)
 
 include_directories(
     ${TERRAIN_LIB_DIR}/include
     ${GAME_ROOT}/ext/md5     # <openssl/md5.h> shim -> CommonCrypto on macOS (same as the game build)
-    ${ZLIB_INCLUDE_DIRS}
 )
 
 file(GLOB_RECURSE TERRAIN_LIB_SOURCES CONFIGURE_DEPENDS
@@ -43,7 +55,7 @@ file(GLOB_RECURSE TERRAIN_LIB_SOURCES CONFIGURE_DEPENDS
 )
 
 add_library(minecraft_terrain STATIC ${TERRAIN_LIB_SOURCES})
-target_link_libraries(minecraft_terrain ${ZLIB_LIBRARIES})
+target_link_libraries(minecraft_terrain libdeflate::libdeflate_static)
 
 # The main parity binary (full async pipeline; driven by tests/parity scripts).
 add_executable(async_chunk_test tests/parity/cpp/CppChunkGeneratorTest.cpp)

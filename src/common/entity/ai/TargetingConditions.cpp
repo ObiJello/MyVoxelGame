@@ -3,6 +3,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/ai/Sensing.hpp"
+#include "common/entity/raid/Raider.hpp"
 
 #include <algorithm>
 
@@ -10,9 +11,10 @@ namespace Game {
 
     bool TargetingConditions::Test(LivingEntity* attacker, const LivingEntity& target) const {
         if (attacker == &target) return false;
-        // MC canBeSeenByAnyone: alive and not a spectator (no spectator mode
-        // reaches mob targeting here).
-        if (!target.IsAlive()) return false;
+        // MC LivingEntity.canBeSeenByAnyone: alive and not a spectator — for
+        // combat and non-combat conditions alike (a spectator is never looked
+        // at, tempted by, followed or targeted).
+        if (!target.IsAlive() || target.IsSpectator()) return false;
 
         if (!attacker) {
             // MC's null-targeter branch: combat still refuses a target that
@@ -29,9 +31,17 @@ namespace Game {
         if (isCombat) {
             // MC targeter.canAttack(target): the port surrogate is
             // IsAttackable() (the player view's override excludes creative),
-            // plus MC's players-are-safe-on-Peaceful rule. isAlliedTo is
-            // scoreboard teams — absent.
+            // plus MC's players-are-safe-on-Peaceful rule.
             if (!target.IsAttackable()) return false;
+            // MC targeter.canAttack(target) proper: a mob's own override
+            // (an illager sparing baby villagers, the iron golem creepers,
+            // the ghast anything far above or below it).
+            if (const auto* mob = dynamic_cast<const Mob*>(attacker); mob && !mob->CanAttack(target)) {
+                return false;
+            }
+            // MC targeter.isAlliedTo(target): no scoreboard teams, so only the
+            // illagers' #illager_friends rule (and the evoker's vexes).
+            if (Raiders::IsAlliedTo(*attacker, target)) return false;
             if (target.IsPlayer() && attacker->Level() &&
                 attacker->Level()->GetDifficulty() == Difficulty::Peaceful) {
                 return false;

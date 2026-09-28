@@ -36,4 +36,13 @@ namespace Game {
     // MC DefaultDispenseItemBehavior.dispense — the dropper's only behaviour.
     ItemStack DispenseDefault(const DispenseSource& source, ItemStack stack);
 
+    // MC DefaultDispenseItemBehavior.spawnItem(level, stack, accuracy,
+    // direction, position): the stack as an item entity just off `position`
+    // (1/8 lower on the Y axis, 5/32 lower sideways), thrown along
+    // `direction` with the dispenser's spread. The trial spawner and the
+    // vault eject their rewards through it (accuracy 2, UP). `direction` is
+    // a Direction ordinal (0 = down .. 5 = east).
+    void DispenseSpawnItem(ILevelWrite& level, const ItemStack& stack, int accuracy, int direction,
+                           const glm::dvec3& position);
+
 } // namespace Game

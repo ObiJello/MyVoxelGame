@@ -671,14 +671,16 @@ namespace Render::DebugScreen {
         }
     };
 
-    // "x y z" — the feet block, nothing else. A plain line so it sits alone
-    // at the top left when it is the only enabled entry.
+    // "x, y, z" — the feet block, nothing else. A plain line so it sits alone
+    // at the top left when it is the only enabled entry. Not a vanilla line:
+    // the three coordinates are split by ", " (no digit grouping, so a long
+    // number never reads as two): "1234, 64, -12345".
     class CoordinatesEntry : public Entry {
     public:
         void Display(Displayer& out, const Context& ctx) override {
             if (!ctx.player) return;
             const glm::ivec3 feet = FeetBlock(ctx);
-            out.AddLine(Fmt("%d %d %d", feet.x, feet.y, feet.z));
+            out.AddLine(Fmt("%d, %d, %d", feet.x, feet.y, feet.z));
         }
     };
 

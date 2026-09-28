@@ -1,5 +1,8 @@
 // File: src/common/entity/ai/goals/EndermanGoals.cpp
 #include "common/entity/ai/goals/EndermanGoals.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/block/BlockState.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
@@ -186,7 +189,13 @@ namespace Game {
         level->GetEntitiesInBox(cell, m_enderman, occupants);
         if (!occupants.empty()) return;
 
-        level->SetBlock(glm::ivec3(xt, yt, zt), m_enderman->GetCarriedBlock());
+        const BlockID carried = m_enderman->GetCarriedBlock();
+        level->SetBlock(glm::ivec3(xt, yt, zt), carried);
+        // MC: level.gameEvent(BLOCK_PLACE, pos, Context.of(enderman, carried)).
+        if (ILevelWrite* write = level->MutableBlocks()) {
+            write->GameEvent(GameEventId::BlockPlace, glm::ivec3(xt, yt, zt),
+                             GameEventContext::Of(m_enderman, BlockStates::Default(carried)));
+        }
         m_enderman->SetCarriedBlock(BlockID::Air);
     }
 
@@ -238,7 +247,13 @@ namespace Game {
             }
         }
 
+        const BlockState taken = blocks->GetBlockState(xt, yt, zt);
         level->SetBlock(glm::ivec3(xt, yt, zt), BlockID::Air);
+        // MC: level.gameEvent(BLOCK_DESTROY, pos, Context.of(enderman, blockState)).
+        if (ILevelWrite* write = level->MutableBlocks()) {
+            write->GameEvent(GameEventId::BlockDestroy, glm::ivec3(xt, yt, zt),
+                             GameEventContext::Of(m_enderman, taken));
+        }
         m_enderman->SetCarriedBlock(block);
     }
 

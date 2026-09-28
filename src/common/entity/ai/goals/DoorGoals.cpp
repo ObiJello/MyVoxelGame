@@ -187,7 +187,7 @@ namespace Game {
             // double-block linkage (see World::NotifyNeighborBlocks), so both
             // halves are cleared explicitly — same observable result.
             // Level events 1021 (the splinter) and 2001 (the block's break
-            // sound; its particles wait on particles).
+            // sound and particles).
             const IBlockAccess* blocks = level->Blocks();
             if (blocks) {
                 const BlockState state = blocks->GetBlockState(

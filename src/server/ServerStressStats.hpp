@@ -17,6 +17,8 @@
 // Tick thread only: BeginTick/Mark/EndTick/Report all run on the server loop.
 #pragma once
 
+#include <atomic>
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -61,6 +63,14 @@ namespace Server {
         void BeginTick();
         void Mark(Phase phase);
         void EndTick(int64_t tickNanos);
+
+        // ── Watchdog (always on, whatever the report's switch) ─────────────
+        // The phase the server thread is IN right now (the one after the last
+        // mark) and when the running tick began — read from another thread
+        // by IntegratedServer::Stop to name a tick that never ends.
+        // -1 = between ticks.
+        int WatchdogPhase() const { return m_watchdogPhase.load(std::memory_order_relaxed); }
+        int64_t WatchdogTickStartMs() const { return m_watchdogTickStartMs.load(std::memory_order_relaxed); }
         void AddChunkResults(int count) { m_chunkResults += static_cast<uint64_t>(count > 0 ? count : 0); }
 
         // Once a second (cheap to call every tick).
@@ -72,6 +82,8 @@ namespace Server {
         void OpenCsv();
 
         bool m_enabled = false;
+        std::atomic<int>     m_watchdogPhase{-1};
+        std::atomic<int64_t> m_watchdogTickStartMs{0};
         std::string m_csvPath;
         std::FILE* m_csv = nullptr;
         bool m_csvFailed = false;

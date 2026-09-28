@@ -7,6 +7,7 @@
 #include "common/core/Log.hpp"
 #include "CommandCoords.hpp"
 #include "EntitySelector.hpp"
+#include "SnbtParser.hpp"
 
 #include <stdexcept>
 #include <vector>
@@ -18,6 +19,24 @@
 namespace Server {
 
     namespace {
+        // Whether every '{' / '[' in `text` outside a quoted string is closed.
+        bool BracketsBalanced(const std::string& text) {
+            int depth = 0;
+            char quote = 0;
+            for (size_t i = 0; i < text.size(); ++i) {
+                const char c = text[i];
+                if (quote) {
+                    if (c == '\\') ++i;
+                    else if (c == quote) quote = 0;
+                    continue;
+                }
+                if (c == '"' || c == '\'') quote = c;
+                else if (c == '{' || c == '[') ++depth;
+                else if (c == '}' || c == ']') --depth;
+            }
+            return depth <= 0 && quote == 0;
+        }
+
         // Shared by the two count-bearing arities. Returns -1 after reporting.
         int ParseCount(const std::string& token, ServerConnection& connection) {
             try {
@@ -64,13 +83,35 @@ namespace Server {
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         for (uint16_t i = 0; i < static_cast<uint16_t>(Game::EntityTypeId::Count); ++i) {
             const auto candidate = static_cast<Game::EntityTypeId>(i);
-            if (Game::GetEntityTypeInfo(candidate).slug == slug) { out = candidate; return true; }
+            if (Game::GetEntityTypeInfo(candidate).slug == slug) {
+                // MC EntityType.canSummon: the fishing bobber is noSummon.
+                if (candidate == Game::EntityTypeId::FishingBobber) return false;
+                out = candidate;
+                return true;
+            }
         }
         return false;
     }
 
     void SummonCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("summon", SummonCommand::Execute);
+        using namespace Game::Cmd;
+        // MC: summon <entity> [<pos> [<nbt>]]. The engine adds a count before
+        // the position and the TNT options fuse=/delay= after it.
+        const auto option = [] {
+            return Argument("option", Arg::Word).Suggests({"fuse=80", "delay=1"}).Executes();
+        };
+        const auto posThenNbt = [&] {
+            return Argument("pos", Arg::Vec3).Executes()
+                .Then(Argument("nbt", Arg::EntityNbt).Executes().Then(option()))
+                .Then(option());
+        };
+        dispatcher.RegisterCommand("summon", SummonCommand::Execute,
+            Root().Then(Argument("entity", Arg::EntityType).Executes()
+                .Then(posThenNbt())
+                .Then(Argument("count", Arg::Integer).Suggests({"1", "10", "100"}).Executes()
+                    .Then(posThenNbt())
+                    .Then(Argument("nbt", Arg::EntityNbt).Executes().Then(option())))
+                .Then(Argument("nbt", Arg::EntityNbt).Executes().Then(option()))));
     }
 
     void SummonCommand::Execute(const CommandSourceStack& source,
@@ -78,6 +119,32 @@ namespace Server {
                                 ServerConnection& connection,
                                 PlayerSessionManager& /*sessionManager*/) {
         ServerPlayer& sender = *source.sender;
+
+        // ── <nbt> (MC CompoundTagArgument) ─────────────────────────────────
+        //
+        // The dispatcher splits on whitespace, and a compound may hold spaces
+        // (`{CustomName:"Two Words", NoAI:1b}`), so the argument runs from the
+        // first token that opens a '{' until its braces balance, quotes
+        // respected. It is pulled out before anything else so a '=' inside it
+        // is never mistaken for a fuse=/delay= option.
+        std::vector<std::string> tokens;
+        std::shared_ptr<const ::World::NBTTagCompound> nbt;
+        for (size_t i = 0; i < rawArgs.size(); ++i) {
+            if (nbt || rawArgs[i].empty() || rawArgs[i][0] != '{' || i == 0) {
+                tokens.push_back(rawArgs[i]);
+                continue;
+            }
+            std::string text = rawArgs[i];
+            while (!BracketsBalanced(text) && i + 1 < rawArgs.size()) text += " " + rawArgs[++i];
+            std::string error;
+            auto compound = Snbt::ParseCompound(text, error);
+            if (!compound) {
+                connection.SendChatMessage(error, 1);
+                return;
+            }
+            nbt = std::move(compound);
+        }
+
         // ── Keyword overrides (MC's NBT compound, without an NBT parser) ───
         //
         // Vanilla spells per-entity overrides as `/summon tnt ~ ~ ~ {Fuse:40}`.
@@ -91,9 +158,10 @@ namespace Server {
         // `delay` is the one with no vanilla counterpart: MC would need a
         // separate command per fuse value to stagger a stack.
         SummonOptions options;
+        options.nbt = nbt;
         std::vector<std::string> args;
-        args.reserve(rawArgs.size());
-        for (const std::string& token : rawArgs) {
+        args.reserve(tokens.size());
+        for (const std::string& token : tokens) {
             const size_t eq = token.find('=');
             if (eq == std::string::npos || eq == 0) { args.push_back(token); continue; }
 
@@ -125,7 +193,7 @@ namespace Server {
         }
         if (args.empty()) {
             connection.SendChatMessage(
-                "Usage: /summon <entity> [count] [<x> <y> <z>] [fuse=n] [delay=n]", 1);
+                "Usage: /summon <entity> [count] [<x> <y> <z>] [<nbt>] [fuse=n] [delay=n]", 1);
             return;
         }
 
@@ -168,7 +236,7 @@ namespace Server {
             coordAt = 2;
         } else if (rest != 0) {
             connection.SendChatMessage(
-                "Usage: /summon <entity> [count] [<x> <y> <z>]", 1);
+                "Usage: /summon <entity> [count] [<x> <y> <z>] [<nbt>]", 1);
             return;
         }
 
@@ -192,7 +260,8 @@ namespace Server {
 
         const int spawned = g_integratedServer->SummonMobs(type, pos, count, options, source.dimension);
         if (spawned == 0) {
-            connection.SendChatMessage("Failed to summon " + slug, 1);
+            // commands.summon.failed
+            connection.SendChatMessage("Unable to summon entity", 1);
             return;
         }
 

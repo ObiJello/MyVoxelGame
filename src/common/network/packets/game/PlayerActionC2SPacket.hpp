@@ -41,6 +41,10 @@ namespace Network {
         STAB                   = 7,
         PERFORM_RESPAWN        = 8,
         STOP_SLEEPING          = 9,   // the InBedScreen's "Leave Bed"
+        // MC ServerboundPlayerCommandPacket Action.OPEN_INVENTORY: the
+        // inventory key while riding a vehicle with its own inventory screen
+        // (a chest boat — HasCustomInventoryScreen).
+        OPEN_VEHICLE_INVENTORY = 10,
     };
 
     struct PlayerActionC2SPacket {

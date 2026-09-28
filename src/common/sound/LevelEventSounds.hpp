@@ -46,11 +46,61 @@ namespace Game {
         inline constexpr int SOUND_DRIP_WATER_INTO_CAULDRON = 1047;
         inline constexpr int SOUND_CRAFTER_CRAFT          = 1049;
         inline constexpr int SOUND_CRAFTER_FAIL           = 1050;
+        // WindChargeItem's DispenseConfig.overrideDispenseEvent(1051).
+        inline constexpr int SOUND_WIND_CHARGE_SHOOT      = 1051;
         inline constexpr int LAVA_FIZZ                    = 1501;
         inline constexpr int REDSTONE_TORCH_BURNOUT       = 1502;
         inline constexpr int END_PORTAL_FRAME_FILL        = 1503;
         inline constexpr int PARTICLES_AND_SOUND_PLANT_GROWTH = 1505;
         inline constexpr int PARTICLES_DESTROY_BLOCK      = 2001;
+        // The particle-only events (and those whose sound LevelEventHandler
+        // plays itself), for PlayLevelEvent / the client's LevelEventHandler
+        // port (client/world/ClientLevelEvents.cpp).
+        inline constexpr int SOUND_FIREWORK_SHOOT         = 1004;
+        inline constexpr int SOUND_SPELL_POTION_SPLASH    = 1053;
+        inline constexpr int SOUND_INSTANT_POTION_SPLASH  = 1054;
+        inline constexpr int COMPOSTER_FILL               = 1500;
+        inline constexpr int DRIPSTONE_DRIP               = 1504;
+        inline constexpr int PARTICLES_SHOOT_SMOKE        = 2000;
+        inline constexpr int PARTICLES_SPELL_POTION_SPLASH = 2002;
+        inline constexpr int PARTICLES_EYE_OF_ENDER_DEATH = 2003;
+        inline constexpr int PARTICLES_MOBBLOCK_SPAWN     = 2004;
+        inline constexpr int PARTICLES_DRAGON_FIREBALL_SPLASH = 2006;
+        inline constexpr int PARTICLES_INSTANT_POTION_SPLASH = 2007;
+        inline constexpr int PARTICLES_DRAGON_BLOCK_BREAK = 2008;
+        inline constexpr int PARTICLES_WATER_EVAPORATING  = 2009;
+        inline constexpr int PARTICLES_SHOOT_WHITE_SMOKE  = 2010;
+        inline constexpr int PARTICLES_BEE_GROWTH         = 2011;
+        inline constexpr int PARTICLES_TURTLE_EGG_PLACEMENT = 2012;
+        inline constexpr int PARTICLES_SMASH_ATTACK       = 2013;
+        inline constexpr int PARTICLES_DESTROY_BLOCK_ONLY = 2014;   // MC PARTICLES_DESTROY_BLOCK (no sound)
+        inline constexpr int PARTICLES_DRAGON_EGG_TELEPORT = 2015;
+        inline constexpr int PARTICLES_SHULKER_TELEPORT   = 2016;
+        inline constexpr int PARTICLES_CONSUME_EFFECT_TELEPORT = 2017;
+        inline constexpr int PARTICLES_ENDERMAN_TELEPORT  = 2018;
+        inline constexpr int PARTICLES_DESTROY_PROGRESS   = 2019;
+        inline constexpr int PARTICLES_AND_SOUND_DESTROY_PROGRESS = 2020;
+        inline constexpr int ANIMATION_END_GATEWAY_SPAWN  = 3000;
+        inline constexpr int ANIMATION_DRAGON_SUMMON_ROAR = 3001;
+        inline constexpr int PARTICLES_ELECTRIC_SPARK     = 3002;
+        inline constexpr int PARTICLES_WAX_ON             = 3003;
+        inline constexpr int PARTICLES_WAX_OFF            = 3004;
+        inline constexpr int PARTICLES_SCRAPE             = 3005;
+        inline constexpr int PARTICLES_SCULK_CHARGE       = 3006;
+        inline constexpr int PARTICLES_SCULK_SHRIEK       = 3007;
+        inline constexpr int PARTICLES_AND_SOUND_BRUSH_BLOCK_COMPLETE = 3008;
+        inline constexpr int PARTICLES_EGG_CRACK          = 3009;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_SPAWN = 3011;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_SPAWN_MOB_AT = 3012;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_DETECT_PLAYER = 3013;
+        inline constexpr int ANIMATION_TRIAL_SPAWNER_EJECT_ITEM = 3014;
+        inline constexpr int ANIMATION_VAULT_ACTIVATE     = 3015;
+        inline constexpr int ANIMATION_VAULT_DEACTIVATE   = 3016;
+        inline constexpr int ANIMATION_VAULT_EJECT_ITEM   = 3017;
+        inline constexpr int ANIMATION_SPAWN_COBWEB       = 3018;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_DETECT_PLAYER_OMINOUS = 3019;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_BECOME_OMINOUS = 3020;
+        inline constexpr int PARTICLES_TRIAL_SPAWNER_SPAWN_ITEM = 3021;
         // Global level events (ServerLevel.globalLevelEvent).
         inline constexpr int SOUND_WITHER_BOSS_SPAWN      = 1023;
         inline constexpr int SOUND_DRAGON_DEATH           = 1028;
@@ -92,9 +142,62 @@ namespace Game {
     // `data` is the event's int (2001: the broken state's raw id; 1009: 0 =
     // fire, 1 = generic). `level` is an ILevelWrite or an EntityLevel — both
     // carry MC's playSound. Returns whether the type has a sound here.
+    // Whether PlayLevelEventSound plays `type`'s sound — i.e. the sound
+    // travels as its own sound packet, and the client's LevelEventHandler
+    // port must NOT play it again when the level event arrives. Kept in step
+    // with the switch below.
+    // MC BlockUtil.clampedPackDifferenceInPosition: the data of the teleport
+    // level events (2015-2018) — `to - from` per axis, clamped to ±127 and
+    // to the radius range, one byte each (x << 16 | y << 8 | z).
+    inline int ClampedPackDifferenceInPosition(const glm::ivec3& from, const glm::ivec3& to, int xRadius,
+                                               int yRadius, int zRadius) {
+        const auto clamp = [](int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); };
+        xRadius = clamp(xRadius, 0, 127);
+        yRadius = clamp(yRadius, 0, 127);
+        zRadius = clamp(zRadius, 0, 127);
+        const int xd = clamp(to.x - from.x, -127, 127);
+        const int yd = clamp(to.y - from.y, -127, 127);
+        const int zd = clamp(to.z - from.z, -127, 127);
+        return (((xd + xRadius) & 255) << 16) | (((yd + yRadius) & 255) << 8) | ((zd + zRadius) & 255);
+    }
+
+    inline constexpr bool LevelEventSoundIsNetworked(int type) {
+        switch (type) {
+            case LevelEvent::SOUND_DISPENSER_DISPENSE:
+            case LevelEvent::SOUND_DISPENSER_FAIL:
+            case LevelEvent::SOUND_DISPENSER_PROJECTILE_LAUNCH:
+            case LevelEvent::SOUND_EXTINGUISH_FIRE:
+            case LevelEvent::SOUND_ANVIL_BROKEN:
+            case LevelEvent::SOUND_ANVIL_USED:
+            case LevelEvent::SOUND_ANVIL_LAND:
+            case LevelEvent::SOUND_CHORUS_GROW:
+            case LevelEvent::SOUND_CHORUS_DEATH:
+            case LevelEvent::SOUND_BREWING_STAND_BREW:
+            case LevelEvent::SOUND_GRINDSTONE_USED:
+            case LevelEvent::SOUND_PAGE_TURN:
+            case LevelEvent::SOUND_SMITHING_TABLE_USED:
+            case LevelEvent::SOUND_POINTED_DRIPSTONE_LAND:
+            case LevelEvent::SOUND_DRIP_LAVA_INTO_CAULDRON:
+            case LevelEvent::SOUND_DRIP_WATER_INTO_CAULDRON:
+            case LevelEvent::SOUND_CRAFTER_CRAFT:
+            case LevelEvent::SOUND_CRAFTER_FAIL:
+            case LevelEvent::LAVA_FIZZ:
+            case LevelEvent::REDSTONE_TORCH_BURNOUT:
+            case LevelEvent::END_PORTAL_FRAME_FILL:
+            case LevelEvent::PARTICLES_AND_SOUND_PLANT_GROWTH:
+            case LevelEvent::PARTICLES_DESTROY_BLOCK:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     template <class LevelT>
     bool PlayLevelEventSound(LevelT& level, const SoundExcept& except, int type,
                              const glm::ivec3& pos, int data, JavaRandom* random) {
+        // The particle half (MC Level.levelEvent's packet / the predicting
+        // client's LevelEventHandler call) — see EntityLevel::PlayLevelEvent.
+        level.PlayLevelEvent(except, type, pos, data);
         auto f = [random]() { return random ? random->NextFloat() : 0.5f; };
         // (random.nextFloat() - random.nextFloat()) as MC writes it: two draws.
         auto spread = [&f]() { const float a = f(); return a - f(); };
@@ -108,6 +211,12 @@ namespace Game {
                 return true;
             case LevelEvent::SOUND_DISPENSER_PROJECTILE_LAUNCH:
                 level.PlaySound(except, at, SoundEvents::DISPENSER_LAUNCH, SoundSource::Blocks, 1.0f, 1.2f);
+                return true;
+            case LevelEvent::SOUND_WIND_CHARGE_SHOOT:
+                // LevelEventHandler 1051: WIND_CHARGE_THROW, BLOCKS, 0.5,
+                // 0.4 / (nextFloat * 0.4 + 0.8).
+                level.PlaySound(except, at, SoundEvents::WIND_CHARGE_THROW, SoundSource::Blocks, 0.5f,
+                                0.4f / (f() * 0.4f + 0.8f));
                 return true;
             case LevelEvent::SOUND_EXTINGUISH_FIRE:
                 if (data == 0) {

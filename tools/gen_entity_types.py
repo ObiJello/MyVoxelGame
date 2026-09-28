@@ -212,6 +212,23 @@ MISC_KEEP = {
     # (ItemFrame.hpp).
     "item_frame",
     "glow_item_frame",
+    # The 26.3 cushion (2026-09-27): a BlockAttachedEntity, not a Mob — the
+    # same pipeline as the hanging entities (Cushion.hpp).
+    "cushion",
+    # The leash knot (2026-09-27): MC LeashFenceKnotEntity, a
+    # BlockAttachedEntity riding the hanging-entity pipeline
+    # (decoration/LeashFenceKnot.hpp).
+    "leash_knot",
+    # The fishing bobber (2026-09-27): MC FishingHook, a Projectile riding
+    # the projectile pipeline (projectile/FishingHook.hpp).
+    "fishing_bobber",
+    # The firework rocket (2026-09-27): MC FireworkRocketEntity, a
+    # Projectile riding the projectile pipeline
+    # (projectile/FireworkRocket.hpp).
+    "firework_rocket",
+    # The ominous item spawner (2026-09-27): MC OminousItemSpawner, a plain
+    # Entity riding the projectile pipeline (OminousItemSpawner.hpp).
+    "ominous_item_spawner",
 }
 
 CATEGORY_CPP = {

@@ -3,11 +3,21 @@
 #include "KeyMapping.hpp"
 #include "common/core/Log.hpp"
 #include "platform/GameDirectory.hpp"
+#include "client/FramerateLimitTracker.hpp"
 #include <GLFW/glfw3.h>
 #include <cmath>
+#include <cstdio>
+#include <string>
 #include <unordered_map>
 #include <queue>
 #include <deque>
+
+#ifdef __APPLE__
+#include <objc/objc.h>
+#include <objc/message.h>
+#define GLFW_EXPOSE_NATIVE_COCOA
+#include <GLFW/glfw3native.h>
+#endif
 
 namespace Input {
     static GLFWwindow* gWindow = nullptr;
@@ -158,6 +168,7 @@ namespace Input {
     }
 
     static void MouseButtonCallback(GLFWwindow* /*window*/, int button, int action, int mods) {
+        Client::FramerateLimitTracker::OnInputReceived();   // MC MouseHandler.onButton
         if (remoteMode) return;   // /control: this window's mouse is not the player's (IsLocalMouseButtonDown polls it)
         Capture({CapturedEvent::Kind::MouseButton, button, action, mods, 0.0, 0.0});
         HandleMouseButton(button, action);
@@ -180,14 +191,18 @@ namespace Input {
         if (uiActive) {
             // Arrows honour auto-repeat, so holding one keeps nudging a
             // focused slider instead of demanding a press per step (MC
-            // forwards PRESS and REPEAT to Screen.keyPressed). Every other
-            // key stays one-shot on purpose: ScreenManager defers stack ops
-            // to the next frame, so a repeating ESC would queue several pops
-            // out of one hold and blow through the screen stack.
-            const bool arrow = glfwKey == GLFW_KEY_LEFT || glfwKey == GLFW_KEY_RIGHT ||
-                               glfwKey == GLFW_KEY_UP   || glfwKey == GLFW_KEY_DOWN;
+            // forwards PRESS and REPEAT to Screen.keyPressed); so do the
+            // two deleting keys, so holding Backspace in a sign or a search
+            // box keeps deleting as it does in MC's EditBox. Every other key
+            // stays one-shot on purpose: ScreenManager defers stack ops to
+            // the next frame, so a repeating ESC (or Enter on a button)
+            // would queue several pops out of one hold and blow through the
+            // screen stack.
+            const bool repeats = glfwKey == GLFW_KEY_LEFT || glfwKey == GLFW_KEY_RIGHT ||
+                                 glfwKey == GLFW_KEY_UP   || glfwKey == GLFW_KEY_DOWN  ||
+                                 glfwKey == GLFW_KEY_BACKSPACE || glfwKey == GLFW_KEY_DELETE;
             const bool wanted = action == GLFW_PRESS ||
-                                (action == GLFW_REPEAT && arrow);
+                                (action == GLFW_REPEAT && repeats);
             if (wanted && uiKeyPresses.size() < kMaxUiKeyPresses) {
                 uiKeyPresses.push_back({glfwKey, mods});
             }
@@ -208,8 +223,32 @@ namespace Input {
 
     static int localEscapePresses = 0;
 
+    // ── Lost-release recovery ───────────────────────────────────────────────
+    // GLFW turns a PRESS into GLFW_REPEAT whenever its own table still has
+    // the key down (_glfwInputKey). If the OS never delivered the key's
+    // release — a keyUp lost to the text-input system, an accent popup, a
+    // focus hand-off that did not reach windowDidResignKey — every later tap
+    // of that key arrives as a "repeat", and a repeat is not a click, so the
+    // key goes dead for bindings (T no longer opens chat) until the window
+    // loses focus. A real auto-repeat follows the key's previous event within
+    // the OS repeat delay (at most ~2 s on macOS's slowest setting); a
+    // "repeat" after a longer silence is a fresh press and is treated as one.
+    static constexpr double kFreshPressAfterSilenceSec = 2.5;
+    static double lastKeyEventTime[GLFW_KEY_LAST + 1] = {};
+
+    static int PromoteStaleRepeat(int glfwKey, int action) {
+        if (glfwKey < 0 || glfwKey > GLFW_KEY_LAST) return action;
+        const double now = glfwGetTime();
+        const double silence = now - lastKeyEventTime[glfwKey];
+        lastKeyEventTime[glfwKey] = now;
+        if (action != GLFW_REPEAT || silence < kFreshPressAfterSilenceSec) return action;
+        return GLFW_PRESS;
+    }
+
     static void KeyCallback(GLFWwindow* /*window*/, int glfwKey, int /*scancode*/,
                             int action, int mods) {
+        Client::FramerateLimitTracker::OnInputReceived();   // MC KeyboardHandler.keyPress
+        action = PromoteStaleRepeat(glfwKey, action);
         if (remoteMode) {
             // /control: the controlled player's own keys are not the
             // player's — except Escape (their pause menu) and the cursor
@@ -283,6 +322,7 @@ namespace Input {
     }
 
     static void ScrollCallback(GLFWwindow* /*window*/, double xoffset, double yoffset) {
+        Client::FramerateLimitTracker::OnInputReceived();   // MC MouseHandler.onScroll
         if (remoteMode) return;
         Capture({CapturedEvent::Kind::Scroll, 0, 0, 0, xoffset, yoffset});
         HandleScroll(xoffset, yoffset);
@@ -290,6 +330,12 @@ namespace Input {
 
     // Mouse-motion callback: calculates deltaX/deltaY
     static void MouseCallback(GLFWwindow* /*window*/, double xpos, double ypos) {
+        // MC MouseHandler.handleAccumulatedMovement: motion counts as input
+        // only while the window is active.
+        if (gWindow && glfwGetWindowAttrib(gWindow, GLFW_FOCUSED) == GLFW_TRUE &&
+            (xpos != lastX || ypos != lastY)) {
+            Client::FramerateLimitTracker::OnInputReceived();
+        }
         if (remoteMode) return;
         // Skip the first mouse callback to avoid a large jump
         if (firstMouse) {
@@ -350,8 +396,30 @@ namespace Input {
 
     // ── Event-driven action API (MC KeyMapping) ─────────────────────────────
 
-    void SetUiActive(bool active) { uiActive = active; }
+    void SetUiActive(bool active, const char* /*owner*/) {
+        uiActive = active;
+    }
     bool IsUiActive()             { return uiActive; }
+
+    void DiscardTextComposition() {
+#ifdef __APPLE__
+        if (!gWindow) return;
+        id nsWindow = glfwGetCocoaWindow(gWindow);
+        if (!nsWindow) return;
+        id view = ((id (*)(id, SEL))objc_msgSend)(nsWindow, sel_registerName("contentView"));
+        if (!view) return;
+        // The OS side: pending dead key / IME composition (it is carried as
+        // marked text on macOS, so this is what drops a stray "´").
+        if (id context = ((id (*)(id, SEL))objc_msgSend)(view, sel_registerName("inputContext"))) {
+            ((void (*)(id, SEL))objc_msgSend)(context, sel_registerName("discardMarkedText"));
+        }
+        // GLFW's own copy of that marked text (its hasMarkedText answer).
+        SEL unmark = sel_registerName("unmarkText");
+        if (((BOOL (*)(id, SEL, SEL))objc_msgSend)(view, sel_registerName("respondsToSelector:"), unmark)) {
+            ((void (*)(id, SEL))objc_msgSend)(view, unmark);
+        }
+#endif
+    }
 
     void ClearUiKeyPresses() { uiKeyPresses.clear(); }
 
@@ -530,8 +598,11 @@ namespace Input {
 
     bool IsRemoteMode() { return remoteMode; }
 
+    // /control: the controller's input drives this client, so it keeps the
+    // AFK frame limit away exactly as local input does.
     void RemoteKey(int glfwKey, int action, int mods) {
         if (!remoteMode) return;
+        Client::FramerateLimitTracker::OnInputReceived();
         if (glfwKey >= 0 && glfwKey <= GLFW_KEY_LAST) {
             if (action == GLFW_PRESS || action == GLFW_REPEAT) remoteKeys[glfwKey] = true;
             else if (action == GLFW_RELEASE)                    remoteKeys[glfwKey] = false;
@@ -541,6 +612,7 @@ namespace Input {
 
     void RemoteMouseButton(int glfwButton, int action, int /*mods*/) {
         if (!remoteMode) return;
+        Client::FramerateLimitTracker::OnInputReceived();
         if (glfwButton >= 0 && glfwButton <= GLFW_MOUSE_BUTTON_LAST) {
             if (action == GLFW_PRESS)        remoteButtons[glfwButton] = true;
             else if (action == GLFW_RELEASE) remoteButtons[glfwButton] = false;
@@ -555,11 +627,13 @@ namespace Input {
 
     void RemoteScroll(double xoffset, double yoffset) {
         if (!remoteMode) return;
+        Client::FramerateLimitTracker::OnInputReceived();
         HandleScroll(xoffset, yoffset);
     }
 
     void RemoteMotion(double dx, double dy) {
         if (!remoteMode) return;
+        if (dx != 0.0 || dy != 0.0) Client::FramerateLimitTracker::OnInputReceived();
         deltaX += dx;
         deltaY += dy;
     }
@@ -689,4 +763,5 @@ namespace Input {
         charInputQueue.pop();
         return c;
     }
+
 }

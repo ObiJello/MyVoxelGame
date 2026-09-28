@@ -1,5 +1,8 @@
 // File: src/common/entity/projectile/ShulkerBullet.cpp
 #include "common/entity/projectile/ShulkerBullet.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
@@ -151,6 +154,9 @@ namespace Game {
         (void)source; (void)amount; (void)attacker;
         if (m_level && !m_level->IsClientSide()) {
             PlaySound(SoundEvents::SHULKER_BULLET_HURT, 1.0f, 1.0f);
+            // MC hurtServer: 15 CRIT sparks as it pops.
+            m_level->SendParticles(ParticleOptions(ParticleKind::Crit), false, false, position.x, position.y,
+                                   position.z, 15, 0.2, 0.2, 0.2, 0.0);
             Destroy();
         }
         return true;   // MC hurtServer: any hit pops the bullet
@@ -158,6 +164,12 @@ namespace Game {
 
     void ShulkerBullet::Destroy() {
         Discard();
+        // MC destroy: level.gameEvent(ENTITY_DAMAGE, position(), Context.of(this)).
+        if (m_level && !m_level->IsClientSide()) {
+            if (ILevelWrite* write = m_level->MutableBlocks()) {
+                write->GameEvent(GameEventId::EntityDamage, position, GameEventContext::Of(this));
+            }
+        }
     }
 
     void ShulkerBullet::OnHitEntity(LivingEntity& target, const HitResult& hit) {
@@ -186,8 +198,12 @@ namespace Game {
     }
 
     void ShulkerBullet::OnHitBlock(const HitResult& hit) {
-        // MC onHitBlock: the pop (its EXPLOSION particles wait on particles).
+        // MC onHitBlock: the pop — two EXPLOSION puffs and the hit sound.
         Projectile::OnHitBlock(hit);
+        if (m_level && !m_level->IsClientSide()) {
+            m_level->SendParticles(ParticleOptions(ParticleKind::Explosion), false, false, position.x, position.y,
+                                   position.z, 2, 0.2, 0.2, 0.2, 0.0);
+        }
         PlaySound(SoundEvents::SHULKER_BULLET_HIT, 1.0f, 1.0f);
     }
 
@@ -237,6 +253,12 @@ namespace Game {
         }
 
         RotateTowardsMovement(0.5f);
+
+        // MC: the client copy trails an END_ROD spark a step behind.
+        if (!serverSide) {
+            m_level->AddParticle(ParticleKind::EndRod, position.x - velocity.x, position.y - velocity.y + 0.15,
+                                 position.z - velocity.z, 0.0, 0.0, 0.0);
+        }
 
         if (serverSide && target) {
             if (m_flightSteps > 0) {

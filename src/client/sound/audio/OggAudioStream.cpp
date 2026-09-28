@@ -47,6 +47,18 @@ namespace Client::Audio {
         return stream;
     }
 
+    bool OggAudioStream::SeekToSeconds(double seconds) {
+        if (!m_vorbis || seconds <= 0.0) return seconds <= 0.0;
+        const double sample = seconds * static_cast<double>(m_format.sampleRate);
+        const unsigned int total = stb_vorbis_stream_length_in_samples(m_vorbis);
+        if (total == 0 || sample >= static_cast<double>(total)) return false;
+        if (stb_vorbis_seek(m_vorbis, static_cast<unsigned int>(sample)) == 0) {
+            stb_vorbis_seek_start(m_vorbis);
+            return false;
+        }
+        return true;
+    }
+
     OggAudioStream::~OggAudioStream() {
         if (m_vorbis) stb_vorbis_close(m_vorbis);
     }

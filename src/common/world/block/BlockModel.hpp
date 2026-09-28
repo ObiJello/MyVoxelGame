@@ -2,6 +2,8 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <map>
@@ -333,6 +335,13 @@ namespace Game {
         // MC produces at bake time rather than shipping as separate files.
         static void RegisterModel(const std::string& name, BlockModel model);
 
+        // Bumped whenever the set of models, or which model a block state
+        // resolves to, may have changed (a load, a clear, a registration, a
+        // blockstate load). Caches of resolved models (the mesher's per-state
+        // table) compare it and start over when it moved.
+        static uint32_t Generation() { return s_generation.load(std::memory_order_acquire); }
+        static void NoteChanged() { s_generation.fetch_add(1, std::memory_order_acq_rel); }
+
         // Rotate a resolved model by whole quarter turns about X then Y, in
         // that order — the same composition order MC's BlockModelRotation uses
         // for a blockstate variant's `"x"` and `"y"` fields.
@@ -371,6 +380,7 @@ namespace Game {
         static BlockModel MergeModels(const std::vector<const BlockModel*>& parts);
 
     private:
+        static inline std::atomic<uint32_t> s_generation{1};
         static std::unordered_map<std::string, BlockModel> s_models;
         static std::unordered_map<std::string, nlohmann::json> s_rawJsons; // Raw JSON storage
         static BlockModel s_defaultModel;

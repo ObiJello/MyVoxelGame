@@ -135,7 +135,7 @@ namespace Render {
         //
         // It matters because glass.png's alpha is BINARY, 0 or 255 — the frame
         // and streaks are fully opaque and the interior is discarded outright
-        // by the 0.01 cutout. With depth writes off those opaque texels
+        // by the pass's 0.1 cutout (terrain_solid.frag). With depth writes off those opaque texels
         // occluded nothing, so a glass block further away could be rasterised
         // afterwards and paint its streaks straight over the frame of the block
         // in front. Writing depth makes the frame occlude properly, while the
@@ -177,8 +177,8 @@ namespace Render {
         m_meshes = meshes;
         m_occlusionGraph.SetChunkManager(chunks);
 
-        // Create separate shader programs for opaque (no discard → early-z enabled)
-        // and cutout/translucent (with discard for alpha testing).
+        // Create separate shader programs for opaque (no discard → early-z
+        // enabled), cutout and translucent (both alpha-tested with discard).
         // Matches Minecraft's SOLID_TERRAIN vs CUTOUT_TERRAIN pipeline split.
         // On Vulkan the block fragment shaders read the environment/fog fields
         // from the Common UBO, which needs the UBO-aware (portal) pipeline
@@ -289,6 +289,10 @@ namespace Render {
                 g_renderBackend->DestroyTexture(m_whiteDebugTexture);
                 m_whiteDebugTexture = INVALID_TEXTURE;
             }
+            if (m_viewSortIbo != INVALID_BUFFER) {
+                g_renderBackend->DestroyBuffer(m_viewSortIbo);
+                m_viewSortIbo = INVALID_BUFFER;
+            }
             Lightmap::Get().Shutdown();
         }
         m_backendShader = INVALID_SHADER;
@@ -360,7 +364,19 @@ namespace Render {
         // WITHIN a section also have to be ordered, or a nearer surface can
         // write depth first and cut out everything behind it. See
         // mesh/TranslucentSort.hpp.
-        ScheduleTranslucentSectionResort(camera.position);
+        //
+        // Only the PLAYER's view (no projection override) re-sorts the
+        // shared per-section index ranges. A portal view of this level, a
+        // face capture or the shadow view draws in the same frame from
+        // another camera; re-sorting those shared ranges for it rewrote the
+        // order the player's view had already recorded draws against (both
+        // backends read the ranges when the GPU runs, not when the draw is
+        // recorded) — with a portal in sight, a still camera flickered
+        // between the two orders. Secondary views sort their nearby
+        // sections into their own ring instead (RenderLayerPass).
+        m_translucentViewCamera   = camera.position;
+        m_translucentSecondaryView = m_useProjectionOverride;
+        if (!m_translucentSecondaryView) ScheduleTranslucentSectionResort(camera.position);
 
         // Setup render state for translucent pass
         SetupRenderPass(m_translucentConfig);
@@ -372,14 +388,44 @@ namespace Render {
         m_stats.translucentPassTimeMs = std::chrono::duration<float, std::milli>(endTime - startTime).count();
     }
 
-    void ChunkRenderer::RecordViewForScheduler(const Camera& camera, const Frustum& frustum) {
-        if (!m_chunks) return;
+    int ChunkRenderer::RecordViewForScheduler(const Camera& camera, const Frustum& frustum,
+                                              std::vector<uint64_t>* pendingKeys) {
+        if (!m_chunks) return 0;
         // As a portal view without a seed: frustum-only discovery, appended
         // to the portal-view list (PrepareVisibleSectionsThroughPortal).
         const bool wasOverride = m_useProjectionOverride;
         m_useProjectionOverride = true;
         PrepareVisibleSections(camera, frustum);
         m_useProjectionOverride = wasOverride;
+        return CountPendingVisibleSections(pendingKeys);
+    }
+
+    int ChunkRenderer::CountPendingVisibleSections(std::vector<uint64_t>* keysOut) const {
+        if (keysOut) keysOut->clear();
+        // Visible sections whose chunk still marks them dirty or building.
+        // Air sections carry no mesh and are not "pending"; only the flags
+        // say so, which is why the count comes from the chunk, not from
+        // whether GPU data resolved. A never-built section of a column
+        // without all eight neighbours is not pending either: the scheduler
+        // will not mesh it (MC compileSections' hasAllNeighbors test), and
+        // the view's outer ring stays that way for good.
+        int pending = 0;
+        if (const auto* ccm = m_chunks) {
+            for (const auto& rd : m_visibleSections) {
+                const Client::ClientChunk* chunk = ccm->GetChunk(rd.chunkPos);
+                if (!chunk || rd.sectionY < 0 || rd.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
+                const auto& si = chunk->sectionInfos[static_cast<size_t>(rd.sectionY)];
+                if (!si.dirty && si.state != Client::SectionState::MESHING) continue;
+                if (!si.builtOnce && si.state != Client::SectionState::MESHING) {
+                    const bool neighbours = chunk->neighborsAllLoaded >= 0 ? chunk->neighborsAllLoaded == 1
+                                                                           : ccm->HasAllNeighborChunks(rd.chunkPos);
+                    if (!neighbours) continue;
+                }
+                ++pending;
+                if (keysOut) keysOut->push_back(VisibleSectionKey(rd.chunkPos, rd.sectionY));
+            }
+        }
+        return pending;
     }
 
     void ChunkRenderer::RenderAll(const Camera& camera, const Frustum& frustum,
@@ -402,6 +448,9 @@ namespace Render {
         // previous one has been collected, so there is never more than one
         // in-flight query per pass and GL_TIME_ELAPSED brackets never nest.
         const bool mainScene = !m_useProjectionOverride && g_renderBackend != nullptr;
+        // One main view per frame: it advances the secondary views' sort
+        // ring to its next partition (WriteViewSortedTranslucent).
+        if (!m_useProjectionOverride) ++m_viewSortSerial;
         if (mainScene) {
             // Always drain pending queries (even when timers are toggled off,
             // so outstanding query objects get collected and freed).
@@ -443,23 +492,8 @@ namespace Render {
         const Frustum& cullFrustum = m_cullOverrideActive ? m_cullFrustum : frustum;
         PrepareVisibleSections(cullCamera, cullFrustum);
 
-        // The main view's outstanding meshes (MainViewSectionsPending): the
-        // visible sections whose chunk still marks them dirty or building.
-        // Air sections carry no mesh and are not "pending"; only the flags
-        // say so, which is why the count comes from the chunk, not from
-        // whether GPU data resolved.
-        if (!m_useProjectionOverride) {
-            int pending = 0;
-            if (const auto* ccm = m_chunks) {
-                for (const auto& rd : m_visibleSections) {
-                    const Client::ClientChunk* chunk = ccm->GetChunk(rd.chunkPos);
-                    if (!chunk || rd.sectionY < 0 || rd.sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
-                    const auto& si = chunk->sectionInfos[static_cast<size_t>(rd.sectionY)];
-                    if (si.dirty || si.state == Client::SectionState::MESHING) ++pending;
-                }
-            }
-            m_mainViewPending = pending;
-        }
+        // The main view's outstanding meshes (MainViewSectionsPending).
+        if (!m_useProjectionOverride) m_mainViewPending = CountPendingVisibleSections();
 
         // Bind opaque shader, compute MVP, and bind atlas texture
         BindSharedRenderState(camera);
@@ -590,8 +624,10 @@ namespace Render {
             // binds below would then be written into it. Ours again.
             if (m_meshes) m_meshes->BindSharedBlockVAO();
         }
-        // The solid shader (no discard → early-z enabled, blending handles
-        // transparency). This avoids the discard penalty entirely.
+        // The translucent terrain shader (terrain_solid): blending handles
+        // partial alpha, and it DISCARDS below the pass's cutout
+        // (RenderLayerPass, MC's 0.1) — the pass writes depth, so an
+        // undiscarded clear texel would occlude everything drawn after it.
         const ShaderHandle solidPassShader = PassShader(kPassTranslucent, m_solidShader);
         if (solidPassShader != INVALID_SHADER && g_renderBackend) {
             PROFILE_ZONE_N("PassShaderSwitch");
@@ -646,6 +682,60 @@ namespace Render {
         m_useProjectionOverride   = false;
         m_projectionOverrideExact = false;
         RestoreRenderState();
+    }
+
+    bool ChunkRenderer::CaptureDeferredTranslucentForOit() {
+        if (!m_deferredTranslucent.pending) return false;
+        OitTranslucentCapture& c = m_oitCapture;
+        c.valid = true;
+        c.pass = m_deferredTranslucent;
+        c.pass.gpuTiming = false;   // three draws of one pass: no pass timer
+        m_deferredTranslucent.pending = false;
+        c.visible.assign(m_visibleSections.begin(), m_visibleSections.end());
+        c.visibleTranslucent = m_visibleTranslucentSections;
+        c.mvp = m_cachedMVP;
+        c.meshes = m_meshes;
+        c.renderOrigin = Render::RenderOrigin();
+        return true;
+    }
+
+    void ChunkRenderer::ReplayCapturedTranslucentForOit() {
+        OitTranslucentCapture& c = m_oitCapture;
+        if (!c.valid || !c.meshes) return;
+        PROFILE_ZONE_N("ChunkRenderer.OitTranslucent");
+        // The captured view in, for the length of one draw of its pass.
+        std::swap(m_visibleSections, c.visible);
+        std::swap(m_visibleTranslucentSections, c.visibleTranslucent);
+        const glm::mat4 mvp = m_cachedMVP;
+        ClientMeshManager* meshes = m_meshes;
+        const glm::dvec3 origin = Render::RenderOrigin();
+        m_cachedMVP = c.mvp;
+        m_meshes = c.meshes;
+        Render::SetRenderOrigin(c.renderOrigin);
+        m_useProjectionOverride   = c.pass.useProjectionOverride;
+        m_projectionOverrideExact = c.pass.projectionOverrideExact;
+        m_projectionOverride      = c.pass.projectionOverride;
+
+        m_meshes->BindSharedBlockVAO();
+        DrawTranslucentPass(c.pass.camera, c.pass.cullCamera, c.pass.cullFrustum, /*gpuTiming=*/false);
+        if (m_afterPassesTarget != INVALID_RENDER_TARGET && g_renderBackend) {
+            g_renderBackend->BindRenderTarget(m_afterPassesTarget);
+        }
+
+        m_useProjectionOverride   = false;
+        m_projectionOverrideExact = false;
+        Render::SetRenderOrigin(origin);
+        m_meshes = meshes;
+        m_cachedMVP = mvp;
+        std::swap(m_visibleTranslucentSections, c.visibleTranslucent);
+        std::swap(m_visibleSections, c.visible);
+        RestoreRenderState();
+    }
+
+    void ChunkRenderer::ReleaseCapturedTranslucentForOit() {
+        m_oitCapture.valid = false;
+        m_oitCapture.visible.clear();   // capacity kept
+        m_oitCapture.meshes = nullptr;
     }
 
     // Greedy-debug substitute for the atlas: with a 1x1 white texture every
@@ -790,9 +880,7 @@ namespace Render {
         // Front to back, as the BFS output is: the opaque pass wants it and
         // the translucent pass reads the list in reverse.
         std::sort(m_visibleSections.begin(), m_visibleSections.end(),
-                  [](const SectionRenderData& a, const SectionRenderData& b) {
-                      return a.distanceToCamera < b.distanceToCamera;
-                  });
+                  &SectionRenderData::NearerFirst);
 
         { PROFILE_ZONE_N("PortalView.Keys");
         for (const auto& rd : m_visibleSections) m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
@@ -1074,7 +1162,7 @@ namespace Render {
                 job->eraseToken = m_eraseToken;
                 job->propagationEpoch = m_propagationEpoch;
                 job->portalView = true;
-                m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
+                m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull && !m_smartCullSuppressed, renderDistanceChunks);
                 m_occlusionGraph.SubmitAsync(std::move(job));
             }
             m_lastPrepareSource = PrepareSource::FrustumOnly;
@@ -1104,7 +1192,7 @@ namespace Render {
             job->portalView = portalView;
 
             auto iterationStart = std::chrono::high_resolution_clock::now();
-            m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
+            m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull && !m_smartCullSuppressed, renderDistanceChunks);
             m_occlusionGraph.RunSync(*job);
             auto iterationEnd = std::chrono::high_resolution_clock::now();
             m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(iterationEnd - iterationStart).count();
@@ -1166,9 +1254,7 @@ namespace Render {
                 // O(n log n) re-sort of the whole reachable list this used to
                 // do on every frame that appended anything.
                 auto& list = usable->sections;
-                const auto byDistance = [](const SectionRenderData& a, const SectionRenderData& b) {
-                    return a.distanceToCamera < b.distanceToCamera;
-                };
+                const auto byDistance = &SectionRenderData::NearerFirst;
                 const auto tail = list.begin() + static_cast<std::ptrdiff_t>(diagPrePartial);
                 std::sort(tail, list.end(), byDistance);
                 std::inplace_merge(list.begin(), tail, list.end(), byDistance);
@@ -1241,7 +1327,7 @@ namespace Render {
             job->eraseToken = m_eraseToken;
             job->propagationEpoch = m_propagationEpoch;
             job->portalView = portalView;
-            m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull, renderDistanceChunks);
+            m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull && !m_smartCullSuppressed, renderDistanceChunks);
             m_occlusionGraph.SubmitAsync(std::move(job));
             startedFullRebuild = true;
             if (!m_useProjectionOverride) m_arrivalRebuildPending = false;
@@ -1752,9 +1838,15 @@ namespace Render {
     // MC's phase 2 also walks the full visible list including the nearby ones,
     // so a section can be visited twice in a frame — harmless, because the
     // second visit finds the point of view already up to date and no-ops.
-    void ChunkRenderer::ScheduleTranslucentSectionResort(const glm::vec3& cameraPos) {
+    void ChunkRenderer::ScheduleTranslucentSectionResort(const glm::dvec3& cameraPos) {
         PROFILE_ZONE_N("ResortTranslucent");
-        if (m_visibleSections.empty() || !m_meshes) return;
+        if (!m_meshes) return;
+        // MC LevelRenderer hands the dispatcher its camera every frame
+        // (SectionRenderDispatcher.setCameraPosition); sections built from
+        // now on are sorted against it. The player's own view only — a
+        // portal-face capture must not re-aim the main level's rebuilds.
+        if (!m_portalSeedActive) m_meshes->SetTranslucentSortCamera(cameraPos);
+        if (m_visibleSections.empty()) return;
 
         const glm::ivec3 cameraBlock(static_cast<int>(std::floor(cameraPos.x)),
                                      static_cast<int>(std::floor(cameraPos.y)),
@@ -1966,10 +2058,17 @@ namespace Render {
         // Set alpha discard threshold per pass:
         //   Opaque: 0.1 (discard overlay transparency like grass sides)
         //   Cutout: 0.5 (standard alpha test for leaves, flowers)
-        //   Translucent: 0.01 (only fully invisible pixels, rest is blended)
+        //   Translucent: 0.1 — MC 26.3 RenderPipelines.TRANSLUCENT_TERRAIN
+        //     (ALPHA_CUTOUT 0.1; 26.1 had 0.01). The pass writes depth, so a
+        //     texel that is not discarded occludes everything drawn after it:
+        //     glass's interior is alpha 0, and with no cutout it hid the
+        //     water behind a pane whenever the pane's quad sorted first —
+        //     the aquarium flicker. 0.1 also clears the +0.025 that
+        //     cutout-strategy mips carry. terrain_solid(.frag/_vk.frag) tests
+        //     it on texture x vertex alpha, as terrain.fsh does.
         float alphaTest = 0.1f;
         if (layer == RenderLayer::Cutout) alphaTest = 0.5f;
-        else if (layer == RenderLayer::Translucent) alphaTest = 0.01f;
+        else if (layer == RenderLayer::Translucent) alphaTest = 0.1f;
         g_renderBackend->SetUniformFloat(m_activeShader, "uAlphaTest", alphaTest);
 
         // Get the mega-buffer for this layer
@@ -2006,6 +2105,7 @@ namespace Render {
         // is time spent inside driver calls. If a pass shows milliseconds,
         // this tells you which side owns them.
         m_drawEntries.clear();
+        m_orderedExactFrom = SIZE_MAX;
         // Sub-draw attribution (Tracy builds only): what the draw count would
         // be if every section were ONE entry (no facing-group splits), with
         // the same contiguity fusion as SubmitMergedRuns. Merged - this =
@@ -2028,6 +2128,12 @@ namespace Render {
                                         (layer == RenderLayer::Cutout)       ? section.resolved->cutoutDrawCmd :
                                                                                section.resolved->translucentDrawCmd;
                 if (cachedCmd.valid && cachedCmd.indexCount > 0 && cachedCmd.slabIndex < slabCount) {
+                    // Back-to-front: everything from the first nearby
+                    // section on is submitted in exact list order across
+                    // slabs (SubmitOrderedRuns).
+                    if (backToFront && section.nearby && m_orderedExactFrom == SIZE_MAX) {
+                        m_orderedExactFrom = m_drawEntries.size();
+                    }
 #ifdef TRACY_ENABLE
                     ++diagSections;
                     m_diagFullEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
@@ -2091,8 +2197,22 @@ namespace Render {
                         }
                         if (drawnIndices == 0) return;
                     } else {
-                        m_drawEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
-                                                 static_cast<uint32_t>(cachedCmd.indexCount), cachedCmd.ibo});
+                        // A secondary view's nearby translucent section is
+                        // drawn in ITS OWN back-to-front order, from the
+                        // per-view ring — never by re-sorting the shared
+                        // range the player's view draws (RenderTranslucent).
+                        uint32_t viewOffset = 0;
+                        if (backToFront && m_translucentSecondaryView && section.nearby &&
+                            cachedCmd.ibo == INVALID_BUFFER &&
+                            WriteViewSortedTranslucent(section.chunkPos, section.sectionY,
+                                                       static_cast<uint32_t>(cachedCmd.indexCount),
+                                                       viewOffset)) {
+                            m_drawEntries.push_back({cachedCmd.slabIndex, viewOffset,
+                                                     static_cast<uint32_t>(cachedCmd.indexCount), m_viewSortIbo});
+                        } else {
+                            m_drawEntries.push_back({cachedCmd.slabIndex, cachedCmd.indexOffset,
+                                                     static_cast<uint32_t>(cachedCmd.indexCount), cachedCmd.ibo});
+                        }
                         drawnIndices = static_cast<uint32_t>(cachedCmd.indexCount);
                     }
                     layerCount++;
@@ -2494,16 +2614,28 @@ namespace Render {
     // entry starts exactly where the current run ends, so the fused range
     // draws the same indices in the same order as two separate draws would.
     int ChunkRenderer::SubmitOrderedRuns(ChunkMegaBuffer& megaBuffer) {
-        // Translucent submission. Strict global back-to-front emission (flush
-        // on every slab change) shattered into thousands of driver calls the
-        // moment sections interleaved across slabs: measured 26 ms/frame on
-        // Apple's GL at a 19k-section sky view, one glMultiDrawElements call
-        // per run. Group runs per slab instead — back-to-front order is exact
-        // WITHIN each slab (sub-draws execute in array order on both
-        // backends), one multi-draw per slab. Cross-slab order is sacrificed,
-        // which is the pre-merge behaviour this pass always had; slabs are
-        // submitted in first-seen (nearest-section-last) order to keep the
-        // common single-slab case exact.
+        // Translucent submission, in two parts.
+        //
+        // FAR entries: strict global back-to-front emission (flush on every
+        // slab change) shattered into thousands of driver calls the moment
+        // sections interleaved across slabs: measured 26 ms/frame on Apple's
+        // GL at a 19k-section sky view, one glMultiDrawElements call per run.
+        // So the far part groups its runs per slab — back-to-front order is
+        // exact WITHIN each slab (sub-draws execute in array order on both
+        // backends), one multi-draw per slab, slabs in first-seen order.
+        // Cross-slab order is sacrificed there.
+        //
+        // NEAR entries (from the first nearby section on — RenderLayerPass
+        // sets m_orderedExactFrom — widened by a flush budget, see below):
+        // exact list order across slabs, a flush per slab change. Up close the sacrifice is not affordable: the
+        // translucent pass writes depth, so a near section drawn before a
+        // farther one hides it outright where its surviving texels land —
+        // stained glass before the water behind it, a pane's frame before
+        // the pool. And "first-seen" is decided by whichever translucent
+        // section is FARTHEST in the frustum, so that order flipped as the
+        // camera turned and the hidden surface blinked in and out. The near
+        // tail is the handful of translucent sections within
+        // kTranslucentNearRadius, so its extra draws are bounded and small.
         int subDraws = 0;
         const uint32_t slabCount = megaBuffer.GetSlabCount();
         m_slabRunCounts.resize(slabCount);
@@ -2515,43 +2647,156 @@ namespace Render {
 
         PROFILE_ZONE_N("OrderedRuns");
         m_callRuns.clear();   // for F8's submitted-coverage check, like SubmitMergedRuns
-        uint32_t slab     = m_drawEntries[0].slab;
-        size_t   runBegin = m_drawEntries[0].offset;
-        size_t   runEnd   = runBegin + m_drawEntries[0].count;
-        auto pushRun = [&]() {
-            if (slab < slabCount) {
-                m_slabRunCounts[slab].push_back(static_cast<int32_t>(runEnd - runBegin));
-                m_slabRunOffsets[slab].push_back(runBegin * ChunkMegaBuffer::INDEX_SIZE);
-                m_callRuns.push_back({static_cast<size_t>(slab), runBegin, runEnd});
-            }
-        };
-
         const size_t n = m_drawEntries.size();
-        for (size_t i = 1; i < n; ++i) {
-            const DrawEntry& e = m_drawEntries[i];
-            if (e.slab == slab && e.offset == runEnd) {
-                runEnd += e.count;          // contiguous and ascending: same bytes, same order
-            } else {
-                pushRun();
-                slab     = e.slab;
-                runBegin = e.offset;
-                runEnd   = runBegin + e.count;
+        // The exact tail always holds every nearby section. It then grows
+        // toward the far end for as long as that costs at most
+        // kExactOrderExtraFlushes extra slab changes, so a scene whose
+        // translucency sits in a few slabs is drawn in exact order end to end
+        // (no frustum-dependent slab order anywhere) and only the interleaved
+        // sky views that measured 26 ms fall back to per-slab grouping for
+        // their far remainder.
+        constexpr int kExactOrderExtraFlushes = 32;
+        size_t split = std::min(m_orderedExactFrom, n);
+        {
+            int extra = 0;
+            while (split > 0) {
+                const bool slabChange = split < n &&
+                                        m_drawEntries[split - 1].slab != m_drawEntries[split].slab;
+                if (slabChange && extra == kExactOrderExtraFlushes) break;
+                if (slabChange) ++extra;
+                --split;
             }
         }
-        pushRun();
-        // Slabs in first-seen order: the slab holding the list's first
-        // section goes first.
+
+        // Walks entries [begin, end) as runs: the next entry extends the run
+        // only when it starts exactly where the run ends in the same slab, so
+        // the fused range draws the same indices in the same order as the
+        // separate draws would.
+        //
+        // An entry's `ibo` is INVALID_BUFFER for the slab's own index buffer,
+        // or a secondary view's sort ring (WriteViewSortedTranslucent) —
+        // runs never fuse across the two, and ring entries (nearby by
+        // construction) only ever sit in the exact tail.
+        auto forEachRun = [this](size_t begin, size_t end, auto&& emit) {
+            if (begin >= end) return;
+            uint32_t     slab     = m_drawEntries[begin].slab;
+            BufferHandle ibo      = m_drawEntries[begin].ibo;
+            size_t       runBegin = m_drawEntries[begin].offset;
+            size_t       runEnd   = runBegin + m_drawEntries[begin].count;
+            for (size_t i = begin + 1; i < end; ++i) {
+                const DrawEntry& e = m_drawEntries[i];
+                if (e.slab == slab && e.ibo == ibo && e.offset == runEnd) {
+                    runEnd += e.count;      // contiguous and ascending: same bytes, same order
+                } else {
+                    emit(slab, ibo, runBegin, runEnd);
+                    slab     = e.slab;
+                    ibo      = e.ibo;
+                    runBegin = e.offset;
+                    runEnd   = runBegin + e.count;
+                }
+            }
+            emit(slab, ibo, runBegin, runEnd);
+        };
+        auto bucketRun = [&](uint32_t slab, BufferHandle ibo, size_t runBegin, size_t runEnd) {
+            if (slab >= slabCount) return;
+            m_slabRunCounts[slab].push_back(static_cast<int32_t>(runEnd - runBegin));
+            m_slabRunOffsets[slab].push_back(runBegin * ChunkMegaBuffer::INDEX_SIZE);
+            // F8's coverage check reads slab index ranges; a ring run is not one.
+            if (ibo == INVALID_BUFFER) m_callRuns.push_back({static_cast<size_t>(slab), runBegin, runEnd});
+        };
+
+        // Far part: one multi-draw per slab, slabs in first-seen order (the
+        // slab holding the list's first section goes first).
+        forEachRun(0, split, bucketRun);
         m_slabOrder.clear();
-        for (const DrawEntry& e : m_drawEntries) {
-            if (e.slab < slabCount && !m_slabRunCounts[e.slab].empty() &&
-                std::find(m_slabOrder.begin(), m_slabOrder.end(), e.slab) == m_slabOrder.end())
-                m_slabOrder.push_back(e.slab);
+        for (size_t i = 0; i < split; ++i) {
+            const uint32_t s2 = m_drawEntries[i].slab;
+            if (s2 < slabCount && !m_slabRunCounts[s2].empty() &&
+                std::find(m_slabOrder.begin(), m_slabOrder.end(), s2) == m_slabOrder.end())
+                m_slabOrder.push_back(s2);
         }
         for (uint32_t s2 : m_slabOrder) {
             FlushSlabRuns(megaBuffer, s2, m_slabRunCounts[s2], m_slabRunOffsets[s2],
                           m_zeroBaseVertices, m_stats, subDraws);
         }
+
+        // Near part: exact order. Consecutive runs in one slab share a
+        // multi-draw; a slab change flushes. (FlushSlabRuns empties the
+        // bucket it draws, so every bucket starts this part empty.)
+        uint32_t     pendingSlab = UINT32_MAX;
+        BufferHandle pendingIbo  = INVALID_BUFFER;
+        auto flushPending = [&]() {
+            if (pendingSlab == UINT32_MAX) return;
+            if (pendingIbo == INVALID_BUFFER) {
+                FlushSlabRuns(megaBuffer, pendingSlab, m_slabRunCounts[pendingSlab],
+                              m_slabRunOffsets[pendingSlab], m_zeroBaseVertices, m_stats, subDraws);
+                return;
+            }
+            // Ring run: the slab's VBO and tables, the ring's indices
+            // (absolute over that VBO, hence baseVertex 0 as in the slab).
+            auto& counts  = m_slabRunCounts[pendingSlab];
+            auto& offsets = m_slabRunOffsets[pendingSlab];
+            if (!counts.empty()) {
+                if (m_zeroBaseVertices.size() < counts.size()) m_zeroBaseVertices.resize(counts.size(), 0);
+                megaBuffer.BindSlab(pendingSlab);
+                g_renderBackend->BindIndexBuffer(pendingIbo);
+                g_renderBackend->MultiDrawIndexedBaseVertex(
+                    counts.data(), offsets.data(), m_zeroBaseVertices.data(),
+                    static_cast<uint32_t>(counts.size()), IndexType::Uint32);
+                m_stats.totalDrawCalls++;
+                subDraws += static_cast<int>(counts.size());
+                counts.clear();
+                offsets.clear();
+            }
+        };
+        forEachRun(split, n, [&](uint32_t slab, BufferHandle ibo, size_t runBegin, size_t runEnd) {
+            if (slab >= slabCount) return;
+            if (pendingSlab != UINT32_MAX && (slab != pendingSlab || ibo != pendingIbo)) flushPending();
+            pendingSlab = slab;
+            pendingIbo  = ibo;
+            bucketRun(slab, ibo, runBegin, runEnd);
+        });
+        flushPending();
         return subDraws;
+    }
+
+    // A secondary view's sort ring: kViewSortPartitions partitions of
+    // kViewSortPartitionIndices uint32 indices. The partition follows the
+    // main-view serial (one per frame, RenderAll) and is only appended to
+    // within it, so a write never lands on a range an earlier draw — this
+    // frame's or one still on the GPU — reads; a partition comes round again
+    // kViewSortPartitions frames later, past every frame in flight on either
+    // backend (the Vulkan frame-overlap invariant). A full partition just
+    // falls back to the shared order for the rest of the frame.
+    bool ChunkRenderer::WriteViewSortedTranslucent(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                                   uint32_t indexCount, uint32_t& outFirstIndex) {
+        if (!m_meshes || !g_renderBackend || indexCount == 0) return false;
+        if (indexCount > kViewSortPartitionIndices) return false;
+        if (m_viewSortIbo == INVALID_BUFFER) {
+            m_viewSortIbo = g_renderBackend->CreateBuffer(
+                BufferUsage::Index,
+                size_t(kViewSortPartitions) * kViewSortPartitionIndices * sizeof(uint32_t),
+                nullptr, BufferAccess::Dynamic);
+            if (m_viewSortIbo == INVALID_BUFFER) return false;
+        }
+        if (m_viewSortPartitionSerial != m_viewSortSerial) {
+            m_viewSortPartitionSerial = m_viewSortSerial;
+            m_viewSortCursor = 0;
+        }
+        if (m_viewSortCursor + indexCount > kViewSortPartitionIndices) return false;
+        if (!m_meshes->BuildViewSortedTranslucentIndices(chunkPos, sectionY, m_translucentViewCamera,
+                                                         m_viewSortScratch) ||
+            m_viewSortScratch.size() != indexCount) {
+            return false;
+        }
+        const size_t partition = static_cast<size_t>(m_viewSortSerial % kViewSortPartitions);
+        const size_t first = partition * kViewSortPartitionIndices + m_viewSortCursor;
+        g_renderBackend->UpdateBufferUnsynchronized(m_viewSortIbo, first * sizeof(uint32_t),
+                                                    size_t(indexCount) * sizeof(uint32_t),
+                                                    m_viewSortScratch.data());
+        m_viewSortCursor += indexCount;
+        outFirstIndex = static_cast<uint32_t>(first);
+        return true;
     }
 
     // MC's layout: each section owns its index buffer, so the layer cannot be
@@ -2672,6 +2917,18 @@ namespace Render {
         if (g_chunkRenderer) {
             g_chunkRenderer->RenderAll(camera, frustum, projectionOverride, exactProjection);
         }
+    }
+
+    bool CaptureChunksDeferredTranslucentForOit() {
+        return g_chunkRenderer && g_chunkRenderer->CaptureDeferredTranslucentForOit();
+    }
+
+    void ReplayChunksTranslucentForOit() {
+        if (g_chunkRenderer) g_chunkRenderer->ReplayCapturedTranslucentForOit();
+    }
+
+    void ReleaseChunksTranslucentForOit() {
+        if (g_chunkRenderer) g_chunkRenderer->ReleaseCapturedTranslucentForOit();
     }
 
     void RenderChunksDeferredTranslucent() {

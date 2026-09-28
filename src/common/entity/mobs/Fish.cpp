@@ -1,5 +1,6 @@
 // File: src/common/entity/mobs/Fish.cpp
 #include "common/entity/mobs/Fish.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
 #include "common/entity/ai/goals/FishGoals.hpp"
 #include "common/entity/ai/goals/AttackGoals.hpp"
@@ -15,6 +16,21 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/entity/Bucketable.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/world/block/BlockInteraction.hpp"
+#include "common/core/Mth.hpp"
+#include "common/entity/EquipmentSlot.hpp"
+#include "common/entity/Item.hpp"
+#include "common/entity/PlayerRideable.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/network/packets/game/GameEventS2CPacket.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 namespace Game {
 
@@ -62,6 +78,36 @@ namespace Game {
         HandleWaterAnimalAirSupply(*this, airSupply);
     }
 
+    // ── Bucketable (MC AbstractFish) ───────────────────────────────────────
+
+    ItemID Fish::GetBucketItem() const {
+        switch (GetType()) {
+            case EntityTypeId::Salmon:       return Items::SalmonBucket;
+            case EntityTypeId::Pufferfish:   return Items::PufferfishBucket;
+            case EntityTypeId::TropicalFish: return Items::TropicalFishBucket;
+            case EntityTypeId::Cod:
+            default:                         return Items::CodBucket;
+        }
+    }
+
+    const char* Fish::GetPickupSound() const { return SoundEvents::BUCKET_FILL_FISH; }
+
+    void Fish::SaveToBucket(ItemStack& bucket) const {
+        Bucketable::SaveDefaultDataToBucketTag(*this, bucket);
+    }
+
+    void Fish::LoadFromBucket(const BucketEntityData& data) {
+        Bucketable::LoadDefaultDataFromBucketTag(*this, data);
+    }
+
+    UseResult Fish::MobInteract(LivingEntity& player, ItemStack& held) {
+        if (auto r = Bucketable::BucketMobPickup(*this, player, held, GetBucketItem(), GetPickupSound(),
+                                                 [this](ItemStack& bucket) { SaveToBucket(bucket); })) {
+            return *r;
+        }
+        return PathfinderMob::MobInteract(player, held);
+    }
+
     int Fish::GetXpReward() const {
         // MC WaterAnimal.getBaseExperienceReward (WaterAnimal.java:32-34):
         // 1 + nextInt(3) — the same 1..3 an Animal pays.
@@ -92,13 +138,39 @@ namespace Game {
         PathfinderMob::AiStep();
     }
 
+    bool Fish::TravelInWaterOverride(const glm::dvec3& input, double baseGravity,
+                                     bool isFalling, double oldY) {
+        // MC AbstractFish.travelInWater, verbatim: none of travelInFluid's
+        // captured values are read — no gravity sixteenth, no drag split,
+        // no jumpOutOfFluid.
+        (void)baseGravity; (void)isFalling; (void)oldY;
+        MoveRelative(0.01f, input);
+        Move(velocity);
+        velocity *= 0.9;
+        if (!GetTarget()) velocity.y += -0.005;
+        return true;
+    }
+
     // ── SchoolingFish (MC AbstractSchoolingFish) ───────────────────────────
 
     namespace {
-        // MC SchoolSpawnGroupData — the pack token carrying the leader.
+        // MC AbstractSchoolingFish.SchoolSpawnGroupData — the pack token
+        // carrying the leader. Held as an EntityRef, not a raw pointer: the
+        // leader is normally added to the level before any follower
+        // finalizes, but a spawn that fails to add it destroys it, and the
+        // ref's liveness token turns that into "no leader" instead of a
+        // dangling read.
         struct SchoolSpawnGroupData : SpawnGroupData {
-            explicit SchoolSpawnGroupData(SchoolingFish* l) : leader(l) {}
-            SchoolingFish* leader;
+            explicit SchoolSpawnGroupData(SchoolingFish* l) { leader.Set(l); }
+            EntityRef leader;
+        };
+
+        // MC TropicalFish.TropicalFishGroupData — the school token that also
+        // carries the variant every member of the school takes.
+        struct TropicalFishGroupData : SchoolSpawnGroupData {
+            TropicalFishGroupData(SchoolingFish* l, const TropicalFishVariants::Variant& v)
+                : SchoolSpawnGroupData(l), variant(v) {}
+            TropicalFishVariants::Variant variant;
         };
     }
 
@@ -112,10 +184,42 @@ namespace Game {
         m_goalSelector.AddGoal(5, std::make_unique<FollowFlockLeaderGoal>(this));
     }
 
-    void SchoolingFish::PathToLeader() {
-        if (IsFollower()) {
-            GetNavigation().MoveTo(*m_leader, 1.0);
+    SchoolingFish* SchoolingFish::Leader() const {
+        if (m_leader.Empty() || !m_level) return nullptr;
+        Entity* e = m_leader.Get(*m_level);
+        // Only a same-type schooling fish is ever followed (StartFollowing's
+        // callers), so the type test stands in for the class test.
+        if (!e || e->GetType() != GetType()) return nullptr;
+        return static_cast<SchoolingFish*>(e);
+    }
+
+    void SchoolingFish::StartFollowing(SchoolingFish& leader) {
+        m_leader.Set(&leader);
+        MarkHoldsEntityRefs();   // see Entity::HoldsEntityRefs
+        ++leader.m_schoolSize;
+    }
+
+    void SchoolingFish::StopFollowing() {
+        if (SchoolingFish* leader = Leader()) --leader->m_schoolSize;
+        m_leader.Clear();
+    }
+
+    void SchoolingFish::AddFollowers(const std::vector<SchoolingFish*>& candidates) {
+        // MC: stream.limit(getMaxSchoolSize() - schoolSize).filter(f != this)
+        // .forEach(f -> f.startFollowing(this)).
+        const int limit = GetMaxSchoolSize() - m_schoolSize;
+        int taken = 0;
+        for (SchoolingFish* fish : candidates) {
+            if (taken >= limit) break;
+            ++taken;
+            if (fish == this) continue;
+            fish->StartFollowing(*this);
         }
+    }
+
+    void SchoolingFish::PathToLeader() {
+        if (!IsFollower()) return;
+        if (SchoolingFish* leader = Leader()) GetNavigation().MoveTo(*leader, 1.0);
     }
 
     void SchoolingFish::Tick() {
@@ -209,39 +313,56 @@ namespace Game {
     void Pufferfish::Touch(LivingEntity& mob) {
         // MC Pufferfish.touch / playerTouch — identical numbers for both:
         // (1 + state) mob-attack damage, then POISON for 60 * state ticks
-        // (amplifier 0). playerTouch additionally sends the PUFFER_FISH_STING
-        // game event — a sting only the stung player hears; no such packet
-        // exists, so a player's sting is silent. A mob's is broadcast.
+        // (amplifier 0). A mob's sting is a broadcast playSound; a player's
+        // is the PUFFER_FISH_STING game event to that player alone (unless
+        // this fish is silent), which its client plays at itself — nobody
+        // else hears it. playerTouch sends it BEFORE the poison.
         // (NAUSEA belongs to EATING a pufferfish, not the sting — nothing to
         // skip here.)
         const int state = m_puffState;
         if (mob.Hurt(MobDamageSource::MobAttack,
                      static_cast<float>(1 + state), this)) {
-            mob.AddEffect(MobEffectInstance(MobEffectId::Poison, 60 * state, 0),
-                          this);
-            if (!mob.IsPlayer()) PlaySound(SoundEvents::PUFFER_FISH_STING, 1.0f, 1.0f);
+            if (mob.IsPlayer()) {
+                if (!IsSilent() && m_level) {
+                    m_level->SendGameEvent(mob, Network::GameEventS2CPacket::kPufferFishSting, 0.0f);
+                }
+                mob.AddEffect(MobEffectInstance(MobEffectId::Poison, 60 * state, 0), this);
+            } else {
+                mob.AddEffect(MobEffectInstance(MobEffectId::Poison, 60 * state, 0), this);
+                PlaySound(SoundEvents::PUFFER_FISH_STING, 1.0f, 1.0f);
+            }
         }
     }
 
     void Pufferfish::AiStep() {
         // MC Pufferfish.aiStep: super first, then — while puffed — sting
-        // everything scary within the box inflated by 0.3. MC splits players
-        // out into playerTouch (the collision callback); one sweep over
-        // LivingEntities covers both here, since the player views sit in the
-        // same entity query — same box, same numbers, same cadence through
-        // the victim's i-frames.
+        // every scary MOB (Mob.class: not a player, not an armor stand)
+        // within the fish's box inflated by 0.3. Players are MC's
+        // playerTouch, reached from Player.aiStep's touch sweep: the
+        // PLAYER's box inflated (1.0, 0.5, 1.0) against this fish's box —
+        // a wider reach than a mob's. One sweep here covers both halves (the
+        // player views sit in the same entity query), each tested against
+        // its own box; same numbers, same cadence through the victim's
+        // i-frames.
         Fish::AiStep();
         if (m_level && !m_level->IsClientSide() && IsAlive() && m_puffState > 0) {
-            AABB box = GetAABB();
-            box.min -= glm::vec3(0.3f);
-            box.max += glm::vec3(0.3f);
+            const AABB self = GetAABB();
+            AABB mobReach = self;
+            mobReach.min -= glm::vec3(0.3f);
+            mobReach.max += glm::vec3(0.3f);
+            AABB playerReach = self;
+            playerReach.min -= glm::vec3(1.0f, 0.5f, 1.0f);
+            playerReach.max += glm::vec3(1.0f, 0.5f, 1.0f);
 
             std::vector<Entity*> nearby;
-            m_level->GetEntitiesInBox(box, this, nearby);
+            m_level->GetEntitiesInBox(playerReach, this, nearby);
             for (Entity* e : nearby) {
                 auto* living = dynamic_cast<LivingEntity*>(e);
                 if (!living || !living->IsAlive()) continue;
+                if (living->GetType() == EntityTypeId::ArmorStand) continue;   // not a Mob
                 if (!IsScaryTarget(*living)) continue;
+                const AABB& reach = living->IsPlayer() ? playerReach : mobReach;
+                if (!reach.Intersects(living->GetAABB())) continue;
                 Touch(*living);
             }
         }
@@ -348,7 +469,8 @@ namespace Game {
 
         // MC's constructor wiring: the smooth-swim controls and the
         // water-bound navigation; water paths are free (AgeableWaterCreature
-        // sets the malus). setCanPickUpLoot rides the mob item system.
+        // sets the malus); setCanPickUpLoot(true).
+        SetCanPickUpLoot(true);
         SetPathfindingMalus(PathType::Water, 0.0f);
         SetMoveControl(std::make_unique<SmoothSwimmingMoveControl>(
             this, 85, 10, 0.02f, 0.1f, true));
@@ -359,10 +481,9 @@ namespace Game {
     }
 
     void Dolphin::RegisterGoals() {
-        // MC Dolphin.registerGoals, priority for priority. BreathAirGoal is
-        // live now that the air supply exists; the still-inert entries
-        // (treasure, swim-with-player, item play, boat following) say why at
-        // their declarations in DolphinGoals.hpp. MC registers
+        // MC Dolphin.registerGoals, priority for priority. The still-inert
+        // entries (the treasure hunt's structure search, boat following)
+        // say why at their declarations in DolphinGoals.hpp. MC registers
         // FollowPlayerRiddenEntityGoal twice (boats, nautiluses); one inert
         // registration stands for both.
         m_goalSelector.AddGoal(0, std::make_unique<BreathAirGoal>(this));
@@ -374,11 +495,58 @@ namespace Game {
         m_goalSelector.AddGoal(5, std::make_unique<LookAtPlayerGoal>(this, 6.0f));
         m_goalSelector.AddGoal(5, std::make_unique<DolphinJumpGoal>(this, 10));
         m_goalSelector.AddGoal(6, std::make_unique<MeleeAttackGoal>(this, 1.2, true));
+        m_goalSelector.AddGoal(7, std::make_unique<DolphinMoveToItemGoal>(this));
         m_goalSelector.AddGoal(8, std::make_unique<PlayWithItemsGoal>(this));
         m_goalSelector.AddGoal(8, std::make_unique<FollowPlayerRiddenEntityGoal>(this));
         m_goalSelector.AddGoal(9, std::make_unique<AvoidEntityGoal>(
                                       this, kDolphinGuardianAvoid, 2, 8.0f, 1.0, 1.0));
         m_targetSelector.AddGoal(1, std::make_unique<DolphinHurtByTargetGoal>(this));
+    }
+
+    void Dolphin::PickUpItem(int32_t itemEntityId, const ItemStack& stack) {
+        if (!GetEquipment(EquipmentSlot::MAINHAND).IsEmpty() || !CanHoldItem(stack)) return;
+        OnItemPickup(itemEntityId, stack);
+        SetEquipment(EquipmentSlot::MAINHAND, stack);
+        SetGuaranteedDrop(EquipmentSlot::MAINHAND);
+        TakeItemEntity(itemEntityId, stack.count);   // take + discard
+    }
+
+    UseResult Dolphin::MobInteract(LivingEntity& player, ItemStack& held) {
+        if (!held.IsEmpty() &&
+            DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(held.itemId), "minecraft:fishes")) {
+            if (m_level && !m_level->IsClientSide()) PlaySound(SoundEvents::DOLPHIN_EAT, 1.0f, 1.0f);
+            if (CanAgeUp()) {
+                Animal::UsePlayerItem(held);
+                AgeUp(GetSpeedUpSecondsWhenFeeding(-GetAge()), /*forced=*/true);
+            } else {
+                SetGotFish(true);
+                Animal::UsePlayerItem(held);
+            }
+            return UseResult::Success;
+        }
+        return AgeableMob::MobInteract(player, held);
+    }
+
+    bool Dolphin::DropHeldItem() {
+        const ItemStack held = GetEquipment(EquipmentSlot::MAINHAND);
+        if (held.IsEmpty()) return false;
+        if (m_level && !m_level->IsClientSide()) {
+            // ItemGoal.drop: from (x, eyeY - 0.3, z), 0.3 along the facing
+            // (pitch-scaled; up by sin(xRot) * 1.5) plus a small random
+            // sideways kick, pickup delay 40.
+            JavaRandom& r = m_level->Random();
+            const float dir = r.NextFloat() * 6.2831855f;
+            const float pow2 = 0.02f * r.NextFloat();
+            const float yr = yRot * 0.017453292f, xr = xRot * 0.017453292f;
+            const glm::dvec3 velocity(
+                0.3f * -std::sin(yr) * std::cos(xr) + std::cos(dir) * pow2,
+                0.3f * std::sin(xr) * 1.5f,
+                0.3f * std::cos(yr) * std::cos(xr) + std::sin(dir) * pow2);
+            m_level->SpawnThrownItem(glm::dvec3(position.x, GetEyeY() - 0.30000001192092896, position.z),
+                                     velocity, held, 40);
+        }
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack{});
+        return true;
     }
 
     int Dolphin::GetXpReward() const {
@@ -395,13 +563,29 @@ namespace Game {
             SetAirSupply(GetMaxAirSupply());
             return;
         }
-        if (!m_level || m_level->IsClientSide()) {
-            // MC's client half is the DOLPHIN trail particles — none yet.
+        if (!m_level) return;
+        if (m_level->IsClientSide()) {
+            // MC's client half: while it swims fast, two pairs of DOLPHIN
+            // trail particles behind the view, 0.3 either side.
+            glm::dvec3 motion = velocity;
+            if (glm::dot(motion, motion) < 1.0e-8) motion = position - oldPosition;
+            if (IsInWater() && glm::dot(motion, motion) > 0.03) {
+                const glm::vec3 view = Mth::ViewVector(xRot, yRot);
+                const float c = std::cos(yRot * 0.017453292f) * 0.3f;
+                const float sn = std::sin(yRot * 0.017453292f) * 0.3f;
+                const float multiplier = 1.2f - m_level->Random().NextFloat() * 0.7f;
+                for (int i = 0; i < 2; ++i) {
+                    m_level->AddParticle(ParticleKind::Dolphin, position.x - view.x * multiplier + c,
+                                         position.y - view.y, position.z - view.z * multiplier + sn, 0.0, 0.0, 0.0);
+                    m_level->AddParticle(ParticleKind::Dolphin, position.x - view.x * multiplier - c,
+                                         position.y - view.y, position.z - view.z * multiplier - sn, 0.0, 0.0, 0.0);
+                }
+            }
             return;
         }
 
-        // MC's moistness clock (isInWaterOrRain — no rain query here).
-        if (IsInWater()) {
+        // MC's moistness clock: water or rain keeps a dolphin moist.
+        if (IsInWaterOrRain()) {
             m_moistnessLevel = 2400;
         } else {
             --m_moistnessLevel;
@@ -460,6 +644,16 @@ namespace Game {
         AgeableMob::AiStep();
 
         const bool serverSide = m_level && !m_level->IsClientSide();
+
+        // MC GlowSquid.aiStep: a GLOW mote over the body every tick (the
+        // client copy draws it; the dark-ticks dimming is not modelled).
+        if (m_level && !serverSide && GetType() == EntityTypeId::GlowSquid) {
+            JavaRandom& r = m_level->Random();
+            const double w = static_cast<double>(GetBbWidth()), h = static_cast<double>(GetBbHeight());
+            m_level->AddParticle(ParticleKind::Glow, position.x + w * (2.0 * r.NextDouble() - 1.0) * 0.6,
+                                 position.y + h * r.NextDouble(),
+                                 position.z + w * (2.0 * r.NextDouble() - 1.0) * 0.6, 0.0, 0.0, 0.0);
+        }
 
         // MC saves last tick's values right after super.aiStep() — the
         // renderer lerps the tentacle angle between them.
@@ -541,61 +735,168 @@ namespace Game {
     }
 
     bool Squid::Hurt(MobDamageSource source, float amount, Entity* attacker) {
-        // MC sprays an ink cloud on a successful hit; the flee goal reads the
-        // lastHurtByMob this sets. STILL SKIPPED with the particle system
-        // landed: SQUID_INK is its own particle class (SquidInkParticle —
-        // animated squid_ink sheet, water-drag tick) and the sprite is not
-        // in assets/textures/particle/; add both to MobParticleSystem when
-        // the ink visual is wanted.
-        return AgeableMob::Hurt(source, amount, attacker);
+        // MC hurtServer: a landed hit with an attacker on record sprays the
+        // ink cloud (spawnInk); the flee goal reads the lastHurtByMob this
+        // sets.
+        if (!AgeableMob::Hurt(source, amount, attacker)) return false;
+        if (m_level && !m_level->IsClientSide() && GetLastHurtByMob() != nullptr) SpawnInk();
+        return true;
+    }
+
+    void Squid::SpawnInk() {
+        // MC spawnInk: the squirt, then 30 ink puffs sprayed out of the
+        // mantle's underside (rotateVector: xRot by xBodyRot — the engine's
+        // squid does not pitch, so 0 — then yRot by -yBodyRot), each sent
+        // as a direct particle (count 0) at speed 0.1.
+        const bool glow = GetType() == EntityTypeId::GlowSquid;
+        MakeSound(glow ? SoundEvents::GLOW_SQUID_SQUIRT : SoundEvents::SQUID_SQUIRT);
+        const double ya = -static_cast<double>(yBodyRot) * 0.017453292;
+        const double yc = std::cos(ya), ys = std::sin(ya);
+        const auto rotate = [&](const glm::dvec3& v) {
+            return glm::dvec3(v.x * yc + v.z * ys, v.y, v.z * yc - v.x * ys);
+        };
+        const glm::dvec3 pos = rotate(glm::dvec3(0.0, -1.0, 0.0)) + position;
+        const ParticleOptions ink(glow ? ParticleKind::GlowSquidInk : ParticleKind::SquidInk);
+        JavaRandom& r = m_level->Random();
+        for (int i = 0; i < 30; ++i) {
+            const glm::dvec3 dir = rotate(glm::dvec3(static_cast<double>(r.NextFloat()) * 0.6 - 0.3, -1.0,
+                                                     static_cast<double>(r.NextFloat()) * 0.6 - 0.3));
+            const float offsetScale = IsBaby() ? 0.1f : 0.3f;
+            const glm::dvec3 d = dir * static_cast<double>(offsetScale + r.NextFloat() * 2.0f);
+            m_level->SendParticles(ink, false, false, pos.x, pos.y + 0.5, pos.z, 0, d.x, d.y, d.z,
+                                   0.10000000149011612);
+        }
     }
 
     std::shared_ptr<SpawnGroupData>
     SchoolingFish::FinalizeSpawn(SpawnReason reason,
                                  std::shared_ptr<SpawnGroupData> groupData) {
+        // MC AbstractSchoolingFish.finalizeSpawn: super, then lead a new
+        // pack or follow the pack's leader.
         groupData = Fish::FinalizeSpawn(reason, std::move(groupData));
         if (!groupData) {
             groupData = std::make_shared<SchoolSpawnGroupData>(this);
         } else if (auto* school = dynamic_cast<SchoolSpawnGroupData*>(groupData.get())) {
-            // NOTE the dangling-leader hazard the raw pointer carries: the
-            // token only lives for one spawn pack, inside one tick, and the
-            // leader was added to the level before any follower finalizes —
-            // the same lifetime MC relies on.
-            if (school->leader && school->leader != this) {
-                StartFollowing(school->leader);
+            Entity* leader = m_level ? school->leader.Get(*m_level) : nullptr;
+            // Same type as the pack — a pack is one spawn entry's type.
+            if (leader && leader != this && leader->GetType() == GetType()) {
+                StartFollowing(*static_cast<SchoolingFish*>(leader));
             }
         }
         return groupData;
     }
 
+    // ── TropicalFish (MC TropicalFish) ─────────────────────────────────────
+
     std::shared_ptr<SpawnGroupData>
     TropicalFish::FinalizeSpawn(SpawnReason reason,
                                 std::shared_ptr<SpawnGroupData> groupData) {
-        // MC TropicalFish.finalizeSpawn (TropicalFish.java:197-218): a fish
-        // continuing an existing pack inherits the pack's variant and stays a
-        // school; a pack INITIATOR rolls nextFloat() — under 0.9 it starts a
-        // common-variant school, otherwise it takes a rare variant and
-        // `isSchool = false` (the loner). Variant draws are not modelled (one
-        // tropical fish texture), so only the school/loner consequence of the
-        // roll survives. MC checks instanceof BEFORE its variant logic; the
-        // pack test happens before super here for the same reason — super
-        // creates the group token that would otherwise mask "initiator".
-        const bool packContinuation =
-            dynamic_cast<SchoolSpawnGroupData*>(groupData.get()) != nullptr;
-
+        // MC TropicalFish.finalizeSpawn: super first (which makes the pack
+        // token for a pack's first fish, or follows the token's leader),
+        // then the variant: a TropicalFishGroupData hands down its school's
+        // variant; otherwise nextFloat() < 0.9 picks a named common variant
+        // and REPLACES the token so the rest of the pack takes it, and the
+        // remaining tenth is a fully random loner (isSchool = false, which
+        // also ends its spawn pack — isMaxGroupSizeReached).
         groupData = SchoolingFish::FinalizeSpawn(reason, std::move(groupData));
+        if (!m_level) return groupData;
+        JavaRandom& rng = m_level->Random();
 
-        if (!packContinuation && m_level &&
-            m_level->Random().NextFloat() >= 0.9f) {
+        TropicalFishVariants::Variant variant;
+        if (auto* school = dynamic_cast<TropicalFishGroupData*>(groupData.get())) {
+            variant = school->variant;
+        } else if (static_cast<double>(rng.NextFloat()) < 0.9) {
+            const auto& common = TropicalFishVariants::CommonVariants();
+            variant = common[static_cast<size_t>(rng.NextInt(TropicalFishVariants::kCommonVariantCount))];
+            groupData = std::make_shared<TropicalFishGroupData>(this, variant);
+        } else {
             m_isSchool = false;
+            // Util.getRandom over Pattern.values(), then DyeColor.values()
+            // twice — base colour first.
+            variant.pattern = static_cast<TropicalFishVariants::Pattern>(
+                rng.NextInt(TropicalFishVariants::kPatternCount));
+            variant.baseColor = static_cast<uint8_t>(rng.NextInt(TropicalFishVariants::kDyeCount));
+            variant.patternColor = static_cast<uint8_t>(rng.NextInt(TropicalFishVariants::kDyeCount));
         }
+        m_variant = variant;
         return groupData;
+    }
+
+    void TropicalFish::SaveToBucket(ItemStack& bucket) const {
+        // MC TropicalFish.saveToBucketTag: super (the default keys), then
+        // bucket.copyFrom(TROPICAL_FISH_PATTERN / _BASE_COLOR /
+        // _PATTERN_COLOR, this) — the entity's get() answers each from the
+        // packed variant.
+        SchoolingFish::SaveToBucket(bucket);
+        bucket.components.set(DataComponents::TROPICAL_FISH_PATTERN,
+                              static_cast<int32_t>(m_variant.pattern));
+        bucket.components.set(DataComponents::TROPICAL_FISH_BASE_COLOR,
+                              static_cast<int32_t>(m_variant.baseColor));
+        bucket.components.set(DataComponents::TROPICAL_FISH_PATTERN_COLOR,
+                              static_cast<int32_t>(m_variant.patternColor));
+    }
+
+    void TropicalFish::ApplyImplicitComponents(const ItemStack& stack) {
+        // MC TropicalFish.applyImplicitComponents: each component present
+        // replaces its third (setPattern / setBaseColor / setPatternColor
+        // repack around the other two).
+        if (auto p = stack.components.get(DataComponents::TROPICAL_FISH_PATTERN);
+            p && *p >= 0 && *p < TropicalFishVariants::kPatternCount) {
+            m_variant.pattern = static_cast<TropicalFishVariants::Pattern>(*p);
+        }
+        if (auto c = stack.components.get(DataComponents::TROPICAL_FISH_BASE_COLOR)) {
+            m_variant.baseColor = TropicalFishVariants::DyeById(*c);
+        }
+        if (auto c = stack.components.get(DataComponents::TROPICAL_FISH_PATTERN_COLOR)) {
+            m_variant.patternColor = TropicalFishVariants::DyeById(*c);
+        }
+    }
+
+    // ── Salmon (MC Salmon) ─────────────────────────────────────────────────
+
+    const char* Salmon::SizeName(uint8_t size) {
+        switch (size) {
+            case kSmall: return "small";
+            case kLarge: return "large";
+            default:     return "medium";
+        }
+    }
+
+    int Salmon::SizeFromName(const std::string& name) {
+        std::string_view n = name;
+        if (n.rfind("minecraft:", 0) == 0) n.remove_prefix(10);
+        if (n == "small")  return kSmall;
+        if (n == "medium") return kMedium;
+        if (n == "large")  return kLarge;
+        return -1;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Salmon::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // MC Salmon.finalizeSpawn: WeightedList{SMALL 30, MEDIUM 50,
+        // LARGE 15}.getRandom — nextInt(total) walked in insertion order —
+        // BEFORE super.
+        if (m_level) {
+            const int roll = m_level->Random().NextInt(30 + 50 + 15);
+            SetSize(roll < 30 ? kSmall : (roll < 80 ? kMedium : kLarge));
+        }
+        return SchoolingFish::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void Salmon::SaveToBucket(ItemStack& bucket) const {
+        // MC Salmon.saveToBucketTag: the default keys + copyFrom(SALMON_SIZE).
+        Bucketable::SaveDefaultDataToBucketTag(*this, bucket);
+        bucket.components.set(DataComponents::SALMON_SIZE, static_cast<int32_t>(m_size));
+    }
+
+    void Salmon::ApplyImplicitComponents(const ItemStack& stack) {
+        if (auto size = stack.components.get(DataComponents::SALMON_SIZE)) SetSize(*size);
     }
 
     // ── Nautilus / ZombieNautilus ──────────────────────────────────────────
 
     AbstractNautilus::AbstractNautilus(EntityTypeId type, EntityLevel* level)
-        : GenericAnimal(type, level) {
+        : GenericAnimal(type, level), TamableAnimal(this) {
         // NO GOALS — MC's nautili never register any; the brain is the whole
         // behaviour. The def already applied MC's locomotion: water-bound
         // navigation + SmoothSwimmingMoveControl(85, 10, 0.011, 0.0, true)
@@ -654,6 +955,344 @@ namespace Game {
         return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
     }
 
+    // ── Taming and feeding ─────────────────────────────────────────────────
+
+    bool AbstractNautilus::IsTamingItem(uint32_t itemId) {
+        // ItemTags.NAUTILUS_TAMING_ITEMS.
+        return itemId == Items::Pufferfish || itemId == Items::PufferfishBucket;
+    }
+
+    bool AbstractNautilus::IsBucketFood(uint32_t itemId) {
+        // ItemTags.NAUTILUS_BUCKET_FOOD.
+        return itemId == Items::PufferfishBucket || itemId == Items::CodBucket ||
+               itemId == Items::SalmonBucket || itemId == Items::TropicalFishBucket;
+    }
+
+    bool AbstractNautilus::IsNautilusFood(uint32_t itemId) {
+        // ItemTags.NAUTILUS_FOOD = #fishes + #nautilus_bucket_food.
+        return itemId == Items::Cod || itemId == Items::CookedCod || itemId == Items::Salmon ||
+               itemId == Items::CookedSalmon || itemId == Items::Pufferfish ||
+               itemId == Items::TropicalFish || IsBucketFood(itemId);
+    }
+
+    bool AbstractNautilus::IsFood(uint32_t itemId) const {
+        // MC isFood: `!isTame() && !isBaby() ? NAUTILUS_TAMING_ITEMS : NAUTILUS_FOOD`.
+        return !IsTame() && !IsBaby() ? IsTamingItem(itemId) : IsNautilusFood(itemId);
+    }
+
+    void AbstractNautilus::OpenCustomInventoryScreen(LivingEntity& player) {
+        // MC AbstractNautilus.openCustomInventoryScreen: !isClientSide,
+        // (!isVehicle || hasPassenger(player)), isTame.
+        if (!m_level || m_level->IsClientSide()) return;
+        if ((!IsVehicle() || HasPassenger(player)) && IsTame()) m_level->OpenMountInventory(player, *this);
+    }
+
+    UseResult AbstractNautilus::MobInteract(LivingEntity& player, ItemStack& held) {
+        // MC AbstractNautilus.interact: any click makes it persistent.
+        const bool clientSide = m_level && m_level->IsClientSide();
+        if (!clientSide) SetPersistenceRequired(true);
+
+        // MC usePlayerItem for the super path: a bucket food is eaten out of
+        // the bucket, which comes back as water (Animal's plain shrink is
+        // undone and refilled — the Axolotl pattern).
+        const auto animalInteract = [&]() {
+            const ItemStack before = held;
+            const UseResult result = GenericAnimal::MobInteract(player, held);
+            const bool spent = held.itemId != before.itemId || held.count < before.count;
+            if (spent && IsBucketFood(before.itemId) && !clientSide) {
+                held = before;
+                m_level->CreateFilledResult(player, held, ItemStack(Items::WaterBucket, 1));
+            }
+            return result;
+        };
+
+        if (IsBaby()) return animalInteract();
+
+        const bool sneaking = m_level && m_level->IsPlayerSneaking(player);
+        if (IsTame() && sneaking) {
+            OpenCustomInventoryScreen(player);
+            return UseResult::Success;
+        }
+
+        if (!held.IsEmpty()) {
+            if (!clientSide && !IsTame() && IsFood(held.itemId)) {
+                // MC usePlayerItem, then tryToTame.
+                if (IsBucketFood(held.itemId)) {
+                    m_level->CreateFilledResult(player, held, ItemStack(Items::WaterBucket, 1));
+                } else {
+                    UsePlayerItem(held);
+                }
+                TryToTame(player);
+                return UseResult::SuccessServer;
+            }
+
+            if (IsFood(held.itemId) && GetHealth() < GetMaxHealth()) {
+                // MC feed(player, hand, stack, 2.0F, 1.0F): usePlayerItem (the
+                // bucket refill), heal by nutrition x 2 (a bucket has no FOOD
+                // component: the default 1.0), the chew.
+                if (!clientSide) {
+                    if (IsBucketFood(held.itemId)) {
+                        m_level->CreateFilledResult(player, held, ItemStack(Items::WaterBucket, 1));
+                        Heal(1.0f);
+                        PlayEatingSound();
+                    } else {
+                        Feed(held, 2.0f, 1.0f);
+                    }
+                }
+                return UseResult::Success;
+            }
+
+            if (const auto interact = ItemRegistry::Get(held.itemId).interactLivingEntity) {
+                if (!clientSide) {
+                    const UseResult r = interact(held, *this);
+                    if (ConsumesAction(r)) return r;
+                }
+            }
+        }
+
+        if (IsTame() && !sneaking && !IsFood(held.itemId)) {
+            DoPlayerRide(player);
+            return UseResult::Success;
+        }
+        return animalInteract();
+    }
+
+    void AbstractNautilus::TryToTame(LivingEntity& player) {
+        // MC tryToTame: 1 in 3 — tame, stop, the hearts; else the smoke.
+        // Either way the chew.
+        if (!m_level) return;
+        if (m_level->Random().NextInt(3) == 0) {
+            Tame(player);
+            GetNavigation().Stop();
+            m_level->BroadcastEntityEvent(*this, 7);
+        } else {
+            m_level->BroadcastEntityEvent(*this, 6);
+        }
+        PlayEatingSound();
+    }
+
+    void AbstractNautilus::DoPlayerRide(LivingEntity& player) {
+        // MC doPlayerRide: server only; `if (!isVehicle()) clearHome()` after
+        // the attempt.
+        if (!m_level || m_level->IsClientSide()) return;
+        m_level->StartPlayerRiding(player, *this);
+        if (!IsVehicle()) ClearHome();
+    }
+
+    // ── Riding ─────────────────────────────────────────────────────────────
+
+    bool AbstractNautilus::CanBeSteeredBy(const RiderControl& rider) const {
+        // MC getControllingPassenger: `isSaddled() && getFirstPassenger()
+        // instanceof Player` — the resolver only answers for a player.
+        (void)rider;
+        return IsSaddled();
+    }
+
+    glm::dvec3 AbstractNautilus::GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) {
+        // MC getRiddenInput: strafe as pressed; forward/back follows the
+        // rider's pitch (backwards at half), so looking down dives.
+        (void)selfInput;
+        const float strafe = rider.xxa;
+        float forward = 0.0f;
+        float up = 0.0f;
+        if (rider.zza != 0.0f) {
+            float forwardLook = std::cos(rider.xRot * Mth::kDegToRad);
+            float upLook = -std::sin(rider.xRot * Mth::kDegToRad);
+            if (rider.zza < 0.0f) {
+                forwardLook *= -0.5f;
+                upLook *= -0.5f;
+            }
+            up = upLook;
+            forward = forwardLook;
+        }
+        return glm::dvec3(strafe, up, forward);
+    }
+
+    void AbstractNautilus::TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) {
+        // MC tickRidden: the shell turns half-way to the rider's yaw each
+        // tick and pitches at half the rider's.
+        (void)riddenInput;
+        const float targetXRot = rider.xRot * 0.5f;
+        const float diff = Mth::WrapDegrees(rider.yRot - yRot);
+        const float newYRot = yRot + diff * 0.5f;
+        // setRot: `% 360` on both; the O/body/head copies take the local
+        // (unreduced) yaw, as MC's chained assignment does.
+        yRot = std::fmod(newYRot, 360.0f);
+        xRot = std::fmod(targetXRot, 360.0f);
+        yRotO = newYRot;
+        yBodyRot = newYRot;
+        yHeadRot = newYRot;
+        if (CanSimulateMountMovement()) {
+            if (m_playerJumpPendingScale > 0.0f && !jumping) {
+                ExecuteRidersJump(m_playerJumpPendingScale, rider);
+            }
+            m_playerJumpPendingScale = 0.0f;
+        }
+    }
+
+    float AbstractNautilus::GetRiddenSpeed(const RiderControl& rider) const {
+        (void)rider;
+        const float speed = static_cast<float>(GetAttributeValue(Attribute::MovementSpeed));
+        return IsInWater() ? kRiddenSpeedInWater * speed : kRiddenSpeedOnLand * speed;
+    }
+
+    void AbstractNautilus::Travel(const glm::dvec3& input) {
+        // MC travel → shouldTravelInFluid → travelInFluid → the travelInWater
+        // override: moveRelative(getSpeed()), move, x0.9 — no gravity, no
+        // slow-down table, no jump-out. (floatInLiquidWhileRidden is for
+        // #can_float_while_ridden, which the nautilus is not.) Lava and air
+        // are the base travel.
+        if (IsInWater() && IsAffectedByFluids()) {
+            MoveRelative(GetSpeed(), input);
+            Move(velocity);
+            velocity *= 0.9;
+            return;
+        }
+        GenericAnimal::Travel(input);
+    }
+
+    glm::dvec3 AbstractNautilus::GetPassengerAttachmentPoint(const Entity& passenger) const {
+        // EntityTypes NAUTILUS / ZOMBIE_NAUTILUS .passengerAttachments(1.1375F);
+        // Nautilus.BABY_DIMENSIONS attach PASSENGER at (0, 0.5, 0). A y-only
+        // point: the yaw rotation leaves it as is.
+        (void)passenger;
+        return glm::dvec3(0.0, IsBaby() ? 0.5 : 1.1375, 0.0);
+    }
+
+    float AbstractNautilus::BlockSpeedFactor() const {
+        // MC LivingEntity.getBlockSpeedFactor: MOVEMENT_EFFICIENCY lerps the
+        // block's factor toward 1; Entity.getBlockSpeedFactor reads the block
+        // here (water and bubble columns answer for themselves), else below.
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        float factor = 1.0f;
+        if (blocks) {
+            const auto factorOf = [](BlockID id) {
+                return (id == BlockID::SoulSand || id == BlockID::HoneyBlock) ? 0.4f : 1.0f;
+            };
+            const glm::ivec3 p = BlockPosition();
+            const BlockID here = blocks->GetBlock(p.x, p.y, p.z);
+            factor = factorOf(here);
+            if (here != BlockID::Water && here != BlockID::BubbleColumn && factor == 1.0f) {
+                const int belowY = static_cast<int>(std::floor(position.y - 0.500001));
+                factor = factorOf(blocks->GetBlock(p.x, belowY, p.z));
+            }
+        }
+        const float efficiency = static_cast<float>(GetAttributeValue(Attribute::MovementEfficiency));
+        return efficiency >= 1.0f ? 1.0f : Mth::Lerp(efficiency, factor, 1.0f);
+    }
+
+    void AbstractNautilus::ExecuteRidersJump(float amount, const RiderControl& rider) {
+        // MC executeRidersJump: a push along the rider's look (1.2 in water,
+        // 0.5 on land, x the charge x MOVEMENT_SPEED x the block factor), the
+        // 40-tick cooldown and the DASH flag.
+        const glm::vec3 look = Mth::ViewVector(rider.xRot, rider.yRot);
+        const double scale = static_cast<double>((IsInWater() ? kDashMomentumInWater : kDashMomentumOnLand) * amount) *
+                             GetAttributeValue(Attribute::MovementSpeed) *
+                             static_cast<double>(BlockSpeedFactor());
+        velocity += glm::dvec3(look) * scale;
+        m_dashCooldown = kDashCooldownTicks;
+        SetDashing(true);
+        needsSync = true;
+    }
+
+    void AbstractNautilus::OnPlayerJump(int jumpAmount) {
+        // MC onPlayerJump: charge only while saddled and off cooldown;
+        // PlayerRideableJumping.getPlayerJumpPendingScale.
+        if (!IsSaddled() || m_dashCooldown > 0) return;
+        m_playerJumpPendingScale = jumpAmount >= 90 ? 1.0f
+                                                    : 0.4f + 0.4f * static_cast<float>(jumpAmount) / 90.0f;
+    }
+
+    void AbstractNautilus::HandleStartJump(int jumpScale) {
+        // MC handleStartJump (server): the dash sound, ENTITY_ACTION, DASH.
+        (void)jumpScale;
+        MakeSound(GetDashSound());
+        GameEvent(GameEventId::EntityAction);
+        SetDashing(true);
+    }
+
+    void AbstractNautilus::SetDashing(bool dashing) {
+        if (dashing == m_dashing) return;
+        m_dashing = dashing;
+        // MC onSyncedDataUpdated(DASH), `!firstTick`: a change arms the
+        // cooldown when none runs (the server's own set and a client's
+        // synched copy alike).
+        if (!firstTick) m_dashCooldown = m_dashCooldown == 0 ? kDashCooldownTicks : m_dashCooldown;
+    }
+
+    void AbstractNautilus::ApplyEffects() {
+        // MC applyEffects: a player in the first seat breathes under water —
+        // BREATH_OF_THE_NAUTILUS for 60 ticks, ambient, refreshed every 40.
+        LivingEntity* player = PlayerRideable::FirstPlayerPassenger(*this);
+        if (!player || !m_level) return;
+        const bool hasEffect = player->HasEffect(MobEffectId::BreathOfTheNautilus);
+        const bool shouldRefresh = m_level->GetGameTime() % kEffectRefreshRate == 0;
+        if (!hasEffect || shouldRefresh) {
+            player->AddEffect(MobEffectInstance(MobEffectId::BreathOfTheNautilus, kEffectDuration, 0,
+                                                true, true, true));
+        }
+    }
+
+    void AbstractNautilus::SpawnBubbles() {
+        // MC spawnBubbles: faster swimming, denser trail, out of the back of
+        // the shell. (Client-visible only; the server's AddParticle is a no-op.)
+        if (!m_level) return;
+        JavaRandom& rng = m_level->Random();
+        const double speed = glm::length(velocity);
+        const double bubbleProbability = std::clamp(speed * 2.0, 0.15000000596046448, 1.0);
+        if (static_cast<double>(rng.NextFloat()) < bubbleProbability) {
+            const float xr = std::clamp(xRot, -10.0f, 10.0f);
+            const glm::vec3 mouth = Mth::ViewVector(xr, yRot);
+            const double spread = rng.NextDouble() * 0.8 * (1.0 + speed);
+            const double dx = (static_cast<double>(rng.NextFloat()) - 0.5) * spread;
+            const double dy = (static_cast<double>(rng.NextFloat()) - 0.5) * spread;
+            const double dz = (static_cast<double>(rng.NextFloat()) - 0.5) * spread;
+            m_level->AddParticle(ParticleKind::Bubble,
+                                 position.x - static_cast<double>(mouth.x) * 1.1,
+                                 position.y - static_cast<double>(mouth.y) + 0.25,
+                                 position.z - static_cast<double>(mouth.z) * 1.1, dx, dy, dz);
+        }
+    }
+
+    void AbstractNautilus::Tick() {
+        GenericAnimal::Tick();
+        if (!m_level) return;
+        if (!m_level->IsClientSide()) ApplyEffects();
+
+        if (IsDashing() && m_dashCooldown < kDashCooldownTicks - kDashMinimumDuration) SetDashing(false);
+
+        if (m_dashCooldown > 0) {
+            --m_dashCooldown;
+            if (m_dashCooldown == 0) MakeSound(GetDashReadySound());
+        }
+
+        if (IsInWater() && m_level->IsClientSide()) SpawnBubbles();
+    }
+
+    void AbstractNautilus::CheckRestriction() {
+        // MC checkRestriction: a tame nautilus off the lead and without a
+        // rider keeps a home around itself — 32 blocks for an unsaddled adult,
+        // 16 otherwise — re-centred once it strays past radius + 8.
+        if (IsLeashed() || IsVehicle() || !IsTame()) return;
+        const int radius = !IsBaby() && GetEquipment(EquipmentSlot::SADDLE).IsEmpty()
+                               ? kLargeRestrictionRadius : kSmallRestrictionRadius;
+        const glm::ivec3 here = BlockPosition();
+        bool recentre = !HasHome() || radius != GetHomeRadius();
+        if (!recentre) {
+            const glm::ivec3 d = GetHomePosition() - here;
+            const double distSqr = static_cast<double>(d.x) * d.x + static_cast<double>(d.y) * d.y +
+                                   static_cast<double>(d.z) * d.z;
+            const double limit = static_cast<double>(radius + kRestrictionRadiusBuffer);
+            recentre = !(distSqr < limit * limit);
+        }
+        if (recentre) SetHomeTo(here, radius);
+    }
+
+    void AbstractNautilus::CustomServerAiStep() {
+        CheckRestriction();
+        GenericAnimal::CustomServerAiStep();
+    }
+
     Nautilus::Nautilus(EntityLevel* level)
         : AbstractNautilus(EntityTypeId::Nautilus, level) {
         m_brain = std::make_unique<Brain>();
@@ -661,6 +1300,41 @@ namespace Game {
     }
 
     void Nautilus::UpdateBrainActivity() { NautilusAi::UpdateActivity(*this); }
+
+    std::unique_ptr<Animal> Nautilus::CreateBaby() {
+        // MC Nautilus.getBreedOffspring: `if (isTame()) { setOwnerReference;
+        // setTame(true, true); }`.
+        std::unique_ptr<Animal> baby = GenericAnimal::CreateBaby();
+        if (baby && IsTame()) {
+            if (auto* foal = dynamic_cast<Nautilus*>(baby.get())) {
+                foal->SetOwnerUuid(GetOwnerUuid());
+                foal->SetTame(true, true);
+            }
+        }
+        return baby;
+    }
+
+    const char* Nautilus::GetAmbientSound() const {
+        if (IsBaby()) {
+            return IsUnderWater() ? SoundEvents::BABY_NAUTILUS_AMBIENT : SoundEvents::BABY_NAUTILUS_AMBIENT_ON_LAND;
+        }
+        return IsUnderWater() ? SoundEvents::NAUTILUS_AMBIENT : SoundEvents::NAUTILUS_AMBIENT_ON_LAND;
+    }
+
+    const char* Nautilus::GetHurtSound(MobDamageSource source) const {
+        (void)source;
+        if (IsBaby()) {
+            return IsUnderWater() ? SoundEvents::BABY_NAUTILUS_HURT : SoundEvents::BABY_NAUTILUS_HURT_ON_LAND;
+        }
+        return IsUnderWater() ? SoundEvents::NAUTILUS_HURT : SoundEvents::NAUTILUS_HURT_ON_LAND;
+    }
+
+    const char* Nautilus::GetDeathSound() const {
+        if (IsBaby()) {
+            return IsUnderWater() ? SoundEvents::BABY_NAUTILUS_DEATH : SoundEvents::BABY_NAUTILUS_DEATH_ON_LAND;
+        }
+        return IsUnderWater() ? SoundEvents::NAUTILUS_DEATH : SoundEvents::NAUTILUS_DEATH_ON_LAND;
+    }
 
     ZombieNautilus::ZombieNautilus(EntityLevel* level)
         : AbstractNautilus(EntityTypeId::ZombieNautilus, level) {

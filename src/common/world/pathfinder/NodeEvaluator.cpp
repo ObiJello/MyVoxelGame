@@ -4,6 +4,7 @@
 #include "common/entity/Mob.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/SnowLayerBlock.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -32,7 +33,16 @@ namespace Game {
 
     PathType PathfindingContext::GetPathTypeFromState(int x, int y, int z) const {
         if (!blocks) return PathType::Blocked;
-        return GetPathTypeFromBlock(blocks->GetBlock(x, y, z));
+        const BlockID id = blocks->GetBlock(x, y, z);
+        // The one block in the table's final `isPathfindable(LAND)` branch
+        // whose answer depends on its STATE: SnowLayerBlock.isPathfindable
+        // is `layers < HEIGHT_IMPASSABLE`, so up to four layers is open
+        // ground to walk through and five or more a wall.
+        if (id == BlockID::SnowLayer) {
+            return SnowLayer::IsPathfindableLand(blocks->GetBlockState(x, y, z))
+                       ? PathType::Open : PathType::Blocked;
+        }
+        return GetPathTypeFromBlock(id);
     }
 
     // ── NodeEvaluator ──────────────────────────────────────────────────────

@@ -26,7 +26,9 @@
 #include "common/sound/SoundSource.hpp"
 
 #include <glm/glm.hpp>
+#include <array>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,10 +39,12 @@ namespace Game {
 
     struct EntityLevel;
     class  ILevelWrite;
+    enum class GameEventId : uint8_t;   // common/world/level/gameevent/GameEvent.hpp
     // Tag must be `class` to match the definition in LivingEntity.hpp: MSVC
     // mangles class and struct differently, so a mismatched tag links fine on
     // Clang and gives LNK2019 on MSVC (see CLAUDE.md).
     class  LivingEntity;
+    class  Mob;
     class  BlockState;
     struct ItemStack;
 
@@ -141,6 +145,19 @@ namespace Game {
         // handing the entity to its manager and have that survive.
         void        MintUuidIfUnset() { if (UuidIsNil(m_uuid)) m_uuid = RandomUuid(); }
 
+        // A token that expires when this object is DESTROYED — what makes a
+        // cached pointer to it (EntityRef) safe to test without touching
+        // freed memory. MC's references re-check isRemoved() on a live Java
+        // object; here the object itself may be gone (a disconnected
+        // player's entity view, a swept mob), so validity must be asked of
+        // something that outlives it. Allocated on demand (every LivingEntity
+        // at construction, anything else the first time it is referenced),
+        // so the million-entity TNT/falling-block paths never pay for it.
+        std::weak_ptr<const void> LivenessToken() const { return m_liveness; }
+        void EnsureLivenessToken() const {
+            if (!m_liveness) m_liveness = std::make_shared<char>(0);
+        }
+
         // MC EntityType.canSerialize. False means "never written to
         // entities/*.mca" — projectiles opt out, because their one meaningful
         // field is an owner pointer that cannot round-trip and their lifetime
@@ -168,6 +185,11 @@ namespace Game {
         // `velocity` field is a knockback accumulator, never integrated
         // movement (MC ServerPlayer.getKnownMovement makes the same split).
         virtual glm::dvec3 GetKnownMovement() const { return velocity; }
+        // MC Entity.getKnownSpeed — the displacement over the last tick
+        // (computeSpeed at the head of baseTick), what a spear's charge
+        // measures closing speeds with. The player's view answers the
+        // client-reported displacement.
+        virtual glm::dvec3 GetKnownSpeed() const { return m_lastKnownSpeed; }
 
         // MC Entity.getWeaponItem — the stack this entity attacks with, which
         // a DamageSource reports as its weapon (DamageSource.getWeaponItem):
@@ -271,6 +293,11 @@ namespace Game {
         // entity ever holds a riding pointer to a removed one. Out of line
         // because the eject walks the passenger list.
         void Remove(RemovalReason reason);
+        // The part of an override of MC remove(reason) that runs BEFORE
+        // super.remove — called once, as the first removal is requested
+        // (AbstractChestBoat / AbstractMinecartContainer drop their contents
+        // when the reason destroys, AbstractBoat drops its lead).
+        virtual void OnRemoving(RemovalReason reason) { (void)reason; }
         // MC Entity.discard — removal with no death handling.
         void Discard() { Remove(RemovalReason::Discarded); }
 
@@ -477,10 +504,11 @@ namespace Game {
         // `force` skips CanRide/CanAddPassenger exactly as in MC (jockey
         // spawns use force, so a "seat rules" override can never break them).
         bool StartRiding(Entity& vehicle, bool force = false);
-        // MC Entity.stopRiding / removeVehicle. Dismount KEEPS the rider's
-        // current (seated) position — MC computes a DismountHelper landing
-        // spot; this port lets the rider fall/collide from the seat instead.
-        // Simplification, revisit if riders dismount into walls.
+        // MC Entity.stopRiding / removeVehicle. The base keeps the rider
+        // where it sits; LivingEntity::StopRiding adds MC's dismountVehicle
+        // (the rider put down at the vehicle's GetDismountLocationForPassenger)
+        // for a mob, and a player's view hands its dismount to the server's
+        // riding system (Server::PlayerRiding).
         virtual void StopRiding() { RemoveVehicle(); }
         void RemoveVehicle();
         // MC Entity.ejectPassengers — everyone off, last passenger first.
@@ -496,8 +524,28 @@ namespace Game {
         // MC Entity.positionRider: seat position = vehicle position
         // + passenger attachment (vehicle's, rotated by vehicle yaw)
         // - vehicle attachment (rider's own mount point, MC ridingOffset).
-        void PositionRider(Entity& passenger);
+        // Virtual as MC's positionRider(passenger, moveFunction) is: a boat
+        // turns its riders with it and clamps their heads (AbstractBoat).
+        virtual void PositionRider(Entity& passenger);
         glm::dvec3 GetPassengerRidingPosition(const Entity& passenger) const;
+
+        // MC Entity.getDismountLocationForPassenger: where a rider getting
+        // off is put down. The base answers MC's: on top of the box, centred.
+        // Boats, minecarts and the equines search for a free floor
+        // (DismountHelper); the cushion keeps the base.
+        virtual glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const;
+
+        // MC Entity.removePassenger's override hook — the passenger left
+        // (the cushion's get-up sound). Called by RemoveVehicle after the
+        // link is gone, on both sides.
+        virtual void OnPassengerRemoved(Entity& passenger) { (void)passenger; }
+        // MC Entity.addPassenger's override hook — `passenger` has just taken
+        // a seat; `wasVehicle` is MC's isVehicle() before it did (the happy
+        // ghast's goggles-down sound and still timeout). Called by
+        // StartRiding after the link is made, on both sides.
+        virtual void OnPassengerAdded(Entity& passenger, bool wasVehicle) {
+            (void)passenger; (void)wasVehicle;
+        }
 
         // Attachment points. MC keeps these on EntityType (EntityAttachments,
         // built by .passengerAttachments()/.ridingOffset() in EntityType.java);
@@ -508,10 +556,18 @@ namespace Game {
         // animation, Camel lowers it while sitting) can override later.
         virtual glm::dvec3 GetPassengerAttachmentPoint(const Entity& passenger) const;
         virtual glm::dvec3 GetVehicleAttachmentPoint() const;
+        // The seat of passenger `slot` of `total`, known by its place rather
+        // than its entity — how the client seats a player (players are no
+        // client entities) on a multi-seat mount (a camel, a happy ghast).
+        // Base: the single seat, turned by this entity's yaw.
+        virtual glm::dvec3 GetPassengerAttachmentForSlot(int slot, int total) const {
+            (void)slot; (void)total;
+            return GetPassengerAttachmentPoint(*this);
+        }
 
-        // MC Entity.getControllingPassenger — null on the base. Player mount
-        // control (travelRidden, steering) is a later wave; until then no
-        // passenger controls anything.
+        // MC Entity.getControllingPassenger — null on the base. A boat's is
+        // its first passenger when that is a player (its view, server side);
+        // a saddled equine's is its rider.
         virtual Entity* GetControllingPassenger() const { return nullptr; }
 
         // MC Entity.canRide: `!isShiftKeyDown() && boardingCooldown <= 0`.
@@ -533,6 +589,31 @@ namespace Game {
         // Backup unlink for direct-erase paths that bypass Remove(); see the
         // lifetime note above. Safe to call redundantly.
         void UnlinkRidingReferenceTo(const Entity* dead);
+
+        // Called at the end of every successful StartRiding. Mob uses it for
+        // MC Mob.startRiding's `if (result && isLeashed()) dropLeash()`.
+        virtual void OnStartedRiding(Entity& vehicle) { (void)vehicle; }
+
+        // ── Leads: the HOLDER side (MC Entity's leash hooks) ───────────────
+        //
+        // Any entity can hold a lead; only a Mob can wear one (Mob.hpp's
+        // Leashable block, common/entity/Leashable.hpp). Defined in
+        // Leashable.cpp.
+        //
+        // MC Entity.supportQuadLeashAsHolder — the ghast and the happy ghast
+        // hold a quad-leashable mob (the horse family, the sniffer) by four
+        // ropes instead of one.
+        virtual bool SupportQuadLeashAsHolder() const;
+        // MC Entity.getQuadLeashHolderOffsets — the four rope ends on the
+        // holder, unrotated.
+        virtual std::array<glm::dvec3, 4> GetQuadLeashHolderOffsets() const;
+        // MC Entity.notifyLeashHolder (every leash tick) / notifyLeasheeRemoved
+        // (a lead taken off). A knot discards itself when its last mob goes.
+        virtual void NotifyLeashHolder(Mob& leashee) { (void)leashee; }
+        virtual void NotifyLeasheeRemoved(Mob& leashee) { (void)leashee; }
+        // MC Entity.baseTick's `this instanceof Leashable → tickLeash`, run
+        // at the end of BaseTick on the server. Mob implements it.
+        virtual void TickLeash() {}
 
         // ── Portals (MC Entity.portalProcess / portalCooldown) ─────────────
         //
@@ -624,6 +705,22 @@ namespace Game {
         // MC Entity.isInLava — `getFluidHeight(LAVA) > 0`.
         virtual bool IsInLava()  const { return m_fluid.height[static_cast<int>(FluidType::Lava)] > 0.0; }
         bool IsInLiquid() const { return IsInWater() || IsInLava(); }
+        // MC Entity.isInRain: the level rains at the block position or at
+        // the top of the box (BlockPos.containing(x, box.maxY, z)) — so a
+        // tall mob with its head out of a doorway is wet.
+        bool IsInRain() const;
+        // MC Entity.isInWaterOrRain.
+        bool IsInWaterOrRain() const { return IsInWater() || IsInRain(); }
+
+        // MC Entity.thunderHit(level, bolt) — server only, from a flashing
+        // LightningBolt's entity sweep (`bolt` is the bolt; null for a strike
+        // with no bolt entity, Twilight Forest's portal). The base: one more
+        // fire tick, a full 8-second ignition when that lands on the "not
+        // burning" rest, then 5 lightning damage. Overridden by the types MC
+        // overrides (creeper, pig, villager, mooshroom, turtle, copper golem,
+        // armor stand, the block-attached entities). Defined in
+        // LightningBolt.cpp.
+        virtual void ThunderHit(Entity* bolt);
 
         // MC Entity.getFluidHeight(tag): the fluid's surface above the feet,
         // 0 when the box touches none of it.
@@ -672,6 +769,10 @@ namespace Game {
 
         virtual bool IsSpectator() const { return false; }
         virtual bool IsCreative()  const { return false; }
+        // MC Player.mayBuild (abilities.mayBuild): false for a player in
+        // adventure or spectator mode. Only a player answers anything but
+        // true; read by the cushion's breaking gate (Cushion.isBreakingDeniedFor).
+        virtual bool MayBuild()    const { return true; }
         // MC Player.getAbilities().flying. Only a player can be flying in the
         // sense that matters (creative/spectator flight); everything else
         // answers false. Read by the explosion's player-knockback gate.
@@ -683,6 +784,11 @@ namespace Game {
         // caller short-circuits on IsPlayer() first. Named for the ability so
         // the two concepts cannot collide again.
         virtual bool IsAbilityFlying() const { return false; }
+        // MC LivingEntity.isFallFlying (shared flag 7): gliding on an elytra.
+        // Only players glide here; their view answers from the ServerPlayer.
+        // What a firework rocket attached to the entity boosts
+        // (FireworkRocketEntity.tick).
+        virtual bool IsFallFlying() const { return false; }
 
         // MC Entity.updateFluidInteraction (26.x's name for
         // updateInWaterStateAndDoFluidPushing) — the per-tick fluid refresh
@@ -739,6 +845,20 @@ namespace Game {
         // (and swim strokes) at all. Bats, squids, shulkers, guardians,
         // silverfish, endermites, breezes, projectiles and items do not.
         virtual bool EmitsMovementSounds() const;
+        // MC getMovementEmission().emitsEvents(): does moving raise the STEP /
+        // SWIM / FLAP game events a sculk sensor hears. True for everything
+        // but MC's MovementEmission.NONE types (items, orbs, arrows, TNT,
+        // falling blocks, end crystals, bobbers, shulkers) — a bat, squid or
+        // silverfish is silent underfoot yet still felt (EVENTS).
+        virtual bool EmitsMovementEvents() const;
+        // MC Entity.dampensVibrations: the warden (and a wool item) raise no
+        // vibration a listener will accept.
+        virtual bool DampensVibrations() const { return false; }
+        // MC Entity.gameEvent(event, sourceEntity) — at this entity's
+        // position — and gameEvent(event), sourced from this entity. A no-op
+        // on the client (gameevent/GameEventLevel.cpp).
+        void GameEvent(GameEventId event, Entity* sourceEntity);
+        void GameEvent(GameEventId event) { GameEvent(event, this); }
         // MC isFlapping / onFlap: a flier moving through air (a parrot's wing
         // beat). Checked where MC checks it — a movement step over air.
         virtual bool IsFlapping() const { return false; }
@@ -888,6 +1008,9 @@ namespace Game {
         Uuid          m_uuid{};
         bool          m_invulnerable = false;
         RemovalReason m_removal = RemovalReason::None;
+        // See LivenessToken. Destroyed with the entity, which expires every
+        // weak_ptr handed out.
+        mutable std::shared_ptr<char> m_liveness;
         Pose          m_pose    = Pose::Standing;
 
         bool m_sprinting = false;
@@ -934,6 +1057,10 @@ namespace Game {
         void WaterSwimSound();
         virtual void PlaySwimSound(float volume);
         void DoWaterSplashEffect();
+        // MC canSpawnSprintParticle / spawnSprintParticle — the dust a
+        // sprinting entity kicks up (client copies draw it).
+        virtual bool CanSpawnSprintParticle() const;
+        void SpawnSprintParticle();
         // MC applyMovementEmissionAndPlaySound + vibrationAndSoundEffectsFrom-
         // Block + walkingStepSound, for one move's clipped displacement.
         void ApplyMovementEmissionAndPlaySound(const glm::dvec3& clippedMovement);
@@ -948,6 +1075,10 @@ namespace Game {
         // MC Entity.boardingCooldown — set to 60 on dismount, decremented in
         // BaseTick, gates CanRide so a mob cannot re-mount the same tick.
         int m_boardingCooldown = 0;
+        // MC Entity.lastKnownSpeed / lastKnownPosition (computeSpeed).
+        glm::dvec3 m_lastKnownSpeed{0.0};
+        glm::dvec3 m_lastKnownPosition{0.0};
+        bool       m_hasLastKnownPosition = false;
     };
 
 
@@ -963,8 +1094,13 @@ namespace Game {
     //
     // `blockCount` is now the REAL number of blocks destroyed rather than the
     // radius-cubed guess the old entity-event path had to make.
+    //
+    // `particleSet` 1 draws the wind charges' GUST_EMITTER_SMALL / _LARGE in
+    // place of EXPLOSION / EXPLOSION_EMITTER; `blockParticles` false is MC's
+    // empty blockParticles list — no debris.
     void SpawnExplosionVisualEffects(EntityLevel& level,
                                      double cx, double cy, double cz,
-                                     float radius, bool small, int blockCount);
+                                     float radius, bool small, int blockCount,
+                                     uint8_t particleSet = 0, bool blockParticles = true);
 
 } // namespace Game

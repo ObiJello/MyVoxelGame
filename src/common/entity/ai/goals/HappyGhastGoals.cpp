@@ -6,9 +6,11 @@
 namespace Game {
 
     HappyGhastFloatGoal::HappyGhastFloatGoal(HappyGhast* ghast)
-        : FloatGoal(ghast) {
-        // MC gates canUse on !isOnStillTimeout(); the timeout is riding-only
-        // and permanently false here, so the base predicate is exact.
+        : FloatGoal(ghast), m_ghast(ghast) {}
+
+    bool HappyGhastFloatGoal::CanUse() {
+        // MC: `!isOnStillTimeout() && super.canUse()`.
+        return !m_ghast->IsOnStillTimeout() && FloatGoal::CanUse();
     }
 
 } // namespace Game

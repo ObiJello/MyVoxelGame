@@ -100,6 +100,12 @@ ConfiguredFeature* TreeFeatures::AZALEA_TREE = nullptr;
 // ConfiguredFeature pointers - Nether fungi
 ConfiguredFeature* TreeFeatures::CRIMSON_FUNGUS = nullptr;
 ConfiguredFeature* TreeFeatures::WARPED_FUNGUS = nullptr;
+ConfiguredFeature* TreeFeatures::CRIMSON_FUNGUS_PLANTED = nullptr;
+ConfiguredFeature* TreeFeatures::WARPED_FUNGUS_PLANTED = nullptr;
+
+// ConfiguredFeature pointers - Sapling-only trees
+ConfiguredFeature* TreeFeatures::JUNGLE_TREE_NO_VINE = nullptr;
+ConfiguredFeature* TreeFeatures::PALE_OAK_BONEMEAL = nullptr;
 
 // ConfiguredFeature pointers - Leaf litter variants (no bees)
 ConfiguredFeature* TreeFeatures::OAK_LEAF_LITTER = nullptr;
@@ -1681,6 +1687,51 @@ void TreeFeatures::bootstrap() {
                                     "minecraft:nether_wart_block", false);
         WARPED_FUNGUS = makeFungus("minecraft:warped_nylium", "minecraft:warped_stem",
                                    "minecraft:warped_wart_block", false);
+        // CRIMSON_FUNGUS_PLANTED / WARPED_FUNGUS_PLANTED (TreeFeatures.java
+        // lines 195/197): the same fungi with planted = true — what a
+        // bone-mealed fungus grows (NetherFungusBlock.performBonemeal).
+        CRIMSON_FUNGUS_PLANTED = makeFungus("minecraft:crimson_nylium", "minecraft:crimson_stem",
+                                            "minecraft:nether_wart_block", true);
+        WARPED_FUNGUS_PLANTED = makeFungus("minecraft:warped_nylium", "minecraft:warped_stem",
+                                           "minecraft:warped_wart_block", true);
+    }
+
+    // =========================================================================
+    // SAPLING-ONLY TREES - never placed by worldgen; TreeGrower's features.
+    // =========================================================================
+
+    // JUNGLE_TREE_NO_VINE (TreeFeatures.java: createJungleTree().ignoreVines())
+    // - TreeGrower.JUNGLE's single-sapling tree.
+    {
+        auto builder = createJungleTree();
+        builder.ignoreVines();
+        JUNGLE_TREE_NO_VINE = registerTree(builder);
+    }
+
+    // PALE_OAK_BONEMEAL (TreeFeatures.java) - PALE_OAK without the pale moss
+    // decorator; TreeGrower.PALE_OAK's 2x2 tree.
+    {
+        auto trunkProvider = BlockStateProvider::simple("minecraft:pale_oak_log");
+        auto foliageProvider = BlockStateProvider::simple("minecraft:pale_oak_leaves");
+        s_providers.push_back(trunkProvider);
+        s_providers.push_back(foliageProvider);
+
+        auto trunkPlacer = std::make_shared<DarkOakTrunkPlacer>(6, 2, 1);
+        s_trunkPlacers.push_back(trunkPlacer);
+
+        auto foliagePlacer = std::make_shared<DarkOakFoliagePlacer>(
+            constantInt(0),
+            constantInt(0)
+        );
+        s_foliagePlacers.push_back(foliagePlacer);
+
+        auto featureSize = std::make_shared<ThreeLayersFeatureSize>(1, 1, 0, 1, 2, std::nullopt);
+        s_featureSizes.push_back(featureSize);
+
+        TreeConfigurationBuilder builder(trunkProvider, trunkPlacer, foliageProvider,
+                                         foliagePlacer, featureSize);
+        builder.ignoreVines();
+        PALE_OAK_BONEMEAL = registerTree(builder);
     }
 
     s_initialized = true;

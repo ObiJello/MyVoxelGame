@@ -140,13 +140,16 @@ MC's ItemInHandLayer + collar layers, landed:
   setupAnim coverage from 78% to **88%** (crossbow-hold/charge arm poses
   across every humanoid).
 - **Collars**: tamed wolves and cats re-render through the collar sheet
-  tinted DyeColor.RED (no collar dyeing yet — every collar is the
-  default), exactly MC's renderColoredCutoutModel.
-- **Wolf**: tame/angry texture swap (wolf_tame/wolf_angry; the biome wolf
-  variant sets sit on disk for a future variant roll), the real
-  getTailAngle (tame health wag included), and **BegGoal** — the
-  interested head-tilt rides anim-byte bit 2 into the model's
-  headRollAngle.
+  tinted by the collar's DyeColor.getTextureDiffuseColor (dyeable by the
+  owner — Wolf/Cat.mobInteract; saved as CollarColor, synced in the anim
+  byte's high nibble; pups get DyeColor.getMixedColor of the parents).
+- **Wolf**: the nine 26.3 coats (WolfVariants.hpp — biome-picked at
+  finalizeSpawn, shared across a pack, inherited from a random parent) each
+  with its wild/tame/angry sheet, the seven sound sets (an owner cycles them with a note block), the real getTailAngle, **BegGoal**'s head tilt, the wet
+  shake (entity events 8/56, wet shade, body roll through WolfModel,
+  splash particles, WOLF_SHAKE) and wolf armor (equip / repair / shear /
+  absorb / crack / break, WolfArmorLayer with dye overlay + cracks,
+  BodyArmorS2C).
 - Still open in this layer: beg-worthy held-item RENDER on the player
   side is inherent (players render items already); fox/allay mouth items
   (need item pickup), witch drinking potion visual, piglin/zombie rare
@@ -224,26 +227,26 @@ breeze, creaking, sniffer. Wave two added, each `<Mob>Ai.{hpp,cpp}` in
   onward a baby) and breeding variant inheritance (1/1200 blue). The
   play-dead-frozen move/look controls are MC's AxolotlMoveControl/
   LookControl. Skipped: bucketing (items), rain in isInWaterOrRain.
-- **Piglin** — idle/fight/celebrate/avoid/ride on MC's activity order
-  (ADMIRE_ITEM stays unregistered — items). Ported: hoglin hunting with the
-  pack broadcast + shared 30-120 s hunt cooldown, celebration (dance roll
-  seeded on game time, CELEBRATE_LOCATION walk, dancing on the anim byte
-  for the renderer's arm pose), retreat from zombified (zombified piglin +
-  zoglin) and from hoglins when outnumbered (the visible-count bookkeeping),
-  the soul-block repellent scan (soul torch/wall torch/lantern/campfire/
-  fire, 8x4 box) with SetWalkTargetAwayFrom.pos, the baby's nemesis flight
-  and baby-hoglin riding games (Mount/Dismount with MC's stack-3 rule via
-  StartRiding), the jealous stare at players holding gold (PIGLIN_LOVED
-  flattened over held-item ids), piglin-to-piglin socialising (InteractWith),
-  anger with pack broadcast, and the overworld zombification clock
-  (300 ticks → ZombifiedPiglin, this engine's one dimension being the
-  overworld). Skipped at their sites: admiring/bartering/pickup (items),
-  crossbow + spear combat (weapons), gold-armor truce (equipment), doors,
-  sounds, UNIVERSAL_ANGER (game rule defaults off).
+- **Piglin** — every MC activity (ADMIRE_ITEM, FIGHT, AVOID, CELEBRATE,
+  RIDE, IDLE): admiring / bartering / loot pickup, the gold-armour truce,
+  crossbow + golden sword combat, hoglin hunting (only hoglins that
+  canBeHunted; the pack broadcast with setAngerTargetIfCloserThanCurrent),
+  celebration and dancing, retreat from zombified mobs and from outnumbering
+  hoglins (retreatFromNearestTarget), the repellent scan (the 8/4/8
+  manhattan walk, lit soul campfires only), the baby games, the guarded
+  block / container anger (chests, double chests, barrels, ender chests,
+  shulker boxes, chest/hopper vehicles), UNIVERSAL_ANGER, the IDLE-gated
+  ambient voice and the zombification clock outside the Nether with the
+  client's conversion shake. Skipped at their sites: spear combat, doors.
 - **PiglinBrute** — the simpler always-hostile brain: ANGRY_AT → player →
   nemesis targeting, HOME memory patrols (StrollToPoi/StrollAroundPoi),
-  piglin/brute socialising, retaliation via the shared MaybeRetaliate, the
-  same zombification clock. Golden axe skipped (equipment).
+  piglin/brute socialising, SetLookAndInteract, retaliation via the shared
+  MaybeRetaliate, the golden axe, the same zombification clock and shake.
+- **Hoglin** — the full HoglinAi (CORE/IDLE/FIGHT/AVOID): repellent pacifying
+  (warped fungus, nether portal, respawn anchor), keeping off adult piglins,
+  retreat when piglins outnumber (onHitTarget / wasHurtBy), pack attack
+  broadcast, HoglinBase.hurtAndThrowTarget (also the zoglin's), 20% babies,
+  crimson-nylium walk preference, zombification into a zoglin.
 - **Nautilus + ZombieNautilus** (promoted, `Fish.{hpp,cpp}`) — swim-wander,
   temptation (fish foods), nautilus breeding, the ChargeAttack ram (velocity
   lock, 12-block charge cap, line-of-sight, attack damage + speed-scaled
@@ -317,10 +320,10 @@ zeroed), TamableAnimalPanicGoal, OwnerHurtByTargetGoal / OwnerHurtTargetGoal
 - *Wolf*: bone → 1/3 tame, tame health 40, sit/stand toggle, feed-heal (2×),
   full MC target table incl. the owner-defence pair and the
   NonTameRandomTargetGoal prey hunts (sheep/rabbit/fox + beached baby
-  turtles), wantsToAttack rules, tame-gated breeding with pup inheritance.
-  Skips at their sites: BegGoal (held-item render), WolfAvoidEntityGoal
-  (llama strength), dye collar + tame texture (per-type texture table),
-  wolf armor.
+  turtles), wantsToAttack rules, tame-gated breeding with pup inheritance,
+  WolfAvoidEntityGoal (llama strength, now rolled at the llama's spawn),
+  the environmental-only TamableAnimalPanicGoal, collar dyeing and wolf
+  armor. Gap: rain (no weather) never wets a wolf.
 - *Cat*: cod/salmon → 1/3 tame (sits on success), reassessTameGoals swaps
   the avoid-players goal out, feed-heal, sit toggle, tame-gated canMate.
   Still bed-gated: CatRelaxOnOwnerGoal / CatLieOnBedGoal / CatSitOnBlockGoal.
@@ -442,8 +445,12 @@ riding, camel/happy ghast mounting, ravager riders.
 
 **Villages / POI / raids** — beds, job sites, bells, raid state machine.
 Gates: villager profession AI (currently wanders/looks only), iron golem
-patrolling, evoker/pillager/vindicator/illusioner raid goals, cat spawning on
-beds, zombie MoveThroughVillageGoal, witch raid participation. (Zombie and
+patrolling, the Raider raid goals (ObtainRaidLeaderBanner, PathfindToRaid,
+MoveThroughVillage, Celebration, RaiderOpenDoor) and applyRaidBuffs, cat
+spawning on beds, zombie MoveThroughVillageGoal, witch raid participation.
+The raider chain itself (PatrollingMonster → Raider → AbstractIllager:
+patrols, HoldGroundAttackGoal, captains with the ominous banner and their
+ominous bottle, PatrolSpawner) is in — common/entity/raid/Raider.hpp. (Zombie and
 vindicator DOOR BREAKING landed in wave three — see below; only the
 village-pathing halves still wait here.)
 
@@ -565,10 +572,11 @@ State of the render side after the compiler/mesh overhaul:
 - SmoothSwimming mobs on land: the turning-speed throttle is exact, but the
   body-pitch render lerp (xBodyRot) is not mirrored client-side yet.
 - Wolf: MC syncs DATA_ANGER_END_TIME so the client's isAngry() picks the
-  angry texture; here the server maps IsAngry() onto the wire's aggressive
-  bit each tick (which the renderer's wolf branch already reads for the
-  angry tail), overriding MeleeAttackGoal's start/stop writes — an angry
-  wolf looks angry, a skeleton-hunting one stays wild-faced, as in MC.
+  angry texture; here the server evaluates isAngry() each tick and ships
+  the answer as anim-byte bit 3 (the aggressive flag stays MeleeAttackGoal's
+  own). Any target starts the anger timer (NeutralMob.updatePersistent-
+  Anger), so a wolf hunting sheep or skeletons shows the red-eyed sheet, as
+  in MC.
 
 ## 2026-08-22 wave three — dragon flight + world-interaction goals
 

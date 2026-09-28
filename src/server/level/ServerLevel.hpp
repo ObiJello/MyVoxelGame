@@ -235,6 +235,7 @@ namespace Server {
         int64_t generationBacklogSortTick = -1;   // m_currentServerTick of the last sort
         std::chrono::steady_clock::time_point generationLastStallCheck{};   // watchdog runs ~1/s
         std::vector<Game::Math::ChunkPos> generationBacklogAnchors;
+        std::vector<int> generationBacklogAnchorBias;   // their portal entry legs, chunks (resort on change)
         size_t generationInFlight = 0;
         // When each in-flight request was handed to the library, and when the
         // library last completed anything: the stall watchdog reads both.

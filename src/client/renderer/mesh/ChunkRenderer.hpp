@@ -94,6 +94,18 @@ namespace Render {
 
         SectionRenderData(::Game::Math::ChunkPos pos, int secY, float dist)
             : chunkPos(pos), sectionY(secY), distanceToCamera(dist) {}
+
+        // THE visible-list order: nearest first, and a strict total order —
+        // equal distances (sections mirrored about the camera) break on the
+        // section position, so every rebuild of the list, full or partial,
+        // lays them out the same way and the translucent pass (which reads
+        // the list in reverse) never swaps two of them between frames.
+        static bool NearerFirst(const SectionRenderData& a, const SectionRenderData& b) {
+            if (a.distanceToCamera != b.distanceToCamera) return a.distanceToCamera < b.distanceToCamera;
+            if (a.chunkPos.x != b.chunkPos.x) return a.chunkPos.x < b.chunkPos.x;
+            if (a.sectionY != b.sectionY) return a.sectionY < b.sectionY;
+            return a.chunkPos.z < b.chunkPos.z;
+        }
     };
 
     // Render statistics for debugging
@@ -195,6 +207,18 @@ namespace Render {
         // sections in view). Greedy-debug mode draws inline instead.
         void RenderDeferredTranslucent();
 
+        // Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency):
+        // the main view's translucent terrain is drawn three times, by the
+        // OIT stages at the end of the level — after the portal views, whose
+        // own RenderAll calls replace the visible list, the MVP and the
+        // pending pass. Capture takes the parked pass (and what drawing it
+        // reads) where RenderDeferredTranslucent would have drawn it; Replay
+        // draws it as captured, for whichever stage is set; Release drops it.
+        // Capture returns false when nothing was pending.
+        bool CaptureDeferredTranslucentForOit();
+        void ReplayCapturedTranslucentForOit();
+        void ReleaseCapturedTranslucentForOit();
+
         // Configuration - **UPDATED**: Now reads from game settings
         void RefreshSettings(); // Call when settings change
 
@@ -202,6 +226,17 @@ namespace Render {
         bool IsEnabledFrustumCulling() const { return m_enableFrustumCulling; }
         void SetEnableSmartCull(bool enable) { m_enableSmartCull = enable; m_visibleSectionsDirty = true; }
         bool IsEnabledSmartCull() const { return m_enableSmartCull; }
+        // MC Camera.extractRenderState: `if (player.isSpectator() &&
+        // level.getBlockState(blockPosition).isSolidRender()) smartCull =
+        // false` — a spectator's camera inside a solid block would otherwise
+        // see its own section's occlusion shut the world out. Set per frame;
+        // a change re-runs the visibility search (every cached slot was
+        // built with the other rule).
+        void SetSmartCullSuppressed(bool suppressed) {
+            if (suppressed == m_smartCullSuppressed) return;
+            m_smartCullSuppressed = suppressed;
+            m_visibleSectionsDirty = true;
+        }
 
         // Statistics
         const RenderStats& GetStats() const { return m_stats; }
@@ -259,13 +294,20 @@ namespace Render {
         // one of its six faces a frame while the pause menu is up, so every
         // direction is meshed before "Save and Quit". Overwrites the
         // visible-section list, so it belongs after the frame's last draw
-        // that reads it.
-        void RecordViewForScheduler(const Camera& camera, const Frustum& frustum);
+        // that reads it. Returns how many of the view's sections still have
+        // a mesh outstanding (dirty or building), counted as
+        // MainViewSectionsPending counts the main view's; `pendingKeys`, if
+        // given, receives those sections' keys.
+        int RecordViewForScheduler(const Camera& camera, const Frustum& frustum,
+                                   std::vector<uint64_t>* pendingKeys = nullptr);
         // Of the main view's visible sections this frame, how many still
         // have a mesh outstanding (dirty, or a build in flight). Zero for a
         // few frames running means the view on screen is complete — what
         // the join transition waits for before it hands the panorama over.
         int MainViewSectionsPending() const { return m_mainViewPending; }
+        // The visible list's sections that still have a mesh outstanding
+        // (their keys into `keysOut` when given).
+        int CountPendingVisibleSections(std::vector<uint64_t>* keysOut = nullptr) const;
         // The chunk fade-in (SectionFade.hpp) off for the draws that follow:
         // the leave capture's panorama faces are built from sections its
         // warm-up has only just meshed, and a picture of the world must
@@ -502,6 +544,16 @@ namespace Render {
             glm::mat4 projectionOverride{1.0f};
         };
         DeferredTranslucent m_deferredTranslucent;
+        struct OitTranslucentCapture {
+            bool valid = false;
+            DeferredTranslucent pass;
+            std::vector<SectionRenderData> visible;   // reused: no allocation once warm
+            int visibleTranslucent = 0;
+            glm::mat4 mvp{1.0f};
+            ClientMeshManager* meshes = nullptr;
+            glm::dvec3 renderOrigin{0.0};
+        };
+        OitTranslucentCapture m_oitCapture;
         // The translucent pass proper — shader bind, uniforms, the pack's
         // before-translucent hook, the sorted draw. Shared by the inline
         // (debug) and deferred paths.
@@ -664,6 +716,7 @@ namespace Render {
         // OBEY_DUMP_VISIBLE=1 diagnostics: see PrepareVisibleSections.
         void DumpVisibleSections(const Camera& camera);
         bool m_enableSmartCull = true;  // Occlusion culling via VisibilitySet BFS
+        bool m_smartCullSuppressed = false;   // SetSmartCullSuppressed (spectator in a block)
         bool m_wireframeMode = false;
         bool m_showSectionBounds = false;
         int m_debugLayer = -1; // -1 = all layers
@@ -938,6 +991,28 @@ namespace Render {
         // allocations, one bucket per slab.
         std::vector<std::vector<int32_t>> m_slabRunCounts;
         std::vector<uint32_t> m_slabOrder;   // SubmitOrderedRuns: slabs in first-seen order
+        // SubmitOrderedRuns: index into m_drawEntries of the first entry of a
+        // nearby section (back-to-front list, so the near tail). From there
+        // on the entries are drawn in exact list order across slabs; SIZE_MAX
+        // = no nearby translucent section this pass. Set by RenderLayerPass.
+        size_t m_orderedExactFrom = SIZE_MAX;
+
+        // Per-view translucent order for SECONDARY views (projection override:
+        // portal views, face captures, the shadow view). Only the player's
+        // view re-sorts the shared per-section ranges; a secondary view sorts
+        // its nearby sections into this ring and draws them from it
+        // (RenderTranslucent, WriteViewSortedTranslucent).
+        static constexpr uint32_t kViewSortPartitions       = 4;
+        static constexpr size_t   kViewSortPartitionIndices = 512 * 1024;   // 2 MB each
+        BufferHandle          m_viewSortIbo = INVALID_BUFFER;
+        uint64_t              m_viewSortSerial = 0;              // ++ per main view (RenderAll)
+        uint64_t              m_viewSortPartitionSerial = UINT64_MAX;
+        size_t                m_viewSortCursor = 0;              // indices used in the partition
+        std::vector<uint32_t> m_viewSortScratch;
+        glm::dvec3            m_translucentViewCamera{0.0};      // this translucent pass's camera
+        bool                  m_translucentSecondaryView = false;
+        bool WriteViewSortedTranslucent(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                        uint32_t indexCount, uint32_t& outFirstIndex);
         std::vector<std::vector<size_t>>  m_slabRunOffsets;
         // Slab indices are absolute, so every sub-draw has baseVertex 0; the
         // backend API still wants an array of them. Grown, never shrunk.
@@ -1046,7 +1121,7 @@ namespace Render {
         // section work lives in ClientMeshManager::ResortTranslucentSection,
         // mirroring MC's split between LevelRenderer and RenderSection.
         // Runs once a frame, immediately before the translucent pass.
-        void ScheduleTranslucentSectionResort(const glm::vec3& cameraPos);
+        void ScheduleTranslucentSectionResort(const glm::dvec3& cameraPos);
         
         // Bind shader, MVP, and atlas texture once per frame (shared across all 3 passes)
         void BindSharedRenderState(const Camera& camera);
@@ -1083,6 +1158,11 @@ namespace Render {
     // non-standard projection matrix. See ChunkRenderer::RenderAll above.
     // ChunkRenderer::RenderDeferredTranslucent on the global renderer.
     void RenderChunksDeferredTranslucent();
+    // Improved Transparency: ChunkRenderer::Capture/Replay/ReleaseCaptured-
+    // TranslucentForOit on the global renderer.
+    bool CaptureChunksDeferredTranslucentForOit();
+    void ReplayChunksTranslucentForOit();
+    void ReleaseChunksTranslucentForOit();
     void RenderChunksAll(const Camera& camera, const Frustum& frustum,
                          const glm::mat4& projectionOverride, bool exactProjection = false);
     

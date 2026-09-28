@@ -229,7 +229,8 @@ namespace Server {
                 if (m_control.TargetOf(pid) || m_control.ControllerOf(pid)) continue;
                 if (p->GetConnection()->MirrorPlayerId() != 0) continue;
                 const ServerPlayer& picker = *p->GetPlayer();
-                if (picker.getHealth() <= 0.0f) continue;
+                // MC Player.aiStep's touch sweep: alive and not a spectator.
+                if (picker.getHealth() <= 0.0f || picker.isSpectator()) continue;
                 Box reach = BoxOf(picker);                     // MC: box.inflate(1, 0.5, 1)
                 reach.min -= glm::dvec3(1.0, 0.5, 1.0);
                 reach.max += glm::dvec3(1.0, 0.5, 1.0);

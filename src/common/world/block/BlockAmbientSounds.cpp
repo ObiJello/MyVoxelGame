@@ -3,6 +3,7 @@
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
@@ -378,10 +379,16 @@ namespace Game {
         if (fluid.Is(FluidType::Water)) {
             // MC WaterFluid.animateTick:47 — flowing (not source, not
             // falling) water, one in 64.
-            if (!fluid.IsSource() && !fluid.falling && random.NextInt(64) == 0) {
-                const float volume = random.NextFloat() * 0.25f + 0.75f;
-                level.PlayLocalSound(Centre(pos), SoundEvents::WATER_AMBIENT, SoundSource::Ambient, volume,
-                                     random.NextFloat() + 0.5f, false);
+            if (!fluid.IsSource() && !fluid.falling) {
+                if (random.NextInt(64) == 0) {
+                    const float volume = random.NextFloat() * 0.25f + 0.75f;
+                    level.PlayLocalSound(Centre(pos), SoundEvents::WATER_AMBIENT, SoundSource::Ambient, volume,
+                                         random.NextFloat() + 0.5f, false);
+                }
+            } else if (random.NextInt(10) == 0) {
+                // ... and still or falling water's UNDERWATER motes.
+                level.AddParticle(ParticleOptions(ParticleKind::Underwater), pos.x + random.NextDouble(),
+                                  pos.y + random.NextDouble(), pos.z + random.NextDouble(), 0.0, 0.0, 0.0);
             }
             return;
         }
@@ -395,6 +402,8 @@ namespace Game {
                 const double xx = pos.x + random.NextDouble();
                 const double yy = pos.y + 1.0;
                 const double zz = pos.z + random.NextDouble();
+                // The pop's LAVA particle, at the sound.
+                level.AddParticle(ParticleOptions(ParticleKind::Lava), xx, yy, zz, 0.0, 0.0, 0.0);
                 const float volume = 0.2f + random.NextFloat() * 0.2f;
                 level.PlayLocalSound(glm::dvec3(xx, yy, zz), SoundEvents::LAVA_POP, SoundSource::Ambient, volume,
                                      0.9f + random.NextFloat() * 0.15f, false);

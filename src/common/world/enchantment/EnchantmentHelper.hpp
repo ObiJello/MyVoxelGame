@@ -24,6 +24,7 @@
 
 #include <functional>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace Game {
@@ -170,6 +171,39 @@ namespace Game {
         int   ProcessProjectileCount(EntityLevel& level, const ItemStack& weapon, Entity& shooter, int count);
         float ProcessProjectileSpread(EntityLevel& level, const ItemStack& weapon, Entity& shooter, float angle);
         int   GetPiercingCount(EntityLevel& level, const ItemStack& weapon, const ItemStack& ammo);
+
+        // MC getFishingTimeReduction / getFishingLuckBonus — the rod's
+        // fishing_time_reduction (Lure: 5 seconds a level) and
+        // fishing_luck_bonus (Luck of the Sea: 1 a level), each run against
+        // the fisher; never below zero, the luck truncated to an int.
+        float GetFishingTimeReduction(EntityLevel& level, const ItemStack& rod, Entity& fisher);
+        int   GetFishingLuckBonus(EntityLevel& level, const ItemStack& rod, Entity& fisher);
+
+        // MC modifyCrossbowChargingTime — the crossbow's crossbow_charge_time
+        // (Quick Charge's -0.25 s a level) over `seconds`, floored at 0.
+        float ModifyCrossbowChargingTime(const ItemStack& crossbow, float seconds);
+        // MC pickHighestLevel(crossbow, CROSSBOW_CHARGING_SOUNDS).start — the
+        // Quick Charge level's start sound ("item.crossbow.quick_charge_N"),
+        // empty when the crossbow has no charging-sound enchantment (then
+        // CrossbowItem.DEFAULT_SOUNDS apply).
+        std::string CrossbowChargingStartSound(const ItemStack& crossbow);
+
+        // MC getTridentSpinAttackStrength — Riptide's launch speed off the
+        // trident's trident_spin_attack_strength (1.5 + 0.75 a level above
+        // the first); 0 without Riptide. Safe on the client (the launch is
+        // predicted there).
+        float GetTridentSpinAttackStrength(const ItemStack& trident);
+        // MC getTridentReturnToOwnerAcceleration — Loyalty's level (the
+        // trident_return_acceleration values), filtered against the thrown
+        // trident; never below 0.
+        int   GetTridentReturnToOwnerAcceleration(EntityLevel& level, const ItemStack& trident, Entity& entity);
+        // MC pickHighestLevel(trident, TRIDENT_SOUND) — Riptide's
+        // item.trident.riptide_N for its level; empty without one (the
+        // caller falls back to TRIDENT_THROW).
+        std::string TridentSound(const ItemStack& trident);
+        // MC doPostPiercingAttackEffects — every worn enchantment's
+        // post_piercing_attack effects on the jabber (Lunge). Server only.
+        void DoPostPiercingAttackEffects(EntityLevel& level, LivingEntity& entity);
 
         // MC isImmuneToDamage — any worn enchantment's damage_immunity
         // matching the source (Frost Walker vs #burn_from_stepping).

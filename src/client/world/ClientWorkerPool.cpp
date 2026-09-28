@@ -1,5 +1,11 @@
 // File: src/client/world/ClientWorkerPool.cpp
 #include "ClientWorkerPool.hpp"
+#include <string>
+#include <cstdlib>
+#include <cstdio>
+#include <tuple>
+#include <mutex>
+#include <map>
 #include "common/core/Log.hpp"
 #include "common/core/ThreadPriority.hpp"
 #include "common/core/Config.hpp"
@@ -18,6 +24,7 @@
 #include <optional>
 #include <thread>
 #include <glm/glm.hpp>
+#include "platform/CrashHandler.hpp"
 
 namespace Threading {
 
@@ -223,6 +230,30 @@ namespace Threading {
         return m_cameraByDimension[Game::DimensionSlot(dimension)];
     }
 
+    void ClientWorkerPool::SetMeshPriorityFields(const ::Render::MeshPriority::Fields& fields) {
+        std::lock_guard<std::mutex> lock(m_playerMutex);
+        m_priorityFields = fields;
+    }
+
+    ::Render::MeshPriority::Field ClientWorkerPool::GetMeshPriorityField(Game::DimensionId dimension) const {
+        std::lock_guard<std::mutex> lock(m_playerMutex);
+        return m_priorityFields[Game::DimensionSlot(dimension)];
+    }
+
+    void ClientWorkerPool::SetTranslucentSortCamera(Game::DimensionId dimension, const glm::dvec3& cameraPos) {
+        std::lock_guard<std::mutex> lock(m_playerMutex);
+        const size_t slot = Game::DimensionSlot(dimension);
+        m_sortCameraByDimension[slot] = cameraPos;
+        m_sortCameraSet[slot] = true;
+    }
+
+    glm::dvec3 ClientWorkerPool::GetTranslucentSortCamera(Game::DimensionId dimension) const {
+        std::lock_guard<std::mutex> lock(m_playerMutex);
+        const size_t slot = Game::DimensionSlot(dimension);
+        return m_sortCameraSet[slot] ? m_sortCameraByDimension[slot]
+                                     : glm::dvec3(m_cameraByDimension[slot]);
+    }
+
     void ClientWorkerPool::LogStats() const {
         Log::Info("ClientWorkerPool Statistics:");
         Log::Info("  Mesh Jobs Submitted: %zu", m_stats.meshJobsSubmitted.load());
@@ -245,6 +276,7 @@ namespace Threading {
         // Feeds the frame: a section that finishes late is a hole in the world,
         // so these outrank terrain generation but still yield to the main thread.
         Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
+        Platform::InstallThreadCrashStack();
         // Log::Debug("WORKER: Client worker thread started");
 
         static std::atomic<uint64_t> jobCounter{0};
@@ -286,14 +318,19 @@ namespace Threading {
 
             // 3. Take the nearest job to where the camera is RIGHT NOW —
             //    each job against its own level's camera.
+            //    "Nearest" is portal-aware: each level's priority field
+            //    (MeshPriority.hpp) ranks the far side of a portal beside
+            //    the player with the sections beside the player.
             std::array<glm::vec3, Game::kDimensionCount> cameras;
+            ::Render::MeshPriority::Fields fields;
             {
                 std::lock_guard<std::mutex> lock(m_playerMutex);
                 cameras = m_cameraByDimension;
+                fields  = m_priorityFields;
             }
             {
                 std::lock_guard<std::mutex> lock(m_jobQueueMutex);
-                jobOpt = PollNearestLocked(cameras);
+                jobOpt = PollNearestLocked(cameras, fields);
             }
 
             if (!jobOpt.has_value()) {
@@ -320,6 +357,58 @@ namespace Threading {
         Log::Debug("Client worker thread stopped");
     }
 
+    namespace {
+        // OBEY_MESH_HASH=<file>: dev check that a mesher change leaves the
+        // meshes identical. Keeps the latest content hash of every section
+        // built (by dimension, chunk, section Y) and writes them sorted to
+        // <file> at exit, so two runs of the same saved world can be diffed.
+        struct MeshHashLog {
+            std::mutex mutex;
+            std::map<std::tuple<int, int, int, int>, uint64_t> latest;
+            std::string path;
+            MeshHashLog() {
+                if (const char* p = std::getenv("OBEY_MESH_HASH")) path = p;
+            }
+            ~MeshHashLog() {
+                if (path.empty()) return;
+                if (std::FILE* f = std::fopen(path.c_str(), "w")) {
+                    for (const auto& [key, hash] : latest) {
+                        std::fprintf(f, "%d %d %d %d %016llx\n", std::get<0>(key), std::get<1>(key),
+                                     std::get<2>(key), std::get<3>(key),
+                                     static_cast<unsigned long long>(hash));
+                    }
+                    std::fclose(f);
+                }
+            }
+        };
+        MeshHashLog& MeshHashes() {
+            static MeshHashLog log;
+            return log;
+        }
+        template <typename T>
+        void HashBytes(uint64_t& h, const std::vector<T>& v) {
+            const auto* p = reinterpret_cast<const unsigned char*>(v.data());
+            const size_t n = v.size() * sizeof(T);
+            for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
+            h ^= n; h *= 1099511628211ull;
+        }
+        void RecordMeshHash(const Network::MeshBuildResult& result) {
+            MeshHashLog& log = MeshHashes();
+            if (log.path.empty() || !result.success) return;
+            const auto& m = result.meshData;
+            uint64_t h = 1469598103934665603ull;
+            HashBytes(h, m.opaqueVertices); HashBytes(h, m.opaqueIndices);
+            HashBytes(h, m.cutoutVertices); HashBytes(h, m.cutoutIndices);
+            HashBytes(h, m.translucentVertices);   // indices: camera-sorted, not content
+            HashBytes(h, m.translucentCentroids);
+            HashBytes(h, m.opaqueFaceMap); HashBytes(h, m.cutoutFaceMap);
+            for (uint32_t r : m.opaqueFacingRanges) { h ^= r; h *= 1099511628211ull; }
+            for (uint32_t r : m.cutoutFacingRanges) { h ^= r; h *= 1099511628211ull; }
+            std::lock_guard<std::mutex> lock(log.mutex);
+            log.latest[{static_cast<int>(result.dimension), result.chunkPos.x, result.sectionY, result.chunkPos.z}] = h;
+        }
+    }
+
     void ClientWorkerPool::ProcessMeshJob(const MeshJob& job) {
         PROFILE_ZONE;
         // Check if job should be cancelled
@@ -337,6 +426,7 @@ namespace Threading {
         try {
             // Build the section mesh
             Network::MeshBuildResult result = BuildSectionMesh(job);
+            RecordMeshHash(result);
             
             // Send result to client render thread
             SendMeshResult(std::move(result));
@@ -422,7 +512,19 @@ namespace Threading {
         // Build mesh using the real Mesher, feeding the snapshot directly —
         // the fast path fills the mesher's block cache with memcpys from the
         // snapshot's flat arrays instead of per-block virtual GetBlock calls.
-        Render::Mesher mesher;
+        //
+        // One mesher per worker thread, reused section to section: a fresh one
+        // per job cleared its caches, allocated a fluid builder, two
+        // std::functions and the biome/tint caches, and started its per-state
+        // model table empty — every state's first use in every section went
+        // back to the registry's name lookup. Every per-build cache is
+        // rewritten by the build's own fill (block, state, opacity, water,
+        // light) or generation-stamped (biome, tint, the model table).
+        static const bool s_meshPerJob = std::getenv("OBEY_MESHER_PER_JOB") != nullptr;   // A/B switch
+        thread_local Render::Mesher t_mesher;
+        std::unique_ptr<Render::Mesher> ownMesher;
+        if (s_meshPerJob) ownMesher = std::make_unique<Render::Mesher>();
+        Render::Mesher& mesher = ownMesher ? *ownMesher : t_mesher;
         mesher.SetDimension(job.snapshot->dimension);
         Render::SectionMesh sectionMesh;
         mesher.BuildSectionMesh(job.snapshot->region, job.chunkPos, job.sectionY, sectionMesh);
@@ -504,7 +606,8 @@ namespace Threading {
     // acquired), not by frame rate, so this is a few thousand distance
     // computations per second at most.
     std::optional<MeshJob> ClientWorkerPool::PollNearestLocked(
-            const std::array<glm::vec3, Game::kDimensionCount>& cameras) {
+            const std::array<glm::vec3, Game::kDimensionCount>& cameras,
+            const ::Render::MeshPriority::Fields& fields) {
         // Phase 1: drop cancelled entries (MC does this inline via
         // iterator.remove()). Swap-and-pop rather than a shifting erase — the
         // queue has no meaningful order, since selection is purely by distance.
@@ -540,17 +643,19 @@ namespace Threading {
             const MeshJob& job = m_jobQueue[i];
             // The job's own level's camera: the queue holds every level's
             // compiles, and their coordinates are not comparable across levels.
-            const glm::vec3& cameraPos = cameras[Game::DimensionSlot(job.snapshot->dimension)];
+            const size_t slot = Game::DimensionSlot(job.snapshot->dimension);
+            const glm::vec3& cameraPos = cameras[slot];
 
             // Section centre in world space. Y is attenuated by 0.1 (squared:
             // 0.01) — our deliberate deviation from MC's plain distSqr, kept
             // from the previous scheduler: this world is 384 blocks tall, so
             // without it a section 300 blocks overhead outranks one 200 blocks
             // out at eye level, which is not what the player is looking at.
-            const float dx = job.chunkPos.x * 16.0f + 8.0f - cameraPos.x;
-            const float dz = job.chunkPos.z * 16.0f + 8.0f - cameraPos.z;
-            const float dy = (-64.0f + job.sectionY * 16.0f + 8.0f) - cameraPos.y;
-            const float distSq = dx * dx + dz * dz + dy * dy * 0.01f;
+            // Through a portal the viewer can look through, the route
+            // distance counts instead when it is shorter (MeshPriority.hpp);
+            // with no portal in reach this is exactly that plain metric.
+            const float distSq = ::Render::MeshPriority::EffectiveDistSq(
+                fields[slot], cameraPos, job.chunkPos, job.sectionY);
 
             if (!job.isRecompile) {
                 if (distSq < bestInitialDistSq) { bestInitialDistSq = distSq; bestInitial = i; }
@@ -691,18 +796,26 @@ namespace Threading {
             // 2026-08-29 at 0.26 ms each, a third of all upload time during a
             // world load. Now it uploads the sorted indices once and only
             // re-sorts when the point of view changes.
-            const glm::vec3 cameraPos = GetPlayerPosition(dimension);
-            // Positions are section-relative fixed point (TerrainVertex);
-            // decode them back to world space against this section's origin.
+            // MC RebuildTask: sorted against the renderer's camera
+            // (SectionRenderDispatcher.cameraPosition), section-relative
+            // (createVertexSorting) — the centroids stay in the section's own
+            // frame, exactly as TerrainVertex stores them, and the camera is
+            // brought into that frame in double. World-space floats lost the
+            // 1/2048-block detail the keys need once the world coordinates
+            // grew, and sorting against the player's feet instead of the eye
+            // left a section rebuilt under a still camera in the wrong order
+            // (no re-sort fires until the camera changes block).
+            const glm::dvec3 cameraPos = GetTranslucentSortCamera(dimension);
             const auto* tv = reinterpret_cast<const Render::TerrainVertex*>(
                 result.meshData.translucentVertices.data());
-            const glm::vec3 origin(static_cast<float>(chunkPos.x * 16),
-                                   static_cast<float>(Config::MinY + sectionY * 16),
-                                   static_cast<float>(chunkPos.z * 16));
-            auto worldPos = [&](const Render::TerrainVertex& t) {
-                return origin + glm::vec3(Render::TerrainVertex::DecodePos(t.px),
-                                          Render::TerrainVertex::DecodePos(t.py),
-                                          Render::TerrainVertex::DecodePos(t.pz));
+            const glm::ivec3 sectionOrigin(
+                chunkPos.x * 16,
+                Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
+                chunkPos.z * 16);
+            auto localPos = [](const Render::TerrainVertex& t) {
+                return glm::vec3(Render::TerrainVertex::DecodePos(t.px),
+                                 Render::TerrainVertex::DecodePos(t.py),
+                                 Render::TerrainVertex::DecodePos(t.pz));
             };
             const size_t quads = result.meshData.translucentVertexCount / 4;
             auto& centroids = result.meshData.translucentCentroids;
@@ -711,23 +824,20 @@ namespace Threading {
             std::vector<glm::vec3> centroidVec;
             centroidVec.reserve(quads);
             for (size_t q = 0; q < quads; ++q) {
-                const glm::vec3 c = (worldPos(tv[q * 4 + 0]) + worldPos(tv[q * 4 + 2])) * 0.5f;
+                const glm::vec3 c = (localPos(tv[q * 4 + 0]) + localPos(tv[q * 4 + 2])) * 0.5f;
                 centroidVec.push_back(c);
                 centroids.push_back(c.x); centroids.push_back(c.y); centroids.push_back(c.z);
             }
             std::vector<uint16_t> sorted;
             std::vector<uint32_t> scratchOrder;
             std::vector<float>    scratchKeys;
-            ::Render::TranslucentSort::BuildSortedIndices(centroidVec, cameraPos, sorted,
-                                                          scratchOrder, scratchKeys);
+            ::Render::TranslucentSort::BuildSortedIndices(
+                centroidVec, ::Render::TranslucentSort::SectionRelativeCamera(cameraPos, sectionOrigin),
+                sorted, scratchOrder, scratchKeys);
             if (!sorted.empty()) {
                 result.meshData.translucentIndices = std::move(sorted);
                 result.meshData.translucentIndexCount = result.meshData.translucentIndices.size();
-                const glm::ivec3 origin(
-                    chunkPos.x * 16,
-                    Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
-                    chunkPos.z * 16);
-                const auto pov = ::Render::TranslucentSort::MakePointOfView(cameraPos, origin);
+                const auto pov = ::Render::TranslucentSort::MakePointOfView(cameraPos, sectionOrigin);
                 result.meshData.translucentPovX = pov.x;
                 result.meshData.translucentPovY = pov.y;
                 result.meshData.translucentPovZ = pov.z;
@@ -766,6 +876,12 @@ namespace Threading {
     void SetClientWorkerPlayerPosition(Game::DimensionId dimension, const glm::vec3& position) {
         if (g_clientWorkerPool) {
             g_clientWorkerPool->SetPlayerPosition(dimension, position);
+        }
+    }
+
+    void SetClientWorkerSortCamera(Game::DimensionId dimension, const glm::dvec3& cameraPos) {
+        if (g_clientWorkerPool) {
+            g_clientWorkerPool->SetTranslucentSortCamera(dimension, cameraPos);
         }
     }
 

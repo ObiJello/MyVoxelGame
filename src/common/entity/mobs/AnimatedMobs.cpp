@@ -1,5 +1,10 @@
 // File: src/common/entity/mobs/AnimatedMobs.cpp
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/entity/SpearItem.hpp"
+#include "common/entity/Bucketable.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/particle/ParticleOptions.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -19,8 +24,13 @@
 #include "common/entity/ai/RandomPos.hpp"
 #include "common/entity/ai/Sensing.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
+#include "common/world/level/World.hpp"
 #include "common/entity/ai/brain/BreezeAi.hpp"
 #include "common/entity/ai/brain/CamelAi.hpp"
+#include "common/entity/HorseTaming.hpp"
+#include "common/entity/Item.hpp"
+#include "common/world/block/BlockInteraction.hpp"
+#include "common/physics/Physics.hpp"
 #include "common/entity/ai/brain/CopperGolemAi.hpp"
 #include "common/entity/ai/brain/CreakingAi.hpp"
 #include "common/entity/ai/brain/GoatAi.hpp"
@@ -44,6 +54,12 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
+#include "common/entity/FireworkItems.hpp"
+#include "common/inventory/SimpleContainerOps.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/level/WorldDrops.hpp"
+#include "common/world/tags/DataTags.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -122,10 +138,77 @@ namespace Game {
 
     // ══ Camel ══════════════════════════════════════════════════════════════
 
+    namespace {
+
+        // MC Camel.CamelMoveControl: a seated camel told to walk somewhere
+        // (and not held on a lead) gets up first, when it has the headroom.
+        class CamelMoveControl final : public MoveControl {
+        public:
+            explicit CamelMoveControl(Camel* camel) : MoveControl(camel), m_camel(camel) {}
+            void Tick() override {
+                if (m_operation == Operation::MoveTo && !m_camel->IsLeashed() && m_camel->IsCamelSitting() &&
+                    !m_camel->IsInPoseTransition() && m_camel->CanCamelChangePose()) {
+                    m_camel->StandUp();
+                }
+                MoveControl::Tick();
+            }
+        private:
+            Camel* m_camel;
+        };
+
+        // MC Camel.CamelLookControl: the head is the rider's while a player
+        // steers.
+        class CamelLookControl final : public LookControl {
+        public:
+            explicit CamelLookControl(Camel* camel) : LookControl(camel), m_camel(camel) {}
+            void Tick() override {
+                if (!m_camel->HasControllingPassenger()) LookControl::Tick();
+            }
+        private:
+            Camel* m_camel;
+        };
+
+        // MC Camel.CamelBodyRotationControl: a camel that refuses to move
+        // keeps its body where it is.
+        class CamelBodyRotationControl final : public BodyRotationControl {
+        public:
+            explicit CamelBodyRotationControl(Camel* camel) : BodyRotationControl(camel), m_camel(camel) {}
+            void ClientTick() override {
+                if (!m_camel->RefuseToMove()) BodyRotationControl::ClientTick();
+            }
+        private:
+            Camel* m_camel;
+        };
+
+        // MC AgeableMob.AgeableMobGroupData(0.2F) — what
+        // AbstractHorse.finalizeSpawn hands a herd: the first camel is an
+        // adult, each later one a calf on a 20 % roll.
+        struct CamelGroupData : SpawnGroupData {
+            float babySpawnChance = 0.2f;
+            int   groupSize = 0;
+        };
+
+    } // namespace
+
     Camel::Camel(EntityLevel* level, EntityTypeId type) : GenericAnimal(type, level) {
         // NO GOALS — MC's Camel has a brain and never registers any.
         m_goalSelector.Clear();
         m_targetSelector.Clear();
+
+        // MC Camel.createAttributes = AbstractHorse.createBaseHorseAttributes
+        // + MAX_HEALTH 32, MOVEMENT_SPEED 0.09, JUMP_STRENGTH 0.42,
+        // STEP_HEIGHT 1.5 (the def carries health, speed and step): the base
+        // horse's SAFE_FALL_DISTANCE 6 and FALL_DAMAGE_MULTIPLIER 0.5.
+        m_attributes.SetBaseValue(Attribute::JumpStrength, 0.41999998688697815);
+        m_attributes.SetBaseValue(Attribute::SafeFallDistance, 6.0);
+        m_attributes.SetBaseValue(Attribute::FallDamageMultiplier, 0.5);
+
+        // MC Camel's constructor: CamelMoveControl, CamelLookControl, the
+        // body control, and a navigation that floats.
+        SetMoveControl(std::make_unique<CamelMoveControl>(this));
+        SetLookControl(std::make_unique<CamelLookControl>(this));
+        SetBodyRotationControl(std::make_unique<CamelBodyRotationControl>(this));
+        GetNavigation().SetCanFloat(true);
 
         m_brain = std::make_unique<Brain>();
         CamelAi::InitBrain(*this, *m_brain);
@@ -136,6 +219,85 @@ namespace Game {
     }
 
     void Camel::UpdateBrainActivity() { CamelAi::UpdateActivity(*this); }
+
+    std::shared_ptr<SpawnGroupData>
+    Camel::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // Camel.finalizeSpawn: resetLastPoseChangeTickToFullStand.
+        const int64_t now = m_level ? m_level->GetGameTime() : 0;
+        ResetLastPoseChangeTick(std::max<int64_t>(0, now - kStandUpDuration - 1));
+        // AbstractHorse.finalizeSpawn: AgeableMobGroupData(0.2) when none
+        // came in; AgeableMob.finalizeSpawn rolls the calves (a camel husk
+        // cannot be one — canBeABaby).
+        if (!groupData) groupData = std::make_shared<CamelGroupData>();
+        if (auto* herd = dynamic_cast<CamelGroupData*>(groupData.get())) {
+            if (!IsHusk() && m_level && herd->groupSize > 0 &&
+                m_level->Random().NextFloat() <= herd->babySpawnChance) {
+                SetAge(kBabyStartAge);
+            }
+            ++herd->groupSize;
+        }
+        return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    // ── Dimensions ───────────────────────────────────────────────────────────
+
+    float Camel::BaseBbWidth() const {
+        if (GetPose() == Pose::Sitting) return IsBaby() ? 0.95f : GetEntityTypeInfo(EntityTypeId::Camel).width;
+        return GenericAnimal::BaseBbWidth();
+    }
+
+    float Camel::BaseBbHeight() const {
+        if (GetPose() == Pose::Sitting) {
+            return IsBaby() ? 0.425f : GetEntityTypeInfo(EntityTypeId::Camel).height - kSittingHeightDifference;
+        }
+        return GenericAnimal::BaseBbHeight();
+    }
+
+    float Camel::BaseEyeHeight() const {
+        if (GetPose() == Pose::Sitting) return IsBaby() ? 0.41f : 0.845f;
+        return GenericAnimal::BaseEyeHeight();
+    }
+
+    double Camel::GetBodyAnchorAnimationYOffset(bool isFront, float partialTicks, float dimensionsHeight,
+                                                float scale) const {
+        // MC Camel.getBodyAnchorAnimationYOffset, verbatim.
+        const double ageSitYOffset = IsBaby() ? 0.09375 : 0.375;
+        double baseSitOffset = static_cast<double>(dimensionsHeight) - ageSitYOffset;
+        const float sittingHeightDifference = scale * kSittingHeightDifference;
+        const float verticalDrop = sittingHeightDifference - scale * 0.2f;
+        const float bottomPoint = sittingHeightDifference - verticalDrop;
+        const bool isInTransition = IsInPoseTransition();
+        const bool isSitting = IsCamelSitting();
+        if (isInTransition) {
+            const int animationDuration = isSitting ? kSitDownDuration : kStandUpDuration;
+            int halfPoint;
+            float flexPointOffset;
+            if (isSitting) {
+                halfPoint = 28;
+                flexPointOffset = isFront ? 0.5f : 0.1f;
+            } else {
+                halfPoint = isFront ? 24 : 32;
+                flexPointOffset = isFront ? 0.6f : 0.35f;
+            }
+            const float poseTime = std::clamp(static_cast<float>(GetPoseTime()) + partialTicks, 0.0f,
+                                              static_cast<float>(animationDuration));
+            const bool isFirstPart = poseTime < static_cast<float>(halfPoint);
+            const float part = isFirstPart
+                ? poseTime / static_cast<float>(halfPoint)
+                : (poseTime - static_cast<float>(halfPoint)) / static_cast<float>(animationDuration - halfPoint);
+            const float flexPoint = sittingHeightDifference - flexPointOffset * verticalDrop;
+            baseSitOffset += isSitting
+                ? static_cast<double>(Mth::Lerp(part, isFirstPart ? sittingHeightDifference : flexPoint,
+                                                isFirstPart ? flexPoint : bottomPoint))
+                : static_cast<double>(Mth::Lerp(part, isFirstPart ? bottomPoint - sittingHeightDifference
+                                                                  : bottomPoint - flexPoint,
+                                                isFirstPart ? bottomPoint - flexPoint : 0.0f));
+        }
+        if (isSitting && !isInTransition) baseSitOffset += static_cast<double>(bottomPoint);
+        return baseSitOffset;
+    }
+
+    // ── Pose ─────────────────────────────────────────────────────────────────
 
     int64_t Camel::GetPoseTime() const {
         const int64_t now = m_level ? m_level->GetGameTime() : 0;
@@ -148,26 +310,68 @@ namespace Game {
 
     void Camel::SitDown() {
         if (IsCamelSitting()) return;
-        MakeSound(IsHusk() ? SoundEvents::CAMEL_HUSK_SIT : SoundEvents::CAMEL_SIT);   // MC getSitDownSound
+        MakeSound(GetSitDownSound());
         SetPose(Pose::Sitting);
+        GameEvent(GameEventId::EntityAction);   // MC sitDown
         // NEGATIVE while sitting — that sign IS the sitting flag in MC.
         ResetLastPoseChangeTick(-(m_level ? m_level->GetGameTime() : 0));
     }
 
     void Camel::StandUp() {
         if (!IsCamelSitting()) return;
-        MakeSound(IsHusk() ? SoundEvents::CAMEL_HUSK_STAND : SoundEvents::CAMEL_STAND);   // MC getStandUpSound
+        MakeSound(GetStandUpSound());
         SetPose(Pose::Standing);
+        GameEvent(GameEventId::EntityAction);   // MC standUp
         ResetLastPoseChangeTick(m_level ? m_level->GetGameTime() : 0);
     }
 
     void Camel::StandUpInstantly() {
         SetPose(Pose::Standing);
+        GameEvent(GameEventId::EntityAction);   // MC standUpInstantly
         // MC backdates the change past the whole stand-up so the camel is not
         // considered "in transition" at all.
         const int64_t now = m_level ? m_level->GetGameTime() : 0;
         ResetLastPoseChangeTick(std::max<int64_t>(0, now - kStandUpDuration - 1));
     }
+
+    bool Camel::CanCamelChangePose() const {
+        // MC LivingEntity.wouldNotSuffocateAtTargetPose(isCamelSitting ?
+        // STANDING : SITTING): the other pose's box at the feet meets no
+        // block.
+        if (!m_level) return true;
+        const bool toStanding = IsCamelSitting();
+        const EntityTypeInfo& type = GetEntityTypeInfo(GetType());
+        float width, height;
+        if (toStanding) {
+            width = IsBaby() ? GetBabyWidth(GetType()) : type.width;
+            height = IsBaby() ? GetBabyHeight(GetType()) : type.height;
+        } else {
+            width = IsBaby() ? 0.95f : GetEntityTypeInfo(EntityTypeId::Camel).width;
+            height = IsBaby() ? 0.425f : GetEntityTypeInfo(EntityTypeId::Camel).height - kSittingHeightDifference;
+        }
+        const double halfWidth = static_cast<double>(width * scale) * 0.5;
+        const AABBd box = AABBd::FromMinMax(position - glm::dvec3(halfWidth, 0.0, halfWidth),
+                                            position + glm::dvec3(halfWidth, static_cast<double>(height * scale),
+                                                                  halfWidth));
+        return !CollidesAt(box, m_level->Physics());
+    }
+
+    bool Camel::IsCamelPanicking() const {
+        // MC PathfinderMob.isPanicking: a brain that keeps IS_PANICKING
+        // answers from the memory.
+        if (const Brain* brain = GetBrain()) return brain->HasMemoryValue(MemoryModule::IsPanicking);
+        return IsPanicking();
+    }
+
+    bool Camel::IsMobControlled() const {
+        // AbstractHorse.isMobControlled is false; CamelHusk's: its first
+        // passenger is a Mob (the husk that came riding it).
+        if (!IsHusk()) return false;
+        const Entity* first = GetFirstPassenger();
+        return first && !first->IsPlayer() && dynamic_cast<const Mob*>(first) != nullptr;
+    }
+
+    // ── Sounds ───────────────────────────────────────────────────────────────
 
     void Camel::PlayStepSound(const glm::ivec3& pos, BlockState state) {
         (void)pos;
@@ -183,12 +387,326 @@ namespace Game {
     }
 
     void Camel::PlayEatingSound() {
-        // MC Camel.feed's eat: level.playSound(null, x, y, z, getEatingSound(),
-        // getSoundSource(), 1, 1 ± 0.2).
+        // MC Camel.handleEating's tail: unless silent, level.playSound(null,
+        // x, y, z, getEatingSound(), getSoundSource(), 1, 1 ± 0.2), then
+        // gameEvent(EAT) — reached only from a feeding that took.
         if (!m_level) return;
+        if (!IsSilent()) {
+            JavaRandom& rng = m_level->Random();
+            m_level->PlaySound(nullptr, position, GetEatingSound(), GetSoundSource(), 1.0f,
+                               1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+        }
+        GameEvent(GameEventId::Eat);
+    }
+
+    // ── Interaction, feeding, breeding ───────────────────────────────────────
+
+    UseResult Camel::MobInteract(LivingEntity& player, ItemStack& held) {
+        // CamelHusk.interact: any click makes the husk persistent.
+        if (IsHusk()) SetPersistenceRequired(true);
+        // MC Camel.mobInteract.
+        if (HorseTaming::IsSecondaryUseActive(player) && !IsBaby()) {
+            OpenCustomInventoryScreen(player);
+            return UseResult::Success;
+        }
+        if (!held.IsEmpty()) {
+            if (const auto interact = ItemRegistry::Get(held.itemId).interactLivingEntity) {
+                const UseResult r = interact(held, *this);
+                if (ConsumesAction(r)) return r;
+            }
+        }
+        if (IsFood(held.itemId)) return FedFood(player, held);
+        if (GetPassengers().size() < 2 && !IsBaby()) {
+            // AbstractHorse.doPlayerRide: setEating(false), clearStanding,
+            // then (server) startRiding.
+            SetEating(false);
+            if (m_level && !m_level->IsClientSide()) m_level->StartPlayerRiding(player, *this);
+            return UseResult::Consume;
+        }
+        if (IsBaby() && held.itemId == ItemRegistry::FromBlock(BlockID::GoldenDandelion)) {
+            return GenericAnimal::MobInteract(player, held);
+        }
+        return UseResult::Fail;
+    }
+
+    void Camel::OpenCustomInventoryScreen(LivingEntity& player) {
+        // MC Camel.openCustomInventoryScreen: !isClientSide →
+        // player.openHorseInventory(this, inventory).
+        if (m_level && !m_level->IsClientSide()) m_level->OpenMountInventory(player, *this);
+    }
+
+    UseResult Camel::FedFood(LivingEntity& player, ItemStack& held) {
+        // MC AbstractHorse.fedFood.
+        const bool ate = HandleEating(player, held);
+        if (ate) UsePlayerItem(held);
+        const bool clientSide = m_level && m_level->IsClientSide();
+        return !ate && !clientSide ? UseResult::Pass : UseResult::SuccessServer;
+    }
+
+    bool Camel::HandleEating(LivingEntity& player, const ItemStack& held) {
+        // MC Camel.handleEating.
+        if (!IsFood(held.itemId)) return false;
+        const bool clientSide = m_level && m_level->IsClientSide();
+        const bool couldHeal = GetHealth() < GetMaxHealth();
+        if (couldHeal) Heal(2.0f);
+        // isTamed() is always true for a camel.
+        const bool couldSetInLove = GetAge() == 0 && CanFallInLove();
+        if (couldSetInLove && !clientSide) SetInLove(&player);
+        const bool couldAgeUp = CanAgeUp();
+        if (couldAgeUp && !clientSide) {
+            // The HAPPY_VILLAGER puff over the calf (getRandomX(1),
+            // getRandomY() + 0.5) — sent, the client does not run this.
+            SendHappyVillagerParticle();
+            AgeUp(10);
+        }
+        if (!couldHeal && !couldSetInLove && !couldAgeUp) return false;
+        if (!clientSide) PlayEatingSound();
+        return true;
+    }
+
+    bool Camel::CanParent() const {
+        // MC AbstractHorse.canParent (isTamed is always true for a camel).
+        return !IsVehicle() && !IsPassenger() && !IsBaby() && GetHealth() >= GetMaxHealth() && IsInLove();
+    }
+
+    bool Camel::CanMate(const Animal& other) const {
+        // MC Camel.canMate; CamelHusk.canMate is false.
+        if (IsHusk() || &other == this) return false;
+        const auto* camel = dynamic_cast<const Camel*>(&other);
+        return camel && !camel->IsHusk() && CanParent() && camel->CanParent();
+    }
+
+    // ── AbstractHorse's life ─────────────────────────────────────────────────
+
+    void Camel::AiStep() {
+        GenericAnimal::AiStep();
+        // MC AbstractHorse.aiStep, server half: the slow self-heal and
+        // grazing (canEatGrass is true for a camel too).
+        if (!m_level || m_level->IsClientSide() || !IsAlive()) return;
         JavaRandom& rng = m_level->Random();
-        m_level->PlaySound(nullptr, position, IsHusk() ? SoundEvents::CAMEL_HUSK_EAT : SoundEvents::CAMEL_EAT,
-                           GetSoundSource(), 1.0f, 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.2f);
+        if (rng.NextInt(900) == 0 && deathTime == 0) Heal(1.0f);
+        if (!m_eating && !IsVehicle() && rng.NextInt(300) == 0) {
+            const IBlockAccess* blocks = m_level->Blocks();
+            const glm::ivec3 p = BlockPosition();
+            if (blocks && blocks->GetBlock(p.x, p.y - 1, p.z) == BlockID::Grass) m_eating = true;
+        }
+        if (m_eating && ++m_eatingCounter > 50) {
+            m_eatingCounter = 0;
+            m_eating = false;
+        }
+    }
+
+    bool Camel::CauseFallDamage(double fallDist, float damageMultiplier) {
+        // MC AbstractHorse.causeFallDamage.
+        if (m_level && m_level->IsClientSide()) return false;
+        if (fallDist > 1.0) {
+            PlaySound(IsBaby() ? SoundEvents::HORSE_LAND_BABY : SoundEvents::HORSE_LAND, 0.4f, 1.0f);
+        }
+        const int damage = CalculateFallDamage(fallDist, damageMultiplier);
+        if (damage <= 0) return false;
+        Hurt(MobDamageSource::Fall, static_cast<float>(damage), nullptr);
+        // (propagateFallToPassengers rides Entity::CheckFallDamage, beside
+        // this call.)
+        PlayBlockFallSound();
+        return true;
+    }
+
+    void Camel::ActuallyHurt(MobDamageSource source, float amount, Entity* attacker) {
+        // MC Camel.actuallyHurt: up at once, then the damage.
+        StandUpInstantly();
+        GenericAnimal::ActuallyHurt(source, amount, attacker);
+    }
+
+    void Camel::UpdateWalkAnimation(float distance) {
+        // MC Camel.updateWalkAnimation.
+        const float targetSpeed = (GetPose() == Pose::Standing && !Anim(MobAnim::Dash).IsStarted())
+                                      ? std::min(distance * 6.0f, 1.0f)
+                                      : 0.0f;
+        walkAnimation.Update(targetSpeed, 0.2f, IsBaby() ? 3.0f : 1.0f);
+    }
+
+    void Camel::Travel(const glm::dvec3& input) {
+        // MC Camel.travel: a camel that refuses to move keeps only its
+        // vertical motion on the ground.
+        glm::dvec3 in = input;
+        if (RefuseToMove() && onGround) {
+            velocity.x = 0.0;
+            velocity.z = 0.0;
+            in.x = 0.0;
+            in.z = 0.0;
+        }
+        GenericAnimal::Travel(in);
+    }
+
+    // ── Riding ───────────────────────────────────────────────────────────────
+
+    bool Camel::CanBeSteeredBy(const RiderControl& rider) const {
+        // MC AbstractHorse.getControllingPassenger: saddled, a player first.
+        (void)rider;
+        return IsSaddled();
+    }
+
+    glm::dvec3 Camel::GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) {
+        (void)selfInput;
+        // MC Camel.getRiddenInput: nothing while it refuses to move; else
+        // AbstractHorse's — half-speed strafing, a quarter backwards (the
+        // rearing stop never applies: a camel cannot rear).
+        if (RefuseToMove()) return glm::dvec3(0.0);
+        const float sideways = rider.xxa * 0.5f;
+        float forward = rider.zza;
+        if (forward <= 0.0f) forward *= 0.25f;
+        return glm::dvec3(static_cast<double>(sideways), 0.0, static_cast<double>(forward));
+    }
+
+    void Camel::TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) {
+        (void)riddenInput;
+        // AbstractHorse.tickRidden: getRiddenRotation — Camel's keeps its
+        // own while it refuses to move, else (rider pitch / 2, rider yaw).
+        float riddenXRot = xRot;
+        float riddenYRot = yRot;
+        if (!RefuseToMove()) {
+            riddenXRot = rider.xRot * 0.5f;
+            riddenYRot = rider.yRot;
+        }
+        // setRot(y % 360, x % 360); yRotO = yBodyRot = yHeadRot = yRot.
+        yRot = std::fmod(riddenYRot, 360.0f);
+        xRot = std::fmod(riddenXRot, 360.0f);
+        yRotO = yBodyRot = yHeadRot = yRot;
+        if (CanSimulateMountMovement() && onGround) {
+            // The charged dash, spent on the ground (isJumping is the
+            // mount's own jump key, never set under a rider).
+            if (m_playerJumpPendingScale > 0.0f && !jumping) ExecuteRidersJump(m_playerJumpPendingScale);
+            m_playerJumpPendingScale = 0.0f;
+        }
+        // Camel.tickRidden: pressing forward on a seated camel stands it up.
+        if (rider.zza > 0.0f && IsCamelSitting() && !IsInPoseTransition()) StandUp();
+    }
+
+    float Camel::GetRiddenSpeed(const RiderControl& rider) const {
+        // MC Camel.getRiddenSpeed: +0.1 while the rider sprints (a passenger
+        // sprints on a forward impulse, Camel.canSprint) and the dash is off
+        // cooldown.
+        const bool sprinting = rider.sprinting && rider.zza > 1.0e-5f;
+        const float movementBonus = sprinting && GetJumpCooldown() == 0 ? 0.1f : 0.0f;
+        return static_cast<float>(GetAttributeValue(Attribute::MovementSpeed)) + movementBonus;
+    }
+
+    float Camel::GetBlockSpeedFactor() const {
+        // MC Entity.getBlockSpeedFactor (soul sand and honey slow to 0.4: the
+        // block at the feet, else — water and bubble columns excepted — the
+        // one below that affects movement), lifted toward 1 by
+        // MOVEMENT_EFFICIENCY (LivingEntity.getBlockSpeedFactor).
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        if (!blocks) return 1.0f;
+        const auto factorOf = [](BlockID id) {
+            return (id == BlockID::SoulSand || id == BlockID::HoneyBlock) ? 0.4f : 1.0f;
+        };
+        const glm::ivec3 feet = BlockPosition();
+        const BlockID here = blocks->GetBlock(feet.x, feet.y, feet.z);
+        float factor = factorOf(here);
+        if (here != BlockID::Water && here != BlockID::BubbleColumn && factor == 1.0f) {
+            const int belowY = static_cast<int>(std::floor(position.y - 0.500001));
+            factor = factorOf(blocks->GetBlock(feet.x, belowY, feet.z));
+        }
+        const float efficiency = static_cast<float>(GetAttributeValue(Attribute::MovementEfficiency));
+        return Mth::Lerp(efficiency, factor, 1.0f);
+    }
+
+    void Camel::ExecuteRidersJump(float amount) {
+        // MC Camel.executeRidersJump: along the look (flattened), scaled by
+        // the charge, speed and the block underfoot, plus a lift from the
+        // jump power.
+        const double jumpMomentum = static_cast<double>(GetJumpPower());
+        const glm::vec3 look = Mth::ViewVector(xRot, yRot);
+        glm::dvec3 flat(static_cast<double>(look.x), 0.0, static_cast<double>(look.z));
+        const double length = std::sqrt(flat.x * flat.x + flat.z * flat.z);
+        flat = length < 1.0e-5 ? glm::dvec3(0.0) : flat / length;
+        const double push = static_cast<double>(22.2222f * amount) * GetAttributeValue(Attribute::MovementSpeed) *
+                            static_cast<double>(GetBlockSpeedFactor());
+        velocity += flat * push + glm::dvec3(0.0, static_cast<double>(1.4285f * amount) * jumpMomentum, 0.0);
+        m_dashCooldown = kDashCooldownTicks;
+        SetDashing(true);
+        needsSync = true;
+    }
+
+    bool Camel::CanJump() const {
+        return !RefuseToMove() && IsSaddled();
+    }
+
+    void Camel::OnPlayerJump(int jumpAmount) {
+        // MC Camel.onPlayerJump → AbstractHorse.onPlayerJump (the stand it
+        // would try is refused: a camel cannot rear).
+        if (!IsSaddled() || m_dashCooldown > 0 || !onGround) return;
+        if (jumpAmount < 0) jumpAmount = 0;
+        // PlayerRideableJumping.getPlayerJumpPendingScale.
+        m_playerJumpPendingScale = jumpAmount >= 90 ? 1.0f
+                                                    : 0.4f + 0.4f * static_cast<float>(jumpAmount) / 90.0f;
+    }
+
+    void Camel::HandleStartJump(int jumpScale) {
+        (void)jumpScale;
+        // MC Camel.handleStartJump.
+        MakeSound(GetDashingSound());
+        GameEvent(GameEventId::EntityAction);
+        SetDashing(true);
+    }
+
+    void Camel::SetDashing(bool v) {
+        if (v == m_dashing) return;
+        m_dashing = v;
+        // MC Camel.onSyncedDataUpdated(DASH), which SynchedEntityData runs
+        // on every change of the flag on either side (not on the first tick):
+        // arm the cooldown unless one is running.
+        if (tickCount > 0) m_dashCooldown = m_dashCooldown == 0 ? kDashCooldownTicks : m_dashCooldown;
+    }
+
+    // ── Seats ────────────────────────────────────────────────────────────────
+
+    namespace {
+        // Vec3.yRot(-yRot in radians) of (0, y, z).
+        glm::dvec3 CamelSeatRotated(double y, double z, float yRot) {
+            const double a = -static_cast<double>(yRot) * static_cast<double>(Mth::kDegToRad);
+            return glm::dvec3(z * std::sin(a), y, z * std::cos(a));
+        }
+    }
+
+    glm::dvec3 Camel::GetPassengerAttachmentPoint(const Entity& passenger) const {
+        // MC Camel.getPassengerAttachmentPoint(passenger, getDimensions(pose),
+        // getScale() * getAgeScale()).
+        const auto& riders = GetPassengers();
+        const auto it = std::find(riders.begin(), riders.end(), &passenger);
+        const int index = it == riders.end() ? 0 : static_cast<int>(it - riders.begin());
+        const bool driver = index == 0;
+        const float ageScale = scale * GetCamelAgeScale();
+        float offset = 0.5f;
+        const double height = IsRemoved() ? 0.009999999776482582
+                                          : GetBodyAnchorAnimationYOffset(driver, 0.0f, GetBbHeight(), ageScale);
+        if (riders.size() > 1) {
+            if (!driver) offset = -0.7f;
+            if (dynamic_cast<const Animal*>(&passenger)) offset += 0.2f;
+        }
+        return CamelSeatRotated(height, static_cast<double>(offset * ageScale), yRot);
+    }
+
+    glm::dvec3 Camel::GetPassengerAttachmentForSlot(int slot, int total) const {
+        // The same seat known by its place (a client's player — never an
+        // Animal).
+        const bool driver = slot <= 0;
+        const float ageScale = scale * GetCamelAgeScale();
+        float offset = 0.5f;
+        const double height = IsRemoved() ? 0.009999999776482582
+                                          : GetBodyAnchorAnimationYOffset(driver, 0.0f, GetBbHeight(), ageScale);
+        if (total > 1 && !driver) offset = -0.7f;
+        return CamelSeatRotated(height, static_cast<double>(offset * ageScale), yRot);
+    }
+
+    void Camel::PositionRider(Entity& passenger) {
+        GenericAnimal::PositionRider(passenger);
+        if (LivingEntity* living = passenger.AsLiving()) living->yBodyRot = yBodyRot;
+    }
+
+    glm::dvec3 Camel::GetDismountLocationForPassenger(const LivingEntity& passenger) const {
+        return HorseTaming::EquineDismountLocation(*this, passenger);
     }
 
     void Camel::OnPoseUpdated() {
@@ -207,11 +725,10 @@ namespace Game {
         GenericAnimal::Tick();
 
         // MC Camel.tick's dash bookkeeping, both sides: the dash flag clears
-        // once the camel is back on the ground (or in liquid) and the cooldown
-        // has run 5 ticks (55 → below 50), and the cooldown itself counts down
-        // wherever it was armed.
-        if (IsDashing() && m_dashCooldown < 50
-            && (onGround || IsInLiquid())) {
+        // once the camel is back on the ground, in liquid or riding
+        // something, and the cooldown has run 5 ticks (55 → below 50); the
+        // cooldown itself counts down wherever it was armed.
+        if (IsDashing() && m_dashCooldown < 50 && (onGround || IsInLiquid() || IsPassenger())) {
             SetDashing(false);
         }
         if (m_dashCooldown > 0) {
@@ -219,10 +736,17 @@ namespace Game {
             // MC: at zero, level.playSound(null, blockPosition(),
             // getDashReadySound(), NEUTRAL, 1, 1).
             if (m_dashCooldown == 0 && m_level) {
-                m_level->PlaySound(nullptr, BlockPosition(),
-                                   IsHusk() ? SoundEvents::CAMEL_HUSK_DASH_READY : SoundEvents::CAMEL_DASH_READY,
-                                   SoundSource::Neutral, 1.0f, 1.0f);
+                m_level->PlaySound(nullptr, BlockPosition(), GetDashReadySound(), SoundSource::Neutral, 1.0f, 1.0f);
             }
+        }
+
+        // MC Camel.tick: a camel that refuses to move keeps its head within
+        // 30° of its body (Mob.clampHeadRotationToBody).
+        if (RefuseToMove()) {
+            const float limit = static_cast<float>(GetMaxHeadYRot());
+            const float delta = Mth::WrapDegrees(yBodyRot - yHeadRot);
+            const float targetDelta = std::clamp(Mth::WrapDegrees(yBodyRot - yHeadRot), -limit, limit);
+            yHeadRot = yHeadRot + delta - targetDelta;
         }
 
         // MC Camel.tick: a sitting camel that ends up in water stands straight
@@ -233,14 +757,8 @@ namespace Game {
     }
 
     void Camel::SetAnimStateByte(uint8_t v) {
-        // MC Camel.onSyncedDataUpdated's DASH branch: the client re-arms its
-        // local 55-tick cooldown when the flag turns on, so its auto-clear
-        // logic in tick() matches the server's timing.
-        const bool dashing = (v & 1) != 0;
-        if (dashing && !m_dashing && m_dashCooldown == 0) {
-            m_dashCooldown = kDashCooldownTicks;
-        }
-        m_dashing = dashing;
+        // MC Camel.onSyncedDataUpdated's DASH branch rides SetDashing.
+        SetDashing((v & 1) != 0);
     }
 
     void Camel::SetupAnimationStates() {
@@ -268,8 +786,8 @@ namespace Game {
             Anim(MobAnim::Sit).Stop();
             Anim(MobAnim::SitPose).Stop();
             // MC's line verbatim: the dash flag rides the anim-state byte, so
-            // this fires the moment the server's setDashing(true) — a rider's
-            // charged jump, once riding exists — reaches this client.
+            // this fires the moment a rider's dash (the steering client's own
+            // executeRidersJump, the server's handleStartJump) sets it.
             Anim(MobAnim::Dash).AnimateWhen(IsDashing(), tickCount);
             Anim(MobAnim::SitUp).AnimateWhen(IsInPoseTransition() && GetPoseTime() >= 0,
                                              tickCount);
@@ -438,6 +956,116 @@ namespace Game {
         HandleWaterAnimalAirSupply(*this, airSupply);
     }
 
+    void Tadpole::AiStep() {
+        GenericPathfinderMob::AiStep();
+        // MC Tadpole.aiStep: the server ages it a tick unless locked.
+        if (m_level && !m_level->IsClientSide() && !m_ageLocked && !IsRemoved()) SetAge(m_age + 1);
+        // MC AgeableMob.makeAgeLockedParticle: one PAUSE_MOB_GROWTH (locked)
+        // or RESET_MOB_GROWTH (unlocked) every other tick of the burst, just
+        // above the body (the locked one 0.2 higher, drifting down).
+        if (m_ageLockParticleTimer > 0) {
+            if ((m_ageLockParticleTimer % 2) == 0 && m_level) {
+                JavaRandom& rng = m_level->Random();
+                const double w = static_cast<double>(GetBbWidth());
+                const double h = static_cast<double>(GetBbHeight());
+                const double px = position.x + w * (2.0 * rng.NextDouble() - 1.0);
+                const double py = position.y + h * 0.2 * rng.NextDouble() + h + (m_ageLocked ? 0.2 : 0.0);
+                const double pz = position.z + w * (2.0 * rng.NextDouble() - 1.0);
+                m_level->AddParticle(m_ageLocked ? ParticleKind::PauseMobGrowth : ParticleKind::ResetMobGrowth,
+                                     px, py, pz, 0.0, 0.0, 0.0);
+            }
+            --m_ageLockParticleTimer;
+        }
+    }
+
+    void Tadpole::SetAge(int age) {
+        m_age = age;
+        if (m_age >= kTicksToBeFrog) BecomeFrog();
+    }
+
+    void Tadpole::BecomeFrog() {
+        // MC Tadpole.ageUp: convertTo(FROG, ConversionParams.single(this,
+        // false, false), frog -> { finalizeSpawn(CONVERSION);
+        // setPersistenceRequired(); fudgePositionAfterSizeChange; the
+        // grow-up sound }). The frog (0.5 wide) centred on the tadpole's
+        // spot (0.4) needs no nudge out of a wall a tadpole fitted in.
+        if (!m_level || m_level->IsClientSide() || IsRemoved()) return;
+        std::unique_ptr<Mob> frog = MakeGenericMob(EntityTypeId::Frog, m_level);
+        if (!frog) return;
+        CopyConversionState(*frog);
+        frog->FinalizeSpawn(SpawnReason::Conversion, nullptr);
+        frog->SetPersistenceRequired(true);
+        PlaySound(SoundEvents::TADPOLE_GROW_UP, 0.15f, 1.0f);
+        FinishConversion(std::move(frog));
+    }
+
+    UseResult Tadpole::MobInteract(LivingEntity& player, ItemStack& held) {
+        const bool client = m_level && m_level->IsClientSide();
+        // isFood: #frog_food (the slime ball), and not while locked.
+        if (held.itemId == Items::SlimeBall && !m_ageLocked) {
+            // MC feed: consume one (not in creative), age up by 10 % of what
+            // is left (getSpeedUpSecondsWhenFeeding), and the HAPPY_VILLAGER
+            // puff — a client-side addParticle in MC, so the client draws it.
+            if (client) {
+                if (m_level) {
+                    JavaRandom& rng = m_level->Random();
+                    const double w = static_cast<double>(GetBbWidth());
+                    m_level->AddParticle(ParticleKind::HappyVillager,
+                                         position.x + w * (2.0 * rng.NextDouble() - 1.0),
+                                         position.y + GetBbHeight() * rng.NextDouble() + 0.5,
+                                         position.z + w * (2.0 * rng.NextDouble() - 1.0), 0.0, 0.0, 0.0);
+                }
+                return UseResult::Success;
+            }
+            if (!player.IsCreative()) Animal::UsePlayerItem(held);
+            const int ticksLeft = std::max(0, kTicksToBeFrog - m_age);
+            SetAge(m_age + AgeableMob::GetSpeedUpSecondsWhenFeeding(ticksLeft) * 20);
+            return UseResult::Success;
+        }
+        // AgeableMob.canUseGoldenDandelion(itemStack, true, timer, this) →
+        // setAgeLocked: toggle, age back to 0, the 40-tick burst/cooldown,
+        // the flower spent, persistence when locking, the sound.
+        if (AgeableMob::CanUseGoldenDandelion(held, /*isBaby=*/true, m_ageLockParticleTimer, *this)) {
+            if (client) return UseResult::Success;
+            m_ageLocked = !m_ageLocked;
+            m_age = 0;
+            m_ageLockParticleTimer = 40;
+            if (!player.IsCreative()) Animal::UsePlayerItem(held);
+            if (m_ageLocked) SetPersistenceRequired(true);
+            if (m_level) {
+                m_level->PlaySound(nullptr, BlockPosition(),
+                                   m_ageLocked ? SoundEvents::GOLDEN_DANDELION_USE
+                                               : SoundEvents::GOLDEN_DANDELION_UNUSE,
+                                   SoundSource::Players, 1.0f, 1.0f);
+            }
+            return UseResult::Success;
+        }
+        if (auto r = Bucketable::BucketMobPickup(*this, player, held, Items::TadpoleBucket,
+                                                 SoundEvents::BUCKET_FILL_TADPOLE,
+                                                 [this](ItemStack& bucket) { SaveToBucket(bucket); })) {
+            return *r;
+        }
+        return GenericPathfinderMob::MobInteract(player, held);
+    }
+
+    void Tadpole::SaveToBucket(ItemStack& bucket) const {
+        Bucketable::SaveDefaultDataToBucketTag(*this, bucket);
+        BucketEntityData data = bucket.components.get(DataComponents::BUCKET_ENTITY_DATA)
+                                    .value_or(BucketEntityData{});
+        data.age = m_age;
+        data.ageLocked = m_ageLocked;
+        bucket.components.set(DataComponents::BUCKET_ENTITY_DATA, data);
+    }
+
+    void Tadpole::LoadFromBucket(const BucketEntityData& data) {
+        Bucketable::LoadDefaultDataFromBucketTag(*this, data);
+        // tag.getInt("Age").ifPresent(setAge); AgeLocked or false. (A
+        // bucketed tadpole is always short of the frog age — it would have
+        // converted — so this never converts a mob not yet in the level.)
+        if (data.age) m_age = *data.age;
+        m_ageLocked = data.ageLocked.value_or(false);
+    }
+
     Goat::Goat(EntityLevel* level) : GenericAnimal(EntityTypeId::Goat, level) {
         m_goalSelector.Clear();
         m_targetSelector.Clear();
@@ -464,12 +1092,7 @@ namespace Game {
 
     const char* Hoglin::GetAmbientSound() const {
         if (!m_level || m_level->IsClientSide()) return "";
-        const Brain* brain = GetBrain();
-        const std::optional<Activity> activity = brain ? brain->GetActiveNonCoreActivity() : std::nullopt;
-        if (!activity) return "";
-        if (*activity == Activity::Avoid) return SoundEvents::HOGLIN_RETREAT;
-        if (*activity == Activity::Fight) return SoundEvents::HOGLIN_ANGRY;
-        return SoundEvents::HOGLIN_AMBIENT;
+        return HoglinAi::SoundForCurrentActivity(*this);
     }
 
     const char* Piglin::GetAmbientSound() const {
@@ -484,18 +1107,74 @@ namespace Game {
                                                                            : SoundEvents::ZOGLIN_AMBIENT;
     }
 
+    namespace {
+
+        // MC HoglinBase.throwTarget: the knockback left after the target's
+        // resistance flings it — a random 0.2..0.7 share horizontally, turned
+        // by nextInt(21) - 10 (Vec3.yRot takes RADIANS), and up to half of it
+        // upward.
+        void HoglinThrowTarget(Mob& body, LivingEntity& target) {
+            EntityLevel* level = body.Level();
+            if (!level) return;
+            const double knockbackPower = body.GetAttributeValue(Attribute::AttackKnockback);
+            const double knockbackResistance = target.GetAttributeValue(Attribute::KnockbackResistance);
+            const double effective = knockbackPower - knockbackResistance;
+            if (effective <= 0.0) return;
+            const double xd = target.position.x - body.position.x;
+            const double zd = target.position.z - body.position.z;
+            JavaRandom& random = level->Random();
+            const float horizontalPushAngle = static_cast<float>(random.NextInt(21) - 10);
+            const double horizontalScale = effective * static_cast<double>(random.NextFloat() * 0.5f + 0.2f);
+            glm::dvec3 push(xd, 0.0, zd);
+            const double len = glm::length(push);
+            push = len < 1.0e-5 ? glm::dvec3(0.0) : push / len * horizontalScale;
+            const double c = static_cast<double>(std::cos(horizontalPushAngle));
+            const double sn = static_cast<double>(std::sin(horizontalPushAngle));
+            const glm::dvec3 turned(push.x * c + push.z * sn, 0.0, push.z * c - push.x * sn);
+            const double verticalScale = effective * static_cast<double>(random.NextFloat()) * 0.5;
+            // target.push(...) + syncVelocity: the push reaches the client.
+            target.AddDeltaMovement(glm::dvec3(turned.x, verticalScale, turned.z));
+        }
+
+        // MC HoglinBase.hurtAndThrowTarget — the hoglin's and the zoglin's
+        // hit: an adult deals ATTACK_DAMAGE / 2 + nextInt(ATTACK_DAMAGE)
+        // (a baby its flat 0.5) as a mob attack, then the post-attack
+        // enchantment effects and, for an adult, the fling.
+        bool HoglinHurtAndThrowTarget(Mob& body, LivingEntity& target) {
+            EntityLevel* level = body.Level();
+            if (!level) return false;
+            const float attackDamage = static_cast<float>(body.GetAttributeValue(Attribute::AttackDamage));
+            float actualDamage = attackDamage;
+            if (!body.IsBaby() && static_cast<int>(attackDamage) > 0) {
+                actualDamage = attackDamage / 2.0f +
+                               static_cast<float>(level->Random().NextInt(static_cast<int>(attackDamage)));
+            }
+            const bool wasHurt = target.Hurt(MobDamageSource::MobAttack, actualDamage, &body);
+            if (wasHurt) {
+                if (!level->IsClientSide()) {
+                    EnchantmentHelper::DoPostAttackEffects(
+                        *level, target, DamageSourceInfo::Of(MobDamageSource::MobAttack, &body, nullptr));
+                }
+                if (!body.IsBaby()) HoglinThrowTarget(body, target);
+            }
+            return wasHurt;
+        }
+
+    } // namespace
+
     bool Hoglin::DoHurtTarget(Entity& target) {
         // MC Hoglin.doHurtTarget: only living targets; arm the headbutt clock
         // and broadcast event 4 BEFORE the hit lands, so the animation starts
-        // on the same tick, with the HOGLIN_ATTACK grunt. HoglinAi.onHitTarget (the pack-retaliation memory) is not
-        // ported; HoglinBase.hurtAndThrowTarget's damage + fling is covered
-        // by the base hit — ATTACK_KNOCKBACK 1.0 from the def rides the
-        // base's extra knockback (the extra vertical toss is not modelled).
-        if (dynamic_cast<LivingEntity*>(&target) == nullptr) return false;
+        // on the same tick, with the HOGLIN_ATTACK grunt; then
+        // HoglinAi.onHitTarget (the pack rally or retreat) and
+        // HoglinBase.hurtAndThrowTarget.
+        auto* living = dynamic_cast<LivingEntity*>(&target);
+        if (!living) return false;
         m_attackAnimationRemainingTicks = 10;
         if (m_level) m_level->BroadcastEntityEvent(*this, 4);
         MakeSound(SoundEvents::HOGLIN_ATTACK);
-        return GenericAnimal::DoHurtTarget(target);
+        HoglinAi::OnHitTarget(*this, *living);
+        return HoglinHurtAndThrowTarget(*this, *living);
     }
 
     void Hoglin::AiStep() {
@@ -504,7 +1183,88 @@ namespace Game {
         if (m_attackAnimationRemainingTicks > 0) {
             --m_attackAnimationRemainingTicks;
         }
+        SyncAgeBoundary();
         GenericAnimal::AiStep();
+    }
+
+    void Hoglin::SyncAgeBoundary() {
+        // MC Hoglin.ageBoundaryReached (AgeableMob.setAge on a crossing, and
+        // on load): the baby's feeble 0.5 attack, the adult's 6.
+        const int baby = IsBaby() ? 1 : 0;
+        if (baby == m_lastBabyState) return;
+        m_lastBabyState = baby;
+        m_attributes.SetBaseValue(Attribute::AttackDamage, baby ? 0.5 : 6.0);
+    }
+
+    bool Hoglin::IsConverting() const {
+        return !m_immuneToZombification && !IsNoAi() && m_level &&
+               m_level->Dimension() != DimensionId::Nether;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Hoglin::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        if (m_level && m_level->Random().NextFloat() < 0.2f) SetBaby(true);
+        SyncAgeBoundary();
+        return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    bool Hoglin::Hurt(MobDamageSource source, float amount, Entity* attacker) {
+        const bool wasHurt = GenericAnimal::Hurt(source, amount, attacker);
+        if (wasHurt && m_level && !m_level->IsClientSide()) {
+            if (auto* living = dynamic_cast<LivingEntity*>(attacker)) {
+                HoglinAi::WasHurtBy(*m_level, *this, *living);
+            }
+        }
+        return wasHurt;
+    }
+
+    float Hoglin::GetWalkTargetValue(const glm::ivec3& pos) const {
+        if (HoglinAi::IsPosNearNearestRepellent(*this, pos)) return -1.0f;
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        return blocks && blocks->GetBlock(pos.x, pos.y - 1, pos.z) == BlockID::CrimsonNylium ? 10.0f : 0.0f;
+    }
+
+    bool Hoglin::CanFallInLove() const {
+        return !HoglinAi::IsPacified(*this) && GenericAnimal::CanFallInLove();
+    }
+
+    std::unique_ptr<Animal> Hoglin::CreateBaby() {
+        std::unique_ptr<Animal> baby = GenericAnimal::CreateBaby();
+        if (baby) baby->SetPersistenceRequired(true);
+        return baby;
+    }
+
+    UseResult Hoglin::MobInteract(LivingEntity& player, ItemStack& held) {
+        const UseResult result = GenericAnimal::MobInteract(player, held);
+        if (ConsumesAction(result)) SetPersistenceRequired(true);
+        return result;
+    }
+
+    void Hoglin::CustomServerAiStep() {
+        // MC Hoglin.customServerAiStep, after the brain: the conversion clock.
+        GenericAnimal::CustomServerAiStep();
+        if (!m_level || m_level->IsClientSide()) return;
+        if (IsConverting()) {
+            ++m_timeInOverworld;
+            if (m_timeInOverworld > kConversionTime) {
+                MakeSound(SoundEvents::HOGLIN_CONVERTED_TO_ZOMBIFIED);
+                FinishConversion();
+            }
+        } else {
+            m_timeInOverworld = 0;
+        }
+    }
+
+    void Hoglin::FinishConversion() {
+        // MC Hoglin.finishConversion: convertTo(ZOGLIN,
+        // ConversionParams.single(this, keepEquipment = true,
+        // preserveCanPickUpLoot = false)), the zoglin then gets NAUSEA 200.
+        auto zoglin = std::make_unique<Zoglin>(m_level);
+        CopyConversionState(*zoglin);
+        MoveEquipmentTo(*zoglin);
+        zoglin->SetBaby(IsBaby());
+        zoglin->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
+        GenericAnimal::FinishConversion(std::move(zoglin));
     }
 
     void Hoglin::HandleEntityEvent(uint8_t id) {
@@ -581,14 +1341,14 @@ namespace Game {
 
     bool Zoglin::DoHurtTarget(Entity& target) {
         // MC Zoglin.doHurtTarget, the Hoglin twin: only living targets, arm
-        // the clock, broadcast event 4, ZOGLIN_ATTACK, then the hit.
-        // hurtAndThrowTarget's fling is
-        // covered by the base's ATTACK_KNOCKBACK (1.0 from the def).
-        if (dynamic_cast<LivingEntity*>(&target) == nullptr) return false;
+        // the clock, broadcast event 4, ZOGLIN_ATTACK, then
+        // HoglinBase.hurtAndThrowTarget.
+        auto* living = dynamic_cast<LivingEntity*>(&target);
+        if (!living) return false;
         m_attackAnimationRemainingTicks = 10;
         if (m_level) m_level->BroadcastEntityEvent(*this, 4);
         MakeSound(SoundEvents::ZOGLIN_ATTACK);
-        return GenericMonster::DoHurtTarget(target);
+        return HoglinHurtAndThrowTarget(*this, *living);
     }
 
     void Zoglin::AiStep() {
@@ -610,14 +1370,29 @@ namespace Game {
 
     // ── Piglin / PiglinBrute ───────────────────────────────────────────────
 
+    namespace {
+        // MC AbstractPiglin's PIGLINS_ZOMBIFY environment attribute: true
+        // everywhere but the Nether.
+        bool PiglinsZombify(const EntityLevel* level) {
+            return level && level->Dimension() != DimensionId::Nether;
+        }
+
+        // MC AbstractPiglin.isHoldingMeleeWeapon: the main hand has a TOOL.
+        bool IsHoldingMeleeWeapon(const Mob& mob) {
+            const ItemStack& main = mob.GetMainHandEquipment();
+            return !main.IsEmpty() && main.get(DataComponents::TOOL).has_value();
+        }
+    }
+
     Piglin::Piglin(EntityLevel* level) : GenericMonster(EntityTypeId::Piglin, level) {
         // NO GOALS — MC's Piglin never registers any; the brain is the whole
-        // behaviour. setCanPickUpLoot(true) and the door-opening ability are
-        // skipped (items / door interaction); the fire maluses are MC
-        // AbstractPiglin's.
+        // behaviour. AbstractPiglin: setCanPickUpLoot(true) and the fire
+        // maluses (the door-opening ability is skipped with door
+        // interaction).
         m_goalSelector.Clear();
         m_targetSelector.Clear();
 
+        SetCanPickUpLoot(true);
         SetPathfindingMalus(PathType::DangerFire, 16.0f);
         SetPathfindingMalus(PathType::DamageFire, -1.0f);
 
@@ -626,6 +1401,13 @@ namespace Game {
     }
 
     void Piglin::UpdateBrainActivity() { PiglinAi::UpdateActivity(*this); }
+
+    void Piglin::PlayAmbientSound() {
+        // MC AbstractPiglin.playAmbientSound: PiglinAi.isIdle gates it.
+        if (const Brain* brain = GetBrain(); brain && brain->IsActive(Activity::Idle)) {
+            GenericMonster::PlayAmbientSound();
+        }
+    }
 
     void Piglin::SetBaby(bool baby) {
         // MC Piglin.setBaby — SPEED_MODIFIER_BABY: +20% ADD_MULTIPLIED_BASE.
@@ -641,17 +1423,47 @@ namespace Game {
         }
     }
 
+    bool Piglin::IsConverting() const {
+        return !IsImmuneToZombification() && !IsNoAi() && PiglinsZombify(m_level);
+    }
+
     std::shared_ptr<SpawnGroupData>
     Piglin::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
-        // MC Piglin.finalizeSpawn — 20% baby (the adult's spawn weapon and
-        // the 10%-per-piece gold armor rolls are skipped: no equipment
-        // system). STRUCTURE spawns (the bastion's template piglins) skip the
-        // roll entirely: they keep the template's adult body and its weapon.
-        if (reason != SpawnReason::Structure && m_level && m_level->Random().NextFloat() < 0.2f) {
-            SetBaby(true);
+        // MC Piglin.finalizeSpawn. STRUCTURE spawns (the bastion's template
+        // piglins) skip the baby / weapon roll: they keep the template's.
+        if (m_level) {
+            JavaRandom& random = m_level->Random();
+            if (reason != SpawnReason::Structure) {
+                if (random.NextFloat() < 0.2f) {
+                    SetBaby(true);
+                } else if (IsAdult()) {
+                    // createSpawnWeapon: 50% a crossbow, else a golden sword
+                    // (a golden spear one time in ten).
+                    const ItemID weapon = static_cast<double>(random.NextFloat()) < 0.5
+                        ? Items::Crossbow
+                        : (random.NextInt(10) == 0 ? Items::GoldenSpear : Items::GoldenSword);
+                    SetEquipment(EquipmentSlot::MAINHAND, ItemStack(weapon, 1));
+                }
+            }
+            PiglinAi::InitMemories(*this);
+            const DifficultyInstance difficulty = CurrentDifficulty();
+            PopulateDefaultEquipmentSlots(random, difficulty);
+            PopulateDefaultEquipmentEnchantments(random, difficulty);
         }
-        PiglinAi::InitMemories(*this);
         return GenericMonster::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void Piglin::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)difficulty;
+        if (!IsAdult()) return;
+        // maybeWearArmor: CHANCE_OF_WEARING_EACH_ARMOUR_ITEM 0.1, head first.
+        const auto maybeWear = [&](EquipmentSlot slot, ItemID item) {
+            if (random.NextFloat() < 0.1f) SetEquipment(slot, ItemStack(item, 1));
+        };
+        maybeWear(EquipmentSlot::HEAD,  Items::GoldenHelmet);
+        maybeWear(EquipmentSlot::CHEST, Items::GoldenChestplate);
+        maybeWear(EquipmentSlot::LEGS,  Items::GoldenLeggings);
+        maybeWear(EquipmentSlot::FEET,  Items::GoldenBoots);
     }
 
     bool Piglin::Hurt(MobDamageSource source, float amount, Entity* attacker) {
@@ -664,37 +1476,148 @@ namespace Game {
         return hurt;
     }
 
+    UseResult Piglin::MobInteract(LivingEntity& player, ItemStack& held) {
+        const UseResult result = GenericMonster::MobInteract(player, held);
+        if (ConsumesAction(result) || !m_level) return result;
+        if (!m_level->IsClientSide()) {
+            return PiglinAi::MobInteract(*m_level, *this, held) ? UseResult::Success : UseResult::Pass;
+        }
+        // The client: canAdmire (its memories are the server's — the arm
+        // pose stands in for ADMIRING_ITEM) and not already admiring.
+        const bool canAdmire = IsAdult() && PiglinAi::IsBarterCurrency(held) && GetPiglinArmPose() != 3;
+        return canAdmire ? UseResult::Success : UseResult::Pass;
+    }
+
+    void Piglin::PerformRangedAttack(LivingEntity& target, float power) {
+        (void)power;
+        // AbstractPiglin.getTarget: the brain's ATTACK_TARGET.
+        LivingEntity* aim = &target;
+        if (const Brain* brain = GetBrain()) {
+            if (auto* t = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget))) aim = t;
+        }
+        MobCrossbow::PerformCrossbowAttack(*this, *this, aim, MobCrossbow::kMobArrowPower);
+    }
+
+    bool Piglin::CanUseNonMeleeWeapon(const ItemStack& stack) const {
+        // MC Piglin.canUseNonMeleeWeapon: the crossbow, or a KINETIC_WEAPON
+        // (a spear — its charge is the brain's SpearAttack, not a melee).
+        return stack.itemId == Items::Crossbow || Spear::Kinetic(stack) != nullptr;
+    }
+
+    bool Piglin::WantsToPickUp(const ItemStack& stack) const {
+        return m_level && m_level->MobGriefing() && CanPickUpLoot() && PiglinAi::WantsToPickup(*this, stack);
+    }
+
+    bool Piglin::CanReplaceCurrentItem(const ItemStack& newStack, const ItemStack& current,
+                                       EquipmentSlot slot) const {
+        if (EnchantmentHelper::HasPreventArmorChange(current)) return false;
+        const char* preferred = GetPreferredWeaponType();
+        const auto inPreferred = [preferred](const ItemStack& s) {
+            return preferred && !s.IsEmpty() &&
+                   DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(s.itemId), preferred);
+        };
+        const bool newItemWanted = PiglinAi::IsLovedItem(newStack) || inPreferred(newStack);
+        const bool currentItemWanted = PiglinAi::IsLovedItem(current) || inPreferred(current);
+        if (newItemWanted && !currentItemWanted) return true;
+        if (!newItemWanted && currentItemWanted) return false;
+        return GenericMonster::CanReplaceCurrentItem(newStack, current, slot);
+    }
+
+    bool Piglin::CanReplaceCurrentItem(const ItemStack& newStack) const {
+        const EquipmentSlot slot = GetEquipmentSlotForItem(newStack);
+        return CanReplaceCurrentItem(newStack, GetEquipment(slot), slot);
+    }
+
+    void Piglin::PickUpItem(int32_t itemEntityId, const ItemStack& stack) {
+        if (!m_level) return;
+        OnItemPickup(itemEntityId, stack);
+        PiglinAi::PickUpItem(*m_level, *this, itemEntityId, stack);
+    }
+
+    void Piglin::HoldInMainHand(const ItemStack& stack) {
+        SetItemSlotAndDropWhenKilled(EquipmentSlot::MAINHAND, stack);
+        SetPersistenceRequired(true);
+    }
+
+    void Piglin::HoldInOffHand(const ItemStack& stack) {
+        SetItemSlotAndDropWhenKilled(EquipmentSlot::OFFHAND, stack);
+        if (!PiglinAi::IsBarterCurrency(stack)) SetPersistenceRequired(true);
+    }
+
+    ItemStack Piglin::AddToInventory(const ItemStack& stack) {
+        return SimpleContainerOps::AddItem(m_inventory, stack);
+    }
+
+    bool Piglin::CanAddToInventory(const ItemStack& stack) const {
+        return SimpleContainerOps::CanAddItem(m_inventory, stack);
+    }
+
+    void Piglin::DropCustomDeathLoot(EntityLevel& level) {
+        GenericMonster::DropCustomDeathLoot(level);
+        for (const ItemStack& stack : SimpleContainerOps::RemoveAllItems(m_inventory)) {
+            DropItemStackAt(level.Dimension(), position, stack);   // spawnAtLocation
+        }
+    }
+
+    int Piglin::GetPiglinArmPose() const {
+        if (IsDancing()) return 4;                                             // DANCING
+        if (PiglinAi::IsLovedItem(GetOffhandEquipment())) return 3;            // ADMIRING_ITEM
+        if (IsAggressive() && IsHoldingMeleeWeapon(*this)) return 0;           // ATTACKING_WITH_MELEE_WEAPON
+        if (IsChargingCrossbow()) return 2;                                    // CROSSBOW_CHARGE
+        if (IsHoldingItem(Items::Crossbow) &&
+            FireworkItems::IsCrossbowCharged(GetEquipment(MobCrossbow::WeaponHoldingHand(*this, Items::Crossbow)))) {
+            return 1;                                                          // CROSSBOW_HOLD
+        }
+        return 5;                                                              // DEFAULT
+    }
+
+    void Piglin::Tick() {
+        GenericMonster::Tick();
+        if (m_level && m_level->IsClientSide()) {
+            m_clientChargeTicks = m_chargingCrossbow ? m_clientChargeTicks + 1 : -1;
+        }
+    }
+
+    void Piglin::FinishPiglinConversion() {
+        // MC Piglin.finishConversion: cancelAdmiring, the pockets onto the
+        // ground, then AbstractPiglin's.
+        PiglinAi::CancelAdmiring(*m_level, *this);
+        for (const ItemStack& stack : SimpleContainerOps::RemoveAllItems(m_inventory)) {
+            DropItemStackAt(m_level->Dimension(), position, stack);
+        }
+        // MC AbstractPiglin.finishConversion: → ZOMBIFIED_PIGLIN with
+        // ConversionParams.single(this, keepEquipment = true,
+        // preserveCanPickUpLoot = true), whose afterConversion adds
+        // NAUSEA 200 (after convertCommon copied the piglin's effects).
+        auto zombified = std::make_unique<ZombifiedPiglin>(m_level);
+        CopyConversionState(*zombified);
+        MoveEquipmentTo(*zombified);
+        zombified->SetBaby(IsBaby());
+        zombified->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
+        FinishConversion(std::move(zombified));
+    }
+
     void Piglin::CustomServerAiStep() {
         // MC AbstractPiglin.customServerAiStep — the zombification clock.
-        // This engine's single dimension IS the overworld, where MC's
-        // PIGLINS_ZOMBIFY attribute is true, so an unprotected piglin
-        // converts after CONVERSION_TIME (300) ticks exactly as one brought
-        // through a portal does.
         if (!m_level || m_level->IsClientSide()) return;
-        const bool converting = !IsImmuneToZombification() && !IsNoAi();
-        m_timeInOverworld = converting ? m_timeInOverworld + 1 : 0;
+        m_timeInOverworld = IsConverting() ? m_timeInOverworld + 1 : 0;
         if (m_timeInOverworld > 300) {
-            // MC finishConversion → ZOMBIFIED_PIGLIN, whose afterConversion
-            // callback gives the new body NAUSEA for 200 ticks (after
-            // convertCommon has copied the piglin's own effects over). The
-            // conversion-shake visual is skipped like the zombie→drowned one;
-            // cancelAdmiring and the inventory drop are items-system work.
-            MakeSound(SoundEvents::PIGLIN_CONVERTED_TO_ZOMBIFIED);   // MC playConvertedSound
-            auto zombified = std::make_unique<ZombifiedPiglin>(m_level);
-            CopyConversionState(*zombified);
-            zombified->SetBaby(IsBaby());
-            zombified->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
-            FinishConversion(std::move(zombified));
+            // playConvertedSound unless PEACEFUL; the conversion-shake visual
+            // is skipped like the zombie→drowned one.
+            if (m_level->GetDifficulty() != Difficulty::Peaceful) {
+                MakeSound(SoundEvents::PIGLIN_CONVERTED_TO_ZOMBIFIED);
+            }
+            FinishPiglinConversion();
         }
     }
 
     PiglinBrute::PiglinBrute(EntityLevel* level)
         : GenericMonster(EntityTypeId::PiglinBrute, level) {
-        // NO GOALS — the brain is the whole behaviour. Golden-axe spawn
-        // equipment skipped (no equipment system).
+        // NO GOALS — the brain is the whole behaviour.
         m_goalSelector.Clear();
         m_targetSelector.Clear();
 
+        SetCanPickUpLoot(true);   // AbstractPiglin
         SetPathfindingMalus(PathType::DangerFire, 16.0f);
         SetPathfindingMalus(PathType::DamageFire, -1.0f);
 
@@ -704,11 +1627,36 @@ namespace Game {
 
     void PiglinBrute::UpdateBrainActivity() { PiglinBruteAi::UpdateActivity(*this); }
 
+    void PiglinBrute::PlayAmbientSound() {
+        // MC AbstractPiglin.playAmbientSound: PiglinAi.isIdle gates it.
+        if (const Brain* brain = GetBrain(); brain && brain->IsActive(Activity::Idle)) {
+            GenericMonster::PlayAmbientSound();
+        }
+    }
+
+    bool PiglinBrute::IsConverting() const {
+        return !IsImmuneToZombification() && !IsNoAi() && PiglinsZombify(m_level);
+    }
+
     std::shared_ptr<SpawnGroupData>
     PiglinBrute::FinalizeSpawn(SpawnReason reason,
                                std::shared_ptr<SpawnGroupData> groupData) {
         PiglinBruteAi::InitMemories(*this);
+        if (m_level) PopulateDefaultEquipmentSlots(m_level->Random(), CurrentDifficulty());
         return GenericMonster::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void PiglinBrute::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)random; (void)difficulty;
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::GoldenAxe, 1));
+    }
+
+    bool PiglinBrute::WantsToPickUp(const ItemStack& stack) const {
+        return stack.itemId == Items::GoldenAxe && GenericMonster::WantsToPickUp(stack);
+    }
+
+    int PiglinBrute::GetPiglinArmPose() const {
+        return IsAggressive() && IsHoldingMeleeWeapon(*this) ? 0 : 5;
     }
 
     bool PiglinBrute::Hurt(MobDamageSource source, float amount, Entity* attacker) {
@@ -731,13 +1679,19 @@ namespace Game {
                 MakeSound(SoundEvents::PIGLIN_BRUTE_ANGRY);
             }
         }
-        const bool converting = !IsImmuneToZombification() && !IsNoAi();
-        m_timeInOverworld = converting ? m_timeInOverworld + 1 : 0;
+        m_timeInOverworld = IsConverting() ? m_timeInOverworld + 1 : 0;
         if (m_timeInOverworld > 300) {
-            MakeSound(SoundEvents::PIGLIN_BRUTE_CONVERTED_TO_ZOMBIFIED);   // MC playConvertedSound
+            if (m_level->GetDifficulty() != Difficulty::Peaceful) {
+                MakeSound(SoundEvents::PIGLIN_BRUTE_CONVERTED_TO_ZOMBIFIED);   // MC playConvertedSound
+            }
+            // MC AbstractPiglin.finishConversion: → ZOMBIFIED_PIGLIN with
+            // ConversionParams.single(this, keepEquipment = true,
+            // preserveCanPickUpLoot = true), whose afterConversion adds
+            // NAUSEA 200 (after convertCommon copied the piglin's effects).
             auto zombified = std::make_unique<ZombifiedPiglin>(m_level);
             CopyConversionState(*zombified);
-            // AbstractPiglin.finishConversion's NAUSEA 200 (see above).
+            MoveEquipmentTo(*zombified);
+            zombified->SetBaby(IsBaby());
             zombified->AddEffect(MobEffectInstance(MobEffectId::Nausea, 200, 0));
             FinishConversion(std::move(zombified));
         }
@@ -841,10 +1795,9 @@ namespace Game {
         GenericAnimal::BaseTick();
 
         if (m_level && !m_level->IsClientSide()) {
-            // MC Axolotl.handleAirSupply. MC exempts rain (isInWaterOrRain);
-            // no weather system here, so water is the whole test — the same
-            // reduction World::IsRainingAt documents.
-            if (IsAlive() && !IsInWater()) {
+            // MC Axolotl.handleAirSupply: out of water AND rain
+            // (isInWaterOrRain) the axolotl dries out; rain keeps it wet.
+            if (IsAlive() && !IsInWaterOrRain()) {
                 SetAirSupply(airSupply - 1);
                 if (ShouldTakeDrowningDamage()) {
                     SetAirSupply(0);
@@ -927,8 +1880,9 @@ namespace Game {
 
     std::shared_ptr<SpawnGroupData>
     Axolotl::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
-        // MC's EntitySpawnReason.BUCKET early-out is unreachable here — no
-        // bucket system, so no such spawn reason exists.
+        // MC: `if (spawnReason == BUCKET) return groupData;` — no variant
+        // roll, no baby, no super: the bucket says what it was.
+        if (reason == SpawnReason::Bucket) return groupData;
         if (!m_level) return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
         JavaRandom& rng = m_level->Random();
 
@@ -949,6 +1903,55 @@ namespace Game {
         ++data->groupSize;
 
         return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    UseResult Axolotl::MobInteract(LivingEntity& player, ItemStack& held) {
+        if (auto r = Bucketable::BucketMobPickup(*this, player, held, Items::AxolotlBucket,
+                                                 SoundEvents::BUCKET_FILL_AXOLOTL,
+                                                 [this](ItemStack& bucket) { SaveToBucket(bucket); })) {
+            return *r;
+        }
+        // Animal.mobInteract feeds with #axolotl_food — the bucket of
+        // tropical fish. MC Axolotl.usePlayerItem then hands back the water
+        // (ItemUtils.createFilledResult(itemStack, player, WATER_BUCKET))
+        // instead of eating the bucket: undo the plain shrink and refill.
+        const ItemStack before = held;
+        const UseResult result = GenericAnimal::MobInteract(player, held);
+        const bool spent = held.itemId != before.itemId || held.count < before.count;
+        if (before.itemId == Items::TropicalFishBucket && spent &&
+            m_level && !m_level->IsClientSide()) {
+            held = before;
+            m_level->CreateFilledResult(player, held, ItemStack(Items::WaterBucket, 1));
+        }
+        return result;
+    }
+
+    void Axolotl::SaveToBucket(ItemStack& bucket) const {
+        Bucketable::SaveDefaultDataToBucketTag(*this, bucket);
+        // bucket.copyFrom(AXOLOTL_VARIANT, this).
+        bucket.components.set(DataComponents::AXOLOTL_VARIANT, static_cast<int32_t>(m_variant));
+        BucketEntityData data = bucket.components.get(DataComponents::BUCKET_ENTITY_DATA)
+                                    .value_or(BucketEntityData{});
+        data.age = GetAge();
+        data.ageLocked = IsAgeLocked();
+        // Brain HAS_HUNTING_COOLDOWN: its remaining TTL, when set.
+        if (const Brain* brain = GetBrain(); brain && brain->HasMemoryValue(MemoryModule::HasHuntingCooldown)) {
+            data.huntingCooldown = brain->GetTimeUntilExpiry(MemoryModule::HasHuntingCooldown);
+        }
+        bucket.components.set(DataComponents::BUCKET_ENTITY_DATA, data);
+    }
+
+    void Axolotl::LoadFromBucket(const BucketEntityData& data) {
+        Bucketable::LoadDefaultDataFromBucketTag(*this, data);
+        SetAge(data.age.value_or(0));
+        SetAgeLocked(data.ageLocked.value_or(false));
+        if (m_brain) {
+            if (data.huntingCooldown) {
+                m_brain->SetMemoryWithExpiry(MemoryModule::HasHuntingCooldown, true, *data.huntingCooldown);
+            } else {
+                m_brain->EraseMemory(MemoryModule::HasHuntingCooldown);
+            }
+        }
     }
 
     void Axolotl::SpawnChildFromBreeding(Animal& partner) {
@@ -1111,9 +2114,20 @@ namespace Game {
     }
 
     void Bee::Tick() {
-        // MC Bee.tick: super, then updateRollAmount on BOTH sides (the nectar
-        // drip particles need the particle system).
+        // MC Bee.tick: super, the nectar drips (a pollinated bee that has
+        // grown fewer than 10 crops drips 1-2 FALLING_NECTAR 5% of ticks —
+        // the client copy draws them), then updateRollAmount on BOTH sides.
         GenericAnimal::Tick();
+        if (m_level && HasNectar() && GetCropsGrownSincePollination() < 10 && m_level->Random().NextFloat() < 0.05f) {
+            JavaRandom& r = m_level->Random();
+            const int n = r.NextInt(2) + 1;
+            const double y = position.y + static_cast<double>(GetBbHeight()) * 0.5;
+            for (int i = 0; i < n; ++i) {
+                const double x = Mth::Lerp(r.NextDouble(), position.x - 0.30000001192092896, position.x + 0.30000001192092896);
+                const double z = Mth::Lerp(r.NextDouble(), position.z - 0.30000001192092896, position.z + 0.30000001192092896);
+                m_level->AddParticle(ParticleKind::FallingNectar, x, y, z, 0.0, 0.0, 0.0);
+            }
+        }
         UpdateRollAmount();
     }
 
@@ -1275,15 +2289,21 @@ namespace Game {
     }
 
     void Breeze::Tick() {
-        // MC Breeze.tick runs this before super.tick(). The per-pose ground
-        // and jump-trail particles have no particle system to land in; the
-        // animation half is complete. Timers are client state, so the block is
+        // MC Breeze.tick runs this before super.tick(): the per-pose ground
+        // and jump-trail dust, then the animation states. Timers are client
+        // state and addParticle draws only there, so the block is
         // client-gated — MC runs it on both sides but only the client reads
         // the states.
         if (m_level && m_level->IsClientSide()) {
             const Pose pose = GetPose();
-            if (pose == Pose::LongJumping) {
+            if (pose == Pose::Shooting || pose == Pose::Inhaling || pose == Pose::Standing) {
+                m_jumpTrailStartedTick = 0;
+                EmitGroundParticles(1 + m_level->Random().NextInt(1));
+            } else if (pose == Pose::Sliding) {
+                EmitGroundParticles(20);
+            } else if (pose == Pose::LongJumping) {
                 Anim(MobAnim::LongJump).StartIfStopped(tickCount);
+                EmitJumpTrailParticles();
             }
             Anim(MobAnim::Idle).StartIfStopped(tickCount);
             // MC: leaving SLIDING plays slideBack from the top — the little
@@ -1305,6 +2325,42 @@ namespace Game {
             }
         }
         GenericMonster::Tick();
+    }
+
+    BlockState Breeze::GroundStateForParticles() const {
+        // !getInBlockState().isAir() ? getInBlockState() : getBlockStateOn().
+        const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr;
+        if (!blocks) return BlockState();
+        const glm::ivec3 in = BlockPosition();
+        const BlockState inState = blocks->GetBlockState(in.x, in.y, in.z);
+        if (inState.Block() != BlockID::Air) return inState;
+        return blocks->GetBlockState(in.x, static_cast<int>(std::floor(position.y - 1.0e-5)), in.z);
+    }
+
+    namespace {
+        bool InvisibleRenderShape(BlockID id) {
+            return id == BlockID::Air || id == BlockID::Barrier || id == BlockID::Light ||
+                   id == BlockID::StructureVoid || id == BlockID::MovingPiston || id == BlockID::Water ||
+                   id == BlockID::Lava;
+        }
+    }
+
+    void Breeze::EmitGroundParticles(int amount) {
+        if (!m_level || GetVehicle()) return;
+        const BlockState ground = GroundStateForParticles();
+        if (InvisibleRenderShape(ground.Block())) return;
+        for (int i = 0; i < amount; ++i) {
+            m_level->AddParticle(ParticleOptions::Block(ground), position.x, position.y, position.z, 0.0, 0.0, 0.0);
+        }
+    }
+
+    void Breeze::EmitJumpTrailParticles() {
+        if (!m_level || ++m_jumpTrailStartedTick > 5) return;
+        const BlockState ground = GroundStateForParticles();
+        const glm::dvec3 c = position + velocity + glm::dvec3(0.0, 0.10000000149011612, 0.0);
+        for (int i = 0; i < 3; ++i) {
+            m_level->AddParticle(ParticleOptions::Block(ground), c.x, c.y, c.z, 0.0, 0.0, 0.0);
+        }
     }
 
     void Breeze::ResetAnimations() {
@@ -1369,7 +2425,11 @@ namespace Game {
         return !CollidesAt(box, level.Physics());
     }
 
-    Warden::Warden(EntityLevel* level, EntityTypeId type) : GenericMonster(type, level) {
+    Warden::Warden(EntityLevel* level, EntityTypeId type)
+        : GenericMonster(type, level),
+          m_vibrationUser(*this),
+          m_vibrationListener(*this),
+          m_dynamicGameEventListener(m_vibrationListener) {
         // NO GOALS — MC's Warden is all brain.
         m_goalSelector.Clear();
         m_targetSelector.Clear();
@@ -1428,25 +2488,58 @@ namespace Game {
     }
 
     void Warden::Tick() {
-        // MC Warden.tick, server half: a persistent warden never digs away.
-        // (The VibrationSystem ticker that precedes this in MC has no
-        // game-event engine to tick — see the class comment.)
-        if (m_level && !m_level->IsClientSide()
-            && (IsPersistenceRequired() || RequiresCustomPersistence())) {
-            WardenAi::SetDigCooldown(*this);
+        // MC Warden.tick, server half: the VibrationSystem ticker (a heard
+        // vibration flies to it and lands), then a persistent warden never
+        // digs away (IsDespawnPersistent: a named one neither — digging away
+        // is its despawn).
+        World* serverWorld = nullptr;
+        if (m_level && !m_level->IsClientSide()) {
+            serverWorld = dynamic_cast<World*>(m_level->MutableBlocks());
+            if (serverWorld) VibrationTicker::Tick(*serverWorld, m_vibrationData, m_vibrationUser);
+            if (IsDespawnPersistent()) WardenAi::SetDigCooldown(*this);
         }
         GenericMonster::Tick();
+        // MC ServerLevel's entity section callbacks (updateDynamicGameEvent-
+        // Listener add / move / remove): the listener follows the warden
+        // into whatever section — or level — it now stands in.
+        if (serverWorld) {
+            if (IsRemoved()) m_dynamicGameEventListener.Remove();
+            else m_dynamicGameEventListener.Move(serverWorld->GameEvents());
+        }
         // MC Warden.tick, client half: the heartbeat, every
         // getHeartBeatDelay() ticks — 40 calm, down to 10 at full anger —
-        // as a local sound (5.0, the voice pitch) unless silent. (The
-        // tendril/heart animation counters and digging particles are
-        // model-layer work the generated warden has no hooks for.)
+        // as a local sound (5.0, the voice pitch) unless silent, and the
+        // digging / emerging chips. (The tendril/heart animation counters
+        // are model-layer work the generated warden has no hooks for.)
         if (m_level && m_level->IsClientSide()) {
             const float f = static_cast<float>(GetActiveAnger()) / static_cast<float>(kAngerAngry);
             const int delay = 40 - static_cast<int>(std::floor(std::clamp(f, 0.0f, 1.0f) * 30.0f));
             if (delay > 0 && tickCount % delay == 0 && !IsSilent()) {
                 m_level->PlayLocalSound(position, SoundEvents::WARDEN_HEARTBEAT, GetSoundSource(),
                                         5.0f, GetVoicePitch(), false);
+            }
+            // MC clientDiggingParticles: while emerging / digging (the first
+            // 4.5 s of the clip), 30 BLOCK chips of the block underfoot a tick.
+            const Pose pose = GetPose();
+            if (pose == Pose::Emerging || pose == Pose::Digging) {
+                const AnimationState& clip = Anim(pose == Pose::Emerging ? MobAnim::Emerge : MobAnim::Digging);
+                if (clip.IsStarted() && clip.ElapsedSeconds(static_cast<float>(tickCount)) < 4.5f) {
+                    if (const IBlockAccess* blocks = m_level->Blocks()) {
+                        const BlockState below = blocks->GetBlockState(
+                            static_cast<int>(std::floor(position.x)),
+                            static_cast<int>(std::floor(position.y - 1.0e-5)),
+                            static_cast<int>(std::floor(position.z)));
+                        if (!InvisibleRenderShape(below.Block())) {
+                            JavaRandom& r = m_level->Random();
+                            const ParticleOptions chip = ParticleOptions::Block(below);
+                            for (int i = 0; i < 30; ++i) {
+                                const double xx = position.x + (r.NextFloat() * 1.4f - 0.7f);
+                                const double zz = position.z + (r.NextFloat() * 1.4f - 0.7f);
+                                m_level->AddParticle(chip, xx, position.y, zz, 0.0, 0.0, 0.0);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1681,6 +2774,69 @@ namespace Game {
         }
     }
 
+    // ── The vibration system (MC Warden.VibrationUser) ─────────────────────
+
+    VibrationUser& Warden::GetVibrationUser() { return m_vibrationUser; }
+
+    Warden::WardenVibrationUser::WardenVibrationUser(Warden& warden)
+        : m_warden(warden),
+          // MC: new EntityPositionSource(Warden.this, getEyeHeight()).
+          m_source(PositionSource::OfEntity(&warden, warden.GetEyeHeight())) {}
+
+    bool Warden::WardenVibrationUser::CanReceiveVibration(World& /*level*/, const glm::ivec3& /*pos*/,
+                                                          GameEventId /*event*/, const GameEventContext& context) {
+        if (m_warden.IsNoAi() || m_warden.IsDeadOrDying() || m_warden.IsDiggingOrEmerging()) return false;
+        if (const Brain* brain = m_warden.GetBrain();
+            brain && brain->HasMemoryValue(MemoryModule::VibrationCooldown)) {
+            return false;
+        }
+        // A living source it could not target (a creative player, another
+        // warden) is not heard at all. (No world border here.)
+        if (context.sourceEntity && context.sourceEntity->AsLiving() &&
+            !m_warden.CanTargetEntity(context.sourceEntity)) {
+            return false;
+        }
+        return true;
+    }
+
+    void Warden::WardenVibrationUser::OnReceiveVibration(World& /*level*/, const glm::ivec3& pos, GameEventId /*event*/,
+                                                         Entity* sourceEntity, Entity* projectileOwner,
+                                                         float /*receivingDistance*/) {
+        if (m_warden.IsDeadOrDying()) return;
+        Brain* brain = m_warden.GetBrain();
+        if (brain) brain->SetMemoryWithExpiry(MemoryModule::VibrationCooldown, std::monostate{}, 40);
+        if (m_warden.m_level) m_warden.m_level->BroadcastEntityEvent(m_warden, kEventWardenTendrils);
+        m_warden.PlaySound(SoundEvents::WARDEN_TENDRIL_CLICKS, 5.0f, m_warden.GetVoicePitch());
+
+        glm::ivec3 suspiciousPos = pos;
+        if (projectileOwner) {
+            // closerThan(projectileOwner, 30).
+            const glm::dvec3 d = projectileOwner->position - m_warden.position;
+            if (glm::dot(d, d) < 30.0 * 30.0) {
+                if (brain && brain->HasMemoryValue(MemoryModule::RecentProjectile)) {
+                    if (m_warden.CanTargetEntity(projectileOwner)) suspiciousPos = projectileOwner->BlockPosition();
+                    m_warden.IncreaseAngerAt(projectileOwner);
+                } else {
+                    m_warden.IncreaseAngerAt(projectileOwner, 10, true);
+                }
+            }
+            if (brain) brain->SetMemoryWithExpiry(MemoryModule::RecentProjectile, std::monostate{}, 100);
+        } else if (sourceEntity) {
+            m_warden.IncreaseAngerAt(sourceEntity);
+        }
+
+        if (!m_warden.IsAngry()) {
+            // AngerManagement.getActiveEntity: the top suspect, if living.
+            const Entity* active = nullptr;
+            if (!m_warden.m_anger.empty() && m_warden.m_anger.front().entity->AsLiving()) {
+                active = m_warden.m_anger.front().entity;
+            }
+            if (projectileOwner || !active || active == sourceEntity) {
+                WardenAi::SetDisturbanceLocation(m_warden, suspiciousPos);
+            }
+        }
+    }
+
     void Warden::ClearReferenceTo(const Entity* entity) {
         GenericMonster::ClearReferenceTo(entity);
         // The anger map holds raw pointers; a removed entity must not survive
@@ -1779,6 +2935,7 @@ namespace Game {
                 || source == MobDamageSource::Projectile)) {
             m_invulnerabilityAnimationRemainingTicks = 8;
             m_level->BroadcastEntityEvent(*this, kEventCreakingInvulnerable);
+            GameEvent(GameEventId::EntityAction);   // MC hurtServer's shimmer branch
         }
         return GenericMonster::Hurt(source, amount, attacker);
     }
@@ -1812,6 +2969,7 @@ namespace Game {
             const bool couldMove = m_canMove;
             const bool nowCanMove = CheckCanMove();
             if (nowCanMove != couldMove) {
+                GameEvent(GameEventId::EntityAction);   // MC aiStep: the freeze flip
                 if (nowCanMove) {
                     MakeSound(SoundEvents::CREAKING_UNFREEZE);
                 } else {
@@ -1849,11 +3007,22 @@ namespace Game {
 
     void Creaking::TickDeath() {
         // MC Creaking.tickDeath while tearing down: 45 ticks
-        // (TWITCH_DEATH_DURATION) instead of the 20-tick fall-over, then the
-        // crumble — poof particles stand in for BLOCK_CRUMBLE pale oak.
+        // (TWITCH_DEATH_DURATION) instead of the 20-tick fall-over, then
+        // tearDown's crumble: 100 BLOCK_CRUMBLE of pale oak wood and 10 of an
+        // awake creaking heart over the box (spread 0.3 of each side).
         ++deathTime;
         if (deathTime > 45 && m_level && !m_level->IsClientSide() && !IsRemoved()) {
-            m_level->BroadcastEntityEvent(*this, 60);
+            const AABB box = GetAABB();
+            const glm::dvec3 c = (glm::dvec3(box.min) + glm::dvec3(box.max)) * 0.5;
+            const glm::dvec3 spread = (glm::dvec3(box.max) - glm::dvec3(box.min)) * 0.3;
+            m_level->SendParticles(ParticleOptions::Block(ParticleKind::BlockCrumble,
+                                                          BlockStates::Default(BlockID::PaleOakWood)),
+                                   false, false, c.x, c.y, c.z, 100, spread.x, spread.y, spread.z, 0.0);
+            m_level->SendParticles(
+                ParticleOptions::Block(ParticleKind::BlockCrumble,
+                                       BlockStates::Default(BlockID::CreakingHeart)
+                                           .SetName(PropertyId::CREAKING_HEART_STATE, "awake")),
+                false, false, c.x, c.y, c.z, 10, spread.x, spread.y, spread.z, 0.0);
             Remove(RemovalReason::Killed);
         }
     }
@@ -1879,6 +3048,7 @@ namespace Game {
         if (Brain* brain = GetBrain()) {
             brain->SetMemory(MemoryModule::AttackTarget, static_cast<Entity*>(player));
         }
+        GameEvent(GameEventId::EntityAction);   // MC activate
         m_isActive = true;
         MakeSound(SoundEvents::CREAKING_ACTIVATE);
     }
@@ -1887,6 +3057,7 @@ namespace Game {
         if (Brain* brain = GetBrain()) {
             brain->EraseMemory(MemoryModule::AttackTarget);
         }
+        GameEvent(GameEventId::EntityAction);   // MC deactivate
         m_isActive = false;
         MakeSound(SoundEvents::CREAKING_DEACTIVATE);   // MC Creaking.deactivate
     }
@@ -2059,9 +3230,9 @@ namespace Game {
     }
 
     bool Sniffer::CanSniff() const {
-        // MC Sniffer.canSniff — leashes and riding do not exist.
+        // MC Sniffer.canSniff.
         return !IsTempted() && !IsBrainPanicking(*this) && !IsInWater()
-            && !IsInLove() && onGround;
+            && !IsInLove() && onGround && !IsPassenger() && !IsLeashed();
     }
 
     bool Sniffer::CanDig() const {
@@ -2134,11 +3305,37 @@ namespace Game {
 
     void Sniffer::Tick() {
         // MC Sniffer.tick: SEARCHING sniffs audibly once a second (a client-
-        // local sound), DIGGING emits particles (absent) and drops the seed.
+        // local sound), DIGGING emits particles and drops the seed.
         if (m_level && m_level->IsClientSide() && m_state == State::Searching && tickCount % 20 == 0) {
             m_level->PlayLocalSoundFromEntity(*this, SoundEvents::SNIFFER_SEARCHING, GetSoundSource(), 1.0f, 1.0f);
         }
+        // emitDiggingParticles: between 1.7 s and 6 s into the dig, 30
+        // BLOCK chips of the block under the snout a tick (client copy).
+        if (m_level && m_level->IsClientSide() && m_state == State::Digging) {
+            const AnimationState& dig = Anim(MobAnim::Digging);
+            const float t = dig.IsStarted() ? dig.ElapsedSeconds(static_cast<float>(tickCount)) : 0.0f;
+            if (t > 1.7f && t < 6.0f) {
+                if (const IBlockAccess* blocks = m_level->Blocks()) {
+                    const glm::ivec3 head = GetHeadBlock();
+                    const BlockState below = blocks->GetBlockState(head.x, head.y - 1, head.z);
+                    if (!InvisibleRenderShape(below.Block())) {
+                        const ParticleOptions chip = ParticleOptions::Block(below);
+                        for (int i = 0; i < 30; ++i) {
+                            m_level->AddParticle(chip, head.x + 0.5, head.y + 0.5 - 0.6499999761581421, head.z + 0.5,
+                                                 0.0, 0.0, 0.0);
+                        }
+                    }
+                }
+            }
+        }
         if (m_level && !m_level->IsClientSide() && m_state == State::Digging) {
+            // MC emitDiggingParticles' tail: every 10 ticks of the dig,
+            // level.gameEvent(ENTITY_ACTION, getHeadBlock(), Context.of(this)).
+            if (tickCount % 10 == 0) {
+                if (ILevelWrite* write = m_level->MutableBlocks()) {
+                    write->GameEvent(GameEventId::EntityAction, GetHeadBlock(), GameEventContext::Of(this));
+                }
+            }
             DropSeed();
         }
         GenericAnimal::Tick();
@@ -2463,12 +3660,14 @@ namespace Game {
         if (IsScared()) return;
         StopInPlace();
         ResetLove();
+        GameEvent(GameEventId::EntityAction);   // MC rollUp
         MakeSound(SoundEvents::ARMADILLO_ROLL);
         SwitchToState(State::Rolling);
     }
 
     void Armadillo::RollOut() {
         if (!IsScared()) return;
+        GameEvent(GameEventId::EntityAction);   // MC rollOut
         MakeSound(SoundEvents::ARMADILLO_UNROLL_FINISH);
         SwitchToState(State::Idle);
     }
@@ -2557,21 +3756,49 @@ namespace Game {
     }
 
     // ══ Allay ══════════════════════════════════════════════════════════════
-
-    Allay::Allay(EntityLevel* level)
-        : GenericPathfinderMob(EntityTypeId::Allay, level) {
-        // NO GOALS — MC's Allay never registers any; its whole behaviour is
-        // the brain (the def's flying navigation + hover move control stand).
-        m_goalSelector.Clear();
-        m_targetSelector.Clear();
-
-        m_brain = std::make_unique<Brain>();
-        AllayAi::InitBrain(*this, *m_brain);
-    }
-
-    void Allay::UpdateBrainActivity() { AllayAi::UpdateActivity(*this); }
+    // Allay.cpp.
 
     // ══ HappyGhast ═════════════════════════════════════════════════════════
+
+    namespace {
+        // MC HappyGhast.HappyGhastLookControl — the adult's: squared up to a
+        // quarter turn while on its still timeout (a platform keeps its
+        // edges on the grid), turned bodily toward a look target, else
+        // facing where it drifts (Ghast.faceMovementDirection).
+        class HappyGhastLookControl final : public LookControl {
+        public:
+            explicit HappyGhastLookControl(HappyGhast* ghast) : LookControl(ghast), m_ghast(ghast) {}
+
+            void Tick() override {
+                if (m_ghast->IsOnStillTimeout()) {
+                    // Mth.wrapDegrees90.
+                    float closeAngle = std::fmod(m_ghast->yRot, 90.0f);
+                    if (closeAngle >= 45.0f) closeAngle -= 90.0f;
+                    if (closeAngle < -45.0f) closeAngle += 90.0f;
+                    m_ghast->yRot -= closeAngle;
+                    m_ghast->SetYHeadRot(m_ghast->yRot);
+                } else if (m_lookAtCooldown > 0) {
+                    --m_lookAtCooldown;
+                    const double xdd = m_wantedX - m_ghast->position.x;
+                    const double zdd = m_wantedZ - m_ghast->position.z;
+                    m_ghast->yRot = -static_cast<float>(std::atan2(xdd, zdd)) * 57.295776f;
+                    m_ghast->yBodyRot = m_ghast->yRot;
+                    m_ghast->SetYHeadRot(m_ghast->yBodyRot);
+                } else {
+                    Ghast::FaceMovementDirection(*m_ghast);
+                }
+            }
+
+        private:
+            HappyGhast* m_ghast;
+        };
+
+        // MC EntityTypes HAPPY_GHAST .passengerAttachments: the harness's
+        // four corners, front / left / back / right, in seat order.
+        constexpr glm::dvec3 kHappyGhastSeats[HappyGhast::kMaxPassengers] = {
+            {0.0, 4.0, 1.7}, {-1.7, 4.0, 0.0}, {0.0, 4.0, -1.7}, {1.7, 4.0, 0.0},
+        };
+    } // namespace
 
     HappyGhast::HappyGhast(EntityLevel* level)
         : GenericAnimal(EntityTypeId::HappyGhast, level) {
@@ -2581,34 +3808,38 @@ namespace Game {
         // a ghastling runs its first tick on the adult set (invisible: one
         // tick, no goal completes).
         RegisterAdultGoals();
+        // MC's constructor: the adult's HappyGhastLookControl.
+        SetLookControl(std::make_unique<HappyGhastLookControl>(this));
     }
 
     void HappyGhast::RegisterAdultGoals() {
         // GenericAnimal's constructor registered the def-driven goal set (the
         // flying wander included); MC's adult table adds the float at
-        // priority 3 — the one bespoke goal that does not ride the riding/
-        // harness systems. Its tempt (HAPPY_GHAST_FOOD, snowballs) already
-        // comes from the def's food list.
+        // priority 3. Its tempt (HAPPY_GHAST_FOOD, snowballs) already comes
+        // from the def's food list.
         m_goalSelector.AddGoal(3, std::make_unique<HappyGhastFloatGoal>(this));
     }
 
     void HappyGhast::AdultSetup() {
-        // MC HappyGhast.adultGhastSetup: back to the goal set, brain stopped
-        // and dropped. MC also swaps to the GhastMoveControl; the def's
-        // FlyingMoveControl stands in for both ages here, so only the AI
-        // layer swaps.
+        // MC HappyGhast.adultGhastSetup: back to the goal set and the
+        // HappyGhastLookControl, brain stopped and dropped. MC also swaps to
+        // the GhastMoveControl; the def's FlyingMoveControl stands in for both
+        // ages here (its shouldBeStopped hook is CustomServerAiStep's).
         m_brain.reset();
         m_goalSelector.Clear();
         m_targetSelector.Clear();
         RegisterGoals();
         RegisterAdultGoals();
+        SetLookControl(std::make_unique<HappyGhastLookControl>(this));
     }
 
     void HappyGhast::BabySetup() {
-        // MC HappyGhast.babyGhastSetup: no goals at all — the ghastling is
-        // pure brain (MC keeps FlyingMoveControl(180, true), which is what
-        // the def already applied; the BabyFlyingPathNavigation variant is
-        // not modelled).
+        // MC HappyGhast.babyGhastSetup: the plain LookControl, the still
+        // timeout dropped, no goals at all — the ghastling is pure brain (MC
+        // keeps FlyingMoveControl(180, true), which is what the def already
+        // applied; the BabyFlyingPathNavigation variant is not modelled).
+        SetLookControl(std::make_unique<LookControl>(this));
+        SetServerStillTimeout(0);
         m_goalSelector.Clear();
         m_targetSelector.Clear();
         m_brain = std::make_unique<Brain>();
@@ -2624,8 +3855,286 @@ namespace Game {
             if (m_wasBaby) BabySetup();
             else           AdultSetup();
         }
+        // MC customServerAiStep: checkRestriction.
+        CheckRestriction();
+        // MC Ghast.GhastMoveControl.tick's shouldBeStopped (the adult's
+        // control, built with this::isOnStillTimeout): the wander parks and
+        // the ghast stops dead — Mob::ServerAiStep ticks the move control
+        // right after this.
+        if (!IsBaby() && IsOnStillTimeout()) {
+            GetMoveControl().SetWait();
+            StopInPlace();
+        }
     }
 
     void HappyGhast::UpdateBrainActivity() { HappyGhastAi::UpdateActivity(*this); }
+
+    void HappyGhast::SetServerStillTimeout(int ticks) {
+        // MC setServerStillTimeout: going still sends the exact position at
+        // once (syncPacketPositionCodec + ClientboundEntityPositionSyncPacket
+        // — the tracker's next update, flagged here), then syncStayStillFlag.
+        if (m_serverStillTimeout <= 0 && ticks > 0 && m_level && !m_level->IsClientSide()) {
+            needsSync = true;
+        }
+        m_serverStillTimeout = ticks;
+        m_staysStill = m_serverStillTimeout > 0;
+    }
+
+    bool HappyGhast::IsWearingHarness() const {
+        // MC isWearingBodyArmor: anything in the BODY slot — for a happy
+        // ghast only a harness (#harnesses) is equippable there.
+        return !GetEquipment(EquipmentSlot::BODY).IsEmpty();
+    }
+
+    bool HappyGhast::IsRidden() const {
+        if (IsVehicle()) return true;
+        return m_level && m_level->IsClientSide() && !SyncedRiders().empty();
+    }
+
+    void HappyGhast::Tick() {
+        GenericAnimal::Tick();
+        // MC HappyGhast.tick's server half.
+        if (!m_level || m_level->IsClientSide() || IsRemoved()) return;
+        if (m_leashHolderTime > 0) --m_leashHolderTime;
+        m_isLeashHolder = m_leashHolderTime > 0;   // setLeashHolder
+        if (m_serverStillTimeout > 0) {
+            // STILL_TIMEOUT_ON_LOAD_GRACE_PERIOD: a saved still timeout holds
+            // through the first 60 ticks after loading, so a player who
+            // logged out standing on it does not fall when the ghast drifts
+            // before their own first move arrives.
+            if (tickCount > kStillTimeoutOnLoadGracePeriod) --m_serverStillTimeout;
+            SetServerStillTimeout(m_serverStillTimeout);
+        }
+        if (ScanPlayerAboveGhast()) SetServerStillTimeout(kMaxStillTimeout);
+    }
+
+    bool HappyGhast::ScanPlayerAboveGhast() const {
+        // MC scanPlayerAboveGhast: any non-spectator player whose ROOT
+        // vehicle (itself when not riding) stands within a box one block
+        // wider than the ghast on each side, from just under its top to half
+        // its height above — unless that root is a happy ghast (a rider on
+        // another ghast parked beside this one does not hold it).
+        if (!m_level) return false;
+        const AABBd bb = GetAABBd();
+        const double minX = bb.min.x - 1.0, minY = bb.max.y - 9.999999747378752E-6, minZ = bb.min.z - 1.0;
+        const double maxX = bb.max.x + 1.0, maxY = bb.max.y + (bb.max.y - bb.min.y) / 2.0, maxZ = bb.max.z + 1.0;
+        static thread_local std::vector<LivingEntity*> t_players;
+        t_players.clear();
+        m_level->GetPlayers(t_players);
+        for (LivingEntity* player : t_players) {
+            if (!player || player->IsSpectator()) continue;
+            const Entity* root = player;
+            while (root->GetVehicle()) root = root->GetVehicle();
+            if (root->GetType() == EntityTypeId::HappyGhast) continue;
+            const glm::dvec3& p = root->position;
+            // AABB.contains(Vec3): min inclusive, max exclusive.
+            if (p.x >= minX && p.x < maxX && p.y >= minY && p.y < maxY && p.z >= minZ && p.z < maxZ) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void HappyGhast::CheckRestriction() {
+        // MC checkRestriction: unleashed and unridden, the ghast keeps a home
+        // around where it floats — 64 blocks bare, 32 harnessed or a baby —
+        // re-centred once it strays past the radius + 16.
+        if (IsLeashed() || IsVehicle()) return;
+        const int radius = !IsBaby() && GetEquipment(EquipmentSlot::BODY).IsEmpty()
+                               ? kLargeRestrictionRadius : kSmallRestrictionRadius;
+        const glm::ivec3 here = BlockPosition();
+        bool reCentre = !HasHome() || radius != GetHomeRadius();
+        if (!reCentre) {
+            // Vec3i.closerThan(pos, radius + 16): distSqr < d².
+            const glm::ivec3 d = GetHomePosition() - here;
+            const double distSqr = static_cast<double>(d.x) * d.x + static_cast<double>(d.y) * d.y +
+                                   static_cast<double>(d.z) * d.z;
+            const double limit = static_cast<double>(radius + kRestrictionRadiusBuffer);
+            reCentre = !(distSqr < limit * limit);
+        }
+        if (reCentre) SetHomeTo(here, radius);
+    }
+
+    void HappyGhast::NotifyLeashHolder(Mob& leashee) {
+        // MC notifyLeashHolder: a quad-leashed mob (the harness's four ropes)
+        // keeps IS_LEASH_HOLDER up for five ticks.
+        if (leashee.SupportQuadLeash()) m_leashHolderTime = 5;
+    }
+
+    // ── Riding ─────────────────────────────────────────────────────────────
+
+    UseResult HappyGhast::MobInteract(LivingEntity& player, ItemStack& held) {
+        // MC HappyGhast.mobInteract.
+        if (IsBaby()) return GenericAnimal::MobInteract(player, held);
+        if (!held.IsEmpty()) {
+            if (const auto interact = ItemRegistry::Get(held.itemId).interactLivingEntity) {
+                const UseResult r = interact(held, *this);
+                if (ConsumesAction(r)) return r;
+            }
+        }
+        const bool sneaking = m_level && m_level->IsPlayerSneaking(player);
+        if (IsWearingHarness() && !sneaking) {
+            // doPlayerRide: the server seats the player (startRiding).
+            if (m_level && !m_level->IsClientSide()) m_level->StartPlayerRiding(player, *this);
+            return UseResult::Success;
+        }
+        return GenericAnimal::MobInteract(player, held);
+    }
+
+    bool HappyGhast::CanBeSteeredBy(const RiderControl& rider) const {
+        // MC getControllingPassenger: harnessed, not on the still timeout,
+        // the first passenger a player (the resolver's).
+        (void)rider;
+        return IsWearingHarness() && !IsOnStillTimeout();
+    }
+
+    glm::dvec3 HappyGhast::GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) {
+        // MC HappyGhast.getRiddenInput: strafe as pressed; forward flies
+        // along the view (cos pitch forward, -sin pitch up), backward the
+        // reverse at half; jump adds half a unit of lift; all of it scaled
+        // by 3.9 * FLYING_SPEED.
+        (void)selfInput;
+        const float strafe = rider.xxa;
+        float forward = 0.0f;
+        float up = 0.0f;
+        if (rider.zza != 0.0f) {
+            const float pitch = rider.xRot * 0.017453292f;
+            float forwardLook = std::cos(pitch);
+            float upLook = -std::sin(pitch);
+            if (rider.zza < 0.0f) {
+                forwardLook *= -0.5f;
+                upLook *= -0.5f;
+            }
+            up = upLook;
+            forward = forwardLook;
+        }
+        if (rider.jumping) up += 0.5f;
+        const double scale = 3.9000000953674316 * GetAttributeValue(Attribute::FlyingSpeed);
+        return glm::dvec3(static_cast<double>(strafe), static_cast<double>(up), static_cast<double>(forward)) * scale;
+    }
+
+    void HappyGhast::TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) {
+        // MC HappyGhast.tickRidden: getRiddenRotation = (rider pitch / 2,
+        // rider yaw); the body eases 8% of the way to the rider's yaw each
+        // tick (a slow, heavy turn), the pitch follows at once.
+        (void)riddenInput;
+        const float targetXRot = rider.xRot * 0.5f;
+        float y = yRot;
+        const float diff = Mth::WrapDegrees(rider.yRot - y);
+        y += diff * 0.08f;
+        yRot = std::fmod(y, 360.0f);          // setRot
+        xRot = std::fmod(targetXRot, 360.0f);
+        yRotO = y;
+        yBodyRot = y;
+        SetYHeadRot(y);
+    }
+
+    bool HappyGhast::CanAddPassenger(const Entity& passenger) const {
+        (void)passenger;
+        return static_cast<int>(GetPassengers().size()) < kMaxPassengers;
+    }
+
+    glm::dvec3 HappyGhast::SeatAttachment(int slot) const {
+        // EntityAttachments.getClamped(PASSENGER, index, yRot): the seat,
+        // scaled with the entity (getScale: age scale × size) and turned by
+        // the yaw (Vec3.yRot(-yRot)).
+        const glm::dvec3 local = kHappyGhastSeats[std::clamp(slot, 0, kMaxPassengers - 1)] *
+                                 (static_cast<double>(IsBaby() ? kBabyScale : 1.0f) * static_cast<double>(scale));
+        const double a = -static_cast<double>(yRot) * static_cast<double>(Mth::kDegToRad);
+        const double c = std::cos(a), s = std::sin(a);
+        return glm::dvec3(local.x * c + local.z * s, local.y, local.z * c - local.x * s);
+    }
+
+    glm::dvec3 HappyGhast::GetPassengerAttachmentPoint(const Entity& passenger) const {
+        // Entity.getDefaultPassengerAttachmentPoint: the seat by the
+        // passenger's place in the list (indexOf; -1 clamps to the first).
+        const auto& riders = GetPassengers();
+        int index = 0;
+        for (size_t i = 0; i < riders.size(); ++i) {
+            if (riders[i] == &passenger) { index = static_cast<int>(i); break; }
+        }
+        return SeatAttachment(index);
+    }
+
+    glm::dvec3 HappyGhast::GetPassengerAttachmentForSlot(int slot, int total) const {
+        (void)total;
+        return SeatAttachment(slot);
+    }
+
+    glm::dvec3 HappyGhast::GetDismountLocationForPassenger(const LivingEntity& passenger) const {
+        // MC: straight up onto its top, at the centre — the harness platform.
+        (void)passenger;
+        return glm::dvec3(position.x, GetAABBd().max.y, position.z);
+    }
+
+    void HappyGhast::OnPassengerAdded(Entity& passenger, bool wasVehicle) {
+        // MC HappyGhast.addPassenger: the goggles come down for the first
+        // rider; then (server) no player on top → the still timeout ends now,
+        // else it is cut back to MAX_STILL_TIMEOUT.
+        (void)passenger;
+        if (!wasVehicle) PlaySound(SoundEvents::HARNESS_GOGGLES_DOWN, 1.0f, 1.0f);
+        if (m_level && !m_level->IsClientSide()) {
+            if (!ScanPlayerAboveGhast()) {
+                SetServerStillTimeout(0);
+            } else if (m_serverStillTimeout > kMaxStillTimeout) {
+                SetServerStillTimeout(kMaxStillTimeout);
+            }
+        }
+    }
+
+    void HappyGhast::OnPassengerRemoved(Entity& passenger) {
+        // MC HappyGhast.removePassenger: (server) hold still a moment for
+        // the one getting off; the last rider gone, the home is dropped (the
+        // next checkRestriction re-centres it where it now floats) and the
+        // goggles go up.
+        (void)passenger;
+        if (m_level && !m_level->IsClientSide()) SetServerStillTimeout(kMaxStillTimeout);
+        if (!IsVehicle()) {
+            ClearHome();
+            PlaySound(SoundEvents::HARNESS_GOGGLES_UP, 1.0f, 1.0f);
+        }
+    }
+
+    bool HappyGhast::CanBeCollidedWithPlayer(double otherFeetY) const {
+        // MC HappyGhast.canBeCollidedWith(player), client side: never a baby
+        // or a dead one; its top is always solid to a player at or above it;
+        // otherwise the whole box only while it holds still.
+        if (IsBaby() || !IsAlive()) return false;
+        if (otherFeetY >= GetAABBd().max.y) return true;
+        return IsOnStillTimeout();
+    }
+
+    void HappyGhast::Travel(const glm::dvec3& input) {
+        // MC HappyGhast.travel → LivingEntity.travelFlying(input, speed,
+        // speed, speed) with speed = FLYING_SPEED * 5/3: no gravity in any
+        // medium, water drag 0.8, lava 0.5, air 0.91.
+        const float speed = static_cast<float>(GetAttributeValue(Attribute::FlyingSpeed)) * 5.0f / 3.0f;
+        // The medium is read before the move, as MC's branches do.
+        const bool inWater = IsInWater();
+        const bool inLava = !inWater && IsInLava();
+        MoveRelative(speed, input);
+        Move(velocity);
+        if (inWater) {
+            velocity *= 0.800000011920929;
+        } else if (inLava) {
+            velocity *= 0.5;
+        } else {
+            velocity *= 0.9100000262260437;
+        }
+    }
+
+    int HappyGhast::GetAmbientSoundInterval() const {
+        const int interval = GenericAnimal::GetAmbientSoundInterval();
+        return IsRidden() ? interval * 6 : interval;
+    }
+
+    void HappyGhast::TickHeadTurn(float yBodyRotTarget) {
+        // MC HappyGhastBodyRotationControl.clientTick.
+        if (IsRidden()) {
+            SetYHeadRot(yRot);
+            yBodyRot = yRot;
+        }
+        GenericAnimal::TickHeadTurn(yBodyRotTarget);
+    }
 
 } // namespace Game

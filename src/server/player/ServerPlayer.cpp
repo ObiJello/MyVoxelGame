@@ -1,10 +1,12 @@
 // File: src/server/player/ServerPlayer.cpp
 #include "ServerPlayer.hpp"
+#include "common/entity/SpearItem.hpp"
 #include "common/physics/Physics.hpp"   // AABBd — block interaction range
 #include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/entity/EquipmentSlot.hpp"
 #include "common/entity/ConsumableBehavior.hpp"
 #include "common/world/level/World.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/world/fluid/FluidState.hpp"
 #include "common/world/level/GameRules.hpp"
 #include "common/core/Log.hpp"
@@ -16,12 +18,14 @@
 #include "server/network/ServerConnection.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
 #include "common/network/packets/game/MobEffectPackets.hpp"
+#include "common/network/packets/game/CooldownS2CPacket.hpp"
 #include "common/entity/Attributes.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -94,10 +98,34 @@ namespace Server {
         return level ? level->World() : nullptr;
     }
 
+    void ServerPlayer::CauseUseVibration(const Game::ItemStack& stack, Game::GameEventId event) {
+        // MC ItemStack.causeUseVibration: only when the stack's USE_EFFECTS
+        // has interact_vibrations — true for every item's default
+        // (UseEffects.DEFAULT) and false for the spears (Item.spear's
+        // UseEffects(true, false, 1.0)).
+        if (stack.IsEmpty()) return;
+        const std::string_view slug = Game::ItemRegistry::Slug(stack.itemId);
+        const std::string_view suffix = "_spear";
+        if (slug.size() >= suffix.size() && slug.substr(slug.size() - suffix.size()) == suffix) return;
+        if (Game::Entity* self = GameEventSource()) self->GameEvent(event);
+    }
+
+    Game::Entity* ServerPlayer::GameEventSource() {
+        return g_integratedServer ? g_integratedServer->GetPlayerEntityView(m_playerId) : nullptr;
+    }
+
     void ServerPlayer::tick(Game::World* world, int currentTick) {
         // MC Player.tick: the ticker counts up every tick and is reset by an
         // attack or a change of held item.
         ++m_attackStrengthTicker;
+
+        // MC Player.tick → this.cooldowns.tick(), and LivingEntity.tick's
+        // post-impulse grace countdown (the player's copy — its entity view
+        // is never Tick()ed).
+        m_itemCooldowns.Tick();
+        m_impulseContext.Tick();
+        // MC ServerPlayer.tick → wardenSpawnTracker.tick().
+        m_wardenSpawnTracker.Tick();
 
         // ── MC Player.giveExperienceLevels' chime ─────────────────────────
         // Every 5th level reached (amount > 0), at most once per 100 ticks:
@@ -135,6 +163,16 @@ namespace Server {
             for (int i = 0; i < 4; ++i) {
                 const Game::ItemStack& worn = m_inventory.GetSlot(Game::InventoryIndexFor(kArmor[i]));
                 const uint32_t id = worn.IsEmpty() ? 0u : static_cast<uint32_t>(worn.itemId);
+                // MC onEquipItem's tail: doesEmitEquipEvent → gameEvent(EQUIP
+                // when the new stack is equippable, else UNEQUIP) — a piece
+                // taken off is heard too.
+                if (m_armorSeen && id != m_lastArmorItems[static_cast<size_t>(i)] &&
+                    m_gameMode != GameMode::SPECTATOR) {
+                    const bool equippableNow = !worn.IsEmpty() && worn.get(Game::DataComponents::EQUIPPABLE);
+                    if (Game::Entity* self = GameEventSource()) {
+                        self->GameEvent(equippableNow ? Game::GameEventId::Equip : Game::GameEventId::Unequip);
+                    }
+                }
                 if (m_armorSeen && id != m_lastArmorItems[static_cast<size_t>(i)] && id != 0 &&
                     m_gameMode != GameMode::SPECTATOR) {
                     if (auto equippable = worn.get(Game::DataComponents::EQUIPPABLE);
@@ -182,8 +220,8 @@ namespace Server {
 
         // Void damage — MC Entity.checkBelowWorld: 64 blocks below the world
         // floor (minY -64 → threshold -128) deals 4/hit until death. The
-        // invulnerability window rate-limits it; creative/spectator are
-        // immune inside damage().
+        // invulnerability window rate-limits it; it is in
+        // BYPASSES_INVULNERABILITY, so creative and spectator die too.
         if (!m_isDead && m_position.y < -128.0) {
             damage(4.0f, DamageSource::VOID_DAMAGE);
         }
@@ -281,12 +319,76 @@ namespace Server {
         // LivingEntity.baseTick → updatingUsingItem (LivingEntity.java:3254).
         updatingUsingItem();
 
+        // ── Elytra flight (MC LivingEntity.tick's fallFlyTicks, aiStep's
+        //    updateFallFlying) ────────────────────────────────────────────
+        if (m_fallFlying) {
+            ++m_fallFlyTicks;
+            if (!canGlide()) {
+                m_fallFlying = false;
+            } else {
+                // Every 10 ticks the ELYTRA_GLIDE game event; every 20 a
+                // point of wear on the glider (a random one when several).
+                const int checkFallFlyTicks = m_fallFlyTicks + 1;
+                if (checkFallFlyTicks % 10 == 0) {
+                    if ((checkFallFlyTicks / 10) % 2 == 0) {
+                        const int chest = Game::InventoryIndexFor(Game::EquipmentSlot::CHEST);
+                        Game::ItemStack& glider = m_inventory.MutableSlot(chest);
+                        if (!glider.IsEmpty()) {
+                            Game::HurtAndBreak(glider, 1, soundRandom(), isCreative(),
+                                               [this](const Game::ItemStack& broken) {
+                                                   OnEquippedItemBroken(broken, Game::EquipmentSlot::CHEST);
+                                               });
+                            markSlotDirty(chest);
+                        }
+                    }
+                    if (Game::LivingEntity* view = effectEntity()) {
+                        view->GameEvent(Game::GameEventId::ElytraGlide);
+                    }
+                }
+            }
+        } else {
+            m_fallFlyTicks = 0;
+        }
+
         // Update position with physics (existing functionality)
         updatePosition(world);
 
         // Update mining progress
         if (m_isBreaking) {
             continueDestroyBlock(m_breakingPos);
+        }
+    }
+
+    // === ELYTRA FLIGHT ===
+
+    bool ServerPlayer::canGlide() const {
+        // Player.canGlide: !abilities.flying && LivingEntity.canGlide.
+        if (m_flying || m_onGround || isPassenger() || hasEffect(Game::MobEffectId::Levitation)) {
+            return false;
+        }
+        // canGlideUsing over every slot: only the elytra glides (GLIDER),
+        // worn in its EQUIPPABLE slot, with wear to spare.
+        const Game::ItemStack& chest = m_inventory.GetSlot(Game::InventoryIndexFor(Game::EquipmentSlot::CHEST));
+        if (chest.IsEmpty() || chest.itemId != Game::Items::Elytra) return false;
+        auto equippable = chest.get(Game::DataComponents::EQUIPPABLE);
+        return equippable && equippable->slot == Game::EquipmentSlot::CHEST && !Game::NextDamageWillBreak(chest);
+    }
+
+    void ServerPlayer::setFallFlyingFromClient(bool fallFlying) {
+        if (fallFlying) {
+            // START_FALL_FLYING: tryToStartFallFlying (not already gliding,
+            // canGlide, not in a liquid — the client checked the liquid), else
+            // stopFallFlying.
+            if (!m_fallFlying) {
+                if (canGlide()) {
+                    m_fallFlying = true;
+                    m_fallFlyTicks = 0;
+                } else {
+                    m_fallFlying = false;
+                }
+            }
+        } else {
+            m_fallFlying = false;
         }
     }
 
@@ -320,8 +422,15 @@ namespace Server {
             m_useItemRemaining = Game::GetUseDuration(stack);    // :3329
             m_isUsingItem      = true;                           // :3331 (flag bit 1)
             m_usedItemHand     = hand;                           // :3332 (flag bit 2)
-            // :3333 causeUseVibration → game-event system TODO (log-stub level)
-            // :3334-3336 KINETIC_WEAPON bookkeeping omitted — no combat.
+            // :3333 useItem.causeUseVibration(this, ITEM_INTERACT_START).
+            CauseUseVibration(m_useItem, Game::GameEventId::ItemInteractStart);
+            // :3334-3336 a KINETIC_WEAPON (a spear's charge) starts a fresh
+            // recentKineticEnemies table on the player's entity.
+            if (Game::Spear::Kinetic(m_useItem)) {
+                if (auto* self = dynamic_cast<Game::LivingEntity*>(GameEventSource())) {
+                    self->BeginKineticContacts();
+                }
+            }
         }
     }
 
@@ -342,11 +451,25 @@ namespace Server {
     // Mirrors LivingEntity.updateUsingItem (LivingEntity.java:3296-3302).
     void ServerPlayer::updateUsingItem() {
         // :3297 useItem.onUseTick → ItemStack.onUseTick (ItemStack.java:1060-1064)
-        // — the periodic consume-phase eat sound/particle stub.
+        // — the item's own Item.onUseTick (the crossbow's loading sounds and
+        // load), then the periodic consume-phase eat sound/particle.
+        const Game::Item& useItemDef = Game::ItemRegistry::Get(m_useItem.itemId);
+        if (useItemDef.onUseTick) {
+            // MC's useItem IS the stack in the hand: the tick writes the
+            // live slot (a crossbow's CHARGED_PROJECTILES), not a copy.
+            const int slot = handSlotIndex(m_usedItemHand);
+            Game::ItemStack& inHand = m_inventory.MutableSlot(slot);
+            if (inHand.itemId == m_useItem.itemId && !inHand.IsEmpty()) {
+                const Game::ItemStack before = inHand;
+                useItemDef.onUseTick(*this, inHand, m_useItemRemaining);
+                if (!Game::ItemStacksMatch(before, inHand)) markSlotDirty(slot);
+                m_useItem = inHand;
+            }
+        }
         Game::ConsumableBehavior::OnUseTick(*this, m_useItem, m_useItemRemaining);
         // :3298 — `--useItemRemaining == 0 && !useOnRelease → completeUsingItem`
-        // (useOnRelease is crossbow-only; we have no item that sets it).
-        if (--m_useItemRemaining == 0) {
+        // (useOnRelease: the crossbow, whose hold only ends on release).
+        if (--m_useItemRemaining == 0 && !useItemDef.useOnRelease) {
             completeUsingItem();
         }
     }
@@ -374,13 +497,20 @@ namespace Server {
     // (Item.java:221-224) + applyAfterUseComponentSideEffects (USE_REMAINDER,
     // ItemStack.java:332-348). Delegated to ConsumableBehavior::FinishUsing.
     Game::ItemStack ServerPlayer::finishUsingItem(Game::ItemStack& stack) {
+        // MC applyAfterUseComponentSideEffects reads USE_COOLDOWN off the
+        // stack as it was BEFORE the use (the chorus fruit's 1 s rest), so
+        // it is captured first and applied after the finish.
+        const Game::ItemStack stackBeforeUse = stack;
         // An item's own finishUsingItem override (the Hush's recall chime)
         // answers instead of the CONSUMABLE path; it mutates in place.
         if (auto finish = Game::ItemRegistry::Get(stack.itemId).finishUsing) {
             finish(*this, stack);
+            Game::ApplyUseCooldown(m_itemCooldowns, stackBeforeUse);
             return stack;
         }
-        return Game::ConsumableBehavior::FinishUsing(*this, stack);
+        Game::ItemStack result = Game::ConsumableBehavior::FinishUsing(*this, stack);
+        Game::ApplyUseCooldown(m_itemCooldowns, stackBeforeUse);
+        return result;
     }
 
     // Mirrors LivingEntity.releaseUsingItem (LivingEntity.java:3426-3437).
@@ -395,7 +525,12 @@ namespace Server {
                 release(*this, inHand, m_useItemRemaining);
                 markSlotDirty(handSlotIndex(m_usedItemHand));
             }
-            // :3431-3433 useOnRelease (crossbow) omitted — no such item.
+            // :3431-3433 — `if (useItem.useOnRelease()) updatingUsingItem()`:
+            // one more use tick at the moment of letting go, which is where a
+            // crossbow drawn to exactly full charge loads.
+            if (Game::ItemRegistry::Get(inHand.itemId).useOnRelease) {
+                updatingUsingItem();
+            }
         }
         stopUsingItem();   // :3436
     }
@@ -411,10 +546,46 @@ namespace Server {
 
     // Mirrors LivingEntity.stopUsingItem (LivingEntity.java:3439-3449).
     void ServerPlayer::stopUsingItem() {
+        // MC LivingEntity.stopUsingItem (server): a use that was running ends
+        // with useItem.causeUseVibration(this, ITEM_INTERACT_FINISH).
+        if (m_isUsingItem) CauseUseVibration(m_useItem, Game::GameEventId::ItemInteractFinish);
+        // The kinetic table goes with the use (recentKineticEnemies = null).
+        if (m_isUsingItem && Game::Spear::Kinetic(m_useItem)) {
+            if (auto* self = dynamic_cast<Game::LivingEntity*>(GameEventSource())) {
+                self->EndKineticContacts();
+            }
+        }
         m_isUsingItem      = false;
         m_usedItemHand     = 0;
         m_useItem          = Game::ItemStack{};
         m_useItemRemaining = 0;
+    }
+
+    void ServerPlayer::startAutoSpinAttack(int ticks, float damage, uint32_t hand,
+                                           const Game::ItemStack& stack) {
+        // MC Player.startAutoSpinAttack: the clock, the damage, the stack;
+        // server side the shoulder parrots come off and the flag goes on.
+        m_autoSpinAttackTicks = ticks;
+        m_autoSpinAttackDmg   = damage;
+        m_autoSpinAttackHand  = hand;
+        m_autoSpinAttackItem  = stack;
+        m_autoSpinAttackFlag  = true;
+    }
+
+    void ServerPlayer::stopAutoSpinAttack() {
+        // checkAutoSpinAttack's server tail: the flag off, the damage and the
+        // stack cleared.
+        m_autoSpinAttackTicks = 0;
+        m_autoSpinAttackFlag  = false;
+        m_autoSpinAttackDmg   = 0.0f;
+        m_autoSpinAttackItem  = Game::ItemStack{};
+    }
+
+    Game::ItemStack& ServerPlayer::autoSpinAttackWeapon(Game::ItemStack& scratch) {
+        Game::ItemStack& inHand = getItemInHand(m_autoSpinAttackHand);
+        if (!inHand.IsEmpty() && inHand.itemId == m_autoSpinAttackItem.itemId) return inHand;
+        scratch = m_autoSpinAttackItem;
+        return scratch;
     }
 
     bool ServerPlayer::setRespawnConfig(const std::optional<RespawnConfig>& config) {
@@ -438,6 +609,10 @@ namespace Server {
         // deathTime 20 (the view's triggerOnDeathMobEffects); an immediate
         // respawn gets here first, so clear them — with the remove packets,
         // because this port's client keeps its player object.
+        //
+        // The fresh player has no impulse in flight either (a death mid-launch
+        // must not forgive the next life's first fall).
+        m_impulseContext.Reset();
         removeAllEffects();
         if (!m_activeEffects.empty()) {
             for (const auto& e : m_activeEffects) sendEffectRemove(e.effect);
@@ -445,6 +620,7 @@ namespace Server {
         }
         m_absorptionAmount = 0.0f;
         m_position = glm::dvec3(spawnPos);
+        m_movePacketBase = m_position;
         m_velocity = glm::vec3(0.0f);
         m_health = 20.0f;
         m_isDead = false;
@@ -480,6 +656,14 @@ namespace Server {
         if (rest.count > 0) m_pendingDrops.push_back(rest);   // player.drop(newItemStack)
     }
 
+    bool ServerPlayer::AddItemOrDrop(const Game::ItemStack& stack) {
+        if (stack.IsEmpty()) return true;
+        Game::ItemStack rest = stack;
+        rest.count = m_inventory.AddStack(stack);   // what did not fit
+        if (rest.count > 0) m_pendingDrops.push_back(rest);
+        return true;
+    }
+
     void ServerPlayer::applyMovementIntent(const glm::vec3& intent) {
         // TODO: Apply movement based on game mode and abilities
         if (m_flying) {
@@ -502,6 +686,7 @@ namespace Server {
         Log::Info("ServerPlayer: Teleporting player %u to (%.1f, %.1f, %.1f)",
                  m_playerId, pos.x, pos.y, pos.z);
         m_position = pos;
+        m_movePacketBase = pos;
         m_velocity = glm::vec3(0.0f);
         m_fallDistance = 0.0f;
         // Open a brief grace window so the next few client-predicted
@@ -509,6 +694,13 @@ namespace Server {
         // position) don't trip the anti-cheat distance gate.
         m_teleportGraceUntil = std::chrono::steady_clock::now() +
                                std::chrono::seconds(2);
+    }
+
+    void ServerPlayer::snapTo(const glm::dvec3& pos) {
+        m_position     = pos;
+        m_movePacketBase = pos;
+        m_velocity     = glm::vec3(0.0f);
+        m_fallDistance = 0.0f;
     }
 
     void ServerPlayer::setRotation(float yaw, float pitch) {
@@ -547,6 +739,7 @@ namespace Server {
         }
 
         m_position = pos;
+        m_movePacketBase = pos;
         updateLastUpdateTime();
     }
 
@@ -697,6 +890,12 @@ namespace Server {
             case DamageSource::STALAGMITE:         return "minecraft:stalagmite";
             case DamageSource::WITHER:             return "minecraft:wither";
             case DamageSource::THORNS:             return "minecraft:thorns";
+            case DamageSource::MACE_SMASH:         return "minecraft:mace_smash";
+            case DamageSource::FIREWORKS:          return "minecraft:fireworks";
+            case DamageSource::FLY_INTO_WALL:      return "minecraft:fly_into_wall";
+            case DamageSource::LIGHTNING_BOLT:     return "minecraft:lightning_bolt";
+            case DamageSource::SPEAR:              return "minecraft:spear";
+            case DamageSource::TRIDENT:            return "minecraft:trident";
         }
         return "minecraft:generic";
     }
@@ -719,13 +918,20 @@ namespace Server {
             return;
         }
 
+
         // Check for invulnerability
         if (m_invulnerabilityTicks > 0) {
             return;
         }
         
-        // Check game mode
-        if (m_gameMode == GameMode::CREATIVE || m_gameMode == GameMode::SPECTATOR) {
+        // MC Player.isInvulnerableTo: `abilities.invulnerable &&
+        // !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY)` — creative and
+        // spectator shrug off everything but the tag's members, of which this
+        // port has the void (fell_out_of_world) and /kill (generic_kill, which
+        // goes through kill()). A spectator or creative player who flies 64
+        // blocks under the world floor dies, as in vanilla.
+        if ((m_gameMode == GameMode::CREATIVE || m_gameMode == GameMode::SPECTATOR) &&
+            source != DamageSource::VOID_DAMAGE && source != DamageSource::GENERIC_KILL) {
             return;
         }
 
@@ -841,6 +1047,11 @@ namespace Server {
 
         // Apply damage
         m_health = std::max(0.0f, m_health - amount);
+        // MC Player.actuallyHurt: `if (dmg != 0) … gameEvent(ENTITY_DAMAGE)`
+        // — a hurt player is heard by sculk sensors and wardens.
+        if (amount != 0.0f) {
+            if (Game::Entity* self = GameEventSource()) self->GameEvent(Game::GameEventId::EntityDamage);
+        }
         // Bumped on every landed hit so the entity view can notice damage that
         // did NOT come through it — fall, void, starvation — and still start
         // the hurt flash and the client's camera tilt. MC gets that for free by
@@ -933,6 +1144,28 @@ namespace Server {
             w->PlaySound(nullptr, m_position, Game::GetBreakSound(broken), Game::SoundSource::Players,
                          0.8f, pitch);
         }
+        // breakItem's spawnItemParticles(stack, 5): the shards out of the
+        // mouth along the look. Sent as five direct particles (count 0 —
+        // the offsets are the velocity), everyone the player included.
+        if (Game::World* w = soundWorld()) {
+            const float eye = (m_sneaking && !isMorphed()) ? 1.27f * m_scale : getEyeHeight();
+            const glm::dvec3 eyePos = m_position + glm::dvec3(0.0, eye, 0.0);
+            const double xa = -static_cast<double>(getPitch()) * 0.017453292;
+            const double ya = -static_cast<double>(getYaw()) * 0.017453292;
+            const double xc = std::cos(xa), xs = std::sin(xa), yc = std::cos(ya), ys = std::sin(ya);
+            const auto rotate = [&](glm::dvec3 v) {
+                v = glm::dvec3(v.x, v.y * xc + v.z * xs, v.z * xc - v.y * xs);
+                return glm::dvec3(v.x * yc + v.z * ys, v.y, v.z * yc - v.x * ys);
+            };
+            const Game::ParticleOptions options = Game::ParticleOptions::Item(broken.itemId);
+            for (int i = 0; i < 5; ++i) {
+                const glm::dvec3 d = rotate(glm::dvec3((m_soundRandom.NextFloat() - 0.5) * 0.1,
+                                                       m_soundRandom.NextFloat() * 0.1 + 0.1, 0.0));
+                const double y1 = static_cast<double>(-m_soundRandom.NextFloat()) * 0.6 - 0.3;
+                const glm::dvec3 p = rotate(glm::dvec3((m_soundRandom.NextFloat() - 0.5) * 0.3, y1, 0.6)) + eyePos;
+                w->SendParticles(options, false, false, p.x, p.y, p.z, 0, d.x, d.y + 0.05, d.z, 1.0);
+            }
+        }
         // stopLocationBasedEffects: armour and attack attributes are read
         // from the slots on demand, so the empty slot already stops them;
         // the enchantments' modifiers and location effects come off at the
@@ -978,6 +1211,9 @@ namespace Server {
         for (const int slot : hands) {
             Game::ItemStack& stack = m_inventory.MutableSlot(slot);
             if (stack.IsEmpty() || stack.itemId != Game::Items::TotemOfUndying) continue;
+            // protectionItem = itemStack.copy(), then shrink(1); the copy's
+            // causeUseVibration(this, ITEM_INTERACT_FINISH) follows below.
+            CauseUseVibration(stack, Game::GameEventId::ItemInteractFinish);
             if (--stack.count <= 0) stack.Clear();   // itemStack.shrink(1)
             protectedByTotem = true;
             break;
@@ -986,8 +1222,8 @@ namespace Server {
 
         // setHealth(1.0F), then DeathProtection.TOTEM_OF_UNDYING's effects:
         // ClearAllStatusEffects, then REGENERATION II 45 s, ABSORPTION II
-        // 5 s and FIRE_RESISTANCE 40 s. (Stats, the USED_TOTEM trigger and the
-        // use vibration have no systems here.) The slot change reaches the
+        // 5 s and FIRE_RESISTANCE 40 s. (Stats and the USED_TOTEM trigger
+        // have no systems here.) The slot change reaches the
         // client through the per-tick inventory diff.
         m_health = 1.0f;
         removeAllEffects();
@@ -1029,7 +1265,12 @@ namespace Server {
         // tick; the tick is the common case, so FIRE bypasses.
         switch (source) {
             case DamageSource::ENTITY_ATTACK:
+            case DamageSource::MACE_SMASH:
+            case DamageSource::SPEAR:
+            case DamageSource::TRIDENT:
             case DamageSource::EXPLOSION:
+            case DamageSource::FIREWORKS:   // not in #bypasses_armor
+            case DamageSource::LIGHTNING_BOLT:   // not in #bypasses_armor
             case DamageSource::LAVA:
             case DamageSource::FALLING_BLOCK:
             case DamageSource::FALLING_ANVIL:
@@ -1206,9 +1447,37 @@ namespace Server {
         for (const Game::MobEffectInstance& e : m_activeEffects) sendEffectUpdate(e, false);
     }
 
+    // MC ServerItemCooldowns.onCooldownStarted / onCooldownEnded:
+    // ClientboundCooldownPacket(group, duration) — 0 for an ended one.
+    void ServerItemCooldowns::OnCooldownStarted(const std::string& group, int duration) {
+        Game::ItemCooldowns::OnCooldownStarted(group, duration);
+        ServerConnection* connection = ConnectionFor(m_owner.getPlayerId());
+        if (!connection) return;
+        Network::CooldownS2CPacket p;
+        p.cooldownGroup = group;
+        p.duration      = duration;
+        connection->SendPacket(static_cast<uint8_t>(Network::PacketId::CooldownS2C),
+                               Network::Serialization::Serialize(p));
+    }
+
+    void ServerItemCooldowns::OnCooldownEnded(const std::string& group) {
+        Game::ItemCooldowns::OnCooldownEnded(group);
+        ServerConnection* connection = ConnectionFor(m_owner.getPlayerId());
+        if (!connection) return;
+        Network::CooldownS2CPacket p;
+        p.cooldownGroup = group;
+        p.duration      = 0;
+        connection->SendPacket(static_cast<uint8_t>(Network::PacketId::CooldownS2C),
+                               Network::Serialization::Serialize(p));
+    }
+
     // === ABILITIES ===
 
-    void ServerPlayer::setGameMode(GameMode mode) {
+    bool ServerPlayer::setGameMode(GameMode mode) {
+        // MC changeGameModeForPlayer: `if (gameModeForPlayer == this.gameModeForPlayer) return false`.
+        if (mode == m_gameMode) return false;
+        // setGameModeForPlayer(gameModeForPlayer, previousGameModeForPlayer = the old one).
+        m_previousGameMode = static_cast<int>(m_gameMode);
         m_gameMode = mode;
         // Keeps the creative-only click paths (CLONE, creative grid, destroy
         // slot) in step with the gamemode.
@@ -1237,7 +1506,12 @@ namespace Server {
                 break;
         }
 
+        // MC ServerPlayerGameMode.changeGameModeForPlayer: going creative
+        // drops any running impulse (resetCurrentImpulseContext).
+        if (mode == GameMode::CREATIVE) m_impulseContext.Reset();
+
         Log::Info("ServerPlayer: Player %u game mode changed to %d", m_playerId, static_cast<int>(mode));
+        return true;
     }
 
     void ServerPlayer::setFlying(bool flying) {
@@ -1290,6 +1564,14 @@ namespace Server {
         // Velocity is cleared rather than left alone so a residual from before
         // the toggle cannot fire the instant noclip is switched off.
         if (m_noclip) {
+            m_velocity = glm::vec3(0.0f);
+            return;
+        }
+        // A passenger's body is its seat's (Server::PlayerRiding puts it
+        // there every tick): no gravity, no drift. Integrating here moved a
+        // rider off the seat between two seatings, which read as a teleport
+        // and ended the ride.
+        if (isPassenger()) {
             m_velocity = glm::vec3(0.0f);
             return;
         }

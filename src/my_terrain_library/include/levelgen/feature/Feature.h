@@ -2889,8 +2889,15 @@ private:
                 for (int dy = 0; dy < totalHeight; ++dy) {
                     blockPos.setWithOffset(surfaceOrigin, dx, dy, dz);
                     if (isReplaceable(level, blockPos, config, true)) {
-                        // config.planted is always false in worldgen
-                        if (cornerOfHugeStem) {
+                        // config.planted: the bone-mealed fungus (never in
+                        // worldgen) breaks what it grows through, with drops.
+                        if (config.planted) {
+                            BlockState* below = level->getBlockState(blockPos.below());
+                            if (below && !below->isAir()) {
+                                level->destroyBlock(blockPos, true);
+                            }
+                            level->setBlock(blockPos, config.stemState, 3);
+                        } else if (cornerOfHugeStem) {
                             if (random.nextFloat() < 0.1f) {
                                 level->setBlock(blockPos, config.stemState, 3);
                             }
@@ -2942,7 +2949,12 @@ private:
                     // CRITICAL: Java gates ALL branches (and their RNG draws)
                     // on isReplaceable(..., false).
                     if (isReplaceable(level, blockPos, config, false)) {
-                        // config.planted always false in worldgen
+                        if (config.planted) {
+                            BlockState* below = level->getBlockState(blockPos.below());
+                            if (below && !below->isAir()) {
+                                level->destroyBlock(blockPos, true);
+                            }
+                        }
                         if (isHatBottom) {
                             if (!inside) {
                                 placeHatDropBlock(level, random, blockPos, config.hatState, placeVines);

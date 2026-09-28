@@ -1,5 +1,6 @@
 // File: src/server/commands/WorldOptionsCommand.cpp
 #include "WorldOptionsCommand.hpp"
+#include "GameModeCommand.hpp"
 #include "../IntegratedServer.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../player/ServerPlayer.hpp"
@@ -24,13 +25,11 @@ namespace Server {
             return std::nullopt;
         }
 
-        std::optional<int> ParseGameMode(const std::string& raw) {
-            const std::string v = Lower(raw);
-            if (v == "survival"  || v == "s"  || v == "0") return 0;
-            if (v == "creative"  || v == "c"  || v == "1") return 1;
-            if (v == "adventure" || v == "a"  || v == "2") return 2;
-            if (v == "spectator" || v == "sp" || v == "3") return 3;
-            return std::nullopt;
+        // /gamemode's parser (names, s/c/a/sp, 0-3), as the world's int.
+        std::optional<int> ParseGameMode(const std::string& v) {
+            const auto mode = GameModeCommand::ParseGameMode(v);
+            if (!mode) return std::nullopt;
+            return static_cast<int>(*mode);
         }
 
         const char* GameModeDisplayName(int mode) {
@@ -60,9 +59,21 @@ namespace Server {
     }
 
     void WorldOptionsCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("worldoptions", WorldOptionsCommand::Execute);
-        dispatcher.RegisterCommand("defaultgamemode", WorldOptionsCommand::ExecuteDefaultGameMode);
-        dispatcher.RegisterCommand("publish", WorldOptionsCommand::ExecutePublish);
+        namespace Cmd = Game::Cmd;
+        const Cmd::Node onOff = Cmd::Argument("value", Cmd::Arg::Word)
+            .Suggests({"on", "off"}).Executes();
+        const Cmd::Node port = Cmd::Argument("port", Cmd::Arg::Integer)
+            .Suggests({"25565"}).Executes();
+        dispatcher.RegisterCommand("worldoptions", WorldOptionsCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literals({"allow_commands", "guest_command_access", "force_game_mode", "joinable"},
+                                    false, &onOff))
+                .Then(Cmd::Literal("difficulty_lock").Executes())
+                .Then(Cmd::Literal("port").Then(port)));
+        dispatcher.RegisterCommand("defaultgamemode", WorldOptionsCommand::ExecuteDefaultGameMode,
+            Cmd::Root().Then(Cmd::Argument("gamemode", Cmd::Arg::GameMode).Executes()));
+        dispatcher.RegisterCommand("publish", WorldOptionsCommand::ExecutePublish,
+            Cmd::Root().Executes().Then(port));
     }
 
     // MC DefaultGameModeCommand: "The default game mode is now %s"

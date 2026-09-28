@@ -89,19 +89,26 @@
           "functions": [
             {
               "decoration": "minecraft:red_x",
+              "destination": "#minecraft:on_treasure_maps",
               "function": "minecraft:exploration_map",
               "skip_existing_chunks": false,
               "zoom": 1
             },
             {
-              "function": "minecraft:set_name",
-              "name": {
-                "translate": "filled_map.buried_treasure"
+              "function": "minecraft:filtered",
+              "item_filter": {
+                "predicates": {
+                  "minecraft:map_id": {}
+                }
               },
-              "target": "item_name"
+              "on_fail": [
+                {
+                  "function": "minecraft:discard"
+                }
+              ]
             }
           ],
-          "name": "minecraft:map",
+          "name": "minecraft:buried_treasure_map",
           "weight": 5
         }
       ],

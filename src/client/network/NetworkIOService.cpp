@@ -2,7 +2,9 @@
 #include "NetworkIOService.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/core/ThreadPriority.hpp"
 #include <chrono>
+#include "platform/CrashHandler.hpp"
 
 namespace Client {
 
@@ -62,9 +64,15 @@ namespace Client {
     }
     
     void NetworkIOService::RunIOThread() {
-        // Server packets are read and decoded here — chunk packets are
-        // prebuilt on this thread (ClientChunkManager::PrebuildChunk).
+        // Server packets are read and decoded here (chunk packets are handed
+        // to the decode threads, ClientConnection.cpp).
         PROFILE_THREAD("NetworkIO");
+        // Tiny CPU, and everything the client receives waits on it. At the
+        // default QoS it lost the cores to the loaders, decoders and mesh
+        // workers during a load burst: a batch of chunks trickled in over tens
+        // of milliseconds on loopback (2026-09-26).
+        Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
+        Platform::InstallThreadCrashStack();
         Log::Info("NetworkIOService: I/O thread started (tid: %zu)", 
                   std::hash<std::thread::id>{}(std::this_thread::get_id()));
         

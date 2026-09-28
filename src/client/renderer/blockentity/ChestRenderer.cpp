@@ -325,6 +325,16 @@ namespace Render {
     }
 
     const char* ChestRenderer::VariantForBlock(Game::BlockID id) const {
+        // MC Sheets.chooseMaterial: a copper chest draws its oxidation's
+        // sheet — copper / copper_exposed / copper_weathered /
+        // copper_oxidized — waxed or not.
+        switch (Game::CopperChestWeatherState(id)) {
+            case 0: return "copper";
+            case 1: return "copper_exposed";
+            case 2: return "copper_weathered";
+            case 3: return "copper_oxidized";
+            default: break;
+        }
         switch (id) {
             case Game::BlockID::TrappedChest: return "trapped";
             case Game::BlockID::EnderChest:   return "ender";
@@ -355,7 +365,15 @@ namespace Render {
         // a chest that opens as a double always draws as one — the two cannot
         // disagree, because both read the same rule off the same block states.
         Variant variant = kSingle;
-        std::string texVariant = VariantForBlock(be.GetBlockId());
+        // The block in the world, not the one the entity was made for: a
+        // copper chest keeps its block entity while it oxidizes.
+        Game::BlockID drawnBlock = be.GetBlockId();
+        if (Client::g_clientBlockAccess) {
+            const glm::ivec3 p = be.GetWorldPos();
+            const Game::BlockID here = Client::g_clientBlockAccess->GetBlock(p.x, p.y, p.z);
+            if (Game::IsChestBlock(here) || here == Game::BlockID::EnderChest) drawnBlock = here;
+        }
+        std::string texVariant = VariantForBlock(drawnBlock);
         // MC ChestBlock.opennessCombiner: a pair opens as one — the wider of
         // the two halves' lids.
         const auto* chest = dynamic_cast<const Game::ChestBlockEntity*>(&be);

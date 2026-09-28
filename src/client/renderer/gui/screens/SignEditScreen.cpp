@@ -2,6 +2,7 @@
 #include "SignEditScreen.hpp"
 
 #include "../GuiGraphics.hpp"
+#include "../FontRenderer.hpp"
 #include "../../backend/RenderBackend.hpp"
 #include "client/world/ClientChunkManager.hpp"
 #include "client/world/ClientBlockAccess.hpp"
@@ -169,7 +170,7 @@ namespace Render {
         if (codepoint < 32 || codepoint > 126) return true;   // the 8×8 sheet is ASCII
         std::string next = m_lines[m_line];
         next += static_cast<char>(codepoint);
-        if (m_widthProbe && m_widthProbe(next) > m_maxLineWidth) return true;
+        if (m_font && m_font->GetStringWidth(next) > m_maxLineWidth) return true;
         m_lines[m_line] = next;
         PushLinesToSign();
         return true;
@@ -177,9 +178,11 @@ namespace Render {
 
     void SignEditScreen::Render(GuiGraphics& g, int mouseX, int mouseY, float partialTick) {
         // The width check needs the GUI font; it becomes available here.
-        if (!m_widthProbe) {
-            m_widthProbe = [&g](const std::string& s) { return g.GetStringWidth(s); };
-        }
+        // Only the FontRenderer is kept — `g` dies with this frame. (Keeping
+        // a reference to `g` itself made CharTyped read a dead stack frame:
+        // per-character garbage glyph widths, so on some builds/CPUs some
+        // letters — "e" among them — were refused as "too wide".)
+        m_font = g.GetFontRenderer();
 
         Screen::Render(g, mouseX, mouseY, partialTick);   // background + Done
 

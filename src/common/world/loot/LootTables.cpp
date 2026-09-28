@@ -8,7 +8,16 @@
 #include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/world/level/World.hpp"
 
+#include "common/data/DataComponentMap.hpp"
+
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,6 +26,47 @@
 namespace Game {
 
     namespace {
+
+        // The `include` lists of a block table's copy_components functions
+        // (source block_entity), namespace stripped. The baked tables keep
+        // the function but not its list, so the list is read from the data
+        // pack (data/<ns>/loot_table/blocks/<slug>.json, MC_DATA_ROOT or
+        // ./data) the first time the block drops, and cached.
+        const std::vector<std::string>& CopyComponentsIncludes(BlockID block) {
+            static std::mutex s_mutex;
+            static std::unordered_map<BlockID, std::vector<std::string>> s_cache;
+            std::lock_guard<std::mutex> lock(s_mutex);
+            if (auto it = s_cache.find(block); it != s_cache.end()) return it->second;
+            std::vector<std::string>& out = s_cache[block];
+            const std::string& slug = BlockRegistry::Get(block).registrySlug;
+            if (slug.empty()) return out;
+            const char* env = std::getenv("MC_DATA_ROOT");
+            const std::filesystem::path file = std::filesystem::path(env ? env : "data") /
+                "minecraft" / "loot_table" / "blocks" / (slug + ".json");
+            std::ifstream in(file);
+            if (!in) return out;
+            nlohmann::json j;
+            try { in >> j; } catch (const std::exception&) { return out; }
+            std::function<void(const nlohmann::json&)> walk = [&](const nlohmann::json& o) {
+                if (o.is_object()) {
+                    if (o.value("function", std::string()) == "minecraft:copy_components" &&
+                        o.value("source", std::string("block_entity")) == "block_entity" &&
+                        o.contains("include") && o["include"].is_array()) {
+                        for (const auto& id : o["include"]) {
+                            if (!id.is_string()) continue;
+                            std::string name = id.get<std::string>();
+                            if (name.rfind("minecraft:", 0) == 0) name.erase(0, 10);
+                            if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+                        }
+                    }
+                    for (const auto& [key, value] : o.items()) walk(value);
+                } else if (o.is_array()) {
+                    for (const auto& value : o) walk(value);
+                }
+            };
+            walk(j);
+            return out;
+        }
 
         bool s_initialized = false;
 
@@ -265,12 +315,20 @@ namespace Game {
                 }
                 break;
 
-            case LootFuncType::CopyComponents:
+            case LootFuncType::CopyComponents: {
+                // MC CopyComponentsFunction (source block_entity): from the
+                // components the broken block's entity collects, the ones the
+                // function's `include` list names — a banner's patterns and
+                // name, a pot's sherds, a shulker box's contents.
+                if (!ctx.blockEntityComponents || ctx.blockEntityComponents->empty()) break;
+                for (const std::string& name : CopyComponentsIncludes(ctx.block)) {
+                    stack.components.CopyNamed(*ctx.blockEntityComponents, name);
+                }
+                break;
+            }
             case LootFuncType::CopyState:
-                // Both copy block-entity data onto the dropped stack (chest
-                // contents, shulker inventories, bee nest honey level). We do
-                // not carry block-entity NBT on an ItemStack yet, so the item
-                // drops without it — the block still drops, just empty.
+                // Block state properties onto BLOCK_STATE (bee nests' honey
+                // level): the engine carries no BLOCK_STATE component.
                 break;
             }
         }

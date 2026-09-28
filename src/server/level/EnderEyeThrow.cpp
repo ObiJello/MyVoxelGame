@@ -21,6 +21,7 @@
 #include "common/entity/Item.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
 #include "common/entity/projectile/ThrowableProjectile.hpp"
+#include "common/entity/projectile/HurtingProjectile.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/core/Mth.hpp"
 #include "server/player/ServerPlayer.hpp"
@@ -141,6 +142,41 @@ namespace Game {
                                   -20.0f, 0.5f, 1.0f);
 
         return level->Mobs()->Add(std::move(potion)) != 0;
+    }
+
+    bool ThrowWindCharge(int dimensionId, IUsePlayer& player) {
+        // The pearl's resolution chain: server level, the player's entity
+        // VIEW as the owner (the blast's attribution, and the charge's
+        // leave-the-owner test).
+        auto* server = Server::g_integratedServer.get();
+        if (!server) return false;
+
+        Server::ServerLevel* level =
+            server->GetLevel(Game::DimensionFromRaw(dimensionId));
+        if (!level || !level->Mobs() || !level->MobLevel()) return false;
+
+        auto* serverPlayer = dynamic_cast<Server::ServerPlayer*>(&player);
+        if (!serverPlayer) return false;
+        auto* sessions = server->GetSessionManager();
+        auto session = sessions
+            ? sessions->GetSession(serverPlayer->getPlayerId()) : nullptr;
+        Server::PlayerEntityView* view = session
+            ? level->MobLevel()->GetPlayerView(session->GetConnectionId())
+            : nullptr;
+        if (!view) return false;
+
+        // MC new WindCharge(player, level, player.position().x(),
+        // player.getEyePosition().y(), player.position().z()).
+        auto charge = std::make_unique<WindCharge>(level->MobLevel());
+        charge->SetOwner(view);
+        charge->position    = glm::dvec3(view->position.x, view->GetEyeY(), view->position.z);
+        charge->oldPosition = charge->position;
+        // spawnProjectileFromRotation(…, player, 0.0F, 1.5F, 1.0F): the view
+        // angles become the direction, the thrower's movement rides along.
+        charge->ShootFromRotation(*view, player.getPitch(), player.getYaw(),
+                                  0.0f, WindCharge::kShootPower, 1.0f);
+
+        return level->Mobs()->Add(std::move(charge)) != 0;
     }
 
 } // namespace Game

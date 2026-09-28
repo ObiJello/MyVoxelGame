@@ -4,6 +4,7 @@
 // entity's (LecternBlockEntity); what lives here is the interaction, the
 // blockstate bookkeeping (HAS_BOOK, POWERED) and the redstone.
 #include "common/world/block/LecternBlock.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/entity/BookItems.hpp"
 #include "common/entity/IUsePlayer.hpp"
@@ -75,7 +76,7 @@ namespace Game {
             // name behind the player it is the lectern's own ("Lectern").
             const std::string readerName = player ? player->getPlainTextName() : std::string();
             lectern->SetBook(std::move(one), readerName.empty() ? nullptr : &readerName);
-            LecternResetBookState(level, pos, state, true);
+            LecternResetBookState(level, pos, state, true, player ? player->GameEventSource() : nullptr);
             level.PlaySound(SoundExcept(nullptr), pos, SoundEvents::BOOK_PUT, SoundSource::Blocks, 1.0f, 1.0f);
         }
 
@@ -134,9 +135,12 @@ namespace Game {
 
     } // namespace
 
-    void LecternResetBookState(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool hasBook) {
+    void LecternResetBookState(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool hasBook,
+                               Entity* sourceEntity) {
         const BlockState newState = WithBool(WithPowered(state, false), PropertyId::HAS_BOOK, hasBook);
         level.SetBlock(pos.x, pos.y, pos.z, newState, World::UpdateFlags::All);
+        // MC resetBookState: gameEvent(BLOCK_CHANGE, pos, Context.of(sourceEntity, newState)).
+        level.GameEvent(GameEventId::BlockChange, pos, GameEventContext::Of(sourceEntity, newState));
         UpdateBelow(level, pos);
     }
 

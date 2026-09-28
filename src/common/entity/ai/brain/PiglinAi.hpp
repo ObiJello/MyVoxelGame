@@ -9,12 +9,28 @@
 // repellent blocks, fleeing when hoglins outnumber the pack, the baby's
 // nemesis-flight and hoglin-riding games, and retaliation with pack anger.
 //
-// SKIPPED, each commented at its MC call site in the .cpp: everything riding
-// on the item/equipment systems — admiring, bartering, item pickup, crossbow
-// and spear combat, gold-armor truce — plus door interaction and sounds.
+// The item half: loot pickup (PiglinAi.pickUpItem — admire, barter, eat,
+// equip, pocket), the ADMIRE_ITEM activity (walk to a loved item, admire it
+// in the off hand for 119 ticks, then barter a gold ingot for the
+// piglin_bartering table or keep what it took), the NEAREST_ITEMS sensor,
+// the crossbow (BackUpIfTooClose + CrossbowAttack), the gold-armour truce
+// (isWearingSafeArmor) and the jealous look / sound at a player holding gold.
+//
+// UNIVERSAL_ANGER (the universal_anger game rule) is honoured: a player's
+// hit, or a guarded block / container, angers the pack at the nearest
+// targetable player, and an angry piglin takes any visible attackable one.
+//
+// The spear fight (SpearApproach / SpearAttack / SpearRetreat) runs in the
+// FIGHT activity for a piglin holding a spear.
+//
+// SKIPPED, commented at its MC call site in the .cpp: door interaction (no
+// InteractWithDoor behaviour).
 #pragma once
 
 #include "common/entity/ai/brain/Brain.hpp"
+#include "common/entity/Item.hpp"
+
+#include <cstdint>
 
 namespace Game {
 
@@ -46,13 +62,51 @@ namespace Game {
         // Shared with PiglinBruteAi.
         void MaybeRetaliate(EntityLevel& level, Mob& piglin, LivingEntity& attacker);
         void SetAngerTarget(Mob& piglin, LivingEntity& target);
+        // MC PiglinAi.broadcastAngerTarget: every nearby adult piglin (brutes
+        // included) that is not hunting-barred takes the target when it is
+        // nearer than its own grudge (setAngerTargetIfCloserThanCurrent); a
+        // hoglin only for a piglin that can hunt one that can be hunted.
+        void BroadcastAngerTarget(EntityLevel& level, Mob& piglin, LivingEntity& target);
+
+        // MC SetLookAndInteract.create(PLAYER, range) — shared with the
+        // brute's IDLE activity.
+        BehaviorPtr MakeSetLookAndInteractPlayer(int interactionRange);
 
         // MC PiglinAi.isZombified — zombified piglin or zoglin.
         bool IsZombified(const Entity& entity);
 
         // MC PiglinAi.isPlayerHoldingLovedItem — a player holding anything in
-        // the piglin_loved tag (the flattened gold-item list here).
+        // the piglin_loved tag in either hand.
         bool IsPlayerHoldingLovedItem(EntityLevel& level, LivingEntity& entity);
+
+        // ── Items ─────────────────────────────────────────────────────────
+        // MC ItemTags.PIGLIN_LOVED / BARTERING_ITEM (the gold ingot) /
+        // ItemTags.PIGLIN_FOOD.
+        bool IsLovedItem(const ItemStack& stack);
+        bool IsBarterCurrency(const ItemStack& stack);
+        bool IsFood(const ItemStack& stack);
+        // MC PiglinAi.isWearingSafeArmor: any armour slot holding a
+        // piglin_safe_armor piece (the gold set) — a player in gold is not a
+        // target.
+        bool IsWearingSafeArmor(LivingEntity& entity);
+        // MC PiglinAi.wantsToPickup.
+        bool WantsToPickup(const Piglin& piglin, const ItemStack& stack);
+        // MC PiglinAi.pickUpItem(level, piglin, itemEntity): takes the whole
+        // stack of nuggets or one of anything else from the item entity.
+        void PickUpItem(EntityLevel& level, Piglin& piglin, int32_t itemEntityId, const ItemStack& stack);
+        // MC PiglinAi.stopHoldingOffHandItem — the end of an admire: an adult
+        // barters a gold ingot (when bartering is enabled) or keeps the loot;
+        // a baby keeps a new toy in its main hand.
+        void StopHoldingOffHandItem(EntityLevel& level, Piglin& piglin, bool barteringEnabled);
+        // MC PiglinAi.cancelAdmiring — the admired item dropped.
+        void CancelAdmiring(EntityLevel& level, Piglin& piglin);
+        // MC PiglinAi.canAdmire / mobInteract (the server half).
+        bool CanAdmire(const Piglin& piglin, const ItemStack& held);
+        bool MobInteract(EntityLevel& level, Piglin& piglin, ItemStack& held);
+        // MC PiglinAi.angerNearbyPiglins: the idle piglins within 16 blocks of
+        // a player (only those that see the player when asked) turn on them —
+        // a guarded container opened, a guarded block broken.
+        void AngerNearbyPiglins(EntityLevel& level, LivingEntity& player, bool onlyIfTheySeeThePlayer);
 
     } // namespace PiglinAi
 

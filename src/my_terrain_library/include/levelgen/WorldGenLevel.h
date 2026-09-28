@@ -192,6 +192,45 @@ public:
         (void)delay;
     }
 
+    //=========================================================================
+    // Live-level hooks
+    //
+    // The features below were written against WorldGenRegion, but the game
+    // also runs them against its LIVE world (a sapling growing into the same
+    // tree worldgen places — TreeGrower.growTree). These three defaults are
+    // the worldgen behaviour; a live-level adapter overrides them. None of
+    // them is reached differently during generation, so the defaults keep
+    // worldgen byte-identical.
+    //=========================================================================
+
+    /**
+     * WorldGenRegion.hasChunkAt / LevelReader.hasChunkAt: is the chunk
+     * holding `pos` accessible to this level.
+     */
+    virtual bool hasChunkAt(const core::BlockPos& pos) {
+        return getChunk(pos.getX() >> 4, pos.getZ() >> 4) != nullptr;
+    }
+
+    /**
+     * LevelWriter.destroyBlock(pos, dropResources): the cell becomes its
+     * fluid (air here, WorldGenRegion keeps no drops) with flag 3. Only the
+     * planted huge fungus reaches it, which worldgen never places.
+     */
+    virtual bool destroyBlock(const core::BlockPos& pos, bool dropResources);
+
+    /**
+     * One face of StructureTemplate.updateShapeAtEdge(level, flags, shape, …):
+     * `pos` is inside the placed shape, `pos + step` outside it. A level that
+     * owns real block behaviour runs BlockState.updateShape on both cells
+     * itself and answers true; the default answers false and the caller
+     * runs its own worldgen emulation of the step.
+     */
+    virtual bool updateShapeAtEdge(const core::BlockPos& pos, int stepX, int stepY, int stepZ,
+                                   int flags) {
+        (void)pos; (void)stepX; (void)stepY; (void)stepZ; (void)flags;
+        return false;
+    }
+
     /**
      * WorldGenerationContext.of(level).seaLevel(): the chunk generator's sea
      * level (VerticalAnchor.seaLevel() resolves against it). Stamped by

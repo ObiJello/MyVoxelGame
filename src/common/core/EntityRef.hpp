@@ -24,6 +24,8 @@
 
 #include "common/core/Uuid.hpp"
 
+#include <memory>
+
 namespace Game {
 
     class Entity;
@@ -36,11 +38,11 @@ namespace Game {
         const Uuid& GetUuid() const { return m_uuid; }
 
         // From a save: identity only, never a pointer.
-        void SetUnresolved(const Uuid& uuid) { m_uuid = uuid; m_resolved = nullptr; }
+        void SetUnresolved(const Uuid& uuid) { m_uuid = uuid; m_resolved = nullptr; m_alive.reset(); }
 
         // From gameplay: stamps both halves.
         void Set(const Entity* entity);
-        void Clear() { m_uuid = Uuid{}; m_resolved = nullptr; }
+        void Clear() { m_uuid = Uuid{}; m_resolved = nullptr; m_alive.reset(); }
 
         // Identity comparison that never triggers a resolve — for "is this the
         // entity I am angry at?" tests on the hot path.
@@ -57,8 +59,14 @@ namespace Game {
         void OnEntityRemoved(const Entity* entity);
 
     private:
+        // The cached pointer is only ever dereferenced while `m_alive` (the
+        // referent's Entity::LivenessToken) has not expired: an entity freed
+        // without anyone calling OnEntityRemoved (a player's view dropped on
+        // disconnect, a mob swept) leaves a dangling pointer that is never
+        // touched again — the next Get resolves by UUID instead.
         Uuid    m_uuid{};
         Entity* m_resolved = nullptr;
+        std::weak_ptr<const void> m_alive;
     };
 
 } // namespace Game

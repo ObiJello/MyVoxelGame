@@ -13,6 +13,9 @@
 #include "server/portal/EntityPortalTravel.hpp"
 #endif
 #include "server/portal/TwilightTeleporter.hpp"
+#if ENABLE_PORTAL_GUN
+#include "server/portal/PortalGunTracker.hpp"
+#endif
 #include "common/entity/GeneratedItemList.hpp"
 
 #include <algorithm>
@@ -37,6 +40,33 @@ namespace Server {
         }
     } // namespace
 
+    // ── Portal-gun bookkeeping ─────────────────────────────────────────────
+    void ItemEntityManager::NoteGunEntity(int32_t id, const Game::ItemStack& stack) {
+#if ENABLE_PORTAL_GUN
+        const uint64_t gunId = Game::Portal::GunInstanceOf(stack);
+        if (gunId != 0) m_gunEntities[id] = gunId;
+#else
+        (void)id; (void)stack;
+#endif
+    }
+
+    void ItemEntityManager::RetireGunEntity(int32_t id, const Game::ItemEntity& entity, bool stored) {
+        const bool transferred = m_transferred.erase(id) != 0;
+        auto it = m_gunEntities.find(id);
+        if (it == m_gunEntities.end()) return;
+        const uint64_t gunId = it->second;
+        m_gunEntities.erase(it);
+#if ENABLE_PORTAL_GUN
+        using Game::Portal::GunItemFate;
+        const GunItemFate fate = stored                                ? GunItemFate::Stored
+                               : (entity.pickedUp || transferred)      ? GunItemFate::Collected
+                                                                       : GunItemFate::Destroyed;
+        Game::Portal::NoteGunItemEntity(gunId, fate, m_dimension, entity.pos);
+#else
+        (void)gunId; (void)entity; (void)stored; (void)transferred;
+#endif
+    }
+
     // ── Spawning ───────────────────────────────────────────────────────────
     int32_t ItemEntityManager::Adopt(Game::ItemEntity entity) {
         if (entity.stack.IsEmpty()) return 0;
@@ -49,6 +79,7 @@ namespace Server {
         entity.needsSync = true;
 
         const int32_t id = entity.id;
+        NoteGunEntity(id, entity.stack);
         m_entities.emplace(id, std::move(entity));
         return id;
     }
@@ -60,6 +91,9 @@ namespace Server {
         Game::ItemEntity e = std::move(it->second);
         m_entities.erase(it);
         m_playerThrown.erase(id);
+        // Travelling to another level, which adopts it (and its gun) again.
+        m_gunEntities.erase(id);
+        m_transferred.erase(id);
         return e;
     }
 
@@ -70,6 +104,7 @@ namespace Server {
         entity.pendingSpawn = true;
         entity.needsSync    = true;
         const int32_t id = entity.id;
+        NoteGunEntity(id, entity.stack);
         m_entities.emplace(id, std::move(entity));
         return true;
     }
@@ -100,6 +135,7 @@ namespace Server {
         e.needsSync   = true;
 
         const int32_t id = e.id;
+        NoteGunEntity(id, e.stack);
         m_entities.emplace(id, std::move(e));
         return id;
     }
@@ -318,6 +354,11 @@ namespace Server {
         // 1. Physics.
         for (auto& [id, e] : m_entities) {
             if (e.stack.IsEmpty()) continue;
+            // A stack written back into an existing entity (a hopper's
+            // remainder) can carry a portal gun this entity did not spawn
+            // with; keep the gun index current (an item-id compare for
+            // everything else).
+            NoteGunEntity(id, e.stack);
             // Items in chunks that have unloaded under us have nothing to
             // collide against; freezing them beats letting them fall forever.
             const Game::Math::ChunkPos cp = ChunkOf(e.pos);
@@ -394,7 +435,9 @@ namespace Server {
 #endif
             for (const PickupSource& collector : collectors) {
                 ServerPlayer* player = collector.player;
-                if (!player || player->isDead()) continue;
+                // MC Player.aiStep: the pickup sweep runs only while
+                // `getHealth() > 0 && !isSpectator()`.
+                if (!player || player->isDead() || player->isSpectator()) continue;
 
                 const glm::dvec3 ppos = collector.pos;
 
@@ -437,6 +480,18 @@ namespace Server {
             }
         }
 
+        // 3b. The mobs' pickups since the last tick (NoteTakenBy): each is
+        //    a take packet toward the mob, and an entity one emptied is a
+        //    pickup, not a removal.
+        for (const ItemPickupEvent& taken : m_mobPickups) {
+            outPickups.push_back(taken);
+            if (auto it = m_entities.find(taken.itemEntityId);
+                it != m_entities.end() && it->second.stack.IsEmpty()) {
+                it->second.pickedUp = true;
+            }
+        }
+        m_mobPickups.clear();
+
         // 4. Sweep everything that emptied out this tick. A pickup is retired
         //    on the client by its take packet, so it must not ALSO be
         //    broadcast as a removal — see ItemEntity::pickedUp.
@@ -446,6 +501,7 @@ namespace Server {
                     outRemoved.push_back(it->first);
                 }
                 m_playerThrown.erase(it->first);
+                RetireGunEntity(it->first, it->second, /*stored=*/false);
                 it = m_entities.erase(it);
             } else {
                 ++it;
@@ -459,6 +515,9 @@ namespace Server {
             if (ChunkOf(it->second.pos) == chunk) {
                 outRemoved.push_back(it->first);
                 m_playerThrown.erase(it->first);
+                // Saved with its chunk just before this (IntegratedServer's
+                // unload pass), so a gun here is stored, not lost.
+                RetireGunEntity(it->first, it->second, /*stored=*/true);
                 it = m_entities.erase(it);
             } else {
                 ++it;
@@ -469,6 +528,9 @@ namespace Server {
     void ItemEntityManager::Clear() {
         m_entities.clear();
         m_playerThrown.clear();
+        m_gunEntities.clear();
+        m_transferred.clear();
+        m_mobPickups.clear();
     }
 
     void ItemEntityManager::CollectSyncSets(int64_t serverTick,

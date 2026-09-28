@@ -24,6 +24,7 @@
 #pragma once
 
 #include "../Blocks.hpp"
+#include "../BlockState.hpp"
 #include <glm/glm.hpp>
 #include <optional>
 
@@ -47,5 +48,40 @@ namespace Game {
     // chest would open as a double and render as two singles.
     std::optional<ChestPairing> FindChestPartner(const IBlockAccess& world,
                                                  const glm::ivec3& pos);
+
+    // ── The ChestBlock family (MC ChestBlock and its subclasses) ────────────
+    //
+    // Every block that is a pairable ChestBlock with a TYPE: the chest, the
+    // trapped chest and the eight copper chests (CopperChestBlock /
+    // WeatheringCopperChestBlock, #minecraft:copper_chests). The ender chest
+    // is its own block (EnderChestBlock) and never pairs.
+    bool IsChestBlock(BlockID id);
+    bool IsCopperChestBlock(BlockID id);
+    // MC ChestBlock.chestCanConnectTo: `blockState.is(this)` for the chest
+    // and the trapped chest; any copper chest for a copper chest
+    // (CopperChestBlock: `is(#copper_chests)`), whatever its oxidation or wax.
+    bool ChestCanConnectTo(BlockID self, BlockID other);
+    // WeatheringCopper.WeatherState of a copper chest — 0 unaffected, 1
+    // exposed, 2 weathered, 3 oxidized — or -1 for anything else.
+    int CopperChestWeatherState(BlockID id);
+    bool IsWaxedCopperChest(BlockID id);
+    // The copper chest of that weather state, waxed or not.
+    BlockID CopperChestOf(int weatherState, bool waxed);
+
+    // The cell a chest's TYPE connects it to (ChestBlock.getConnectedDirection:
+    // LEFT → clockwise of FACING, RIGHT → counter-clockwise), or nullopt for
+    // a SINGLE chest.
+    std::optional<glm::ivec3> ChestConnectedCell(BlockState state, const glm::ivec3& pos);
+
+    // MC CopperChestBlock.getLeastOxidizedChestOfConnectedBlocks: a paired
+    // copper chest `state` at `pos` becomes the less oxidized of itself and
+    // the copper chest it connects to (both unwaxed first when their wax
+    // differs), keeping its own properties. Anything else comes back as is.
+    BlockState CopperChestLeastOxidizedState(const IBlockAccess& level, const glm::ivec3& pos,
+                                             BlockState state);
+
+    // `block.withPropertiesOf(state)` between two chests: the same FACING,
+    // TYPE and WATERLOGGED on another ChestBlock.
+    BlockState ChestWithPropertiesOf(BlockID block, BlockState state);
 
 } // namespace Game

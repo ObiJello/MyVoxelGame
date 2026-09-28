@@ -4,6 +4,7 @@
 // projectile/EyeOfEnder.java.
 
 #include "common/entity/projectile/EyeOfEnder.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -109,6 +110,22 @@ namespace Game {
         if (m_target) {
             velocity = UpdateDeltaMovement(velocity, newPosition, *m_target);
         }
+        // MC spawnParticles (client copy): the PORTAL trail a quarter of the
+        // motion behind the new position, or four BUBBLEs under water.
+        if (m_level && m_level->IsClientSide()) {
+            const glm::dvec3 origin = newPosition - velocity * 0.25;
+            if (IsInWater()) {
+                for (int i = 0; i < 4; ++i) {
+                    m_level->AddParticle(ParticleKind::Bubble, origin.x, origin.y, origin.z,
+                                         velocity.x, velocity.y, velocity.z);
+                }
+            } else {
+                JavaRandom& r = m_level->Random();
+                const double px = origin.x + r.NextDouble() * 0.6 - 0.3;
+                const double pz = origin.z + r.NextDouble() * 0.6 - 0.3;
+                m_level->AddParticle(ParticleKind::Portal, px, origin.y - 0.5, pz, velocity.x, velocity.y, velocity.z);
+            }
+        }
         position = newPosition;
 
         // MC guards the whole death block with `!level().isClientSide()`.
@@ -130,9 +147,12 @@ namespace Game {
                                           : DimensionId::Overworld,
                                   BlockPosition(), m_item);
             }
-            // MC: ENDER_EYE_DEATH either way (levelEvent 2003's shatter is
-            // particles only, which wait on particles).
+            // MC: ENDER_EYE_DEATH either way; a shattered eye also sends
+            // levelEvent 2003 (the shatter burst).
             PlaySound(SoundEvents::ENDER_EYE_DEATH, 1.0f, 1.0f);
+            if (m_pendingDeath == Death::Shatter && m_level) {
+                m_level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_EYE_OF_ENDER_DEATH, BlockPosition(), 0);
+            }
             Discard();
         }
     }

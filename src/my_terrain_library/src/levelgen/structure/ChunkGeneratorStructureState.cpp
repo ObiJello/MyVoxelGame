@@ -1,6 +1,7 @@
 #include "levelgen/structure/ChunkGeneratorStructureState.h"
 #include "levelgen/WorldGenTweaks.h"
 #include "world/biome/FixedBiomeSource.h"
+#include "util/TerrainProfiling.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -335,6 +336,7 @@ std::shared_ptr<ChunkGeneratorStructureState::RingJob> ChunkGeneratorStructureSt
     job->positions.resize(candidates.size());
     job->remaining.store(static_cast<int32_t>(candidates.size()), std::memory_order_release);
     auto searchOne = [this, &preferredBiomes, job](size_t index, Candidate& c) {
+        TERRAIN_ZONE_N("Gen.RingSearch");
         int32_t blockX, blockZ;
         std::pair<int32_t, int32_t> result{c.initialX, c.initialZ};
         if (findBiomeHorizontal(*m_biomeSource, c.initialX * 16 + 8, 0, c.initialZ * 16 + 8, 112,

@@ -4,7 +4,7 @@
 #include "nbt/ListTag.h"
 #include <cstring>
 #include <stdexcept>
-#include <zlib.h>
+#include "util/Deflate.h"
 
 // Reference: net/minecraft/nbt/NbtIo.java
 
@@ -281,7 +281,7 @@ void NbtIo::write(const CompoundTag& tag, std::ostream& output) {
 }
 
 // =========================================================================
-// Compression support using zlib
+// Compression support (gzip), over libdeflate (util/Deflate.h)
 // Reference: NbtIo.java readCompressed/writeCompressed
 // =========================================================================
 
@@ -289,35 +289,10 @@ std::unique_ptr<CompoundTag> NbtIo::readCompressed(std::istream& input) {
     // Read entire compressed data
     std::vector<char> compressedData(std::istreambuf_iterator<char>(input), {});
 
-    // Decompress using zlib
-    z_stream strm{};
-    strm.next_in = reinterpret_cast<Bytef*>(compressedData.data());
-    strm.avail_in = static_cast<uInt>(compressedData.size());
-
-    // Initialize for gzip decompression (windowBits + 16)
-    if (inflateInit2(&strm, 16 + MAX_WBITS) != Z_OK) {
-        throw std::runtime_error("Failed to initialize zlib inflation");
-    }
-
     std::vector<char> decompressedData;
-    char buffer[16384];
-
-    int ret;
-    do {
-        strm.next_out = reinterpret_cast<Bytef*>(buffer);
-        strm.avail_out = sizeof(buffer);
-
-        ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR || ret == Z_MEM_ERROR) {
-            inflateEnd(&strm);
-            throw std::runtime_error("zlib decompression error");
-        }
-
-        size_t have = sizeof(buffer) - strm.avail_out;
-        decompressedData.insert(decompressedData.end(), buffer, buffer + have);
-    } while (ret != Z_STREAM_END);
-
-    inflateEnd(&strm);
+    if (!::minecraft::util::deflate::decompress(compressedData.data(), compressedData.size(), decompressedData)) {
+        throw std::runtime_error("gzip decompression error");
+    }
 
     // Parse the decompressed NBT data
     std::string decompressedStr(decompressedData.begin(), decompressedData.end());
@@ -331,35 +306,12 @@ void NbtIo::writeCompressed(const CompoundTag& tag, std::ostream& output) {
     write(tag, buffer);
     std::string uncompressedData = buffer.str();
 
-    // Compress using zlib/gzip
-    z_stream strm{};
-    strm.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(uncompressedData.data()));
-    strm.avail_in = static_cast<uInt>(uncompressedData.size());
-
-    // Initialize for gzip compression (windowBits + 16)
-    if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED,
-                     16 + MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        throw std::runtime_error("Failed to initialize zlib deflation");
+    std::vector<char> compressed;
+    if (!::minecraft::util::deflate::compress(uncompressedData.data(), uncompressedData.size(), compressed,
+                                 ::minecraft::util::deflate::Format::Gzip)) {
+        throw std::runtime_error("gzip compression error");
     }
-
-    char outBuffer[16384];
-    int ret;
-
-    do {
-        strm.next_out = reinterpret_cast<Bytef*>(outBuffer);
-        strm.avail_out = sizeof(outBuffer);
-
-        ret = deflate(&strm, Z_FINISH);
-        if (ret == Z_STREAM_ERROR) {
-            deflateEnd(&strm);
-            throw std::runtime_error("zlib compression error");
-        }
-
-        size_t have = sizeof(outBuffer) - strm.avail_out;
-        output.write(outBuffer, have);
-    } while (strm.avail_out == 0);
-
-    deflateEnd(&strm);
+    output.write(compressed.data(), static_cast<std::streamsize>(compressed.size()));
 }
 
 std::unique_ptr<CompoundTag> NbtIo::readCompressedFromFile(const std::string& path) {

@@ -14,6 +14,8 @@
 
 namespace Server { class ServerPlayer; }
 
+namespace Game { class LivingEntity; }
+
 namespace Game::ConsumableBehavior {
 
     // Mirrors Consumable.startConsuming — Consumable.java:39-52. Resolves
@@ -47,5 +49,16 @@ namespace Game::ConsumableBehavior {
     // USE_REMAINDER conversion). `handStack` is mutated (consume); the
     // returned stack is what should end up in the hand slot.
     ItemStack FinishUsing(Server::ServerPlayer& player, ItemStack& handStack);
+
+    // The same (ItemStack.finishUsingItem → Consumable.onConsume, then
+    // applyAfterUseComponentSideEffects) for a NON-player user — a fox
+    // eating what it carries: the consume sound through user.playSound and
+    // the 16 item particles (emitParticlesAndSounds), FoodProperties.onConsume's
+    // NEUTRAL level sound (no food data), potion / stew / ominous-bottle
+    // listeners and the onConsumeEffects applied to the living entity, the
+    // EAT / DRINK game event, one consumed, and the use remainder (a mob's
+    // handleExtraItemsCreatedOnUse is a no-op, so only a fully-used stack
+    // becomes its remainder). SERVER ONLY. Returns what the hand holds.
+    ItemStack FinishUsingForLiving(LivingEntity& user, ItemStack& handStack);
 
 } // namespace Game::ConsumableBehavior

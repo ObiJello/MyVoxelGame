@@ -4,6 +4,7 @@
 #pragma once
 
 #include "CommandSourceStack.hpp"
+#include "common/command/CommandSyntax.hpp"
 
 #include <string>
 #include <vector>
@@ -28,7 +29,15 @@ namespace Server {
             ServerConnection& connection,
             PlayerSessionManager& sessionManager)>;
 
-        // Register a command by name
+        // Register a command by name, with its argument tree (MC's
+        // Brigadier node — common/command/CommandSyntax.hpp). The tree is
+        // shipped to every client in CommandsS2C and is the ONLY source of
+        // the chat's usage hint and Tab completion for this command, so every
+        // command registers one: `Cmd::Root()` alone for a command that takes
+        // nothing, `.Executes()` wherever the command may end.
+        void RegisterCommand(const std::string& name, CommandHandler handler, Game::Cmd::Node syntax);
+        // Without a tree: the name completes, but the client knows nothing
+        // of its arguments. Don't — every command should declare its tree.
         void RegisterCommand(const std::string& name, CommandHandler handler);
 
         // Execute a command line (without leading '/') as the player typed it:
@@ -51,8 +60,35 @@ namespace Server {
         // accepts instead of a list the client hardcodes and forgets to update.
         std::vector<std::string> GetCommandNames() const;
 
+        // The registered tree of each name GetCommandNames returns, in the
+        // same order; nullptr for a command registered without one. What
+        // CommandsS2C ships. Pointers into the dispatcher: valid until the
+        // next RegisterCommand.
+        std::vector<const Game::Cmd::Node*> GetCommandSyntax() const;
+
+        // The command's usage lines ("/effect give <targets> <effect> ..."),
+        // generated from its tree; empty when the name is unknown.
+        std::vector<std::string> GetUsageLines(const std::string& name) const;
+
+        // Server thread, once a tick: re-run the commands a `name=` selector
+        // deferred (named entities in unloaded chunks — EntitySelector.hpp)
+        // once their chunks' entities are in, or after the timeout.
+        void ProcessDeferred(PlayerSessionManager& sessionManager);
+
     private:
+        struct Deferred {
+            std::string commandLine;
+            uint32_t    playerId = 0;
+            std::vector<NamedEntities::ChunkRef> chunks;
+            int         ticks = 0;
+        };
+        static constexpr int kDeferredTimeoutTicks = 200;   // 10 s
+        std::vector<Deferred> m_deferred;
+        int  m_depth = 0;          // nested ExecuteCommand (/execute run)
+        bool m_rerunning = false;  // inside ProcessDeferred's re-run
+
         std::unordered_map<std::string, CommandHandler> m_commands;
+        std::unordered_map<std::string, Game::Cmd::Node> m_syntax;
 
         // Tokenize a string by spaces
         static std::vector<std::string> Tokenize(const std::string& input);

@@ -1,11 +1,13 @@
 // File: src/common/world/block/FallingBlock.cpp
 #include "common/world/block/FallingBlock.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include "common/world/block/entity/BrushableBlockEntity.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
@@ -164,6 +166,13 @@ namespace Game {
 
     void FallingBlockTick(ILevelWrite& level, const glm::ivec3& pos,
                           BlockState state, JavaRandom& /*random*/) {
+        // MC BrushableBlock.tick: the dig rewinds first (checkReset), then
+        // the block falls like any other.
+        if (state.Block() == BlockID::SuspiciousSand || state.Block() == BlockID::SuspiciousGravel) {
+            if (auto* brushable = dynamic_cast<BrushableBlockEntity*>(level.GetBlockEntity(pos))) {
+                brushable->CheckReset(level);
+            }
+        }
         // MC FallingBlock.tick.
         if (pos.y < World::MIN_Y) return;
         const glm::ivec3 below = pos + kDown;
@@ -329,6 +338,10 @@ namespace Game {
         if (id == BlockID::SuspiciousSand || id == BlockID::SuspiciousGravel) {
             PlayLevelEventSound(level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
                                 static_cast<int>(state.RawId()), level.Random());
+            // :68 gameEvent(entity, BLOCK_DESTROY, centerOfEntity) — the
+            // falling entity is not handed down here, so its centre is taken
+            // as the cell's and the event carries no source.
+            level.GameEvent(nullptr, GameEventId::BlockDestroy, glm::dvec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5));
         }
     }
 

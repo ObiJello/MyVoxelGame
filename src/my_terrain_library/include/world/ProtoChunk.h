@@ -14,6 +14,7 @@
 #include "core/BlockPos.h"
 #include "core/QuartPos.h"
 #include "nbt/CompoundTag.h"
+#include <array>
 #include <atomic>
 #include <vector>
 #include <map>
@@ -54,11 +55,21 @@ private:
 
     // Heightmaps
     std::map<levelgen::Heightmap::Types, std::unique_ptr<levelgen::Heightmap>> m_heightmaps;
+    // m_heightmaps by type, for the per-block paths (MC keeps them in an
+    // EnumMap): setBlockState updates every tracked heightmap on each write,
+    // and two std::map lookups per heightmap per block showed in the surface
+    // profile. Filled wherever m_heightmaps gains an entry (it never loses one).
+    static constexpr size_t kHeightmapTypes = 6;
+    std::array<levelgen::Heightmap*, kHeightmapTypes> m_heightmapByType{};
+    static size_t heightmapSlot(levelgen::Heightmap::Types type) { return static_cast<size_t>(type); }
 
     // Post-processing positions (packed as shorts)
     std::vector<std::set<int16_t>> m_postProcessing;
     // (y,z,x) -> canonical E-line payload; ascending = emission order.
     std::map<std::tuple<int, int, int>, std::string> m_blockEntityNbts;
+    // Positions whose payload stands for a live BlockEntity (see
+    // setBlockEntityNbt / setPendingBlockEntityNbt).
+    std::set<std::tuple<int, int, int>> m_materializedBlockEntities;
     // Reference: ProtoChunk.entities - worldgen-placed entities, in
     // placement order (see IChunk::GeneratedEntity).
     std::vector<GeneratedEntity> m_entities;
@@ -90,6 +101,8 @@ private:
     std::atomic<bool> m_unsaved{false};
     // See releaseBlockData.
     std::atomic<bool> m_blockDataReleased{false};
+    // See carverBiome.
+    std::atomic<biome::BiomeHolder> m_carverBiome{nullptr};
 
 
 public:
@@ -143,15 +156,9 @@ public:
         // Initialize post-processing
         m_postProcessing.resize(m_sectionCount);
 
-        // Create worldgen heightmaps with block getter
-        auto blockGetter = [this](int32_t x, int32_t y, int32_t z) -> const BlockState* {
-            return this->getBlockState(x, y, z);
-        };
-
-        m_heightmaps[levelgen::Heightmap::Types::WORLD_SURFACE_WG] =
-            std::make_unique<levelgen::Heightmap>(minY, height, levelgen::Heightmap::Types::WORLD_SURFACE_WG, blockGetter);
-        m_heightmaps[levelgen::Heightmap::Types::OCEAN_FLOOR_WG] =
-            std::make_unique<levelgen::Heightmap>(minY, height, levelgen::Heightmap::Types::OCEAN_FLOOR_WG, blockGetter);
+        // The worldgen heightmaps (reading this chunk's blocks).
+        getOrCreateHeightmap(levelgen::Heightmap::Types::WORLD_SURFACE_WG);
+        getOrCreateHeightmap(levelgen::Heightmap::Types::OCEAN_FLOOR_WG);
         ::minecraft::util::LiveCounters::protoChunks().fetch_add(1, std::memory_order_relaxed);
     }
 
@@ -265,10 +272,10 @@ public:
         // Reference: ChunkAccess.java / ProtoChunk.java setBlockState()
         const chunk::status::ChunkStatus* persistedStatus = getPersistedStatus();
         if (persistedStatus != nullptr) {
-            const auto& tracked = persistedStatus->heightmapsAfter();
+            const auto& tracked = persistedStatus->heightmapsAfterList();
             bool needPrime = false;
             for (auto type : tracked) {
-                if (m_heightmaps.find(type) == m_heightmaps.end()) {
+                if (m_heightmapByType[heightmapSlot(type)] == nullptr) {
                     needPrime = true;
                     break;
                 }
@@ -278,7 +285,7 @@ public:
                 // materialized here, not on every block write.
                 std::set<levelgen::Heightmap::Types> toPrime;
                 for (auto type : tracked) {
-                    if (m_heightmaps.find(type) == m_heightmaps.end()) {
+                    if (m_heightmapByType[heightmapSlot(type)] == nullptr) {
                         toPrime.insert(type);
                     }
                 }
@@ -286,9 +293,8 @@ public:
             }
 
             for (auto type : tracked) {
-                auto it = m_heightmaps.find(type);
-                if (it != m_heightmaps.end()) {
-                    it->second->update(localX, y, localZ, state);
+                if (levelgen::Heightmap* heightmap = m_heightmapByType[heightmapSlot(type)]) {
+                    heightmap->update(localX, y, localZ, state);
                 }
             }
         }
@@ -299,13 +305,27 @@ public:
     // Reference: ChunkAccess.setBlockEntityNbt (pending tags during
     // generation). The payload is the CANONICAL serialized E-line string
     // (FORMAT.md); a new write at the same position replaces the old tag.
+    // A producer's write stands for Java's live BlockEntity (loaded through
+    // WorldGenRegion.getBlockEntity -> ProtoChunk.setBlockEntity), so the
+    // position is marked materialised.
     void setBlockEntityNbt(const core::BlockPos& pos, std::string canonicalNbt) override {
-        m_blockEntityNbts[std::make_tuple(pos.getY(), pos.getZ(), pos.getX())] =
-            std::move(canonicalNbt);
+        const auto key = std::make_tuple(pos.getY(), pos.getZ(), pos.getX());
+        m_blockEntityNbts[key] = std::move(canonicalNbt);
+        m_materializedBlockEntities.insert(key);
+    }
+
+    // ChunkAccess.setBlockEntityNbt: a pending tag never replaces a live
+    // BlockEntity.
+    void setPendingBlockEntityNbt(const core::BlockPos& pos, std::string canonicalNbt) override {
+        const auto key = std::make_tuple(pos.getY(), pos.getZ(), pos.getX());
+        if (m_materializedBlockEntities.count(key) != 0) return;
+        m_blockEntityNbts[key] = std::move(canonicalNbt);
     }
 
     void removeBlockEntity(const core::BlockPos& pos) override {
-        m_blockEntityNbts.erase(std::make_tuple(pos.getY(), pos.getZ(), pos.getX()));
+        const auto key = std::make_tuple(pos.getY(), pos.getZ(), pos.getX());
+        m_blockEntityNbts.erase(key);
+        m_materializedBlockEntities.erase(key);
     }
 
     const std::map<std::tuple<int, int, int>, std::string>*
@@ -391,14 +411,14 @@ public:
     int getHeight(int heightmapType, int localX, int localZ) const override {
         auto type = static_cast<levelgen::Heightmap::Types>(heightmapType);
         auto* self = const_cast<ProtoChunk*>(this);
-        auto it = self->m_heightmaps.find(type);
-        if (it == self->m_heightmaps.end()) {
+        levelgen::Heightmap* heightmap = self->m_heightmapByType[heightmapSlot(type)];
+        if (heightmap == nullptr) {
             levelgen::Heightmap::primeHeightmaps(self, {type});
-            it = self->m_heightmaps.find(type);
+            heightmap = self->m_heightmapByType[heightmapSlot(type)];
         }
 
-        if (it != self->m_heightmaps.end()) {
-            return it->second->getHighestTaken(localX, localZ);
+        if (heightmap != nullptr) {
+            return heightmap->getHighestTaken(localX, localZ);
         }
 
         return m_minY;
@@ -408,8 +428,7 @@ public:
      * Get heightmap by type
      */
     levelgen::Heightmap* getHeightmap(levelgen::Heightmap::Types type) {
-        auto it = m_heightmaps.find(type);
-        return it != m_heightmaps.end() ? it->second.get() : nullptr;
+        return m_heightmapByType[heightmapSlot(type)];
     }
 
     /**
@@ -426,6 +445,7 @@ public:
                 type,
                 std::make_unique<levelgen::Heightmap>(m_minY, m_height, type, blockGetter)
             );
+            m_heightmapByType[heightmapSlot(type)] = result.first->second.get();
             return *result.first->second;
         }
         return *it->second;
@@ -524,6 +544,26 @@ public:
     bool tryMarkSaved() { return m_unsaved.exchange(false, std::memory_order_acq_rel); }
     bool isUnsaved() const { return m_unsaved.load(std::memory_order_acquire); }
 
+    // Reference: ChunkAccess.carverBiome - the biome whose carvers start in
+    // this chunk, worked out once by the first terrain task that carves near
+    // it (up to 8 chunks away) and reused by the other 288. Terrain tasks run
+    // in parallel: the first value stored is the one every caller gets.
+    template <typename Source>
+    biome::BiomeHolder carverBiome(Source&& source) {
+        biome::BiomeHolder cached = m_carverBiome.load(std::memory_order_acquire);
+        if (cached != nullptr) {
+            return cached;
+        }
+        biome::BiomeHolder computed = source();
+        if (computed == nullptr) {
+            return computed;
+        }
+        if (m_carverBiome.compare_exchange_strong(cached, computed, std::memory_order_acq_rel)) {
+            return computed;
+        }
+        return cached;
+    }
+
     // Drop the content of a FULL chunk the embedder has taken over — blocks,
     // biomes, block entities, generated entities, post-processing — keeping
     // only what OTHER chunks' generation still reads from it: its status,
@@ -543,6 +583,7 @@ public:
         }
         m_postProcessing.assign(m_postProcessing.size(), {});
         m_blockEntityNbts.clear();
+        m_materializedBlockEntities.clear();
         std::vector<GeneratedEntity>().swap(m_entities);
         std::vector<StructureSpawnArea>().swap(m_structureSpawnAreas);
         m_structuresAtFull.reset();

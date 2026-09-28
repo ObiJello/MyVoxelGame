@@ -9,7 +9,9 @@
 namespace Server {
 
     void HealCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("heal", HealCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("heal", HealCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Argument("targets", Cmd::Arg::Entities).Executes()));
     }
 
     void HealCommand::Execute(const CommandSourceStack& source,

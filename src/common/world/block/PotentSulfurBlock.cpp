@@ -6,11 +6,11 @@
 // DEVIATIONS:
 //   * MC's CollisionContext.positionContext (the geyser tests pass one) only
 //     changes the collision shape of blocks that ask about the entity or the
-//     position — scaffolding, powder snow. The engine's collision shapes are
-//     per state, so those two read as their default shape here.
-//   * level.gameEvent(BLOCK_ACTIVATE) has nothing to reach: the engine has no
-//     game-event (vibration) system.
+//     position — scaffolding and powder snow, both of which it leaves EMPTY
+//     (the position is always below the cell asked about). Scaffolding is a
+//     no-collision block here already; powder snow is special-cased.
 #include "common/world/block/PotentSulfurBlock.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -67,6 +67,15 @@ namespace Game {
             bool IsPassableState(BlockState state) {
                 const BlockID id = state.Block();
                 if (id == BlockID::Air || id == BlockID::Water) return true;
+                // getCollisionShape(...).isEmpty(): a `.noCollision()` block
+                // (seagrass, kelp, grass, flowers, signs…) has no collision
+                // shape at all. The engine keeps that as Block::hasCollision
+                // — GetBlockCollisionShapeSet still answers the OUTLINE for
+                // those — so it is asked first.
+                if (!BlockRegistry::HasCollision(id)) return true;
+                // PowderSnowBlock.getCollisionShape answers a shape only to an
+                // entity context; the geyser's positionContext gets Shapes.empty().
+                if (id == BlockID::PowderSnow) return true;
                 return BlockRegistry::GetBlockCollisionShapeSet(state).count == 0;
             }
 
@@ -186,8 +195,8 @@ namespace Game {
                             s == State::Continuous ? SoundEvents::GEYSER_CONTINUOUS_START
                                                    : SoundEvents::GEYSER_ERUPTION_START,
                             SoundSource::Blocks, 1.0f, 1.0f);
-            // level.gameEvent(GameEvent.BLOCK_ACTIVATE, pos, Context.of(state)):
-            // no game-event system (see the file header).
+            // level.gameEvent(GameEvent.BLOCK_ACTIVATE, pos, Context.of(state)).
+            level.GameEvent(GameEventId::BlockActivate, pos, GameEventContext::Of(newState));
         }
 
         // MC PotentSulfurBlock.animateTick: under a water source, every state

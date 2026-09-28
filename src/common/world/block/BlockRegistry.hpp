@@ -102,6 +102,13 @@ namespace Game {
     using BlockPerformBonemealFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
                                             BlockState state, JavaRandom& random);
 
+    // MC BonemealableBlock.isBonemealSuccess — the roll that decides whether
+    // an accepted bone meal actually grows anything (the item is spent either
+    // way). Null means vanilla's default `true`; mushrooms roll
+    // `random.nextFloat() < 0.4`.
+    using BlockIsBonemealSuccessFn = bool (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                              BlockState state, JavaRandom& random);
+
     // A neighbour of this block changed. Narrowed port of MC's
     // `BlockBehaviour.updateShape(state, …, direction, neighbourPos,
     // neighbourState, …)`, which returns the state this block BECOMES —
@@ -282,6 +289,20 @@ namespace Game {
     // arrow or other projectile struck this block. The target block scores
     // it; TNT lights from a burning one. `hitPos` is the exact impact point
     // and `face` the face struck.
+    // `Block.stepOn(level, pos, state, entity)` — once a tick for every
+    // entity standing on this block (Entity.applyEffectsFromBlocks, the
+    // getOnPosLegacy cell, only while onGround). Server-side here: the
+    // client's mirrors never drive block effects.
+    using BlockStepOnFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                   BlockState state, Entity& entity);
+
+    // `Block.fallOn(level, state, pos, entity, fallDistance)` — the entity
+    // landed on this block (getOnPosLegacy) having fallen `fallDistance`.
+    // Called in addition to, and before, the fall damage the engine already
+    // applies (the base Block.fallOn's causeFallDamage).
+    using BlockFallOnFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
+                                   BlockState state, Entity& entity, double fallDistance);
+
     using BlockOnProjectileHitFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
                                             BlockState state, const glm::dvec3& hitPos,
                                             Direction face, Entity& projectile);
@@ -329,6 +350,13 @@ namespace Game {
         BlockRandomTickFn            randomTick            = nullptr;
         BlockIsValidBonemealTargetFn isValidBonemealTarget = nullptr;
         BlockPerformBonemealFn       performBonemeal       = nullptr;
+        BlockIsBonemealSuccessFn     isBonemealSuccess     = nullptr;
+        // Marks a block whose growth is a random SHAPE (a tree, a huge
+        // mushroom, pickles scattered over coral). Informational since every
+        // performBonemeal became server-only, as MC's growCrop gates it on
+        // ServerLevel (ItemBehaviors UseOn_BoneMeal): no bone-meal growth is
+        // predicted on the client any more.
+        bool                         bonemealServerOnly    = false;
         BlockUpdateShapeFn       updateShape       = nullptr;
         BlockTickFn                  tick                  = nullptr;
         BlockAnimateTickFn           animateTick           = nullptr;
@@ -350,6 +378,8 @@ namespace Game {
         BlockUpdateIndirectNeighbourShapesFn   updateIndirectNeighbourShapes = nullptr;
         BlockAnyInsideFn                       anyInside                     = nullptr;
         BlockOnProjectileHitFn                 onProjectileHit               = nullptr;
+        BlockStepOnFn                          stepOn                        = nullptr;
+        BlockFallOnFn                          fallOn                        = nullptr;
 
         // MC `BlockBehaviour.isSignalSource(state)`. Per-block constant in
         // vanilla for everything but redstone dust, whose answer flips while

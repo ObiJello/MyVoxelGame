@@ -6,6 +6,10 @@
 #include "common/core/Log.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/alchemy/Potions.hpp"
+#include "common/world/map/MapItem.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/entity/DyeColorUtil.hpp"
+#include "common/entity/FireworkItems.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -53,6 +57,225 @@ namespace Game {
                 }
             }
             return hasSource && hasMaterial;
+        }
+
+        // MC 26.3 "minecraft:map_cloning" — a TransmuteRecipe (input
+        // #minecraft:clonable_maps, material minecraft:map, material_count
+        // 1..8, add_material_count_to_result, result: the input item): one
+        // map and 1–8 blank maps give 1 + n copies carrying the map's
+        // components. Hand-coded like book cloning; the data pack's
+        // map_cloning.json keeps the crafting_special type the recipe
+        // generator skips, so the two can never both match.
+        constexpr const char* kMapCloningRecipeId = "minecraft:map_cloning";
+        CraftingRecipe s_mapCloning = [] {
+            CraftingRecipe r;
+            r.id = kMapCloningRecipeId;
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::FilledMap;
+            r.resultCount = 1;
+            return r;
+        }();
+
+        // TransmuteRecipe.matches for map_cloning.
+        bool MapCloningMatches(const CraftingInput& input, int* outMaterials = nullptr,
+                               const ItemStack** outMap = nullptr) {
+            constexpr int kMinMaterials = 1, kMaxMaterials = 8;
+            if (input.IngredientCount() < kMinMaterials + 1 || input.IngredientCount() > kMaxMaterials + 1) return false;
+            const ItemStack* found = nullptr;
+            int materials = 0;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (MapItem::IsMapItem(stack.itemId)) {        // #minecraft:clonable_maps
+                    if (found) return false;
+                    found = &stack;
+                } else if (stack.itemId == Items::Map) {
+                    if (++materials > kMaxMaterials) return false;
+                } else {
+                    return false;
+                }
+            }
+            if (!found || materials < kMinMaterials) return false;
+            if (outMaterials) *outMaterials = materials;
+            if (outMap) *outMap = found;
+            return true;   // result size 1 + n is never 1: no "unchanged" check needed
+        }
+
+        // MC 26.3 MapExtendingRecipe "minecraft:map_extending": paper ring
+        // around a #minecraft:extendable_maps map (filled_map) whose data is
+        // below the maximum scale. The result is the map with
+        // MAP_POST_PROCESSING SCALE; taking it gives it its new, zoomed-out
+        // map (MapItem.onCraftedPostProcess).
+        constexpr const char* kMapExtendingRecipeId = "minecraft:map_extending";
+        CraftingRecipe s_mapExtending = [] {
+            CraftingRecipe r;
+            r.id = kMapExtendingRecipeId;
+            r.kind = RecipeKind::Shaped;
+            r.resultItem = Items::FilledMap;
+            r.resultCount = 1;
+            return r;
+        }();
+
+        bool MapExtendingMatches(const CraftingInput& input) {
+            // ShapedRecipePattern "###", "#x#", "###".
+            if (input.Width() != 3 || input.Height() != 3) return false;
+            for (int y = 0; y < 3; ++y) {
+                for (int x = 0; x < 3; ++x) {
+                    const ItemStack& stack = input.GetItem(x, y);
+                    if (x == 1 && y == 1) {
+                        if (stack.IsEmpty() || stack.itemId != Items::FilledMap) return false;
+                    } else if (stack.IsEmpty() || stack.itemId != Items::Paper) {
+                        return false;
+                    }
+                }
+            }
+            // findFilledMap: the stack with a MAP_ID; its data must exist and
+            // be below scale 4.
+            const ItemStack& map = input.GetItem(1, 1);
+            if (!map.get(DataComponents::MAP_ID)) return false;
+            const std::optional<int> scale = MapItemBridge::MapScale(map);
+            return scale && *scale < 4;
+        }
+
+        // ── The fireworks' custom recipes (MC 26.3 FireworkRocketRecipe,
+        // FireworkStarRecipe, FireworkStarFadeRecipe — VanillaRecipeProvider
+        // gives them their ingredients). Their data-pack JSONs keep the
+        // crafting_special types the recipe generator skips, so they are
+        // matched here; they are tried AHEAD of the generated table, where
+        // "firework_rocket_simple" (paper + gunpowder, no components) would
+        // otherwise answer the one-gunpowder rocket — vanilla's special
+        // recipe sorts first and gives the flight-1 rocket.
+        constexpr const char* kFireworkRocketRecipeId   = "minecraft:firework_rocket";
+        constexpr const char* kFireworkStarRecipeId     = "minecraft:firework_star";
+        constexpr const char* kFireworkStarFadeRecipeId = "minecraft:firework_star_fade";
+        CraftingRecipe s_fireworkRocket = [] {
+            CraftingRecipe r;
+            r.id = kFireworkRocketRecipeId;
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::FireworkRocket;
+            r.resultCount = 3;
+            return r;
+        }();
+        CraftingRecipe s_fireworkStar = [] {
+            CraftingRecipe r;
+            r.id = kFireworkStarRecipeId;
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::FireworkStar;
+            r.resultCount = 1;
+            return r;
+        }();
+        CraftingRecipe s_fireworkStarFade = [] {
+            CraftingRecipe r;
+            r.id = kFireworkStarFadeRecipeId;
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::FireworkStar;
+            r.resultCount = 1;
+            return r;
+        }();
+
+        // DecoratedPotRecipe (crafting_decorated_pot, VanillaRecipeProvider:
+        // every side #decorated_pot_ingredients — bricks and sherds). Its
+        // JSON is a special type the recipe generator skips.
+        CraftingRecipe s_decoratedPot = [] {
+            CraftingRecipe r;
+            r.id = "minecraft:decorated_pot";
+            r.kind = RecipeKind::Shaped;
+            r.width = 3;
+            r.height = 3;
+            r.resultItem = ItemRegistry::FromBlock(BlockID::DecoratedPot);
+            r.resultCount = 1;
+            return r;
+        }();
+
+        bool IsPotIngredient(const ItemStack& stack) {
+            return !stack.IsEmpty() &&
+                   DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId),
+                                    "minecraft:decorated_pot_ingredients");
+        }
+
+        // DecoratedPotRecipe.matches: a 3x3 grid with exactly the four edge
+        // centres filled — back (1,0), left (0,1), right (2,1), front (1,2).
+        bool DecoratedPotMatches(const CraftingInput& input) {
+            if (input.Width() != 3 || input.Height() != 3 || input.IngredientCount() != 4) return false;
+            return IsPotIngredient(input.GetItem(1, 0)) && IsPotIngredient(input.GetItem(0, 1)) &&
+                   IsPotIngredient(input.GetItem(2, 1)) && IsPotIngredient(input.GetItem(1, 2));
+        }
+
+        // DataComponents.DYE — the sixteen dyes (#minecraft:dyes).
+        bool IsDye(const ItemStack& stack) { return DyeColorOfItem(stack.itemId) >= 0; }
+
+        // FireworkStarRecipe.findShape: fire charge → LARGE_BALL, feather →
+        // BURST, gold nugget → STAR, #minecraft:skulls → CREEPER.
+        std::optional<FireworkExplosion::Shape> FireworkShapeOf(const ItemStack& stack) {
+            if (stack.itemId == Items::FireCharge) return FireworkExplosion::Shape::LargeBall;
+            if (stack.itemId == Items::Feather)    return FireworkExplosion::Shape::Burst;
+            if (stack.itemId == Items::GoldNugget) return FireworkExplosion::Shape::Star;
+            if (DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:skulls")) {
+                return FireworkExplosion::Shape::Creeper;
+            }
+            return std::nullopt;
+        }
+
+        // FireworkRocketRecipe.matches: one paper, one to three gunpowder,
+        // and nothing else but firework stars.
+        bool FireworkRocketMatches(const CraftingInput& input) {
+            if (input.IngredientCount() < 2) return false;
+            bool hasShell = false;
+            int fuelCount = 0;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (stack.itemId == Items::Paper) {
+                    if (hasShell) return false;
+                    hasShell = true;
+                } else if (stack.itemId == Items::Gunpowder) {
+                    if (++fuelCount > 3) return false;
+                } else if (stack.itemId != Items::FireworkStar) {
+                    return false;
+                }
+            }
+            return hasShell && fuelCount >= 1;
+        }
+
+        // FireworkStarRecipe.matches: exactly one gunpowder, at least one dye,
+        // at most one each of glowstone dust (twinkle), diamond (trail) and
+        // shape ingredient, nothing else.
+        bool FireworkStarMatches(const CraftingInput& input) {
+            if (input.IngredientCount() < 2) return false;
+            bool hasFuel = false, hasDye = false, hasShape = false, hasTrail = false, hasTwinkle = false;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (stack.itemId == Items::GlowstoneDust) {
+                    if (hasTwinkle) return false;
+                    hasTwinkle = true;
+                } else if (stack.itemId == Items::Diamond) {
+                    if (hasTrail) return false;
+                    hasTrail = true;
+                } else if (stack.itemId == Items::Gunpowder) {
+                    if (hasFuel) return false;
+                    hasFuel = true;
+                } else if (IsDye(stack)) {
+                    hasDye = true;
+                } else {
+                    if (!FireworkShapeOf(stack) || hasShape) return false;
+                    hasShape = true;
+                }
+            }
+            return hasFuel && hasDye;
+        }
+
+        // FireworkStarFadeRecipe.matches: one firework star and any dyes.
+        bool FireworkStarFadeMatches(const CraftingInput& input) {
+            if (input.IngredientCount() < 2) return false;
+            bool hasDye = false, hasTarget = false;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (IsDye(stack)) {
+                    hasDye = true;
+                } else {
+                    if (stack.itemId != Items::FireworkStar || hasTarget) return false;
+                    hasTarget = true;
+                }
+            }
+            return hasTarget && hasDye;
         }
 
         // Resolved ingredient: the sorted ItemIDs that satisfy it. Sorted so
@@ -485,6 +708,12 @@ namespace Game {
     const CraftingRecipe* RecipeManager::Find(const CraftingInput& input) {
         if (input.IsEmpty()) return nullptr;
 
+        // The fireworks first (see s_fireworkRocket): none of the three can
+        // match what any table recipe but firework_rocket_simple does.
+        if (FireworkRocketMatches(input))   return &s_fireworkRocket;
+        if (FireworkStarMatches(input))     return &s_fireworkStar;
+        if (FireworkStarFadeMatches(input)) return &s_fireworkStarFade;
+
         for (const auto& recipe : s_recipes) {
             // MC's first and cheapest rejection, shared by both pattern kinds.
             if (recipe.ingredientCount != input.IngredientCount()) continue;
@@ -493,7 +722,10 @@ namespace Game {
                                : UnorderedMatches(recipe, input);
             if (matched) return &recipe;
         }
+        if (DecoratedPotMatches(input)) return &s_decoratedPot;
         if (BookCloningMatches(input)) return &s_bookCloning;
+        if (MapCloningMatches(input)) return &s_mapCloning;
+        if (MapExtendingMatches(input)) return &s_mapExtending;
         return nullptr;
     }
 
@@ -524,6 +756,98 @@ namespace Game {
             copy.count  = recipe.resultCount + (count - 1);
             copy.components.set(DataComponents::WRITTEN_BOOK_CONTENT, content->CraftCopy());
             return copy;
+        }
+
+        // TransmuteRecipe.assemble (map_cloning): the map's item and
+        // components, 1 + one per blank map.
+        if (&recipe == &s_mapCloning) {
+            int materials = 0;
+            const ItemStack* map = nullptr;
+            if (!MapCloningMatches(input, &materials, &map)) return ItemStack{};
+            ItemStack copy = *map;
+            copy.count = 1 + materials;
+            return copy;
+        }
+
+        // MapExtendingRecipe.assemble: the map (createWithOriginalComponents)
+        // flagged for the SCALE post-process.
+        if (&recipe == &s_mapExtending) {
+            ItemStack copy = input.GetItem(1, 1);
+            copy.count = 1;
+            copy.components.set(DataComponents::MAP_POST_PROCESSING, Maps::MapPostProcessing::Scale);
+            return copy;
+        }
+
+        // DecoratedPotRecipe.assemble: the pot with POT_DECORATIONS from the
+        // four edges (back, left, right, front).
+        if (&recipe == &s_decoratedPot) {
+            PotDecorations decorations;
+            decorations.sides = { input.GetItem(1, 0).itemId, input.GetItem(0, 1).itemId,
+                                  input.GetItem(2, 1).itemId, input.GetItem(1, 2).itemId };
+            out.components.set(DataComponents::POT_DECORATIONS, decorations);
+            return out;
+        }
+
+        // FireworkRocketRecipe.assemble: three rockets whose FIREWORKS is
+        // the gunpowder count and every star's explosion, in grid order.
+        if (&recipe == &s_fireworkRocket) {
+            Fireworks fireworks;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (stack.itemId == Items::Gunpowder) {
+                    ++fireworks.flightDuration;
+                } else if (stack.itemId == Items::FireworkStar) {
+                    if (auto explosion = stack.get(DataComponents::FIREWORK_EXPLOSION)) {
+                        fireworks.explosions.push_back(*explosion);
+                    }
+                }
+            }
+            FireworkItems::SetFireworks(out, fireworks);
+            return out;
+        }
+        // FireworkStarRecipe.assemble: the shape (SMALL_BALL without one),
+        // every dye's firework colour in grid order, trail and twinkle.
+        if (&recipe == &s_fireworkStar) {
+            FireworkExplosion explosion;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (auto shape = FireworkShapeOf(stack)) {
+                    explosion.shape = *shape;
+                } else if (stack.itemId == Items::GlowstoneDust) {
+                    explosion.hasTwinkle = true;
+                } else if (stack.itemId == Items::Diamond) {
+                    explosion.hasTrail = true;
+                } else if (IsDye(stack)) {
+                    explosion.colors.push_back(FireworkItems::DyeFireworkColor(
+                        static_cast<uint8_t>(DyeColorOfItem(stack.itemId))));
+                }
+            }
+            out.components.set(DataComponents::FIREWORK_EXPLOSION, std::move(explosion));
+            return out;
+        }
+        // FireworkStarFadeRecipe.assemble: the star (its components kept,
+        // TransmuteRecipe.createWithOriginalComponents) with the dyes'
+        // colours as its fade colours.
+        if (&recipe == &s_fireworkStarFade) {
+            std::vector<int32_t> colors;
+            const ItemStack* target = nullptr;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (IsDye(stack)) {
+                    colors.push_back(FireworkItems::DyeFireworkColor(
+                        static_cast<uint8_t>(DyeColorOfItem(stack.itemId))));
+                } else if (stack.itemId == Items::FireworkStar) {
+                    target = &stack;
+                }
+            }
+            if (!target || colors.empty()) return ItemStack{};
+            ItemStack star = *target;
+            star.itemId = recipe.resultItem;
+            star.count = recipe.resultCount;
+            FireworkExplosion explosion = star.get(DataComponents::FIREWORK_EXPLOSION).value_or(FireworkExplosion{});
+            explosion.fadeColors = std::move(colors);
+            star.components.set(DataComponents::FIREWORK_EXPLOSION, std::move(explosion));
+            return star;
         }
 
         // ImbueRecipe.assemble: result.set(POTION_CONTENTS, source's).

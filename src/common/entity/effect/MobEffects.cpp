@@ -1,5 +1,6 @@
 // File: src/common/entity/effect/MobEffects.cpp
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -353,20 +354,21 @@ namespace Game {
         // WindChargedMobEffect.onMobRemoved: a wind-charge burst centred on the
         // body — radius 3 + nextFloat() * 2, TRIGGER interaction, no entity
         // damage (AbstractWindCharge.EXPLOSION_DAMAGE_CALCULATOR: blocks yes,
-        // entities no, no knockback multiplier).
+        // entities no, no knockback multiplier), the gust pair and the
+        // BREEZE_WIND_CHARGE_BURST sound.
         void WindChargedBurst(LivingEntity& mob) {
             EntityLevel* level = mob.Level();
             if (!level) return;
             ExplosionParams p;
+            ConfigureWindChargeExplosion(p);
             p.center = glm::dvec3(mob.position.x,
                                   mob.position.y + static_cast<double>(mob.GetBbHeight() / 2.0f),
                                   mob.position.z);
             p.radius              = 3.0f + level->Random().NextFloat() * 2.0f;
             p.source              = &mob;
             p.attributedTo        = nullptr;
-            p.interaction         = ExplosionInteraction::Trigger;
-            p.damageEntities      = false;
             p.knockbackMultiplier = 1.0f;
+            p.explosionSound      = SoundEvents::BREEZE_WIND_CHARGE_BURST;
             Explode(*level, p);
         }
 
@@ -395,8 +397,11 @@ namespace Game {
                 positions.push_back(p);
                 if (static_cast<int>(positions.size()) >= cobwebCount) break;
             }
-            // levelEvent 3018 (the cobweb poof) has no client particle here.
-            for (const glm::ivec3& p : positions) level->SetBlock(p, BlockID::Cobweb);
+            // setBlockAndUpdate + levelEvent 3018 (the cobweb poof) per cell.
+            for (const glm::ivec3& p : positions) {
+                level->SetBlock(p, BlockID::Cobweb);
+                level->PlayLevelEvent(nullptr, LevelEvent::ANIMATION_SPAWN_COBWEB, p, 0);
+            }
         }
 
         // OozingMobEffect.onMobRemoved: two size-2 slimes at y + 0.5, capped

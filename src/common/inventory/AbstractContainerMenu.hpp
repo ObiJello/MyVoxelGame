@@ -69,6 +69,14 @@ namespace Game {
         // random — the client's predictive run of the same take awards nothing.
         bool grindstoneUsed = false;
         int  grindstoneXp   = 0;
+        // A cartography table result was taken (MC CartographyTableMenu's
+        // result slot onTake → access.execute): the session plays
+        // UI_CARTOGRAPHY_TABLE_TAKE_RESULT at the table, once per game tick.
+        bool cartographyUsed = false;
+        // A loom result was taken (LoomMenu's result slot onTake →
+        // access.execute): the session plays UI_LOOM_TAKE_RESULT at the loom,
+        // once per game tick.
+        bool loomUsed = false;
     };
 
     class AbstractContainerMenu {
@@ -211,7 +219,12 @@ namespace Game {
         virtual ContainerClickResult HandleCreativeQuickMove(const ItemStack& source);
         virtual ContainerClickResult HandleCreativeDestroyAll();
         virtual ContainerClickResult HandleCreativeDeleteCarried(uint8_t button);
-        virtual ContainerClickResult HandleCreativeFillSlot(int slotIndex, const ItemStack& source);
+        // button 0: a full stack of `source` (pick-block, the creative grid's
+        // number-key swap); button 1: `source` exactly as given, count
+        // included (MC ServerboundSetCreativeModeSlotPacket — a saved hotbar
+        // being loaded).
+        virtual ContainerClickResult HandleCreativeFillSlot(int slotIndex, const ItemStack& source,
+                                                            uint8_t button = 0);
 
         static void MarkChanged(ContainerClickResult& r, int slot);
 

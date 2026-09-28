@@ -1,7 +1,12 @@
 // File: shaders/terrain_solid.frag
-// No-discard TERRAIN fragment shader: block_solid.frag plus the
-// greedy-meshing tile-rect sample path. Used for the translucent pass
-// (water, ice, stained glass) where blending handles transparency. NOTE the
+// Translucent-pass TERRAIN fragment shader: block_solid.frag plus the
+// greedy-meshing tile-rect sample path and MC's translucent cutout. Used for
+// the translucent pass (water, glass, ice, stained glass) where blending
+// handles transparency. It still discards (MC 26.3 TRANSLUCENT_TERRAIN,
+// ALPHA_CUTOUT 0.1): the pass writes depth, and a fully clear texel that
+// is not discarded — glass's interior — would write depth over everything
+// drawn after it, so water behind a pane vanished whenever the pane's quad
+// sorted first. NOTE the
 // mesher never merges translucent quads (sort granularity), so the tiled
 // branch is only ever taken here if that policy changes — it is kept so all
 // three terrain fragment shaders share one vertex format and one contract.
@@ -36,13 +41,26 @@ vec3 sampleLightmap(vec2 uv) {
     return texture(uLightmap, clamp(uv / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0))).rgb;
 }
 uniform vec3 uCameraPos;            // World-space camera position (per view)
+// MC ALPHA_CUTOUT for the pass (ChunkRenderer::RenderLayerPass: 0.1, MC 26.3
+// RenderPipelines.TRANSLUCENT_TERRAIN), tested on the final alpha.
+uniform float uAlphaTest;
 uniform vec4 uFogColor;             // Time-of-day fog color
 uniform vec4 uFogEnv;               // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
 // Debug fill override (greedy-mesh view): rgb painted at strength a over the
 // final color. Zero (the GL default for an unset uniform) = passthrough.
 uniform vec4 uOverlayColor;
 
+#ifndef OIT_ALPHA_ONLY
 out vec4 FragColor;
+#endif
+
+// Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency): the
+// OIT variants of this shader are its source with `#define OIT` and a stage
+// define; the backend splices shaders/oit_lib.glsl in here. The engine's own
+// compile never sees any of it.
+#ifdef OIT
+#pragma oit_library
+#endif
 
 float linearFog(float d, float s, float e) {
     if (d <= s) return 0.0;
@@ -170,6 +188,17 @@ void main() {
     if (mapped) rec = fetchFaceRecord(uv);
     vec4 textureColor = sampleTerrainAtlas(mapped ? rec.sprite : (fragSprite & 0xFFFF), uv);
     vec4 vcol = shadedVertexColor(mapped, rec, uv);
+    // MC terrain.fsh: `if (color.a < ALPHA_CUTOUT) discard;` on texture x
+    // vertex colour. A discarded texel writes no depth, which is what keeps
+    // an invisible pane interior from hiding the water behind it.
+    float alpha = textureColor.a * vcol.a;
+    if (alpha < uAlphaTest) {
+        discard;
+    }
+#ifdef OIT_ALPHA_ONLY
+    // MC terrain.fsh: the depth-bounds / transmittance stages read alpha only.
+    executeAlphaOnlyPhase(gl_FragCoord.z, alpha);
+#else
     vec3 finalColor = textureColor.rgb * vcol.rgb;
 
     // MC lightmap (Render::Lightmap): the vertex colour is already lit;
@@ -186,5 +215,11 @@ void main() {
     finalColor = mix(uFogColor.rgb, finalColor, fragVisibility);
 
     finalColor = mix(finalColor, uOverlayColor.rgb, uOverlayColor.a);
-    FragColor = vec4(finalColor, textureColor.a * vcol.a);
+    FragColor = vec4(finalColor, alpha);
+#ifdef OIT_ACCUMULATE
+    // MC calculateFinalColor: premultiplied, weighted by the transmittance
+    // in front of it (the fog is already in the colour).
+    FragColor = sampleColorForAccumulation(FragColor);
+#endif
+#endif
 }

@@ -414,4 +414,54 @@ namespace Game::RandomPos {
         }, scoring);
     }
 
+    std::optional<glm::dvec3> GetLandPosAway(PathfinderMob& mob, double minHorizontalDist,
+                                             double maxHorizontalDist, int verticalDist,
+                                             const glm::dvec3& avoidPos) {
+        if (!mob.Level()) return std::nullopt;
+        JavaRandom& rng = mob.Level()->Random();
+        const IBlockAccess* blocks = mob.Level()->Blocks();
+
+        // dirAway = mob.position - avoidPos; a zero vector rolls a random one.
+        glm::dvec3 away = mob.position - avoidPos;
+        if (glm::length(away) == 0.0) {
+            away = glm::dvec3(rng.NextDouble() - 0.5, 0.0, rng.NextDouble() - 0.5);
+        }
+        const bool restrict = MobRestricted(mob, maxHorizontalDist);
+
+        return BestOf(mob, [&](glm::ivec3& out) {
+            // RandomPos.generateRandomDirectionWithinRadians(random, min, max,
+            // vertical, 0, dir.x, dir.z, PI/2): dist = lerp(sqrt(u), min, max)
+            // * SQRT_2, rejected outside the |x|,|z| <= max box.
+            constexpr double kSqrt2 = 1.4142135623730951;
+            const double yRadiansCenter = std::atan2(away.z, away.x) - 3.14159265358979323846 / 2.0;
+            const double yRadians = yRadiansCenter +
+                static_cast<double>(2.0f * rng.NextFloat() - 1.0f) * 1.5707963705062866;
+            const double dist = (minHorizontalDist + std::sqrt(rng.NextDouble()) *
+                                 (maxHorizontalDist - minHorizontalDist)) * kSqrt2;
+            const double xt = -dist * std::sin(yRadians);
+            const double zt =  dist * std::cos(yRadians);
+            if (std::abs(xt) > maxHorizontalDist || std::abs(zt) > maxHorizontalDist) return false;
+            const int yt = rng.NextInt(2 * verticalDist + 1) - verticalDist;
+            const glm::ivec3 dir(static_cast<int>(std::floor(xt)), yt, static_cast<int>(std::floor(zt)));
+
+            // LandRandomPos.generateRandomPosTowardDirection: limits,
+            // restriction and stability on the raw candidate, then
+            // movePosUpOutOfSolid, never water, never a malus.
+            glm::ivec3 candidate = GenerateRandomPosTowardDirection(mob, maxHorizontalDist, rng, dir);
+            if (IsOutsideLimits(candidate))               return false;
+            if (restrict && !mob.IsWithinHome(candidate)) return false;
+            if (!IsStable(mob, candidate))                return false;
+            if (blocks) {
+                while (candidate.y < 320 &&
+                       BlockRegistry::HasCollision(blocks->GetBlock(candidate.x, candidate.y, candidate.z))) {
+                    ++candidate.y;
+                }
+                if (blocks->ContainsWater(candidate.x, candidate.y, candidate.z)) return false;
+            }
+            if (HasMalus(mob, candidate)) return false;
+            out = candidate;
+            return true;
+        });
+    }
+
 } // namespace Game::RandomPos

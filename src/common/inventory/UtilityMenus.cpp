@@ -5,6 +5,9 @@
 #include "common/entity/GeneratedItemList.hpp"   // Items::EnchantedBook, Items::Book
 #include "common/world/enchantment/EnchantmentDefinitions.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/world/map/MapItem.hpp"
+#include "common/world/banner/BannerPatterns.hpp"
+#include "common/entity/DyeColorUtil.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -25,6 +28,40 @@ namespace Game {
                 : Slot(container, 0, x, y), m_menu(menu) {}
             bool MayPlace(const ItemStack& /*stack*/) const override { return false; }
             bool MayPickup() const override { return m_menu.MayPickupResult(); }
+            void OnTake(const ItemStack& taken, ContainerClickResult& result) override {
+                m_menu.OnTakeResult(taken, result);
+            }
+        private:
+            ItemCombinerMenu& m_menu;
+        };
+
+        // CartographyTableMenu's two input slots: the map square takes only
+        // a map with an id, the other paper, a blank map or a glass pane.
+        class CartographyInputSlot : public Slot {
+        public:
+            CartographyInputSlot(IContainer* container, int index, int x, int y)
+                : Slot(container, index, x, y) {}
+            bool MayPlace(const ItemStack& stack) const override {
+                if (containerSlot == CartographyTableMenu::MAP_SLOT) {
+                    return stack.get(DataComponents::MAP_ID).has_value();
+                }
+                return stack.itemId == Items::Paper || stack.itemId == Items::Map ||
+                       stack.itemId == ItemRegistry::FromBlock(BlockID::GlassPane);
+            }
+        };
+
+        // The result square: taking it runs onCraftedBy on what is taken
+        // (the LOCK / SCALE post-process), then the menu's onTake.
+        class CartographyResultSlot : public Slot {
+        public:
+            CartographyResultSlot(ItemCombinerMenu& menu, IContainer* container, int x, int y)
+                : Slot(container, 0, x, y), m_menu(menu) {}
+            bool MayPlace(const ItemStack& /*stack*/) const override { return false; }
+            ItemStack Remove(int amount) override {
+                ItemStack taken = Slot::Remove(amount);
+                MapItemBridge::OnCraftedPostProcess(taken);
+                return taken;
+            }
             void OnTake(const ItemStack& taken, ContainerClickResult& result) override {
                 m_menu.OnTakeResult(taken, result);
             }
@@ -370,39 +407,271 @@ namespace Game {
 
     void CartographyTableMenu::PlaceInputSlots() {
         // MC CartographyTableMenu: map (15,15), paper (15,52), result (145,39).
-        AddInputSlot(0, 15, 15);
-        AddInputSlot(1, 15, 52);
-        AddResultSlot(145, 39);
+        AddSlot(std::make_unique<CartographyInputSlot>(&m_inputs, MAP_SLOT, 15, 15));
+        AddSlot(std::make_unique<CartographyInputSlot>(&m_inputs, ADDITIONAL_SLOT, 15, 52));
+        AddSlot(std::make_unique<CartographyResultSlot>(*this, &m_result, 145, 39));
+    }
+
+    void CartographyTableMenu::SlotsChanged(ContainerClickResult& result) {
+        // MC slotsChanged: with a result showing and an input gone, the
+        // result goes; with both inputs, setupResultSlot.
+        const bool haveBoth = !Input(MAP_SLOT).IsEmpty() && !Input(ADDITIONAL_SLOT).IsEmpty();
+        if (!Result().IsEmpty() && !haveBoth) {
+            SetResult(ItemStack{});
+        } else if (haveBoth) {
+            ComputeResult();
+        }
+        MarkChanged(result, ResultSlotIndex());
     }
 
     void CartographyTableMenu::ComputeResult() {
-        // Every cartography operation (zoom out, lock, clone) works on filled
-        // map data, which needs the MapItemSavedData system — not present. The
-        // menu is here so the block opens and behaves like a container that
-        // hands your items back; it produces nothing until maps exist.
-        SetResult(ItemStack{});
+        // MC setupResultSlot.
+        const ItemStack& map = Input(MAP_SLOT);
+        const ItemStack& additional = Input(ADDITIONAL_SLOT);
+        if (map.IsEmpty() || additional.IsEmpty()) return;
+        // MapItem.getSavedData(map, level): nothing changes without data.
+        const std::optional<int> scale = MapItemBridge::MapScale(map);
+        if (!scale) return;
+        const bool locked = MapItemBridge::MapLocked(map);
+
+        ItemStack out = map;
+        out.count = 1;
+        if (additional.itemId == Items::Paper && map.itemId == Items::FilledMap &&   // #extendable_maps
+            !locked && *scale < 4) {
+            out.components.set(DataComponents::MAP_POST_PROCESSING, Maps::MapPostProcessing::Scale);
+        } else if (additional.itemId == ItemRegistry::FromBlock(BlockID::GlassPane) && !locked) {
+            out.components.set(DataComponents::MAP_POST_PROCESSING, Maps::MapPostProcessing::Lock);
+        } else if (additional.itemId == Items::Map) {
+            out.count = 2;
+        } else {
+            SetResult(ItemStack{});
+            return;
+        }
+        if (!ItemStacksMatch(out, Result())) SetResult(out);
+    }
+
+    void CartographyTableMenu::OnTakeResult(const ItemStack& /*taken*/, ContainerClickResult& result) {
+        // The result slot's onTake: one of each input, then the take sound
+        // (the session's, at the table).
+        for (int i : {MAP_SLOT, ADDITIONAL_SLOT}) {
+            ItemStack& input = Input(i);
+            if (input.IsEmpty()) continue;
+            if (--input.count <= 0) input.Clear();
+            MarkChanged(result, i);
+        }
+        result.cartographyUsed = true;
+        MarkChanged(result, ResultSlotIndex());
+    }
+
+    void CartographyTableMenu::QuickMoveStack(int slotIndex, ContainerClickResult& result) {
+        Slot& slot = GetSlot(slotIndex);
+        if (!slot.HasItem()) return;
+        ItemStack& stack = slot.GetItemMut();
+        const ItemStack original = stack;
+        const int mainBegin = RESULT_SLOT + 1;           // 3
+        const int hotbarBegin = mainBegin + 27;          // 30
+        const int playerEnd = SlotCount();               // 39
+
+        bool moved = false;
+        if (slotIndex == RESULT_SLOT) {
+            // stack.getItem().onCraftedBy(stack, player) before the move.
+            MapItemBridge::OnCraftedPostProcess(stack);
+            moved = MoveItemStackTo(stack, mainBegin, playerEnd, true, result);
+        } else if (slotIndex == MAP_SLOT || slotIndex == ADDITIONAL_SLOT) {
+            moved = MoveItemStackTo(stack, mainBegin, playerEnd, false, result);
+        } else if (stack.get(DataComponents::MAP_ID)) {
+            moved = MoveItemStackTo(stack, MAP_SLOT, MAP_SLOT + 1, false, result);
+        } else if (stack.itemId == Items::Paper || stack.itemId == Items::Map ||
+                   stack.itemId == ItemRegistry::FromBlock(BlockID::GlassPane)) {
+            moved = MoveItemStackTo(stack, ADDITIONAL_SLOT, ADDITIONAL_SLOT + 1, false, result);
+        } else if (slotIndex >= mainBegin && slotIndex < hotbarBegin) {
+            moved = MoveItemStackTo(stack, hotbarBegin, playerEnd, false, result);
+        } else if (slotIndex >= hotbarBegin && slotIndex < playerEnd) {
+            moved = MoveItemStackTo(stack, mainBegin, hotbarBegin, false, result);
+        }
+
+        if (!moved || stack.count == original.count) return;
+        slot.SetChanged();
+        MarkChanged(result, slotIndex);
+        // As ItemCombinerMenu: the caller's onTake consumes the inputs before
+        // the result square is recomputed.
+        MarkChanged(result, ResultSlotIndex());
     }
 
     // ── Loom ──────────────────────────────────────────────────────────────
+    namespace {
+        class LoomInputSlot : public Slot {
+        public:
+            LoomInputSlot(IContainer* container, int index, int x, int y) : Slot(container, index, x, y) {}
+            bool MayPlace(const ItemStack& stack) const override {
+                switch (containerSlot) {
+                    case LoomMenu::BANNER_SLOT:  return LoomMenu::IsBannerItem(stack);
+                    case LoomMenu::DYE_SLOT:     return LoomMenu::IsDyeItem(stack);
+                    case LoomMenu::PATTERN_SLOT: return LoomMenu::IsPatternItem(stack);
+                    default:                     return false;
+                }
+            }
+        };
+    } // namespace
+
     LoomMenu::LoomMenu(Inventory* playerInventory)
         : ItemCombinerMenu(playerInventory, 3, 84) {
+        SetOwnedData(std::make_unique<SimpleContainerData>(DATA_COUNT));
+        SetData(DATA_SELECTED, -1);
         PlaceInputSlots();
         FinishLayout(playerInventory);
     }
 
     void LoomMenu::PlaceInputSlots() {
-        // MC LoomMenu: banner (13,26), dye (33,26), pattern (23,45), result (143,58).
-        AddInputSlot(0, 13, 26);
-        AddInputSlot(1, 33, 26);
-        AddInputSlot(2, 23, 45);
-        AddResultSlot(143, 58);
+        // MC LoomMenu: banner (13,26), dye (33,26), pattern (23,45), result (143,57).
+        AddSlot(std::make_unique<LoomInputSlot>(&m_inputs, BANNER_SLOT, 13, 26));
+        AddSlot(std::make_unique<LoomInputSlot>(&m_inputs, DYE_SLOT, 33, 26));
+        AddSlot(std::make_unique<LoomInputSlot>(&m_inputs, PATTERN_SLOT, 23, 45));
+        AddResultSlot(143, 57);
+    }
+
+    bool LoomMenu::IsBannerItem(const ItemStack& stack) {
+        // BannerItem: the sixteen standing banners' items.
+        if (stack.IsEmpty() || !ItemRegistry::IsBlockItem(stack.itemId)) return false;
+        const std::string_view slug = ItemRegistry::Slug(stack.itemId);
+        constexpr std::string_view kSuffix = "_banner";
+        return slug.size() > kSuffix.size() && slug.substr(slug.size() - kSuffix.size()) == kSuffix &&
+               slug.find("_wall_banner") == std::string_view::npos;
+    }
+
+    bool LoomMenu::IsDyeItem(const ItemStack& stack) {
+        // #loom_dyes with a DYE: the sixteen dyes.
+        return !stack.IsEmpty() && DyeColorOfItem(stack.itemId) >= 0;
+    }
+
+    bool LoomMenu::IsPatternItem(const ItemStack& stack) {
+        // #loom_patterns with PROVIDES_BANNER_PATTERNS.
+        if (stack.IsEmpty()) return false;
+        const std::string tag = BannerPatterns::ProvidedTagOf(std::string(ItemRegistry::Slug(stack.itemId)));
+        return !tag.empty() && !BannerPatterns::Resolve(tag).empty();
+    }
+
+    std::vector<std::string> LoomMenu::SelectablePatternsFor(const ItemStack& patternStack) const {
+        if (patternStack.IsEmpty()) return BannerPatterns::Resolve("#minecraft:no_item_required");
+        const std::string tag = BannerPatterns::ProvidedTagOf(std::string(ItemRegistry::Slug(patternStack.itemId)));
+        return tag.empty() ? std::vector<std::string>{} : BannerPatterns::Resolve(tag);
+    }
+
+    void LoomMenu::SetupResultSlot(const std::string& pattern) {
+        const ItemStack& banner = Input(BANNER_SLOT);
+        const ItemStack& dye = Input(DYE_SLOT);
+        ItemStack result;
+        if (!banner.IsEmpty() && !dye.IsEmpty()) {
+            const int color = DyeColorOfItem(dye.itemId);
+            if (color >= 0) {
+                result = banner;
+                result.count = 1;
+                BannerPatternLayers layers = result.get(DataComponents::BANNER_PATTERNS).value_or(BannerPatternLayers{});
+                layers.layers.push_back(BannerPatternLayer{pattern, static_cast<uint8_t>(color)});
+                result.components.set(DataComponents::BANNER_PATTERNS, std::move(layers));
+            }
+        }
+        if (!ItemStacksMatch(result, Result())) SetResult(result);
     }
 
     void LoomMenu::ComputeResult() {
-        // Applying a pattern writes a BANNER_PATTERNS component onto the
-        // result. That component is not registered, so the loom opens and
-        // returns its inputs but cannot yet weave.
-        SetResult(ItemStack{});
+        // MC LoomMenu.slotsChanged.
+        const ItemStack& banner = Input(BANNER_SLOT);
+        const ItemStack& dye = Input(DYE_SLOT);
+        if (banner.IsEmpty() || dye.IsEmpty()) {
+            SetResult(ItemStack{});
+            m_selectablePatterns.clear();
+            SetData(DATA_SELECTED, -1);
+            return;
+        }
+        const int selected = GetData(DATA_SELECTED);
+        const bool validIndex = selected >= 0 && selected < static_cast<int>(m_selectablePatterns.size());
+        const std::vector<std::string> previous = m_selectablePatterns;
+        m_selectablePatterns = SelectablePatternsFor(Input(PATTERN_SLOT));
+        std::optional<std::string> toDisplay;
+        if (m_selectablePatterns.size() == 1) {
+            SetData(DATA_SELECTED, 0);
+            toDisplay = m_selectablePatterns[0];
+        } else if (!validIndex) {
+            SetData(DATA_SELECTED, -1);
+        } else {
+            const std::string& value = previous[static_cast<size_t>(selected)];
+            const auto it = std::find(m_selectablePatterns.begin(), m_selectablePatterns.end(), value);
+            if (it != m_selectablePatterns.end()) {
+                toDisplay = value;
+                SetData(DATA_SELECTED, static_cast<int>(it - m_selectablePatterns.begin()));
+            } else {
+                SetData(DATA_SELECTED, -1);
+            }
+        }
+        if (toDisplay) {
+            const auto layers = banner.get(DataComponents::BANNER_PATTERNS);
+            const bool hasMaxPatterns = layers && static_cast<int>(layers->layers.size()) >= MAX_PATTERNS;
+            if (hasMaxPatterns) {
+                SetData(DATA_SELECTED, -1);
+                SetResult(ItemStack{});
+            } else {
+                SetupResultSlot(*toDisplay);
+            }
+        } else {
+            SetResult(ItemStack{});
+        }
+    }
+
+    bool LoomMenu::ClickMenuButton(int buttonId, bool /*mayBuild*/, ContainerClickResult& result) {
+        if (buttonId < 0 || buttonId >= static_cast<int>(m_selectablePatterns.size())) return false;
+        SetData(DATA_SELECTED, buttonId);
+        SetupResultSlot(m_selectablePatterns[static_cast<size_t>(buttonId)]);
+        MarkChanged(result, RESULT_SLOT);
+        return true;
+    }
+
+    void LoomMenu::OnTakeResult(const ItemStack& /*taken*/, ContainerClickResult& result) {
+        // The result slot's onTake: one banner and one dye used; the pattern
+        // item stays. Without both the selection resets. The session plays
+        // UI_LOOM_TAKE_RESULT at the loom, once per game tick.
+        ItemStack& banner = Input(BANNER_SLOT);
+        ItemStack& dye = Input(DYE_SLOT);
+        if (!banner.IsEmpty() && --banner.count <= 0) banner.Clear();
+        if (!dye.IsEmpty() && --dye.count <= 0) dye.Clear();
+        if (banner.IsEmpty() || dye.IsEmpty()) SetData(DATA_SELECTED, -1);
+        MarkChanged(result, BANNER_SLOT);
+        MarkChanged(result, DYE_SLOT);
+        MarkChanged(result, RESULT_SLOT);
+        result.loomUsed = true;
+    }
+
+    void LoomMenu::QuickMoveStack(int slotIndex, ContainerClickResult& result) {
+        // MC LoomMenu.quickMoveStack.
+        Slot& slot = GetSlot(slotIndex);
+        if (!slot.HasItem()) return;
+        ItemStack& stack = slot.GetItemMut();
+        const ItemStack original = stack;
+        constexpr int kInvStart = 4, kInvEnd = 31, kUseRowStart = 31, kUseRowEnd = 40;
+
+        bool moved = false;
+        if (slotIndex == RESULT_SLOT) {
+            moved = MoveItemStackTo(stack, kInvStart, kUseRowEnd, true, result);
+        } else if (slotIndex != DYE_SLOT && slotIndex != BANNER_SLOT && slotIndex != PATTERN_SLOT) {
+            if (IsBannerItem(stack)) {
+                moved = MoveItemStackTo(stack, BANNER_SLOT, BANNER_SLOT + 1, false, result);
+            } else if (IsDyeItem(stack)) {
+                moved = MoveItemStackTo(stack, DYE_SLOT, DYE_SLOT + 1, false, result);
+            } else if (IsPatternItem(stack)) {
+                moved = MoveItemStackTo(stack, PATTERN_SLOT, PATTERN_SLOT + 1, false, result);
+            } else if (slotIndex >= kInvStart && slotIndex < kInvEnd) {
+                moved = MoveItemStackTo(stack, kUseRowStart, kUseRowEnd, false, result);
+            } else if (slotIndex >= kUseRowStart && slotIndex < kUseRowEnd) {
+                moved = MoveItemStackTo(stack, kInvStart, kInvEnd, false, result);
+            }
+        } else {
+            moved = MoveItemStackTo(stack, kInvStart, kUseRowEnd, false, result);
+        }
+
+        if (!moved || stack.count == original.count) return;
+        slot.SetChanged();
+        MarkChanged(result, slotIndex);
+        MarkChanged(result, ResultSlotIndex());
     }
 
     // ── Smithing table ────────────────────────────────────────────────────

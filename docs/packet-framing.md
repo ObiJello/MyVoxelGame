@@ -138,23 +138,14 @@ Connection Protection
 
 Compression Implementation Details
 
-Zlib Integration
+Deflate Integration
 
-    #include <zlib.h>
-    
-    std::vector<uint8_t> CompressData(const std::vector<uint8_t>& data) {
-        uLongf compressedSize = compressBound(data.size());
-        std::vector<uint8_t> compressed(compressedSize);
-
-        int result = compress(compressed.data(), &compressedSize,
-                           data.data(), data.size());
-        if (result != Z_OK) {
-            throw std::runtime_error("Compression failed");
-        }
-
-        compressed.resize(compressedSize);
-        return compressed;
-    }
+    // common/core/Deflate: zlib format, level 6, through libdeflate
+    // (NetworkConnection's DeflateFast / InflateFast).
+    std::vector<uint8_t> compressed;
+    Core::Deflate::Compress(body.data(), body.size(), compressed, Core::Deflate::Format::Zlib, 6);
+    // Reading: the frame's Data Length is the exact inflated size.
+    Core::Deflate::DecompressExact(src, n, out, dataLength, Core::Deflate::Format::Zlib);
 
 Compression Threshold
 

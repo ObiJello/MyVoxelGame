@@ -29,6 +29,7 @@
 
 namespace Game {
     class Villager;
+    class WanderingTrader;
     class ZombieVillager;
 }
 
@@ -42,6 +43,11 @@ namespace Game::Anvil {
     // Both, in MC's read order; rebuilds the brain for the loaded profession
     // (MC refreshBrain) and queues the POI tickets the memories name.
     void ReadVillagerNbt(const ::World::NBTTagCompound& tag, Villager& villager);
+
+    // MC WanderingTrader: AbstractVillager's Offers and Inventory, then
+    // DespawnDelay (int) and wander_target (int[3], only when set).
+    void WriteWanderingTraderNbt(Nbt::Writer& w, const WanderingTrader& trader);
+    void ReadWanderingTraderNbt(const ::World::NBTTagCompound& tag, WanderingTrader& trader);
 
     // MC ZombieVillager: VillagerData, VillagerDataFinalized, Xp (the
     // offers and gossips it carries for a cure are not kept — no curing).

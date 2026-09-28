@@ -3,9 +3,9 @@
 
 #include "common/core/AssetLocator.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/ZipArchive.hpp"
 
 #include <nlohmann/json.hpp>
-#include "unzip.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -250,20 +250,6 @@ namespace Resources {
             std::string mcmeta;
         };
 
-        bool ReadZipEntry(unzFile zf, std::string& out) {
-            if (unzOpenCurrentFile(zf) != UNZ_OK) return false;
-            out.clear();
-            char buf[64 * 1024];
-            for (;;) {
-                const int n = unzReadCurrentFile(zf, buf, sizeof buf);
-                if (n < 0) { unzCloseCurrentFile(zf); return false; }
-                if (n == 0) break;
-                out.append(buf, static_cast<size_t>(n));
-            }
-            unzCloseCurrentFile(zf);
-            return true;
-        }
-
         bool SafeRelativeEntry(const std::string& name) {
             if (name.empty() || name[0] == '/' || name[0] == '\\') return false;
             if (name.find("..") != std::string::npos) return false;
@@ -277,17 +263,11 @@ namespace Resources {
         // pack carries.
         ZipScan ScanZip(const fs::path& zip) {
             ZipScan scan;
-            unzFile zf = unzOpen(zip.string().c_str());
-            if (!zf) return scan;
+            Core::ZipArchive zf(zip);
+            if (!zf.IsOpen()) return scan;
             std::vector<std::string> names;
-            if (unzGoToFirstFile(zf) == UNZ_OK) {
-                do {
-                    char name[1024];
-                    unz_file_info info{};
-                    if (unzGetCurrentFileInfo(zf, &info, name, sizeof name, nullptr, 0, nullptr, 0) != UNZ_OK) continue;
-                    names.emplace_back(name);
-                } while (unzGoToNextFile(zf) == UNZ_OK);
-            }
+            names.reserve(zf.Entries().size());
+            for (const Core::ZipArchive::Entry& e : zf.Entries()) names.push_back(e.name);
             scan.ok = true;
             auto has = [&](const std::string& n) { return std::find(names.begin(), names.end(), n) != names.end(); };
             if (has("pack.mcmeta")) {
@@ -305,7 +285,7 @@ namespace Resources {
                     }
                 }
                 if (candidates == 1) scan.prefix = found;
-                else { unzClose(zf); return scan; }   // not a pack
+                else return scan;   // not a pack
             }
             scan.hasMcmeta = true;
             scan.hasIcon = has(scan.prefix + "pack.png");
@@ -318,55 +298,48 @@ namespace Resources {
                     break;
                 }
             }
-            if (unzLocateFile(zf, (scan.prefix + "pack.mcmeta").c_str(), 1) == UNZ_OK) ReadZipEntry(zf, scan.mcmeta);
-            unzClose(zf);
+            if (const Core::ZipArchive::Entry* mcmeta = zf.Find(scan.prefix + "pack.mcmeta")) zf.Read(*mcmeta, scan.mcmeta);
             return scan;
         }
 
         bool ExtractZipEntryTo(const fs::path& zip, const std::string& entry, const fs::path& dest) {
-            unzFile zf = unzOpen(zip.string().c_str());
-            if (!zf) return false;
-            bool ok = false;
+            Core::ZipArchive zf(zip);
+            const Core::ZipArchive::Entry* e = zf.IsOpen() ? zf.Find(entry) : nullptr;
             std::string bytes;
-            if (unzLocateFile(zf, entry.c_str(), 1) == UNZ_OK && ReadZipEntry(zf, bytes)) {
-                std::error_code ec;
-                fs::create_directories(dest.parent_path(), ec);
-                std::ofstream out(dest, std::ios::binary);
-                ok = static_cast<bool>(out.write(bytes.data(), static_cast<std::streamsize>(bytes.size())));
-            }
-            unzClose(zf);
-            return ok;
+            if (!e || !zf.Read(*e, bytes)) return false;
+            std::error_code ec;
+            fs::create_directories(dest.parent_path(), ec);
+            std::ofstream out(dest, std::ios::binary);
+            return static_cast<bool>(out.write(bytes.data(), static_cast<std::streamsize>(bytes.size())));
         }
 
         bool ExtractZip(const fs::path& zip, const fs::path& destDir) {
-            unzFile zf = unzOpen(zip.string().c_str());
-            if (!zf) return false;
+            Core::ZipArchive zf(zip);
+            if (!zf.IsOpen()) return false;
             std::error_code ec;
             fs::remove_all(destDir, ec);
             fs::create_directories(destDir, ec);
             bool ok = true;
             size_t files = 0;
-            if (unzGoToFirstFile(zf) == UNZ_OK) {
-                do {
-                    char name[1024];
-                    unz_file_info info{};
-                    if (unzGetCurrentFileInfo(zf, &info, name, sizeof name, nullptr, 0, nullptr, 0) != UNZ_OK) { ok = false; break; }
-                    const std::string entry(name);
-                    if (entry.empty() || entry.back() == '/') continue;   // directory entry
-                    if (!SafeRelativeEntry(entry)) { Log::Warning("[ResourcePacks] skipping unsafe zip entry %s", entry.c_str()); continue; }
-                    // Only what a resource pack can use: keeps a 300 MB pack
-                    // with stray videos from being copied.
-                    if (entry.find("assets/") == std::string::npos && entry.find("pack.") == std::string::npos) continue;
-                    std::string bytes;
-                    if (!ReadZipEntry(zf, bytes)) { ok = false; break; }
-                    const fs::path dest = destDir / entry;
-                    fs::create_directories(dest.parent_path(), ec);
-                    std::ofstream out(dest, std::ios::binary);
-                    if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) { ok = false; break; }
-                    ++files;
-                } while (unzGoToNextFile(zf) == UNZ_OK);
+            for (const Core::ZipArchive::Entry& e : zf.Entries()) {
+                const std::string& entry = e.name;
+                if (entry.empty() || e.IsDirectory()) continue;
+                if (!SafeRelativeEntry(entry)) { Log::Warning("[ResourcePacks] skipping unsafe zip entry %s", entry.c_str()); continue; }
+                // Only what a resource pack can use: keeps a 300 MB pack
+                // with stray videos from being copied.
+                if (entry.find("assets/") == std::string::npos && entry.find("pack.") == std::string::npos) continue;
+                std::string bytes;
+                if (!zf.Read(e, bytes)) {
+                    Log::Warning("[ResourcePacks] %s: %s", zip.filename().string().c_str(), zf.Error().c_str());
+                    ok = false;
+                    break;
+                }
+                const fs::path dest = destDir / entry;
+                fs::create_directories(dest.parent_path(), ec);
+                std::ofstream out(dest, std::ios::binary);
+                if (!out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()))) { ok = false; break; }
+                ++files;
             }
-            unzClose(zf);
             Log::Info("[ResourcePacks] extracted %zu file(s) from %s", files, zip.filename().string().c_str());
             return ok;
         }

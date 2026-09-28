@@ -1,5 +1,6 @@
 // File: src/common/entity/mobs/TwilightCreatures.cpp
 #include "common/entity/mobs/TwilightCreatures.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
@@ -499,7 +500,7 @@ namespace Game {
         if (m_maxDuration - m_durationLeft > 5) {
             if (Entity* target = GetHeadLookTarget()) {
                 m_host->DoBreathAttack(*target);
-                // gameEvent(PROJECTILE_SHOOT) — no game-event system.
+                m_host->GameEvent(GameEventId::ProjectileShoot);   // TF: gameEvent(PROJECTILE_SHOOT)
             }
         }
     }
@@ -713,6 +714,21 @@ namespace Game {
             m_meleeGoal = melee.get();
             m_goalSelector.AddGoal(4, std::move(melee));
         }
+    }
+
+    bool SkeletonDruid::HoldsHoe() const {
+        switch (GetMainHandEquipment().itemId) {
+            case Items::WoodenHoe: case Items::StoneHoe: case Items::CopperHoe: case Items::IronHoe:
+            case Items::GoldenHoe: case Items::DiamondHoe: case Items::NetheriteHoe:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void SkeletonDruid::PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) {
+        (void)random; (void)difficulty;
+        SetEquipment(EquipmentSlot::MAINHAND, ItemStack(IsBaby() ? Items::Stick : Items::GoldenHoe, 1));
     }
 
     void SkeletonDruid::SetBaby(bool baby) {

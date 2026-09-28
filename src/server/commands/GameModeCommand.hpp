@@ -8,8 +8,12 @@
 #pragma once
 
 #include "CommandDispatcher.hpp"
+#include <optional>
+#include <string>
 
 namespace Server {
+
+    enum class GameMode;   // ServerPlayer.hpp (opaque: complete, int-based)
 
     class GameModeCommand {
     public:
@@ -19,6 +23,10 @@ namespace Server {
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
+
+        // survival|creative|adventure|spectator, s|c|a|sp, 0-3 (any case).
+        // Shared by /gamemode and /defaultgamemode.
+        static std::optional<GameMode> ParseGameMode(const std::string& arg);
     };
 
 } // namespace Server

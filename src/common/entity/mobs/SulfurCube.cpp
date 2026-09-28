@@ -4,6 +4,7 @@
 // same observable rule where it does not (touch callbacks → per-tick
 // proximity, as the slime's contact damage already does).
 #include "common/entity/mobs/SulfurCube.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/entity/ai/goals/SlimeGoals.hpp"
 #include "common/entity/ai/Goal.hpp"
 #include "common/entity/Animal.hpp"
@@ -92,6 +93,7 @@ namespace Game {
         bool ImmuneWithBlock(MobDamageSource source) {
             switch (source) {
                 case MobDamageSource::PlayerAttack:
+                case MobDamageSource::MaceSmash:
                 case MobDamageSource::MobAttack:
                 case MobDamageSource::Projectile:
                 case MobDamageSource::Fall:
@@ -593,6 +595,7 @@ namespace Game {
         m_maxFuse = fuseTime;                   // MAX_FUSE, synched
         needsSync = true;
         MakeSound(SoundEvents::TNT_PRIMED);
+        GameEvent(GameEventId::PrimeFuse);   // MC: gameEvent(PRIME_FUSE)
         return true;
     }
 
@@ -601,6 +604,8 @@ namespace Game {
         if (!m_archetype || !m_archetype->explodes) return;
         if (m_fuse == 0) {
             if (m_level && !m_level->IsClientSide()) {
+                // MC tickFuse: dropLeash() before the blast.
+                DropLeash();
                 if (m_level->TntExplodes()) Explode();
                 Discard();
             }
@@ -671,7 +676,7 @@ namespace Game {
         m_level->GetItemEntitiesInBox(box, items);
         for (const auto& it : items) {
             if (!it.canPickUp || !IsSwallowable(it.itemId)) continue;
-            if (m_level->TakeFromItemEntity(it.id, 1) == 1) {
+            if (TakeItemEntity(it.id, 1) == 1) {
                 SetBodyItem(it.itemId);
                 PlaySound(SoundEvents::SULFUR_CUBE_ABSORB, 1.0f, 1.0f);
                 break;
@@ -890,13 +895,17 @@ namespace Game {
         if (held.itemId == Items::Shears && ReadyForShearing()) {
             if (client) return UseResult::Success;
             Shear();
+            GameEvent(GameEventId::Shear, &player);   // MC: gameEvent(SHEAR, player)
             HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);   // MC hurtAndBreak(1, player, hand)
             return UseResult::Success;
         }
         if (IsSwallowable(held.itemId)) {
             if (client) return UseResult::SuccessServer;
             const bool worked = EquipItem(held.itemId);
-            if (worked) Animal::UsePlayerItem(held);
+            if (worked) {
+                Animal::UsePlayerItem(held);
+                GameEvent(GameEventId::EntityInteract);   // MC: gameEvent(ENTITY_INTERACT)
+            }
             return worked ? UseResult::SuccessServer : UseResult::Pass;
         }
         // Bucketable.bucketMobPickup: an empty bucket scoops the cube — the
@@ -909,6 +918,9 @@ namespace Game {
             ItemStack bucket(Items::SulfurCubeBucket, 1);
             SaveToBucket(bucket);
             m_level->CreateFilledResult(player, held, bucket);
+            // Bucketable.bucketMobPickup: `leashable.dropLeash()` before the
+            // discard — the lead falls where the cube was.
+            DropLeash();
             Discard();
             return UseResult::SuccessServer;
         }

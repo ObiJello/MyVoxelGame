@@ -255,6 +255,12 @@ def resolve_map_color(arg):
     m = re.fullmatch(r'DyeColor\.([A-Z_]+)', arg)
     if m:
         return DYE_TO_MAP.get(m.group(1))
+    # `ACACIA_PLANKS.defaultMapColor()` — another block's colour (doors,
+    # fences, pressure plates, the pale oak and poplar logs). Resolved against
+    # the already-walked fields by the caller.
+    m = re.fullmatch(r'([A-Z_0-9]+)\.defaultMapColor\(\)', arg)
+    if m:
+        return "@field:" + m.group(1)
     # A bare parameter name (`color`, `mapColor`) inside a helper, or a
     # state-dependent lambda. Both are resolved by the caller or, for the
     # lambda, approximated by the first MapColor mentioned inside it — which is
@@ -275,6 +281,15 @@ def resolve_map_color(arg):
 # The nine local factories in Blocks.java that build a Properties of their own.
 # Transcribed from their bodies rather than parsed, because each is a one-liner
 # that will not move and a parser for them would be more code than the table.
+def resolve_field_color(c, fields):
+    """"@field:NAME" (another block's defaultMapColor()) -> that block's
+    MapColor name; anything else passes through."""
+    if c and c.startswith("@field:"):
+        base = fields.get(c[7:])
+        return base.map_color if base is not None else "NONE"
+    return c
+
+
 def helper_props(name, args, fields):
     p = Props()
     if name == "logProperties":            # (topColor, sideColor, soundType)
@@ -356,7 +371,7 @@ def eval_props(expr, fields, ctx=None, where=""):
         raw_args = split_args(expr[open_idx + 1:close - 1])
         args = []
         for a in raw_args:
-            c = resolve_map_color(a)
+            c = resolve_field_color(resolve_map_color(a), fields)
             args.append(c if c and not c.startswith("@param:") else
                         ctx.get(c[7:], "NONE") if c else "NONE")
         p = helper_props(m.group(1), args, fields)
@@ -392,7 +407,7 @@ def eval_props(expr, fields, ctx=None, where=""):
             if m:
                 p.instrument = m.group(1).lower()
         elif name == "mapColor":
-            c = resolve_map_color(args)
+            c = resolve_field_color(resolve_map_color(args), fields)
             if c and c.startswith("@param:"):
                 c = ctx.get(c[7:], "NONE")
             if c:

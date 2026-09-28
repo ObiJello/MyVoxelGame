@@ -60,9 +60,16 @@ namespace Server {
         PlayerEntityView(Game::EntityLevel* level, ServerPlayer* player, int32_t entityId);
 
         bool IsPlayer() const override { return true; }
+        // MC Player.getSoundSource: PLAYERS (the view's placeholder Zombie
+        // type would say HOSTILE) — what a shoulder parrot's chatter and
+        // imitations are voiced through.
+        Game::SoundSource GetSoundSource() const override { return Game::SoundSource::Players; }
         bool IsCreative() const override;
         bool IsSpectator() const override;
+        bool MayBuild() const override;
         bool IsAbilityFlying() const override;
+        // MC isFallFlying — the ServerPlayer's glide (what a rocket boosts).
+        bool IsFallFlying() const override;
 
         // A player's current push is applied by the CLIENT's own physics
         // (MC LocalPlayer runs updateFluidInteraction itself); pushing the
@@ -71,10 +78,20 @@ namespace Server {
         // (RefreshFluidState in TickCombatState) for the mobs that ask.
         bool IsPushedByFluid() const override { return false; }
 
+        // MC LivingEntity.stopRiding → dismountVehicle for the player: the
+        // view leaves the vehicle's passenger list (Entity::StopRiding) and
+        // Server::PlayerRiding puts the real player down at the vehicle's
+        // dismount location — whoever ended the ride (a sneak, the vehicle
+        // breaking or ejecting, a water-logged boat).
+        void StopRiding() override;
+
         // MC LivingEntity.isAttackable — creative and spectator players are not
         // valid targets, which is what makes a creative player invisible to
         // hostile mobs.
         bool IsAttackable() const override { return !IsCreative() && !IsSpectator(); }
+        // MC Player.isPickable: `!isSpectator() && super.isPickable()` — no
+        // crosshair, projectile or spectate click lands on a spectator.
+        bool IsPickable() const override { return !IsSpectator() && IsAlive(); }
 
         // The base box; Entity::scale (set from the player's size when the
         // view syncs) sits on top of it. A morphed player (/morph) has the
@@ -90,6 +107,28 @@ namespace Server {
         glm::dvec3 GetKnownMovement() const override {
             return position - oldPosition;
         }
+        // MC ServerPlayer.getKnownSpeed: the same client-reported
+        // displacement (a spear's charge measures closing speed with it).
+        glm::dvec3 GetKnownSpeed() const override {
+            return position - oldPosition;
+        }
+
+        // ── Spears and the riptide (server/items/TridentSpearItems.cpp) ───
+        // MC Player.stabAttack: the attack charge (unless it is the charge of
+        // the hand in use), the enchanted-hit burst, the wear, the
+        // post-attack effects, the damage hearts, the exhaustion.
+        bool  StabAttack(Game::EquipmentSlot weaponSlot, Game::Entity& target, float baseDamage,
+                         bool dealsDamage, bool dealsKnockback, bool dismounts) override;
+        // ATTACK_DAMAGE as the ServerPlayer has it (base, held item, effects).
+        float GetJabAttackDamage() const override;
+        // Player.onAttack: the attack charge resets.
+        void  OnAttack() override;
+        // FoodData's level, for the `player` predicate (Lunge).
+        int   GetFoodLevel() const override;
+        // MC LivingEntity.aiStep's riptide touch (checkAutoSpinAttack), run
+        // from TickCombatState: the swept SPIN_ATTACK box's first living
+        // entity takes the spin's attack.
+        void  TickAutoSpinAttack();
 
         // MC Player.getDimensionChangingDelay (Player.java:383) — TEN ticks,
         // against Entity's generic 300.
@@ -163,6 +202,11 @@ namespace Server {
         // eye in water). Read by the dolphin's escort (DOLPHINS_GRACE).
         bool IsSwimming() const override;
 
+        // MC Player.getBaseExperienceReward: min(level * 7, 100), none with
+        // keep_inventory on or as a spectator — what a sculk catalyst turns
+        // into charge when this player dies near one.
+        int GetExperienceReward(Game::EntityLevel& level, Game::Entity* killer) override;
+
         // The player's absorption hearts live on ServerPlayer (MC Player's
         // DATA_PLAYER_ABSORPTION_ID); ABSORPTION's onEffectStarted and the
         // hurt path reach them through these.
@@ -173,6 +217,18 @@ namespace Server {
         // removed (KILLED) — triggerOnDeathMobEffects fires WIND_CHARGED /
         // WEAVING / OOZING and empties the list. Called by TickCombatState.
         void TickPlayerDeathEffects();
+
+        // MC LivingEntity.aiStep's pushEntities for a ServerPlayer: the
+        // player shoves the pushable mobs it overlaps (a minecart, a boat, a
+        // crowd — each by its own push rule) and takes cramming damage in a
+        // crush. Its own half of each shove is its CLIENT's (MC pushes the
+        // local player client-side: Client::Vehicles), so it is discarded
+        // here; other players are left to their own clients.
+        void TickPushEntities();
+        // A player in the engine's debug noclip has no collision at all, so
+        // it neither pushes nor is pushed (MC: noPhysics entities never
+        // push — Entity.push / isPushable).
+        bool IsPushable() const override;
 
         // Called once per server tick, before mobs tick.
         void SyncFromPlayer();
@@ -250,6 +306,23 @@ namespace Server {
             m_pendingKnockback = velocity;
             m_hasPendingKnockback = true;
         }
+
+        // The player's current-impulse context lives on the ServerPlayer
+        // (it has to survive this view being rebuilt on a dimension change).
+        using Game::LivingEntity::GetImpulseContext;
+        Game::ImpulseContext& GetImpulseContext() override;
+
+        // MC ServerPlayer.onExplosionHit: a blast from a player-thrown wind
+        // charge arms the impulse at the player's position (the launch's fall
+        // is forgiven down to where it started); any other blast drops the
+        // grace window of whatever impulse was running.
+        void OnExplosionHit(Game::Entity* explosionCausedBy) override;
+
+        // MC setDeltaMovement + connection.send(ClientboundSetEntityMotion
+        // Packet(player)) — MaceItem.hurtEnemy's bounce. Sent NOW, so a push
+        // later in the same tick (Wind Burst's blast, which rides the explode
+        // packet as an ADD) lands on top of it on the client, as in MC.
+        void SetDeltaMovementAndSync(const glm::dvec3& v) override;
 
     protected:
         void ActuallyHurt(Game::MobDamageSource source, float amount,
@@ -349,6 +422,9 @@ namespace Server {
         // it, so Peaceful was unreachable and MC's difficulty scaling on damage
         // could not be reproduced.
         Game::Difficulty GetDifficulty() const override;
+        // MC ChunkAccess.getInhabitedTime of the loaded chunk (the local
+        // difficulty's local half — EntityLevel::GetCurrentDifficultyAt).
+        bool GetChunkInhabitedTime(int chunkX, int chunkZ, int64_t& out) const override;
         Game::JavaRandom& Random() override { return m_random; }
 
         int  GetSkyBrightness(int x, int y, int z) const override;
@@ -359,6 +435,12 @@ namespace Server {
         bool CanSeeSky(int x, int y, int z) const override;
         bool MonstersBurn() const override;
         bool IsDay() const override;
+        // Weather — the World's levels (World::GetRainLevel & co.).
+        float GetRainLevel(float partialTick = 1.0f) const override;
+        float GetThunderLevel(float partialTick = 1.0f) const override;
+        bool  IsRaining() const override;
+        bool  IsThundering() const override;
+        int   PrecipitationAt(const glm::ivec3& pos) const override;
         float GetBiomeTemperature(int x, int y, int z) const override;
 
         void GetEntitiesInBox(const Game::AABB& box, const Game::Entity* except,
@@ -376,18 +458,36 @@ namespace Server {
         // owner may be standing in the Nether.
         Game::Entity*       ResolveEntity(const Game::Uuid& uuid) const override;
         Game::LivingEntity* ResolvePlayer(const Game::Uuid& uuid) const override;
+        // A mob of this level, or a player's view, by its per-level id.
+        Game::Entity*       ResolveEntityById(int32_t id) const override;
+        // The player's ServerPlayer's tracker (sculk shriekers).
+        Game::WardenSpawnTracker* GetWardenSpawnTracker(Game::LivingEntity& player) override;
+        // MC ShoulderRidingEntity.setEntityOnShoulder → ServerPlayer
+        // .setEntityOnShoulder, through ShoulderEntities (the player's
+        // shoulder slots live on its ServerPlayer).
+        bool SetEntityOnShoulder(Game::LivingEntity& player, Game::Mob& entity) override;
         uint32_t GetHeldItemId(const Game::LivingEntity& player) const override;
         uint32_t GetChestItemId(const Game::LivingEntity& player) const override;
         void DisplayClientMessage(const Game::LivingEntity& player, const std::string& text,
                                   bool actionBar) const override;
+        void SendGameEvent(const Game::LivingEntity& player, uint8_t event, float param) const override;
+        void BroadcastSystemMessage(const std::string& text) const override;
+        std::string GetPlayerName(const Game::LivingEntity& player) const override;
+        bool StartPlayerRiding(Game::LivingEntity& player, Game::Mob& vehicle) override;
+        bool IsPlayerSneaking(const Game::LivingEntity& player) const override;
         void GetItemEntitiesInBox(const Game::AABBd& box,
                                   std::vector<NearbyItemEntity>& out) const override;
         int  TakeFromItemEntity(int32_t id, int count) override;
+        void NoteItemEntityTaken(int32_t itemEntityId, int32_t collectorId, int amount) override;
         bool AddItemEntityDeltaMovement(int32_t id, const glm::dvec3& delta) override;
+        int  AddExperienceOrbDeltaMovementInBox(const Game::AABBd& box, double maxVy,
+                                                const glm::dvec3& delta) override;
         const Game::ItemStack* GetItemEntityStack(int32_t id) const override;
         bool SetItemEntityStack(int32_t id, const Game::ItemStack& stack) override;
         void CreateFilledResult(Game::LivingEntity& player, Game::ItemStack& held,
                                 const Game::ItemStack& filled) override;
+        void AddItemToPlayer(Game::LivingEntity& player, const Game::ItemStack& stack) override;
+        bool TryAddItemToPlayer(Game::LivingEntity& player, const Game::ItemStack& stack) override;
 
         void BroadcastEntityEvent(const Game::Entity& entity, uint8_t event) override;
 
@@ -410,6 +510,9 @@ namespace Server {
 
         // MC ClientboundHurtAnimationPacket, sent to that player alone.
         void SendHurtAnimation(int32_t connectionId, float hurtDir);
+        // ClientboundSetEntityMotionPacket to one player about their own
+        // movement (the id is the connection id their client answers to).
+        void SendPlayerMotion(int32_t connectionId, const glm::dvec3& velocity);
         void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) override;
         void SpawnItemStackDrop(const glm::dvec3& pos, const Game::ItemStack& stack) override;
         // MC BehaviorUtils.throwItem's ItemEntity: an exact spawn point,
@@ -423,6 +526,12 @@ namespace Server {
         // MC Merchant.openTradingScreen: recorded on the ServerPlayer and
         // performed by its session (PlayerSession::FlushPendingMenuOpen).
         void OpenMerchantMenu(Game::LivingEntity& player, Game::Mob& merchant) override;
+        // MC ContainerEntity.interactWithContainerVehicle → player.openMenu:
+        // likewise recorded, for a vehicle's container (VehicleEntity).
+        bool OpenContainerEntityMenu(Game::LivingEntity& player, Game::Mob& containerEntity) override;
+        // MC ServerPlayer.openHorseInventory / openNautilusInventory:
+        // likewise recorded (MenuType::MountInventory over the mount's id).
+        void OpenMountInventory(Game::LivingEntity& player, Game::Mob& mount) override;
 
         // MC ExperienceOrb.award: real orbs at `pos` through THIS level's
         // ExperienceOrbManager (split, merge, pickup delay and the Mending
@@ -449,7 +558,8 @@ namespace Server {
 
         // MC ServerLevel.explode's per-player ClientboundExplodePacket send.
         void BroadcastExplosion(const glm::dvec3& center, float radius,
-                                int blockCount, bool small) override;
+                                int blockCount, bool small,
+                                uint8_t particleSet = 0, bool blockParticles = true) override;
         // MC ServerLevel.getDragonFight — set by ServerLevel for the End,
         // null everywhere else. See common/entity/DragonFight.hpp.
         void SetDragonFight(Game::IDragonFight* fight) { m_dragonFight = fight; }

@@ -14,7 +14,10 @@
 namespace Server {
 
     void SpawnAllCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("spawnall", SpawnAllCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        const Cmd::Node spacing = Cmd::Argument("spacing", Cmd::Arg::Float).Suggests({"2", "3", "4", "8"}).Executes();
+        dispatcher.RegisterCommand("spawnall", SpawnAllCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Literals({"adults", "babies", "both"}, true, &spacing)));
     }
 
     void SpawnAllCommand::Execute(const CommandSourceStack& source,

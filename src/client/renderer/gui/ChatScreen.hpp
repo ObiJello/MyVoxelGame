@@ -34,6 +34,9 @@ namespace Render {
     public:
         static constexpr int MAX_MESSAGE_LENGTH = 256;
         static constexpr int INPUT_HEIGHT = 12;
+        // Pitch of the usage-hint lines above the input (the single hint
+        // always sat 11 px above it).
+        static constexpr int HINT_LINE_STEP = 11;
 
         void Open(bool withSlash = false);
         void Close();
@@ -63,6 +66,16 @@ namespace Render {
 
         // Render the input field
         void Render(GuiGraphics& graphics);
+
+        // Mouse wheel while chat is open: scrolls the completion list (MC
+        // CommandSuggestions.mouseScrolled). The caller consumes the wheel
+        // either way, so it never reaches the hotbar.
+        void OnMouseScrolled(double deltaY);
+
+        // How far the chat history must rise so a multi-line usage hint
+        // never overlaps it: one HINT_LINE_STEP per line past the first
+        // (the first fits the gap MC leaves above the input).
+        int HistoryLift() const;
 
         // Get submitted message (empty if none pending)
         std::string ConsumeSubmittedMessage();
@@ -96,6 +109,9 @@ namespace Render {
         std::vector<std::string> m_suggestions;
         int  m_suggestionIndex = 0;
         int  m_suggestionAnchor = 0;   // Start of the word being completed (index in m_inputText)
+        int  m_suggestionScroll = 0;   // First visible row (MC SuggestionsList.offset)
+        double    m_suggestionScrollAccum  = 0.0;   // fractional wheel rows not yet applied
+        long long m_suggestionScrollLastMs = 0;     // last wheel frame (velocity)
         bool m_suggestionsOpen = false;
         // How many characters the completion currently occupies, starting at
         // m_suggestionAnchor. Needed because TAB now types the suggestion
@@ -106,8 +122,9 @@ namespace Render {
         // for more. Match the constant.
         static constexpr int MAX_VISIBLE_SUGGESTIONS = 10;
 
-        // Suggestion lifecycle. ComputeSuggestions tokenises the input,
-        // dispatches per command, fills m_suggestions / m_suggestionAnchor.
+        // Suggestion lifecycle. OpenSuggestions asks CommandSuggestions (the
+        // walk of the server's command trees) and fills m_suggestions /
+        // m_suggestionAnchor.
         void OpenSuggestions();
         void CloseSuggestions();
         // Writes the highlighted suggestion into the input field, replacing

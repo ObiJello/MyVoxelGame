@@ -28,6 +28,8 @@
 #include <chrono>
 #include <string_view>
 #include <algorithm>
+#include <array>
+#include <thread>
 #include <filesystem>
 #include <random>
 #include <string>
@@ -373,15 +375,36 @@ void main() {
         }
         const size_t bytes = static_cast<size_t>(size) * static_cast<size_t>(size) * 4u;
         for (int i = 0; i < 6; ++i) {
-            const auto& face = facesRgba[static_cast<size_t>(i)];
-            if (face.size() != bytes) {
+            if (facesRgba[static_cast<size_t>(i)].size() != bytes) {
                 Log::Warning("PanoramaRenderer: face %d is not %dx%d — last-world panorama not saved", i, size, size);
                 return false;
             }
-            const std::string path = (dir / ("panorama_" + std::to_string(i) + ".png")).string();
-            PROFILE_ZONE_N("Panorama.WritePNG");
-            if (!stbi_write_png(path.c_str(), size, size, 4, face.data(), size * 4)) {
-                Log::Warning("PanoramaRenderer: could not write %s", path.c_str());
+        }
+        // One encoder per face, side by side: they share nothing but the
+        // directory, and a Quit Game waits for the files before the process
+        // exits (FinishPendingSaves).
+        std::array<bool, 6> written{};
+        {
+            std::array<std::thread, 6> encoders;
+            for (int i = 0; i < 6; ++i) {
+                encoders[static_cast<size_t>(i)] = std::thread([&, i] {
+#if defined(__APPLE__)
+                    pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#elif defined(_WIN32)
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+#endif
+                    PROFILE_ZONE_N("Panorama.WritePNG");
+                    const auto& face = facesRgba[static_cast<size_t>(i)];
+                    const std::string path = (dir / ("panorama_" + std::to_string(i) + ".png")).string();
+                    written[static_cast<size_t>(i)] =
+                        stbi_write_png(path.c_str(), size, size, 4, face.data(), size * 4) != 0;
+                });
+            }
+            for (auto& t : encoders) t.join();
+        }
+        for (int i = 0; i < 6; ++i) {
+            if (!written[static_cast<size_t>(i)]) {
+                Log::Warning("PanoramaRenderer: could not write panorama_%d.png", i);
                 return false;
             }
         }

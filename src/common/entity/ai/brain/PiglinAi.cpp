@@ -1,16 +1,30 @@
 // File: src/common/entity/ai/brain/PiglinAi.cpp
 #include "common/entity/ai/brain/PiglinAi.hpp"
+#include "common/entity/ai/goals/SpearGoals.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
+#include "common/entity/ai/brain/ManhattanBlockSearch.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
-#include "common/world/crafting/RecipeManager.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/MobCrossbow.hpp"
+#include "common/entity/ai/Controls.hpp"
+#include "common/entity/ai/RandomPos.hpp"
+#include "common/entity/ai/navigation/PathNavigation.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/core/Mth.hpp"
+#include "common/world/level/WorldDrops.hpp"
+#include "common/world/loot/ChestLootTables.hpp"
+#include "common/world/tags/DataTags.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 namespace Game {
 
@@ -42,26 +56,124 @@ namespace Game {
             return IsPiglinLike(e) && !e.IsBaby();
         }
 
-        // MC ItemTags.PIGLIN_LOVED, flattened to the items this game's
-        // registry actually has (unknown slugs resolve to Air and drop out).
-        const std::vector<ItemID>& LovedItems() {
-            static const std::vector<ItemID> items = [] {
-                std::vector<ItemID> out;
-                for (const char* slug :
-                     { "gold_ore", "deepslate_gold_ore", "nether_gold_ore",
-                       "gold_block", "gilded_blackstone",
-                       "light_weighted_pressure_plate", "gold_ingot", "bell",
-                       "clock", "golden_carrot", "glistering_melon_slice",
-                       "golden_apple", "enchanted_golden_apple",
-                       "golden_helmet", "golden_chestplate", "golden_leggings",
-                       "golden_boots", "golden_horse_armor", "golden_sword",
-                       "golden_pickaxe", "golden_shovel", "golden_axe",
-                       "golden_hoe", "raw_gold", "raw_gold_block" }) {
-                    const ItemID id = RecipeManager::ItemFromSlug(slug);
-                    if (id != Items::Air) out.push_back(id);
-                }
-                return out;
-            }();
+        // MC's constants for the item half.
+        constexpr int kAdmireDuration          = 119;   // MC ADMIRE_DURATION
+        constexpr int kMaxDistanceToWalkToItem = 9;     // MC MAX_DISTANCE_TO_WALK_TO_ITEM
+        constexpr int kMaxTimeToWalkToItem     = 200;   // MC MAX_TIME_TO_WALK_TO_ITEM
+        constexpr int kDisableAdmireWalking    = 200;   // HOW_LONG_TIME_TO_DISABLE_ADMIRE_WALKING_IF_CANT_REACH_ITEM
+        constexpr int kEatCooldown             = 200;   // MC EAT_COOLDOWN
+        constexpr int kHitByPlayerMemoryTimeout = 400;  // MC HIT_BY_PLAYER_MEMORY_TIMEOUT
+        constexpr int kMinDistFromTargetWithCrossbow = 5;
+        constexpr float kSpeedWhenStrafingBack = 0.75f;
+
+        // MC ItemStack.is(TagKey<Item>) over the data pack's item tags.
+        bool HasItemTag(const ItemStack& stack, const char* tag) {
+            return !stack.IsEmpty() &&
+                   DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), tag);
+        }
+
+        bool IsAdmiringItem(const Brain& brain) { return brain.HasMemoryValue(MemoryModule::AdmiringItem); }
+        bool IsAdmiringDisabled(const Brain& brain) { return brain.HasMemoryValue(MemoryModule::AdmiringDisabled); }
+        bool HasEatenRecently(const Brain& brain) { return brain.HasMemoryValue(MemoryModule::AteRecently); }
+
+        // MC PiglinAi.isNotHoldingLovedItemInOffHand.
+        bool IsNotHoldingLovedItemInOffHand(const Piglin& piglin) {
+            const ItemStack& off = piglin.GetOffhandEquipment();
+            return off.IsEmpty() || !PiglinAi::IsLovedItem(off);
+        }
+
+        // MC PiglinAi.hasCrossbow — isHolding(CROSSBOW).
+        bool HasCrossbow(const LivingEntity& body) {
+            const auto* mob = dynamic_cast<const Mob*>(&body);
+            return mob && mob->IsHoldingItem(Items::Crossbow);
+        }
+
+        // MC PiglinAi.stopWalking.
+        void StopWalking(Piglin& piglin) {
+            if (Brain* brain = piglin.GetBrain()) brain->EraseMemory(MemoryModule::WalkTarget);
+            piglin.GetNavigation().Stop();
+        }
+
+        // MC PiglinAi.admireGoldItem.
+        void AdmireGoldItem(Piglin& piglin) {
+            if (Brain* brain = piglin.GetBrain()) {
+                brain->SetMemoryWithExpiry(MemoryModule::AdmiringItem, true, kAdmireDuration);
+            }
+        }
+
+        // MC Entity.spawnAtLocation(level, stack).
+        void SpawnAtLocation(EntityLevel& level, const Mob& mob, const ItemStack& stack) {
+            if (stack.IsEmpty()) return;
+            DropItemStackAt(level.Dimension(), mob.position, stack);
+        }
+
+        // MC BehaviorUtils.throwItem(thrower, item, targetPos): from 0.3
+        // below the eye, 0.3 blocks/tick toward the target, the default
+        // pickup delay.
+        void ThrowItem(EntityLevel& level, LivingEntity& thrower, const ItemStack& item,
+                       const glm::dvec3& targetPos) {
+            if (item.IsEmpty()) return;
+            const glm::dvec3 from(thrower.position.x, thrower.GetEyeY() - 0.30000001192092896,
+                                  thrower.position.z);
+            glm::dvec3 dir = targetPos - thrower.position;
+            const double len = glm::length(dir);
+            dir = len < 1.0e-5 ? glm::dvec3(0.0) : dir / len;
+            level.SpawnThrownItem(from, dir * 0.30000001192092896, item, 10);
+        }
+
+        // MC PiglinAi.throwItemsTowardPos: a swing of the off hand, then each
+        // stack at the target raised a block.
+        void ThrowItemsTowardPos(EntityLevel& level, Piglin& piglin, const std::vector<ItemStack>& stacks,
+                                 const glm::dvec3& targetPos) {
+            if (stacks.empty()) return;
+            piglin.Swing();   // swing(OFF_HAND)
+            for (const ItemStack& stack : stacks) {
+                ThrowItem(level, piglin, stack, targetPos + glm::dvec3(0.0, 1.0, 0.0));
+            }
+        }
+
+        // MC PiglinAi.getRandomNearbyPos: LandRandomPos.getPos(body, 4, 2),
+        // else where it stands.
+        void ThrowItemsTowardRandomPos(EntityLevel& level, Piglin& piglin, const std::vector<ItemStack>& stacks) {
+            const std::optional<glm::dvec3> pos = RandomPos::GetLandPos(piglin, 4, 2);
+            ThrowItemsTowardPos(level, piglin, stacks, pos ? *pos : piglin.position);
+        }
+
+        // MC PiglinAi.throwItems: toward NEAREST_VISIBLE_PLAYER, else a
+        // random nearby spot.
+        void ThrowItems(EntityLevel& level, Piglin& piglin, const std::vector<ItemStack>& stacks) {
+            const Brain* brain = piglin.GetBrain();
+            Entity* player = brain ? brain->GetEntity(MemoryModule::NearestVisiblePlayer) : nullptr;
+            if (player) {
+                ThrowItemsTowardPos(level, piglin, stacks, player->position);
+            } else {
+                ThrowItemsTowardRandomPos(level, piglin, stacks);
+            }
+        }
+
+        // MC PiglinAi.putInInventory: what does not fit is thrown aside (the
+        // list always holds the remainder, empty or not — the swing plays).
+        void PutInInventory(EntityLevel& level, Piglin& piglin, const ItemStack& stack) {
+            const ItemStack couldNotFit = piglin.AddToInventory(stack);
+            ThrowItemsTowardRandomPos(level, piglin, { couldNotFit });
+        }
+
+        // MC PiglinAi.holdInOffhand: whatever the off hand held drops first.
+        void HoldInOffhand(EntityLevel& level, Piglin& piglin, const ItemStack& stack) {
+            if (!piglin.GetOffhandEquipment().IsEmpty()) {
+                SpawnAtLocation(level, piglin, piglin.GetOffhandEquipment());
+            }
+            piglin.HoldInOffHand(stack);
+        }
+
+        // MC PiglinAi.getBarterResponseItems: the gameplay/piglin_bartering
+        // table (PIGLIN_BARTER params, the level's random).
+        std::vector<ItemStack> BarterResponseItems(EntityLevel& level, Piglin& piglin) {
+            std::vector<ItemStack> items;
+            ChestLoot::LootLevelContext context;
+            context.dimensionId = DimensionToRaw(level.Dimension());
+            context.origin = piglin.position;
+            ChestLoot::GetRandomItems("minecraft:gameplay/piglin_bartering", level.Random(), 0.0f, items, &context);
             return items;
         }
 
@@ -98,9 +210,7 @@ namespace Game {
             return hoglins > piglins;
         }
 
-        // MC PiglinAi.findNearestValidAttackTarget. UNIVERSAL_ANGER is gated
-        // on a game rule that defaults OFF, so that branch is dead in vanilla
-        // defaults and skipped here.
+        // MC PiglinAi.findNearestValidAttackTarget.
         LivingEntity* FindTarget(Mob& mob) {
             Brain* brain = mob.GetBrain();
             if (!brain) return nullptr;
@@ -110,13 +220,20 @@ namespace Game {
                     dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt))) {
                 if (mob.CanAttack(*angry)) return angry;
             }
+            // UNIVERSAL_ANGER (the universal_anger game rule): any visible
+            // attackable player will do.
+            if (brain->HasMemoryValue(MemoryModule::UniversalAnger)) {
+                if (auto* player = dynamic_cast<LivingEntity*>(
+                        brain->GetEntity(MemoryModule::NearestVisibleAttackablePlayer))) {
+                    return player;
+                }
+            }
             if (auto* nemesis = dynamic_cast<LivingEntity*>(
                     brain->GetEntity(MemoryModule::NearestVisibleNemesis))) {
                 return nemesis;
             }
-            // MC NEAREST_TARGETABLE_PLAYER_NOT_WEARING_GOLD — with no
-            // equipment system no player can wear gold, so every targetable
-            // player qualifies (the sensor writes it on that basis).
+            // MC NEAREST_TARGETABLE_PLAYER_NOT_WEARING_GOLD — the sensor
+            // leaves out a player in the gold set.
             return dynamic_cast<LivingEntity*>(
                 brain->GetEntity(MemoryModule::NearestTargetablePlayerNotWearingGold));
         }
@@ -219,17 +336,14 @@ namespace Game {
                     brain->GetEntity(MemoryModule::NearestVisibleHuntableHoglin));
                 if (!hoglin) return false;
 
+                // MC: setAngerTarget, dontKillAnyMoreHoglinsForAWhile,
+                // broadcastAngerTarget (the nearby adult pack), then the
+                // hunt cooldown on every VISIBLE adult packmate.
                 PiglinAi::SetAngerTarget(*piglin, *hoglin);
                 SampleAndSetHuntedRecently(*piglin, level.Random());
-                // MC broadcastAngerTarget + dontKillAnyMoreHoglinsForAWhile on
-                // every packmate.
-                for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearbyAdultPiglins)) {
-                    if (auto* mate = dynamic_cast<Mob*>(e)) {
-                        if (PiglinCanHunt(*mate)) {
-                            PiglinAi::SetAngerTarget(*mate, *hoglin);
-                        }
-                        SampleAndSetHuntedRecently(*mate, level.Random());
-                    }
+                PiglinAi::BroadcastAngerTarget(level, *piglin, *hoglin);
+                for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearestVisibleAdultPiglins)) {
+                    if (auto* mate = dynamic_cast<Mob*>(e)) SampleAndSetHuntedRecently(*mate, level.Random());
                 }
                 return true;
             }
@@ -522,6 +636,555 @@ namespace Game {
             }
         };
 
+        // ── The item half (MC piglin/*Admir*, GoToWantedItem, NearestItemSensor,
+        //    BackUpIfTooClose, CrossbowAttack, SetLookAndInteract) ────────────
+
+        // BehaviorUtils.canSee: the target is in the visible set.
+        bool CanSee(const Brain& brain, LivingEntity* target) {
+            const NearestVisibleLivingEntities* visible =
+                brain.GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
+            return target && visible && visible->Contains(target) && visible->IsVisible(target);
+        }
+
+        // MC LivingEntity.hasLineOfSight(item entity): eye to the item's eye
+        // (0.2125 above it), within 128, no collider in between (the
+        // quarter-block walk the allay's and villager's item sensors take).
+        bool ClearSightToItem(EntityLevel& level, const glm::dvec3& from, const glm::dvec3& to) {
+            const IBlockAccess* blocks = level.Blocks();
+            if (!blocks) return false;
+            const glm::dvec3 delta = to - from;
+            const double distance = glm::length(delta);
+            if (distance > 128.0) return false;
+            if (distance < 1.0e-4) return true;
+            const int steps = static_cast<int>(std::ceil(distance * 4.0));
+            const glm::dvec3 step = delta / static_cast<double>(steps);
+            glm::dvec3 p = from;
+            for (int i = 1; i < steps; ++i) {
+                p += step;
+                const glm::ivec3 b(static_cast<int>(std::floor(p.x)), static_cast<int>(std::floor(p.y)),
+                                   static_cast<int>(std::floor(p.z)));
+                if (BlockRegistry::HasCollision(blocks->GetBlock(b.x, b.y, b.z))) return false;
+            }
+            return true;
+        }
+
+        // The wanted item entity, if it still exists: its position.
+        std::optional<glm::dvec3> WantedItemPos(EntityLevel& level, const Piglin& piglin, double searchRadius) {
+            const std::optional<int32_t> id = piglin.GetWantedItemId();
+            if (!id) return std::nullopt;
+            AABBd box = piglin.GetAABBd();
+            box.min -= glm::dvec3(searchRadius + 1.0);
+            box.max += glm::dvec3(searchRadius + 1.0);
+            std::vector<EntityLevel::NearbyItemEntity> items;
+            level.GetItemEntitiesInBox(box, items);
+            for (const auto& item : items) {
+                if (item.id == *id) return item.pos;
+            }
+            return std::nullopt;
+        }
+
+        // MC NearestItemSensor (scan rate 20): the nearest item entity within
+        // (32, 16, 32) the piglin wants, closer than 32 and in sight. The
+        // answer lives on the piglin (item entities are not Entities).
+        class PiglinNearestItemSensor : public Sensor {
+        public:
+            std::vector<MemoryModule> Requires() const override {
+                return { MemoryModule::NearestVisibleWantedItem };
+            }
+        protected:
+            void DoTick(EntityLevel& level, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                if (!piglin) return;
+                AABBd box = body.GetAABBd();
+                box.min -= glm::dvec3(32.0, 16.0, 32.0);
+                box.max += glm::dvec3(32.0, 16.0, 32.0);
+                std::vector<EntityLevel::NearbyItemEntity> items;
+                level.GetItemEntitiesInBox(box, items);
+                std::sort(items.begin(), items.end(), [&](const auto& a, const auto& b) {
+                    return glm::dot(a.pos - body.position, a.pos - body.position) <
+                           glm::dot(b.pos - body.position, b.pos - body.position);
+                });
+                std::optional<int32_t> found;
+                for (const auto& item : items) {
+                    const ItemStack* stack = level.GetItemEntityStack(item.id);
+                    if (!stack || !piglin->WantsToPickUp(*stack)) continue;
+                    const glm::dvec3 d = item.pos - body.position;
+                    if (glm::dot(d, d) >= 32.0 * 32.0) continue;
+                    if (!ClearSightToItem(level, body.GetEyePosition(), item.pos + glm::dvec3(0.0, 0.2125, 0.0))) {
+                        continue;
+                    }
+                    found = item.id;
+                    break;
+                }
+                piglin->SetWantedItemId(found);
+            }
+        };
+
+        // MC piglin/StopHoldingItemIfNoLongerAdmiring (CORE): the admire
+        // over, whatever is in the off hand (no shield) is bartered or kept.
+        class StopHoldingItemIfNoLongerAdmiring : public Behavior {
+        public:
+            StopHoldingItemIfNoLongerAdmiring()
+                : Behavior({ MemoryCondition{ MemoryModule::AdmiringItem, MemoryStatus::ValueAbsent } }, 1) {}
+            const char* DebugString() const override { return "StopHoldingItemIfNoLongerAdmiring"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                if (!piglin) return false;
+                const ItemStack& off = piglin->GetOffhandEquipment();
+                if (off.IsEmpty() || off.get(DataComponents::BLOCKS_ATTACKS)) return false;
+                PiglinAi::StopHoldingOffHandItem(level, *piglin, /*barteringEnabled=*/true);
+                return true;
+            }
+        };
+
+        // MC piglin/StartAdmiringItemIfSeen(119) (CORE): a loved item in
+        // sight starts the ADMIRE_ITEM activity.
+        class StartAdmiringItemIfSeen : public Behavior {
+        public:
+            explicit StartAdmiringItemIfSeen(int admireDuration)
+                : Behavior({ MemoryCondition{ MemoryModule::AdmiringItem, MemoryStatus::ValueAbsent },
+                             MemoryCondition{ MemoryModule::AdmiringDisabled, MemoryStatus::ValueAbsent },
+                             MemoryCondition{ MemoryModule::DisableWalkToAdmireItem, MemoryStatus::ValueAbsent } },
+                           1),
+                  m_admireDuration(admireDuration) {}
+            const char* DebugString() const override { return "StartAdmiringItemIfSeen"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                if (!piglin || !piglin->GetWantedItemId()) return false;   // i.present(WANTED_ITEM)
+                const ItemStack* stack = level.GetItemEntityStack(*piglin->GetWantedItemId());
+                if (!stack || !PiglinAi::IsLovedItem(*stack)) return false;
+                body.GetBrain()->SetMemoryWithExpiry(MemoryModule::AdmiringItem, true, m_admireDuration);
+                return true;
+            }
+        private:
+            int m_admireDuration;
+        };
+
+        // MC GoToWantedItem.create(isNotHoldingLovedItemInOffHand, 1.0, true,
+        // 9) — the ADMIRE_ITEM walk (interrupting any other walk).
+        class PiglinGoToWantedItem : public Behavior {
+        public:
+            PiglinGoToWantedItem(float speed, int maxDistToWalk)
+                : Behavior({ MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::ItemPickupCooldownTicks, MemoryStatus::Registered } },
+                           1),
+                  m_speed(speed), m_maxDist(maxDistToWalk) {}
+            const char* DebugString() const override { return "GoToWantedItem"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                Brain* brain = body.GetBrain();
+                if (!piglin || !brain || brain->HasMemoryValue(MemoryModule::ItemPickupCooldownTicks)) return false;
+                if (!IsNotHoldingLovedItemInOffHand(*piglin)) return false;
+                const std::optional<glm::dvec3> pos = WantedItemPos(level, *piglin, m_maxDist);
+                if (!pos) return false;
+                const glm::dvec3 d = *pos - body.position;
+                if (glm::dot(d, d) >= static_cast<double>(m_maxDist) * m_maxDist) return false;   // closerThan
+                const glm::ivec3 cell(static_cast<int>(std::floor(pos->x)), static_cast<int>(std::floor(pos->y)),
+                                      static_cast<int>(std::floor(pos->z)));
+                brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfBlock(cell));
+                brain->SetMemory(MemoryModule::WalkTarget, WalkTarget(cell, m_speed, 0));
+                return true;
+            }
+        private:
+            float m_speed;
+            int   m_maxDist;
+        };
+
+        // MC piglin/StopAdmiringIfItemTooFarAway(9).
+        class StopAdmiringIfItemTooFarAway : public Behavior {
+        public:
+            explicit StopAdmiringIfItemTooFarAway(int maxDistanceToItem)
+                : Behavior({ MemoryCondition{ MemoryModule::AdmiringItem, MemoryStatus::ValuePresent } }, 1),
+                  m_maxDist(maxDistanceToItem) {}
+            const char* DebugString() const override { return "StopAdmiringIfItemTooFarAway"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                if (!piglin || !piglin->GetOffhandEquipment().IsEmpty()) return false;
+                const std::optional<glm::dvec3> pos = WantedItemPos(level, *piglin, m_maxDist);
+                if (pos) {
+                    const glm::dvec3 d = *pos - body.position;
+                    if (glm::dot(d, d) < static_cast<double>(m_maxDist) * m_maxDist) return false;
+                }
+                body.GetBrain()->EraseMemory(MemoryModule::AdmiringItem);
+                return true;
+            }
+        private:
+            int m_maxDist;
+        };
+
+        // MC piglin/StopAdmiringIfTiredOfTryingToReachItem(200, 200): the
+        // walk counts up; past the limit the admire ends and walking to
+        // admire is disabled for a while.
+        class StopAdmiringIfTiredOfTryingToReachItem : public Behavior {
+        public:
+            StopAdmiringIfTiredOfTryingToReachItem(int maxTimeToReachItem, int disableTime)
+                : Behavior({ MemoryCondition{ MemoryModule::AdmiringItem, MemoryStatus::ValuePresent },
+                             MemoryCondition{ MemoryModule::TimeTryingToReachAdmireItem, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::DisableWalkToAdmireItem, MemoryStatus::Registered } },
+                           1),
+                  m_maxTime(maxTimeToReachItem), m_disableTime(disableTime) {}
+            const char* DebugString() const override { return "StopAdmiringIfTiredOfTryingToReachItem"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                // i.present(NEAREST_VISIBLE_WANTED_ITEM).
+                if (!piglin || !piglin->GetWantedItemId() || !piglin->GetOffhandEquipment().IsEmpty()) return false;
+                Brain* brain = body.GetBrain();
+                const std::optional<int> time = brain->GetInt(MemoryModule::TimeTryingToReachAdmireItem);
+                if (!time) {
+                    brain->SetMemory(MemoryModule::TimeTryingToReachAdmireItem, 0);
+                } else if (*time > m_maxTime) {
+                    brain->EraseMemory(MemoryModule::AdmiringItem);
+                    brain->EraseMemory(MemoryModule::TimeTryingToReachAdmireItem);
+                    brain->SetMemoryWithExpiry(MemoryModule::DisableWalkToAdmireItem, true, m_disableTime);
+                } else {
+                    brain->SetMemory(MemoryModule::TimeTryingToReachAdmireItem, *time + 1);
+                }
+                return true;
+            }
+        private:
+            int m_maxTime;
+            int m_disableTime;
+        };
+
+        // MC BackUpIfTooClose.create(5, 0.75) under triggerIf(hasCrossbow):
+        // strafe backwards from a target inside 5 blocks.
+        class BackUpIfTooClose : public Behavior {
+        public:
+            BackUpIfTooClose(int tooCloseDistance, float strafeSpeed)
+                : Behavior({ MemoryCondition{ MemoryModule::WalkTarget, MemoryStatus::ValueAbsent },
+                             MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent },
+                             MemoryCondition{ MemoryModule::NearestVisibleLivingEntities,
+                                              MemoryStatus::ValuePresent } },
+                           1),
+                  m_tooClose(tooCloseDistance), m_strafeSpeed(strafeSpeed) {}
+            const char* DebugString() const override { return "BackUpIfTooClose"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                Brain* brain = body.GetBrain();
+                if (!mob || !brain || !HasCrossbow(body)) return false;
+                auto* target = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget));
+                if (!target) return false;
+                const double d2 = target->DistanceToSqr(body);
+                if (!(d2 < static_cast<double>(m_tooClose) * m_tooClose) || !CanSee(*brain, target)) return false;
+                brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(target, true));
+                mob->GetMoveControl().Strafe(-m_strafeSpeed, 0.0f);
+                mob->yRot = Mth::RotateIfNecessary(mob->yRot, mob->yHeadRot, 0.0f);
+                return true;
+            }
+        private:
+            int   m_tooClose;
+            float m_strafeSpeed;
+        };
+
+        // ── The spear fight (MC SpearApproach / SpearAttack / SpearRetreat) ─
+        //
+        // SPEAR_STATUS walks APPROACH → CHARGING → RETREAT: close to the
+        // approach distance, lower the spear and charge (the use's
+        // KineticWeapon.damageEntities does the hitting), veer off past the
+        // target, and when the charge window is spent back off 9-11 blocks.
+        // A mounted piglin runs at its mount's chargeSpeedModifier.
+        enum SpearStatus : int { kSpearApproach = 0, kSpearCharging = 1, kSpearRetreat = 2 };
+        constexpr int kSpearNeverTimesOut = 1 << 29;   // timedOut() == false
+
+        LivingEntity* SpearTarget(LivingEntity& body) {
+            Brain* brain = body.GetBrain();
+            return brain ? dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget)) : nullptr;
+        }
+        bool SpearAbleToAttack(LivingEntity& body) {
+            auto* mob = dynamic_cast<Mob*>(&body);
+            return mob && SpearTarget(body) && SpearAi::HoldsKineticWeapon(*mob);
+        }
+
+        class SpearApproach : public Behavior {
+        public:
+            SpearApproach(double speedModifierWhenRepositioning, float approachDistance)
+                : Behavior({ MemoryCondition{ MemoryModule::SpearStatus, MemoryStatus::ValueAbsent } },
+                           kSpearNeverTimesOut),
+                  m_speed(speedModifierWhenRepositioning),
+                  m_approachDistanceSq(approachDistance * approachDistance) {}
+            const char* DebugString() const override { return "SpearApproach"; }
+            void ClearReferenceTo(const Entity*) override {}
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                return SpearAbleToAttack(body) && !body.IsUsingItem();
+            }
+            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (auto* mob = dynamic_cast<Mob*>(&body)) mob->SetAggressive(true);
+                body.GetBrain()->SetMemory(MemoryModule::SpearStatus, static_cast<int>(kSpearApproach));
+            }
+            bool CanStillUse(EntityLevel&, LivingEntity& body, int64_t) override {
+                LivingEntity* target = SpearTarget(body);
+                return SpearAbleToAttack(body) && target &&
+                       body.DistanceToSqr(target->position.x, target->position.y, target->position.z) >
+                           static_cast<double>(m_approachDistanceSq);
+            }
+            void Tick(EntityLevel&, LivingEntity& body, int64_t) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                LivingEntity* target = SpearTarget(body);
+                if (!mob || !target) return;
+                const float speedModifier = SpearAi::ChargeSpeedModifier(*mob);
+                body.GetBrain()->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(target, true));
+                mob->GetNavigation().MoveTo(*target, speedModifier * m_speed);
+            }
+            void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (auto* mob = dynamic_cast<Mob*>(&body)) mob->GetNavigation().Stop();
+                body.GetBrain()->SetMemory(MemoryModule::SpearStatus, static_cast<int>(kSpearCharging));
+            }
+        private:
+            double m_speed;
+            float  m_approachDistanceSq;
+        };
+
+        class SpearAttack : public Behavior {
+        public:
+            SpearAttack(double speedModifierWhenCharging, double speedModifierWhenRepositioning,
+                        float targetInRangeRadius)
+                : Behavior({ MemoryCondition{ MemoryModule::SpearStatus, MemoryStatus::ValuePresent } },
+                           kSpearNeverTimesOut),
+                  m_chargeSpeed(speedModifierWhenCharging), m_repositionSpeed(speedModifierWhenRepositioning),
+                  m_targetInRangeRadiusSq(targetInRangeRadius * targetInRangeRadius) {}
+            const char* DebugString() const override { return "SpearAttack"; }
+            void ClearReferenceTo(const Entity*) override {}
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                const int status = body.GetBrain()->GetInt(MemoryModule::SpearStatus).value_or(kSpearApproach);
+                return status == kSpearCharging && SpearAbleToAttack(body) && !body.IsUsingItem();
+            }
+            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                if (!mob) return;
+                mob->SetAggressive(true);
+                Brain* brain = body.GetBrain();
+                brain->SetMemory(MemoryModule::SpearEngageTime, SpearAi::KineticUseDuration(*mob));
+                brain->EraseMemory(MemoryModule::SpearChargePosition);
+                body.StartUsingItem(EquipmentSlot::MAINHAND);
+            }
+            bool CanStillUse(EntityLevel&, LivingEntity& body, int64_t) override {
+                return body.GetBrain()->GetInt(MemoryModule::SpearEngageTime).value_or(0) > 0 &&
+                       SpearAbleToAttack(body);
+            }
+            void Tick(EntityLevel&, LivingEntity& body, int64_t) override {
+                auto* mob = dynamic_cast<PathfinderMob*>(&body);
+                LivingEntity* target = SpearTarget(body);
+                if (!mob || !target) return;
+                Brain* brain = body.GetBrain();
+                const double targetDistSqr =
+                    mob->DistanceToSqr(target->position.x, target->position.y, target->position.z);
+                const float speedModifier = SpearAi::ChargeSpeedModifier(*mob);
+                const int mountDistance = mob->IsPassenger() ? 2 : 0;
+                brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(target, true));
+                brain->SetMemory(MemoryModule::SpearEngageTime,
+                                 brain->GetInt(MemoryModule::SpearEngageTime).value_or(0) - 1);
+                if (const std::optional<glm::dvec3> away = brain->GetVec3(MemoryModule::SpearChargePosition)) {
+                    mob->GetNavigation().MoveTo(away->x, away->y, away->z, speedModifier * m_repositionSpeed);
+                    if (mob->GetNavigation().IsDone()) brain->EraseMemory(MemoryModule::SpearChargePosition);
+                } else {
+                    mob->GetNavigation().MoveTo(*target, speedModifier * m_chargeSpeed);
+                    if (targetDistSqr < static_cast<double>(m_targetInRangeRadiusSq) ||
+                        mob->GetNavigation().IsDone()) {
+                        const double distance = std::sqrt(targetDistSqr);
+                        const std::optional<glm::dvec3> newAway = RandomPos::GetLandPosAway(
+                            *mob, static_cast<double>(6 + mountDistance) - distance,
+                            static_cast<double>(7 + mountDistance) - distance, 7, target->position);
+                        if (newAway) brain->SetMemory(MemoryModule::SpearChargePosition, *newAway);
+                        else         brain->EraseMemory(MemoryModule::SpearChargePosition);
+                    }
+                }
+            }
+            void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (auto* mob = dynamic_cast<Mob*>(&body)) mob->GetNavigation().Stop();
+                body.StopUsingItem();
+                Brain* brain = body.GetBrain();
+                brain->EraseMemory(MemoryModule::SpearChargePosition);
+                brain->EraseMemory(MemoryModule::SpearEngageTime);
+                brain->SetMemory(MemoryModule::SpearStatus, static_cast<int>(kSpearRetreat));
+            }
+        private:
+            double m_chargeSpeed;
+            double m_repositionSpeed;
+            float  m_targetInRangeRadiusSq;
+        };
+
+        class SpearRetreat : public Behavior {
+        public:
+            explicit SpearRetreat(double speedModifierWhenRepositioning)
+                : Behavior({ MemoryCondition{ MemoryModule::SpearStatus, MemoryStatus::ValuePresent } }, 100),
+                  m_speed(speedModifierWhenRepositioning) {}
+            const char* DebugString() const override { return "SpearRetreat"; }
+            void ClearReferenceTo(const Entity*) override {}
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                if (!SpearAbleToAttack(body) || body.IsUsingItem()) return false;
+                Brain* brain = body.GetBrain();
+                if (brain->GetInt(MemoryModule::SpearStatus).value_or(kSpearApproach) != kSpearRetreat) return false;
+                auto* mob = dynamic_cast<PathfinderMob*>(&body);
+                LivingEntity* target = SpearTarget(body);
+                if (!mob || !target) return false;
+                const double distance = std::sqrt(
+                    mob->DistanceToSqr(target->position.x, target->position.y, target->position.z));
+                const int mountDistance = mob->IsPassenger() ? 2 : 0;
+                const std::optional<glm::dvec3> away = RandomPos::GetLandPosAway(
+                    *mob, std::max(0.0, static_cast<double>(9 + mountDistance) - distance),
+                    std::max(1.0, static_cast<double>(11 + mountDistance) - distance), 7, target->position);
+                if (!away) return false;
+                brain->SetMemory(MemoryModule::SpearFleeingPosition, *away);
+                return true;
+            }
+            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (auto* mob = dynamic_cast<Mob*>(&body)) mob->SetAggressive(true);
+                body.GetBrain()->SetMemory(MemoryModule::SpearFleeingTime, 0);
+            }
+            bool CanStillUse(EntityLevel&, LivingEntity& body, int64_t) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                Brain* brain = body.GetBrain();
+                return mob && brain->GetInt(MemoryModule::SpearFleeingTime).value_or(100) < 100 &&
+                       brain->HasMemoryValue(MemoryModule::SpearFleeingPosition) &&
+                       !mob->GetNavigation().IsDone() && SpearAbleToAttack(body);
+            }
+            void Tick(EntityLevel&, LivingEntity& body, int64_t) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                LivingEntity* target = SpearTarget(body);
+                if (!mob || !target) return;
+                Brain* brain = body.GetBrain();
+                const float speedModifier = SpearAi::ChargeSpeedModifier(*mob);
+                brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(target, true));
+                brain->SetMemory(MemoryModule::SpearFleeingTime,
+                                 brain->GetInt(MemoryModule::SpearFleeingTime).value_or(0) + 1);
+                if (const std::optional<glm::dvec3> flee = brain->GetVec3(MemoryModule::SpearFleeingPosition)) {
+                    mob->GetNavigation().MoveTo(flee->x, flee->y, flee->z, speedModifier * m_speed);
+                }
+            }
+            void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (auto* mob = dynamic_cast<Mob*>(&body)) {
+                    mob->GetNavigation().Stop();
+                    mob->SetAggressive(false);
+                }
+                body.StopUsingItem();
+                Brain* brain = body.GetBrain();
+                brain->EraseMemory(MemoryModule::SpearFleeingTime);
+                brain->EraseMemory(MemoryModule::SpearFleeingPosition);
+                brain->EraseMemory(MemoryModule::SpearStatus);
+            }
+        private:
+            double m_speed;
+        };
+
+        // MC CrossbowAttack: draw, hold 20..39 ticks, fire — the brain twin
+        // of RangedCrossbowAttackGoal (no approach of its own; the FIGHT
+        // activity's walk behaviour keeps the range).
+        class PiglinCrossbowAttack : public Behavior {
+        public:
+            PiglinCrossbowAttack()
+                : Behavior({ MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent } },
+                           1200) {}
+            const char* DebugString() const override { return "CrossbowAttack"; }
+            void ClearReferenceTo(const Entity*) override {}
+        protected:
+            static LivingEntity* Target(LivingEntity& body) {
+                Brain* brain = body.GetBrain();
+                return brain ? dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget)) : nullptr;
+            }
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                auto* mob = dynamic_cast<Mob*>(&body);
+                LivingEntity* target = Target(body);
+                return mob && target && mob->IsHoldingItem(Items::Crossbow) && CanSee(*body.GetBrain(), target) &&
+                       MobCrossbow::IsWithinAttackRange(*mob, *target, 0);
+            }
+            bool CanStillUse(EntityLevel& level, LivingEntity& body, int64_t) override {
+                return body.GetBrain()->HasMemoryValue(MemoryModule::AttackTarget) &&
+                       CheckExtraStartConditions(level, body);
+            }
+            void Tick(EntityLevel& level, LivingEntity& body, int64_t) override {
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                LivingEntity* target = Target(body);
+                if (!piglin || !target) return;
+                // LivingEntity.tick's use clock, ahead of the brain.
+                MobCrossbow::TickUsingItem(*piglin, m_use);
+                body.GetBrain()->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(target, true));
+                switch (m_state) {
+                    case State::Uncharged:
+                        MobCrossbow::StartUsingItem(*piglin, m_use,
+                                                    MobCrossbow::WeaponHoldingHand(*piglin, Items::Crossbow));
+                        m_state = State::Charging;
+                        piglin->SetChargingCrossbow(true);
+                        break;
+                    case State::Charging: {
+                        if (!m_use.usingItem) m_state = State::Uncharged;
+                        const int pullTime = m_use.TicksUsingItem();
+                        if (pullTime >= MobCrossbow::ChargeDuration(piglin->GetEquipment(m_use.hand))) {
+                            MobCrossbow::ReleaseUsingItem(*piglin, m_use);
+                            m_state = State::Charged;
+                            m_attackDelay = 20 + level.Random().NextInt(20);
+                            piglin->SetChargingCrossbow(false);
+                        }
+                        break;
+                    }
+                    case State::Charged:
+                        --m_attackDelay;
+                        if (m_attackDelay == 0) m_state = State::ReadyToAttack;
+                        break;
+                    case State::ReadyToAttack:
+                        piglin->PerformRangedAttack(*target, 1.0f);
+                        m_state = State::Uncharged;
+                        break;
+                }
+            }
+            void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
+                if (m_use.usingItem) MobCrossbow::StopUsingItem(m_use);
+                auto* piglin = dynamic_cast<Piglin*>(&body);
+                if (piglin && piglin->IsHoldingItem(Items::Crossbow)) {
+                    piglin->SetChargingCrossbow(false);
+                    // MC then empties getUseItem()'s CHARGED_PROJECTILES —
+                    // useItem is already EMPTY after stopUsingItem, so a
+                    // loaded crossbow stays loaded.
+                }
+            }
+        private:
+            enum class State : uint8_t { Uncharged, Charging, Charged, ReadyToAttack };
+            State m_state = State::Uncharged;
+            int   m_attackDelay = 0;
+            MobCrossbow::UseState m_use;
+        };
+
+        // MC SetLookAndInteract.create(PLAYER, 4): the nearest visible player
+        // within reach becomes the INTERACTION_TARGET and the look target.
+        class SetLookAndInteractPlayer : public Behavior {
+        public:
+            explicit SetLookAndInteractPlayer(int interactionRange)
+                : Behavior({ MemoryCondition{ MemoryModule::LookTarget, MemoryStatus::Registered },
+                             MemoryCondition{ MemoryModule::InteractionTarget, MemoryStatus::ValueAbsent },
+                             MemoryCondition{ MemoryModule::NearestVisibleLivingEntities,
+                                              MemoryStatus::ValuePresent } },
+                           1),
+                  m_rangeSqr(interactionRange * interactionRange) {}
+            const char* DebugString() const override { return "SetLookAndInteract"; }
+        protected:
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                Brain* brain = body.GetBrain();
+                const NearestVisibleLivingEntities* visible =
+                    brain->GetVisibleEntities(MemoryModule::NearestVisibleLivingEntities);
+                if (!visible) return false;
+                LivingEntity* found = visible->FindClosest([&](LivingEntity* e) {
+                    return e->IsPlayer() && e->DistanceToSqr(body) <= static_cast<double>(m_rangeSqr);
+                });
+                if (!found) return false;
+                brain->SetMemory(MemoryModule::InteractionTarget, static_cast<Entity*>(found));
+                brain->SetMemory(MemoryModule::LookTarget, PositionTracker::OfEntity(found, true));
+                return true;
+            }
+        private:
+            int m_rangeSqr;
+        };
+
         // ── PiglinSpecificSensor ───────────────────────────────────────────
         //
         // MC ai/sensing/PiglinSpecificSensor: one pass over the visible set,
@@ -549,11 +1212,9 @@ namespace Game {
                 if (!brain) return;
                 auto* mob = dynamic_cast<Mob*>(&body);
 
-                // MC findNearestRepellent — BlockTags.PIGLIN_REPELLENTS within
-                // 8 horizontally / 4 vertically. The tag here is the soul
-                // blocks the registry has: soul torch (+wall), soul lantern,
-                // soul campfire and soul fire itself. The campfire lit check
-                // is skipped (no lit blockstate reader on this path).
+                // MC findNearestRepellent — the first BlockTags.PIGLIN_REPELLENTS
+                // cell (soul fire, soul torch and wall torch, soul lantern, a
+                // LIT soul campfire) of the 8/4/8 manhattan-ordered walk.
                 if (const std::optional<glm::ivec3> repellent =
                         FindNearestRepellent(level, body)) {
                     brain->SetMemory(MemoryModule::NearestRepellent, *repellent);
@@ -584,23 +1245,23 @@ namespace Game {
                                 if (!babyHoglin) babyHoglin = e;
                             } else {
                                 ++adultHoglinCount;
-                                // MC also asks Hoglin.canBeHunted (false for a
-                                // zombification-immune hoglin); the port's
-                                // hoglin has no immunity flag, so every adult
-                                // qualifies.
-                                if (!huntableHoglin) huntableHoglin = e;
+                                // Hoglin.canBeHunted: an adult without
+                                // CannotBeHunted.
+                                const auto* hoglin = dynamic_cast<const Hoglin*>(e);
+                                if (!huntableHoglin && hoglin && hoglin->CanBeHunted()) huntableHoglin = e;
                             }
                         } else if (t == EntityTypeId::PiglinBrute) {
                             visibleAdultPiglins.push_back(e);
                         } else if (t == EntityTypeId::Piglin) {
                             if (!e->IsBaby()) visibleAdultPiglins.push_back(e);
                         } else if (e->IsPlayer()) {
-                            // MC: "not wearing gold" — no equipment system, so
-                            // no player ever wears the safe armor.
-                            if (!playerNotWearingGold && mob && mob->CanAttack(*e)) {
+                            // MC: a player in any piece of piglin_safe_armor
+                            // (the gold set) is left alone.
+                            if (!playerNotWearingGold && !PiglinAi::IsWearingSafeArmor(*e)
+                                && mob && mob->CanAttack(*e)) {
                                 playerNotWearingGold = e;
                             }
-                            if (!playerHoldingWantedItem
+                            if (!playerHoldingWantedItem && !e->IsSpectator()
                                 && PiglinAi::IsPlayerHoldingLovedItem(level, *e)) {
                                 playerHoldingWantedItem = e;
                             }
@@ -650,34 +1311,30 @@ namespace Game {
                 else   brain.EraseMemory(m);
             }
 
-            static bool IsRepellentBlock(BlockID id) {
-                return id == BlockID::SoulTorch || id == BlockID::SoulWallTorch
-                    || id == BlockID::SoulLantern || id == BlockID::SoulCampfire
-                    || id == BlockID::SoulFire;
+            // MC PiglinSpecificSensor.isValidRepellent: the tag, and a soul
+            // campfire only while lit.
+            static bool IsValidRepellent(const BlockState& state) {
+                switch (state.Block()) {
+                    case BlockID::SoulTorch:
+                    case BlockID::SoulWallTorch:
+                    case BlockID::SoulLantern:
+                    case BlockID::SoulFire:
+                        return true;
+                    case BlockID::SoulCampfire:
+                        return state.HasProperty(PropertyId::LIT) && state.GetName(PropertyId::LIT) == "true";
+                    default:
+                        return false;
+                }
             }
 
             static std::optional<glm::ivec3> FindNearestRepellent(EntityLevel& level,
                                                                   LivingEntity& body) {
                 const IBlockAccess* blocks = level.Blocks();
                 if (!blocks) return std::nullopt;
-                const glm::ivec3 origin = body.BlockPosition();
-                std::optional<glm::ivec3> best;
-                double bestDistSq = 0.0;
-                for (int dx = -8; dx <= 8; ++dx) {
-                    for (int dy = -4; dy <= 4; ++dy) {
-                        for (int dz = -8; dz <= 8; ++dz) {
-                            const glm::ivec3 p = origin + glm::ivec3(dx, dy, dz);
-                            if (!IsRepellentBlock(blocks->GetBlock(p.x, p.y, p.z))) {
-                                continue;
-                            }
-                            const double d = static_cast<double>(dx) * dx
-                                           + static_cast<double>(dy) * dy
-                                           + static_cast<double>(dz) * dz;
-                            if (!best || d < bestDistSq) { best = p; bestDistSq = d; }
-                        }
-                    }
-                }
-                return best;
+                return FindFirstInBoxByManhattanDistance(
+                    body.BlockPosition(), 8, 4, 8, [blocks](const glm::ivec3& p) {
+                        return IsValidRepellent(blocks->GetBlockState(p.x, p.y, p.z));
+                    });
             }
         };
 
@@ -727,18 +1384,261 @@ namespace Game {
     }
 
     bool PiglinAi::IsPlayerHoldingLovedItem(EntityLevel& level, LivingEntity& entity) {
+        // MC: entity.is(PLAYER) && entity.isHolding(PiglinAi::isLovedItem) —
+        // either hand.
+        (void)level;
         if (!entity.IsPlayer()) return false;
-        const uint32_t held = level.GetHeldItemId(entity);
-        if (held == 0) return false;
-        const std::vector<ItemID>& loved = LovedItems();
-        return std::find(loved.begin(), loved.end(), static_cast<ItemID>(held))
-               != loved.end();
+        for (const EquipmentSlot hand : { EquipmentSlot::MAINHAND, EquipmentSlot::OFFHAND }) {
+            if (const ItemStack* held = entity.EquipmentInSlot(hand); held && IsLovedItem(*held)) return true;
+        }
+        return false;
+    }
+
+    bool PiglinAi::IsLovedItem(const ItemStack& stack) {
+        return HasItemTag(stack, "minecraft:piglin_loved");
+    }
+
+    bool PiglinAi::IsBarterCurrency(const ItemStack& stack) {
+        return !stack.IsEmpty() && stack.itemId == Items::GoldIngot;   // MC BARTERING_ITEM
+    }
+
+    bool PiglinAi::IsFood(const ItemStack& stack) {
+        return HasItemTag(stack, "minecraft:piglin_food");
+    }
+
+    bool PiglinAi::IsWearingSafeArmor(LivingEntity& entity) {
+        // EquipmentSlotGroup.ARMOR: head, chest, legs, feet (and body).
+        for (const EquipmentSlot slot : { EquipmentSlot::FEET, EquipmentSlot::LEGS, EquipmentSlot::CHEST,
+                                          EquipmentSlot::HEAD }) {
+            if (const ItemStack* worn = entity.EquipmentInSlot(slot);
+                worn && HasItemTag(*worn, "minecraft:piglin_safe_armor")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool PiglinAi::WantsToPickup(const Piglin& piglin, const ItemStack& stack) {
+        const Brain* brain = piglin.GetBrain();
+        if (!brain) return false;
+        if (piglin.IsBaby() && HasItemTag(stack, "minecraft:ignored_by_piglin_babies")) return false;
+        if (HasItemTag(stack, "minecraft:piglin_repellents")) return false;
+        if (IsAdmiringDisabled(*brain) && brain->HasMemoryValue(MemoryModule::AttackTarget)) return false;
+        if (IsBarterCurrency(stack)) return IsNotHoldingLovedItemInOffHand(piglin);
+        const bool hasSpace = piglin.CanAddToInventory(stack);
+        if (stack.itemId == Items::GoldNugget) return hasSpace;
+        if (IsFood(stack)) return !HasEatenRecently(*brain) && hasSpace;
+        if (!IsLovedItem(stack)) return piglin.CanReplaceCurrentItem(stack);
+        return IsNotHoldingLovedItemInOffHand(piglin) && hasSpace;
+    }
+
+    void PiglinAi::PickUpItem(EntityLevel& level, Piglin& piglin, int32_t itemEntityId, const ItemStack& stack) {
+        StopWalking(piglin);
+        ItemStack taken;
+        if (stack.itemId == Items::GoldNugget) {
+            // body.take(entity, count) + the whole stack; the entity goes.
+            piglin.TakeItemEntity(itemEntityId, stack.count);
+            taken = stack;
+        } else {
+            // body.take(entity, 1) + removeOneItemFromItemEntity.
+            piglin.TakeItemEntity(itemEntityId, 1);
+            taken = stack;
+            taken.count = 1;
+        }
+
+        Brain* brain = piglin.GetBrain();
+        if (IsLovedItem(taken)) {
+            if (brain) brain->EraseMemory(MemoryModule::TimeTryingToReachAdmireItem);
+            HoldInOffhand(level, piglin, taken);
+            AdmireGoldItem(piglin);
+        } else if (IsFood(taken) && brain && !HasEatenRecently(*brain)) {
+            // PiglinAi.eat: the food is gone; ATE_RECENTLY for 200 ticks.
+            brain->SetMemoryWithExpiry(MemoryModule::AteRecently, true, kEatCooldown);
+        } else {
+            const bool itemEquipped = !piglin.EquipItemIfPossible(taken).IsEmpty();
+            if (!itemEquipped) PutInInventory(level, piglin, taken);
+        }
+    }
+
+    void PiglinAi::StopHoldingOffHandItem(EntityLevel& level, Piglin& piglin, bool barteringEnabled) {
+        const ItemStack itemStack = piglin.GetOffhandEquipment();
+        piglin.SetEquipment(EquipmentSlot::OFFHAND, ItemStack{});
+        if (piglin.IsAdult()) {
+            const bool barterCurrency = IsBarterCurrency(itemStack);
+            if (barteringEnabled && barterCurrency) {
+                ThrowItems(level, piglin, BarterResponseItems(level, piglin));
+            } else if (!barterCurrency) {
+                const bool equipped = !piglin.EquipItemIfPossible(itemStack).IsEmpty();
+                if (!equipped) PutInInventory(level, piglin, itemStack);
+            }
+            // A gold ingot with bartering disabled (the admire cut short by a
+            // hit) is simply gone, as in MC.
+        } else {
+            const bool equipped = !piglin.EquipItemIfPossible(itemStack).IsEmpty();
+            if (!equipped) {
+                const ItemStack mainHandItem = piglin.GetMainHandEquipment();
+                if (IsLovedItem(mainHandItem)) {
+                    PutInInventory(level, piglin, mainHandItem);
+                } else {
+                    ThrowItems(level, piglin, { mainHandItem });
+                }
+                piglin.HoldInMainHand(itemStack);
+            }
+        }
+    }
+
+    void PiglinAi::CancelAdmiring(EntityLevel& level, Piglin& piglin) {
+        const Brain* brain = piglin.GetBrain();
+        if (brain && IsAdmiringItem(*brain) && !piglin.GetOffhandEquipment().IsEmpty()) {
+            SpawnAtLocation(level, piglin, piglin.GetOffhandEquipment());
+            piglin.SetEquipment(EquipmentSlot::OFFHAND, ItemStack{});
+        }
+    }
+
+    bool PiglinAi::CanAdmire(const Piglin& piglin, const ItemStack& held) {
+        const Brain* brain = piglin.GetBrain();
+        if (!brain) return false;
+        return !IsAdmiringDisabled(*brain) && !IsAdmiringItem(*brain) && piglin.IsAdult() &&
+               IsBarterCurrency(held);
+    }
+
+    bool PiglinAi::MobInteract(EntityLevel& level, Piglin& piglin, ItemStack& held) {
+        if (!CanAdmire(piglin, held)) return false;
+        // playerHeldItemStack.consumeAndReturn(1, player) — the caller hands
+        // a creative player's stack back.
+        ItemStack taken = held;
+        taken.count = 1;
+        held.count -= 1;
+        if (held.count <= 0) held = ItemStack{};
+        HoldInOffhand(level, piglin, taken);
+        AdmireGoldItem(piglin);
+        StopWalking(piglin);
+        return true;
+    }
+
+    namespace {
+
+        bool UniversalAnger() { return Rules::GetBool(Rules::Id::UniversalAnger); }
+
+        // MC BehaviorUtils.getNearestTarget(body, current, candidate): the
+        // candidate unless the current one is strictly nearer.
+        LivingEntity* NearestTarget(const LivingEntity& body, LivingEntity* current, LivingEntity& candidate) {
+            if (!current) return &candidate;
+            return body.DistanceToSqr(*current) < body.DistanceToSqr(candidate) ? current : &candidate;
+        }
+
+        LivingEntity* AngerTargetOf(const Mob& piglin) {
+            const Brain* brain = piglin.GetBrain();
+            return brain ? dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt)) : nullptr;
+        }
+
+        // MC PiglinAi.setAngerTargetIfCloserThanCurrent.
+        void SetAngerTargetIfCloserThanCurrent(Mob& piglin, LivingEntity& newTarget) {
+            LivingEntity* current = AngerTargetOf(piglin);
+            LivingEntity* nearest = NearestTarget(piglin, current, newTarget);
+            if (!current || current != nearest) PiglinAi::SetAngerTarget(piglin, *nearest);
+        }
+
+        // MC PiglinAi.getNearestVisibleTargetablePlayer.
+        LivingEntity* NearestVisibleTargetablePlayer(const Mob& piglin) {
+            const Brain* brain = piglin.GetBrain();
+            return brain ? dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::NearestVisibleAttackablePlayer))
+                         : nullptr;
+        }
+
+        // MC PiglinAi.setAngerTargetToNearestTargetablePlayerIfFound.
+        void SetAngerTargetToNearestTargetablePlayerIfFound(Mob& piglin, LivingEntity& targetIfNoPlayerFound) {
+            if (LivingEntity* player = NearestVisibleTargetablePlayer(piglin)) {
+                PiglinAi::SetAngerTarget(piglin, *player);
+            } else {
+                PiglinAi::SetAngerTarget(piglin, targetIfNoPlayerFound);
+            }
+        }
+
+        // MC PiglinAi.broadcastUniversalAnger: every nearby adult piglin
+        // turns on the player it can see and attack.
+        void BroadcastUniversalAnger(Mob& piglin) {
+            const Brain* brain = piglin.GetBrain();
+            if (!brain) return;
+            for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearbyAdultPiglins)) {
+                auto* mate = dynamic_cast<Mob*>(e);
+                if (!mate) continue;
+                if (LivingEntity* player = NearestVisibleTargetablePlayer(*mate)) {
+                    PiglinAi::SetAngerTarget(*mate, *player);
+                }
+            }
+        }
+
+        // MC PiglinAi.setAvoidTargetAndDontHuntForAWhile.
+        void SetAvoidTargetAndDontHuntForAWhile(Piglin& piglin, LivingEntity& target) {
+            Brain* brain = piglin.GetBrain();
+            EntityLevel* level = piglin.Level();
+            if (!brain || !level) return;
+            brain->EraseMemory(MemoryModule::AngryAt);
+            brain->EraseMemory(MemoryModule::AttackTarget);
+            brain->EraseMemory(MemoryModule::WalkTarget);
+            brain->SetMemoryWithExpiry(MemoryModule::AvoidTarget, static_cast<Entity*>(&target),
+                                       level->Random().NextInt(kRetreatMin, kRetreatMax));
+            SampleAndSetHuntedRecently(piglin, level->Random());
+        }
+
+        // MC PiglinAi.retreatFromNearestTarget: flee the nearest of the new
+        // threat, the current avoid target and the current attack target.
+        void RetreatFromNearestTarget(Piglin& piglin, LivingEntity& newAvoidTarget) {
+            const Brain* brain = piglin.GetBrain();
+            if (!brain) return;
+            LivingEntity* nearest = &newAvoidTarget;
+            nearest = NearestTarget(piglin, dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AvoidTarget)),
+                                    *nearest);
+            nearest = NearestTarget(piglin, dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget)),
+                                    *nearest);
+            SetAvoidTargetAndDontHuntForAWhile(piglin, *nearest);
+        }
+
+    } // namespace
+
+    BehaviorPtr PiglinAi::MakeSetLookAndInteractPlayer(int interactionRange) {
+        return std::make_unique<SetLookAndInteractPlayer>(interactionRange);
+    }
+
+    void PiglinAi::BroadcastAngerTarget(EntityLevel& level, Mob& piglin, LivingEntity& target) {
+        (void)level;
+        const Brain* brain = piglin.GetBrain();
+        if (!brain) return;
+        const auto* hoglin = target.GetType() == EntityTypeId::Hoglin ? dynamic_cast<const Hoglin*>(&target)
+                                                                      : nullptr;
+        for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearbyAdultPiglins)) {
+            auto* mate = dynamic_cast<Mob*>(e);
+            if (!mate) continue;
+            if (hoglin && (!PiglinCanHunt(*mate) || !hoglin->CanBeHunted())) continue;
+            SetAngerTargetIfCloserThanCurrent(*mate, target);
+        }
+    }
+
+    void PiglinAi::AngerNearbyPiglins(EntityLevel& level, LivingEntity& player, bool onlyIfTheySeeThePlayer) {
+        // MC: the piglins in the player's box grown by 16 that are IDLE (and
+        // see the player, when asked) take the player — or, under
+        // UNIVERSAL_ANGER, the nearest player each can target.
+        AABB box = player.GetAABB();
+        box.min -= glm::vec3(16.0f);
+        box.max += glm::vec3(16.0f);
+        std::vector<Entity*> nearby;
+        level.GetEntitiesInBox(box, &player, nearby);
+        const bool universal = UniversalAnger();
+        for (Entity* e : nearby) {
+            auto* piglin = dynamic_cast<Piglin*>(e);
+            if (!piglin || !piglin->IsAlive()) continue;
+            Brain* brain = piglin->GetBrain();
+            if (!brain || !brain->IsActive(Activity::Idle)) continue;   // PiglinAi.isIdle
+            if (onlyIfTheySeeThePlayer && !CanSee(*brain, &player)) continue;   // BehaviorUtils.canSee
+            if (universal) SetAngerTargetToNearestTargetablePlayerIfFound(*piglin, player);
+            else           SetAngerTarget(*piglin, player);
+        }
     }
 
     void PiglinAi::SetAngerTarget(Mob& piglin, LivingEntity& target) {
-        // MC PiglinAi.setAngerTarget. The attackable pre-check runs in the
-        // callers that need it (StartAttacking re-checks either way); the
-        // UNIVERSAL_ANGER game rule defaults off, so that branch is skipped.
+        // MC PiglinAi.setAngerTarget. The attackable pre-check
+        // (isEntityAttackableIgnoringLineOfSight) is the mob's canAttack.
         Brain* brain = piglin.GetBrain();
         if (!brain || !piglin.CanAttack(target)) return;
         brain->EraseMemory(MemoryModule::CantReachWalkTargetSince);
@@ -749,11 +1649,13 @@ namespace Game {
                 SampleAndSetHuntedRecently(piglin, level->Random());
             }
         }
+        if (target.IsPlayer() && UniversalAnger()) {
+            brain->SetMemoryWithExpiry(MemoryModule::UniversalAnger, true, kAngerDuration);
+        }
     }
 
     void PiglinAi::MaybeRetaliate(EntityLevel& level, Mob& piglin,
                                   LivingEntity& attacker) {
-        (void)level;
         Brain* brain = piglin.GetBrain();
         if (!brain) return;
         // MC: never retaliate out of an active retreat.
@@ -769,36 +1671,33 @@ namespace Game {
             }
         }
 
-        SetAngerTarget(piglin, attacker);
-        // MC broadcastAngerTarget across the nearby adult pack.
-        for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearbyAdultPiglins)) {
-            auto* mate = dynamic_cast<Mob*>(e);
-            if (!mate) continue;
-            if (attacker.GetType() == EntityTypeId::Hoglin && !PiglinCanHunt(*mate)) {
-                continue;
-            }
-            // MC setAngerTargetIfCloserThanCurrent.
-            Brain* theirs = mate->GetBrain();
-            auto* theirTarget = theirs ? dynamic_cast<LivingEntity*>(
-                theirs->GetEntity(MemoryModule::AngryAt)) : nullptr;
-            if (!theirTarget
-                || mate->DistanceToSqr(attacker) < mate->DistanceToSqr(*theirTarget)) {
-                SetAngerTarget(*mate, attacker);
-            }
+        if (attacker.IsPlayer() && UniversalAnger()) {
+            SetAngerTargetToNearestTargetablePlayerIfFound(piglin, attacker);
+            BroadcastUniversalAnger(piglin);
+        } else {
+            SetAngerTarget(piglin, attacker);
+            BroadcastAngerTarget(level, piglin, attacker);
         }
     }
 
     void PiglinAi::WasHurtBy(EntityLevel& level, Piglin& piglin,
                              LivingEntity& attacker) {
-        // MC PiglinAi.wasHurtBy. The offhand-item drop and the ADMIRING
-        // memory wipes are items-system work and skipped; the celebration
-        // stop, baby flight, outnumbered retreat and retaliation are ported.
-        if (IsPiglinLike(attacker)) return;
+        // MC PiglinAi.wasHurtBy (`attacker instanceof Piglin` — the brute is
+        // an AbstractPiglin, not a Piglin, so a brute's hit counts).
+        if (attacker.GetType() == EntityTypeId::Piglin) return;
         Brain* brain = piglin.GetBrain();
         if (!brain) return;
 
+        // A hit ends an admire: the off-hand item is kept or dropped, never
+        // bartered (a gold ingot is lost).
+        if (!piglin.GetOffhandEquipment().IsEmpty()) StopHoldingOffHandItem(level, piglin, false);
+
         brain->EraseMemory(MemoryModule::CelebrateLocation);
         brain->EraseMemory(MemoryModule::Dancing);
+        brain->EraseMemory(MemoryModule::AdmiringItem);
+        if (attacker.IsPlayer()) {
+            brain->SetMemoryWithExpiry(MemoryModule::AdmiringDisabled, true, kHitByPlayerMemoryTimeout);
+        }
 
         // MC: an avoid target of a DIFFERENT type than the attacker is
         // dropped, so the new threat can take the slot.
@@ -809,47 +1708,19 @@ namespace Game {
             }
         }
 
-        JavaRandom& rng = level.Random();
         if (piglin.IsBaby()) {
-            // MC BABY_FLEE_DURATION_AFTER_GETTING_HIT = 100.
+            // MC BABY_FLEE_DURATION_AFTER_GETTING_HIT = 100; the pack is
+            // told, the baby itself runs.
             brain->SetMemoryWithExpiry(MemoryModule::AvoidTarget,
                                        static_cast<Entity*>(&attacker), 100);
-            if (piglin.CanAttack(attacker)) {
-                // broadcastAngerTarget without retaliating itself.
-                for (Entity* e : AdultPiglinList(*brain,
-                                                 MemoryModule::NearbyAdultPiglins)) {
-                    auto* mate = dynamic_cast<Mob*>(e);
-                    if (!mate) continue;
-                    if (attacker.GetType() == EntityTypeId::Hoglin
-                        && !PiglinCanHunt(*mate)) {
-                        continue;
-                    }
-                    SetAngerTarget(*mate, attacker);
-                }
-            }
-        } else if (attacker.GetType() != EntityTypeId::Hoglin
+            if (piglin.CanAttack(attacker)) BroadcastAngerTarget(level, piglin, attacker);
+        } else if (attacker.GetType() == EntityTypeId::Hoglin
                    && HoglinsOutnumberPiglins(piglin)) {
-            // MC setAvoidTargetAndDontHuntForAWhile + broadcastRetreat.
-            auto retreat = [&rng](Piglin& p, LivingEntity& threat) {
-                Brain* b = p.GetBrain();
-                if (!b) return;
-                b->EraseMemory(MemoryModule::AngryAt);
-                b->EraseMemory(MemoryModule::AttackTarget);
-                b->EraseMemory(MemoryModule::WalkTarget);
-                b->SetMemoryWithExpiry(MemoryModule::AvoidTarget,
-                                       static_cast<Entity*>(&threat),
-                                       rng.NextInt(kRetreatMin, kRetreatMax));
-                SampleAndSetHuntedRecently(p, rng);
-            };
-            retreat(piglin, attacker);
-            for (Entity* e : AdultPiglinList(*brain,
-                                             MemoryModule::NearestVisibleAdultPiglins)) {
-                if (auto* mate = dynamic_cast<Piglin*>(e)) {
-                    // MC retreatFromNearestTarget picks the nearest of the
-                    // mate's current threats and the new one; the new threat
-                    // stands in — the mate's own sensors resettle it.
-                    retreat(*mate, attacker);
-                }
+            // MC setAvoidTargetAndDontHuntForAWhile + broadcastRetreat (the
+            // VISIBLE adult piglins — brutes never retreat).
+            SetAvoidTargetAndDontHuntForAWhile(piglin, attacker);
+            for (Entity* e : AdultPiglinList(*brain, MemoryModule::NearestVisibleAdultPiglins)) {
+                if (auto* mate = dynamic_cast<Piglin*>(e)) RetreatFromNearestTarget(*mate, attacker);
             }
         } else {
             MaybeRetaliate(level, piglin, attacker);
@@ -863,11 +1734,10 @@ namespace Game {
     }
 
     void PiglinAi::InitBrain(Piglin& piglin, Brain& brain) {
-        // MC Piglin.MEMORY_TYPES, minus the item/door machinery this port
-        // does not have (DOORS_TO_CLOSE, NEAREST_VISIBLE_WANTED_ITEM,
-        // ITEM_PICKUP_COOLDOWN_TICKS, ADMIRING_*, TIME_TRYING_TO_REACH_
-        // ADMIRE_ITEM, DISABLE_WALK_TO_ADMIRE_ITEM, UNIVERSAL_ANGER, and the
-        // five SPEAR_* memories).
+        // MC Piglin's memories, minus the door machinery this port does not
+        // run. NEAREST_VISIBLE_WANTED_ITEM is
+        // registered for the sensor; its value (an item entity) lives on the
+        // piglin (Piglin::GetWantedItemId).
         for (MemoryModule m : { MemoryModule::LookTarget,
                                 MemoryModule::NearestLivingEntities,
                                 MemoryModule::NearestVisibleLivingEntities,
@@ -898,23 +1768,35 @@ namespace Game {
                                 MemoryModule::NearestTargetablePlayerNotWearingGold,
                                 MemoryModule::NearestPlayerHoldingWantedItem,
                                 MemoryModule::AteRecently,
-                                MemoryModule::NearestRepellent }) {
+                                MemoryModule::NearestRepellent,
+                                MemoryModule::NearestVisibleWantedItem,
+                                MemoryModule::ItemPickupCooldownTicks,
+                                MemoryModule::AdmiringItem,
+                                MemoryModule::TimeTryingToReachAdmireItem,
+                                MemoryModule::DisableWalkToAdmireItem,
+                                MemoryModule::AdmiringDisabled,
+                                MemoryModule::UniversalAnger,
+                                // The spear fight's (Piglin.BRAIN_PROVIDER).
+                                MemoryModule::SpearFleeingTime,
+                                MemoryModule::SpearFleeingPosition,
+                                MemoryModule::SpearChargePosition,
+                                MemoryModule::SpearEngageTime,
+                                MemoryModule::SpearStatus }) {
             brain.RegisterMemory(m);
         }
 
-        // MC SENSOR_TYPES: NEAREST_LIVING_ENTITIES, NEAREST_PLAYERS, HURT_BY,
-        // PIGLIN_SPECIFIC_SENSOR (NEAREST_ITEMS skipped — no item entities on
-        // this path).
+        // MC SENSOR_TYPES: NEAREST_LIVING_ENTITIES, NEAREST_PLAYERS,
+        // NEAREST_ITEMS, HURT_BY, PIGLIN_SPECIFIC_SENSOR.
         brain.AddSensor(std::make_unique<NearestLivingEntitySensor>());
         brain.AddSensor(std::make_unique<PlayerSensor>());
+        brain.AddSensor(std::make_unique<PiglinNearestItemSensor>());
         brain.AddSensor(std::make_unique<HurtBySensor>());
         brain.AddSensor(std::make_unique<PiglinSpecificSensor>());
 
         EntityLevel* level = piglin.Level();
 
         // ── CORE (MC initCoreActivity) ─────────────────────────────────────
-        // InteractWithDoor, StopHoldingItemIfNoLongerAdmiring and
-        // StartAdmiringItemIfSeen are skipped — doors and items.
+        // InteractWithDoor is skipped — door interaction.
         std::vector<BehaviorPtr> core;
         core.push_back(std::make_unique<LookAtTargetSink>(45, 90));
         core.push_back(std::make_unique<MoveToTargetSink>());
@@ -928,13 +1810,13 @@ namespace Game {
             &IsNearZombified,
             MemoryModule::NearestVisibleZombified, MemoryModule::AvoidTarget,
             kAvoidZombifiedMin, kAvoidZombifiedMax));
+        core.push_back(std::make_unique<StopHoldingItemIfNoLongerAdmiring>());
+        core.push_back(std::make_unique<StartAdmiringItemIfSeen>(kAdmireDuration));
         core.push_back(std::make_unique<StartCelebratingIfTargetDead>(kCelebrationTime));
         core.push_back(std::make_unique<StopBeingAngryIfTargetDead>());
         brain.AddActivity(Activity::Core, 0, std::move(core));
 
         // ── IDLE (MC initIdleActivity, priority 10) ────────────────────────
-        // SetLookAndInteract is skipped — its downstream consumer is the
-        // bartering interaction.
         std::vector<BehaviorPtr> idle;
         idle.push_back(std::make_unique<SetEntityLookTarget>(
             [level](LivingEntity& e) {
@@ -947,15 +1829,23 @@ namespace Game {
         idle.push_back(std::make_unique<BabySometimesRideBabyHoglin>());
         idle.push_back(IdleLookBehaviors());
         idle.push_back(IdleMovementBehaviors(level));
+        idle.push_back(std::make_unique<SetLookAndInteractPlayer>(4));
         brain.AddActivity(Activity::Idle, 10, std::move(idle));
 
         // ── FIGHT (MC initFightActivity, priority 10) ──────────────────────
-        // BackUpIfTooClose + CrossbowAttack (crossbow) and the three Spear
-        // behaviours are skipped — no weapon items exist to hold.
+        // The walk keeps a crossbow's range (isWithinAttackRange, margin 1),
+        // the spear fights by its three behaviours, the melee stands down
+        // while either is held (canUseNonMeleeWeapon).
         std::vector<BehaviorPtr> fight;
         fight.push_back(std::make_unique<PiglinStopAttacking>());
+        fight.push_back(std::make_unique<BackUpIfTooClose>(kMinDistFromTargetWithCrossbow,
+                                                           kSpeedWhenStrafingBack));
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(1.0f));
+        fight.push_back(std::make_unique<SpearApproach>(1.0, 10.0f));
+        fight.push_back(std::make_unique<SpearAttack>(1.0, 1.0, 2.0f));
+        fight.push_back(std::make_unique<SpearRetreat>(1.0));
         fight.push_back(std::make_unique<MeleeAttack>(20));
+        fight.push_back(std::make_unique<PiglinCrossbowAttack>());
         fight.push_back(std::make_unique<RememberIfHoglinWasKilled>());
         fight.push_back(std::make_unique<EraseMemoryIf>(&IsNearZombified,
                                                         MemoryModule::AttackTarget));
@@ -989,10 +1879,14 @@ namespace Game {
                                                     std::move(celebrate),
                                                     MemoryModule::CelebrateLocation);
 
-        // ── ADMIRE_ITEM is not registered — the whole activity is the item
-        // system (GoToWantedItem, StopAdmiring*). UpdateActivity still asks
-        // for it first, exactly as MC orders the list; an unregistered
-        // activity simply never validates.
+        // ── ADMIRE_ITEM (MC initAdmireItemActivity, priority 10) ───────────
+        std::vector<BehaviorPtr> admire;
+        admire.push_back(std::make_unique<PiglinGoToWantedItem>(1.0f, kMaxDistanceToWalkToItem));
+        admire.push_back(std::make_unique<StopAdmiringIfItemTooFarAway>(kMaxDistanceToWalkToItem));
+        admire.push_back(std::make_unique<StopAdmiringIfTiredOfTryingToReachItem>(kMaxTimeToWalkToItem,
+                                                                                   kDisableAdmireWalking));
+        brain.AddActivityAndRemoveMemoryWhenStopped(Activity::AdmireItem, 10, std::move(admire),
+                                                    MemoryModule::AdmiringItem);
 
         // ── AVOID (MC initRetreatActivity, priority 10) ────────────────────
         std::vector<BehaviorPtr> avoid;
@@ -1028,6 +1922,7 @@ namespace Game {
         const std::optional<Activity> activity = brain ? brain->GetActiveNonCoreActivity() : std::nullopt;
         if (!activity) return "";
         if (*activity == Activity::Fight) return SoundEvents::PIGLIN_ANGRY;
+        if (piglin.IsConverting()) return SoundEvents::PIGLIN_RETREAT;
         if (*activity == Activity::Avoid) {
             const auto* avoid = dynamic_cast<const LivingEntity*>(brain->GetEntity(MemoryModule::AvoidTarget));
             if (avoid) {
@@ -1037,6 +1932,9 @@ namespace Game {
         }
         if (*activity == Activity::AdmireItem) return SoundEvents::PIGLIN_ADMIRING_ITEM;
         if (*activity == Activity::Celebrate) return SoundEvents::PIGLIN_CELEBRATE;
+        // seesPlayerHoldingLovedItem → JEALOUS; isNearRepellent → RETREAT.
+        if (brain->HasMemoryValue(MemoryModule::NearestPlayerHoldingWantedItem)) return SoundEvents::PIGLIN_JEALOUS;
+        if (brain->HasMemoryValue(MemoryModule::NearestRepellent)) return SoundEvents::PIGLIN_RETREAT;
         return SoundEvents::PIGLIN_AMBIENT;
     }
 

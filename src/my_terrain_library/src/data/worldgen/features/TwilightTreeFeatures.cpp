@@ -205,9 +205,10 @@ bool isBlockNotOk(BlockState* state) {
         || id == "minecraft:hardened_dark_leaves";
 }
 
-// WorldGenRegion.hasChunkAt: the chunk is inside the region being decorated.
+// WorldGenRegion.hasChunkAt: the chunk is inside the region being decorated
+// (WorldGenLevel::hasChunkAt - a live level answers for its loaded chunks).
 bool hasChunkAt(WorldGenLevel& level, const core::BlockPos& pos) {
-    return level.getChunk(pos.getX() >> 4, pos.getZ() >> 4) != nullptr;
+    return level.hasChunkAt(pos);
 }
 
 // FeatureUtil.isAreaSuitable — flat natural ground below, free space above.

@@ -18,6 +18,7 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/world/block/Direction.hpp"
+#include "common/world/level/DimensionId.hpp"
 
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -148,6 +149,26 @@ namespace Server {
 
         size_t Count() const { return m_entities.size(); }
 
+        // ── Portal-gun bookkeeping (PortalGunTracker.cpp) ────────────────────
+        // A portal gun's pair closes when its stack is destroyed, so this
+        // manager reports what became of every dropped gun as it leaves:
+        // destroyed (despawn, void, /kill, a blast — emptied without being
+        // collected), collected (a player, hopper or mob took it), or stored
+        // (its chunk unloaded and saved it). The level's dimension is set by
+        // ServerLevel right after construction.
+        void SetDimension(Game::DimensionId dimension) { m_dimension = dimension; }
+        // A hopper or a mob took this entity's stack into itself (the
+        // bridge's TakeFromItemEntity / SetItemEntityStack emptied it): when
+        // the sweep retires it that is a hand-over, not a destruction.
+        void NoteTransferred(int32_t id) { m_transferred.insert(id); }
+        // A mob took `amount` from this entity (Mob::TakeItemEntity → the
+        // bridge): queued as a pickup so the next Tick hands clients the take
+        // packet (the fly-in toward the mob), and an entity it emptied
+        // retires through that packet instead of a removal.
+        void NoteTakenBy(int32_t id, int32_t collectorId, int amount) {
+            m_mobPickups.push_back(ItemPickupEvent{ id, static_cast<uint32_t>(collectorId), amount });
+        }
+
         // Split this tick's entities into the two kinds of update.
         //
         // `outFullRefresh` gets a whole spawn packet (stack included):
@@ -186,6 +207,19 @@ namespace Server {
         // not saved (TF's owner check is a same-session affair). Pruned
         // wherever an entity leaves m_entities.
         std::unordered_set<int32_t> m_playerThrown;
+
+        // Portal guns among the entities (entity id -> gun instance id),
+        // kept from spawn/adoption on because a destroyed entity's stack is
+        // already cleared by the time the sweep sees it. See SetDimension.
+        Game::DimensionId                     m_dimension = Game::DimensionId::Overworld;
+        std::unordered_map<int32_t, uint64_t> m_gunEntities;
+        std::unordered_set<int32_t>           m_transferred;
+        // Mob pickups since the last Tick (NoteTakenBy).
+        std::vector<ItemPickupEvent>          m_mobPickups;
+        void NoteGunEntity(int32_t id, const Game::ItemStack& stack);
+        // An entity is leaving m_entities: report a gun's fate, drop the
+        // bookkeeping. `stored` = its chunk unloaded (saved, not destroyed).
+        void RetireGunEntity(int32_t id, const Game::ItemEntity& entity, bool stored);
         bool     m_randomSeeded = false;
         Game::JavaRandom m_random{0};
 

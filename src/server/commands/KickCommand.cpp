@@ -10,7 +10,11 @@
 namespace Server {
 
     void KickCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("kick", KickCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC KickCommand: <targets> [<reason>] — here a bare player name.
+        dispatcher.RegisterCommand("kick", KickCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("target", Cmd::Arg::PlayerName).Executes()
+                .Then(Cmd::Argument("reason", Cmd::Arg::Greedy).Executes())));
     }
 
     static bool CaseInsensitiveEquals(const std::string& a, const std::string& b) {

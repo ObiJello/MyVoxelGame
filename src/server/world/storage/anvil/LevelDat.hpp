@@ -18,8 +18,8 @@
 namespace Game::Anvil {
 
     // Everything level.dat carries that ObeyCraft actually knows. Fields
-    // vanilla defaults sensibly (DragonFight, CustomBossEvents, the wandering
-    // trader) are simply not written.
+    // vanilla defaults sensibly (DragonFight, CustomBossEvents) are simply
+    // not written.
     struct LevelDatData {
         std::string levelName = "World";
         int64_t     seed      = 0;
@@ -36,6 +36,29 @@ namespace Game::Anvil {
         int64_t time       = 0;      // total ticks the world has run
         int64_t dayTime    = 6000;   // 6000 = noon
         int64_t lastPlayed = 0;      // epoch MILLISECONDS; 0 = stamp with now
+
+        // MC WanderingTraderSpawner's saved clock (WanderingTraderData's
+        // spawn_delay / spawn_chance; level.dat's WanderingTraderSpawnDelay /
+        // WanderingTraderSpawnChance at this save's DataVersion). The flag
+        // says the file carried them.
+        int  wanderingTraderSpawnDelay  = 24000;
+        int  wanderingTraderSpawnChance = 25;
+        bool hasWanderingTraderData     = false;
+
+        // MC WeatherData (Server::ServerWeather): at this save's DataVersion
+        // the five keys sit in Data (clearWeatherTime, rainTime, raining,
+        // thunderTime, thundering — PrimaryLevelData); 26.3's
+        // LevelDatToSavedDataPreparationFix moves them to weather.dat.
+        // Absent keys read as MC's defaults (all zero / false: a new world's
+        // first cycle rolls the delays).
+        int  clearWeatherTime = 0;
+        int  rainTime         = 0;
+        bool raining          = false;
+        int  thunderTime      = 0;
+        bool thundering       = false;
+        // The file carried them (else a 26.3 world's data/minecraft/
+        // weather.dat is read — ServerWeather::LoadSavedDataFile).
+        bool hasWeatherData   = false;
 
         int   spawnX = 0, spawnY = 64, spawnZ = 0;
         float spawnYaw = 0.0f, spawnPitch = 0.0f;
@@ -61,8 +84,12 @@ namespace Game::Anvil {
         // World Options "Command Access": may guests use commands. MC keeps
         // this per session (IntegratedServer.guestCommandAccess); this
         // engine saves it with the world so a host does not re-enable it
-        // on every launch.
-        bool guestCommandAccess = false;
+        // on every launch. On by default: players who join may use commands
+        // unless the host turns it off. Stored as obeycraft.guest_commands;
+        // the older guest_command_access key was always written with the old
+        // default (off), so it cannot tell a host's "off" from "never
+        // touched" and is not read back.
+        bool guestCommandAccess = true;
         bool mobGriefing      = true;
         int  randomTickSpeed  = 3;
         bool tntExplodes             = true;

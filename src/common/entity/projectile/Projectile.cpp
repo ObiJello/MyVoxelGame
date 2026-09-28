@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/Projectile.cpp
 #include "common/entity/projectile/Projectile.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/world/block/TntBlock.hpp"
 #include "common/world/level/ILevelWrite.hpp"
@@ -134,6 +135,9 @@ namespace Game {
         // answer the same whether or not my shooter is currently loaded, and
         // it keeps this method const.
         if (&entity == this) return false;
+        // MC canBeHitByProjectile is isPickable, and a fishing bobber is not:
+        // nothing a projectile flies at stops on a line's float.
+        if (entity.GetType() == EntityTypeId::FishingBobber) return false;
         // MC: the owner is protected only until leftOwner — after that a
         // shooter can be hit by their own projectile (MC also spares the
         // owner's co-passengers; no vehicle system here).
@@ -166,6 +170,12 @@ namespace Game {
         // Clip is the funnel every projectile tick passes through, and it runs
         // before this tick's movement is applied — the same ordering as MC.
         if (!m_leftOwner) m_leftOwner = CheckLeftOwner();
+        // MC Projectile.tick opens with `if (!hasBeenShot) {
+        // gameEvent(PROJECTILE_SHOOT, getOwner()); hasBeenShot = true; }`.
+        if (!m_hasBeenShot) {
+            m_hasBeenShot = true;
+            GameEvent(GameEventId::ProjectileShoot, GetOwner());
+        }
 
         const double moveLen = glm::length(movement);
         if (moveLen < 1.0e-9) return result;
@@ -284,6 +294,19 @@ namespace Game {
             // priming removed the block).
             NotifyBlockOfProjectileHit(hit);
             OnHitBlock(hit);
+        }
+        EmitProjectileLand(hit);
+    }
+
+    void Projectile::EmitProjectileLand(const HitResult& hit) {
+        if (!m_level || m_level->IsClientSide()) return;
+        ILevelWrite* write = m_level->MutableBlocks();
+        if (!write) return;
+        if (hit.IsEntity() && hit.entity) {
+            write->GameEvent(GameEventId::ProjectileLand, hit.location, GameEventContext::Of(this));
+        } else if (hit.IsBlock()) {
+            const BlockState state = write->GetBlockState(hit.blockPos.x, hit.blockPos.y, hit.blockPos.z);
+            write->GameEvent(GameEventId::ProjectileLand, hit.blockPos, GameEventContext::Of(this, state));
         }
     }
 

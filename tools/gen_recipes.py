@@ -209,6 +209,9 @@ FUEL_SPEC = [
     # gives them `cookingFuel(COOKING_TIME_WOOL)` / `(COOKING_TIME_WOOL_SLABS)`
     # in Items.java, which ContextIntProviders resolves to 100 and 50 ticks.
     ("#wool_stairs", _U // 2), ("#wool_slabs", _U // 4),
+    # 26.3's cushions: CushionItem is registered with
+    # cookingFuel(COOKING_TIME_WOOL_SLABS) — 50 ticks, like a wool slab.
+    ("#cushions", _U // 4),
     ("#saplings", _U // 2), ("bowl", _U // 2),
     ("#wool_carpets", 1 + _U // 3), ("dried_kelp_block", 1 + _U * 20),
     ("crossbow", _U * 3 // 2), ("bamboo", _U // 4),

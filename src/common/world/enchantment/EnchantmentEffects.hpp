@@ -78,6 +78,11 @@ namespace Game {
         bool inWater    = false;
         bool baby       = false;
         bool hasVehicle = false;
+        // The `player` entity sub-predicate's inputs (PlayerPredicate):
+        // the game mode (0 survival, 1 creative, 2 adventure, 3 spectator,
+        // -1 not a player) and FoodData's level.
+        int  gameMode   = -1;
+        int  foodLevel  = 20;
 
         static EnchantmentEntityFacts Of(const Entity& e);
     };
@@ -151,6 +156,12 @@ namespace Game {
         DoubleBounds moveX, moveY, moveZ, speed, horizontalSpeed, verticalSpeed, fallDistance;
         int  periodicTick = 0;
         std::vector<EnchantmentEntityPredicate> vehicle;              // 0 or 1
+        // type_specific {type: player}: the allowed game modes (empty = any;
+        // 0..3 as EnchantmentEntityFacts::gameMode) and the food level's
+        // IntBounds (food.level).
+        bool playerPredicate = false;
+        std::vector<int> gameModes;
+        DoubleBounds foodLevel;
         bool unsupported = false;
 
         // `{}` — asks nothing but that the entity exists.
@@ -158,7 +169,7 @@ namespace Game {
             return !hasType && !onGround && !onFire && !sneaking && !sprinting && !swimming &&
                    !flying && !baby && !inWater && !fallFlying && location.empty() &&
                    movementAffectedBy.empty() && !hasMovement && periodicTick == 0 &&
-                   vehicle.empty() && !unsupported;
+                   vehicle.empty() && !playerPredicate && !unsupported;
         }
 
         bool Matches(const EnchantmentContext& ctx, const EnchantmentEntityFacts& facts) const;
@@ -243,6 +254,7 @@ namespace Game {
         enum class Type : uint8_t {
             AllOf, ApplyMobEffect, Ignite, DamageEntity, ChangeItemDamage, SummonEntity,
             PlaySound, Explode, ApplyExhaustion, ReplaceDisk, SpawnParticles,
+            ApplyImpulse,   // MC ApplyEntityImpulse (the spear's Lunge)
             Attribute,      // location_changed only (EnchantmentAttributeEffect)
             Unsupported
         };
@@ -271,12 +283,25 @@ namespace Game {
         bool createFire = false;
         std::string blockInteraction;                      // "none" / "trigger" / ...
         std::string explosionSound;                        // namespace stripped
-        bool vanillaExplosionParticles = false;            // explosion + explosion_emitter
+        // The small/large particle pair as a Game::ExplosionParticles (0 =
+        // explosion + explosion_emitter, 1 = gust_emitter_small + _large).
+        uint8_t explosionParticles = 0;
+        bool    explosionBlockParticles = false;           // block_particles non-empty
+        // immune_blocks = #minecraft:blocks_wind_charge_explosions (the only
+        // set vanilla names; SimpleExplosionDamageCalculator's immuneBlocks).
+        bool    windChargeImmuneBlocks = false;
         glm::dvec3 explodeOffset{0.0};
+        // ApplyImpulse: the look-space direction, the per-axis scale and
+        // (in `a`) the magnitude.
+        glm::dvec3 impulseDirection{0.0};
+        glm::dvec3 impulseScale{1.0};
         // ReplaceDisk.
         glm::ivec3 diskOffset{0};
         BlockState diskState{};
         bool hasDiskState = false;
+        // trigger_game_event: the GameEventId (as its index) posted at each
+        // replaced block, sourced from the entity; -1 for none.
+        int16_t diskGameEvent = -1;
         struct BlockPredicate {
             enum class Kind : uint8_t { AllOf, MatchingBlockTag, MatchingBlocks, MatchingFluids,
                                         Unobstructed, Unsupported };
@@ -288,6 +313,17 @@ namespace Game {
         std::vector<BlockPredicate> diskPredicate;         // 0 or 1
         // Attribute (location_changed).
         EnchantmentAttributeEffect attribute;
+        // SpawnParticles (MC SpawnParticlesEffect): a simple particle type
+        // (its raw ParticleKind), the horizontal / vertical PositionSource
+        // (entity_position or in_bounding_box, offset, scale) and
+        // VelocitySource (movement_scale + base FloatProvider), and speed.
+        uint8_t particleKind = 0;
+        struct ParticlePosition { bool boundingBox = false; float offset = 0.0f; float scale = 1.0f; };
+        struct ParticleVelocity { float movementScale = 0.0f; float baseMin = 0.0f, baseMax = 0.0f; bool baseUniform = false; };
+        ParticlePosition particleHPos, particleVPos;
+        ParticleVelocity particleHVel, particleVVel;
+        float particleSpeedMin = 0.0f, particleSpeedMax = 0.0f;
+        bool  particleSpeedUniform = false;
 
         // MC EnchantmentEntityEffect.apply(serverLevel, level, item, entity,
         // position). Server only; a no-op without a level.

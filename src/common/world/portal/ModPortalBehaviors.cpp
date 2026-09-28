@@ -21,6 +21,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
 #include "common/sound/SoundSource.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/Entity.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/world/block/Direction.hpp"
@@ -321,8 +322,10 @@ namespace Game {
             }
 
             if (!good) {
-                // levelEvent(PARTICLES_DESTROY_BLOCK) has no server→client
-                // channel here; the block change is what the client sees.
+                // levelEvent(PARTICLES_DESTROY_BLOCK): the portal's break
+                // puff and sound, then the pool drains to water.
+                PlayLevelEventSound(level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                    static_cast<int>(state.RawId()), nullptr);
                 level.SetBlock(pos.x, pos.y, pos.z, BlockID::Water, World::UpdateFlags::All);
             }
         }

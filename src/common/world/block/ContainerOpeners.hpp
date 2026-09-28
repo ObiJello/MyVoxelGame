@@ -18,6 +18,7 @@
 namespace Game {
 
     class ILevelWrite;
+    class Entity;
 
     namespace ContainerOpeners {
 
@@ -25,8 +26,10 @@ namespace Game {
         // this counter handles.
         bool Handles(const ILevelWrite& level, const glm::ivec3& pos);
 
-        void StartOpen(ILevelWrite& level, const glm::ivec3& pos);
-        void StopOpen(ILevelWrite& level, const glm::ivec3& pos);
+        // `user` is the CONTAINER_OPEN / CONTAINER_CLOSE game event's
+        // source (MC's LivingEntity / containerUser.getLivingEntity()).
+        void StartOpen(ILevelWrite& level, const glm::ivec3& pos, Entity* user = nullptr);
+        void StopOpen(ILevelWrite& level, const glm::ivec3& pos, Entity* user = nullptr);
 
     } // namespace ContainerOpeners
 

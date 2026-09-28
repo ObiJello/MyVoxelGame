@@ -5,6 +5,8 @@
 #include "common/entity/Entity.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/network/packets/game/SoundPackets.hpp"
+#include "common/network/packets/game/LevelEventS2CPacket.hpp"
+#include "common/network/packets/game/JukeboxSongS2CPacket.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
 #include "server/network/ServerConnection.hpp"
@@ -80,6 +82,48 @@ namespace Server {
         Submit(std::move(out));
     }
 
+    void ServerSoundBroadcaster::LevelEvent(Game::DimensionId dimension, const Game::SoundExcept& except,
+                                            int type, const glm::ivec3& pos, int data) {
+        Network::LevelEventS2CPacket packet;
+        packet.type = type;
+        packet.x    = pos.x;
+        packet.y    = pos.y;
+        packet.z    = pos.z;
+        packet.data = data;
+        packet.globalEvent = false;
+
+        Outgoing out;
+        out.dimension      = dimension;
+        out.exceptPlayerId = ExceptPlayerId(except);
+        // PlayerList.broadcast(except, pos.getX(), pos.getY(), pos.getZ(),
+        // 64.0, ...): measured from the cell's corner, not its centre.
+        out.pos            = glm::dvec3(pos);
+        out.range          = 64.0;
+        out.packetId       = static_cast<uint8_t>(Network::PacketId::LevelEventS2C);
+        out.payload        = Network::Serialization::Serialize(packet);
+        Submit(std::move(out));
+    }
+
+    void ServerSoundBroadcaster::JukeboxSongEverywhere(Game::DimensionId dimension, const glm::ivec3& pos,
+                                                       int songId, int64_t ticks, bool fresh) {
+        Network::JukeboxSongS2CPacket packet;
+        packet.dimension = static_cast<int8_t>(dimension);
+        packet.x      = pos.x;
+        packet.y      = pos.y;
+        packet.z      = pos.z;
+        packet.songId = songId;
+        packet.ticks  = ticks;
+        packet.fresh  = fresh;
+
+        Outgoing out;
+        out.dimension  = dimension;
+        out.pos        = glm::dvec3(pos);
+        out.everywhere = true;
+        out.packetId   = static_cast<uint8_t>(Network::PacketId::JukeboxSongS2C);
+        out.payload    = Network::Serialization::Serialize(packet);
+        Submit(std::move(out));
+    }
+
     void ServerSoundBroadcaster::Submit(Outgoing&& out) {
         if (std::this_thread::get_id() == g_serverThreadId) {
             Broadcast(out);
@@ -109,6 +153,10 @@ namespace Server {
             const ServerPlayer* player = session->GetPlayer();
             ServerConnection* connection = session->GetConnection();
             if (!player || !connection) continue;
+            if (out.everywhere) {
+                connection->SendPacket(out.packetId, out.payload);
+                continue;
+            }
             if (out.exceptPlayerId && player->getPlayerId() == *out.exceptPlayerId) continue;
             if (Game::DimensionFromRaw(player->getDimensionId()) != out.dimension) continue;
             const glm::dvec3 d = out.pos - player->getPosition();

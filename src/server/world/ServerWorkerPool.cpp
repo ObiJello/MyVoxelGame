@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <future>
 #include <limits>
+#include "platform/CrashHandler.hpp"
 
 namespace Threading {
 
@@ -297,6 +298,7 @@ namespace Threading {
         // threads that were starving the main thread — four of them saturating
         // a 4-performance-core machine while the frame waited its turn.
         Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Throughput);
+        Platform::InstallThreadCrashStack();
         Log::Debug("Server worker thread started");
 
         while (m_running.load()) {
@@ -319,6 +321,30 @@ namespace Threading {
         if (ShouldCancelJob(job)) {
             m_stats.jobsCancelled.fetch_add(1, std::memory_order_relaxed);
             return;
+        }
+
+        // A chunk load is the player waiting (a saved view streaming in on
+        // join or after a teleport): it runs Elevated; everything else runs at
+        // Throughput. Throughput alone kept the loads on the efficiency cores -
+        // a saved 32-chunk view was read from disk in 1.1-1.3 s instead of
+        // 0.8-0.9 s (2026-09-26, Game Mode).
+        //
+        // The class changes only when the job type does. Dropping back to
+        // Throughput after EVERY load left the worker queued behind any
+        // default-QoS work to get back onto a core just to take the next load:
+        // at world open the stronghold ring search (nine threads, ~3.5 s of
+        // CPU) held a saved view's loads to a trickle for its first ~300 ms
+        // while these four threads sat mostly idle.
+        // World I/O jobs (entity reads interleaved with the loads they belong
+        // to, entity writes, fresh-chunk conversion) keep whatever class the
+        // thread is in.
+        thread_local Core::ThreadPriorityClass t_class = Core::ThreadPriorityClass::Throughput;
+        Core::ThreadPriorityClass wanted = t_class;
+        if (job.type == ServerJobType::CHUNK_LOADING) wanted = Core::ThreadPriorityClass::Elevated;
+        else if (job.type != ServerJobType::WORLD_IO) wanted = Core::ThreadPriorityClass::Throughput;
+        if (wanted != t_class) {
+            Core::SetCurrentThreadPriority(wanted);
+            t_class = wanted;
         }
 
         try {
@@ -502,8 +528,7 @@ namespace Threading {
         int best = kDistanceBuckets - 1;
         if (!anchors) return best;
         for (const auto& anchor : (*anchors)[Game::DimensionSlot(job.dimension)]) {
-            const int d = std::max(std::abs(job.chunkPos.x - anchor.x), std::abs(job.chunkPos.z - anchor.z));
-            best = std::min(best, d);
+            best = std::min(best, anchor.ChebyshevTo(job.chunkPos));   // portal-aware (ChunkLoadAnchor)
         }
         return std::min(best, kDistanceBuckets - 1);
     }
@@ -616,8 +641,47 @@ namespace Threading {
 
     void ServerWorkerPool::SetAnchors(ChunkLoadAnchors anchors) {
         auto snapshot = std::make_shared<const ChunkLoadAnchors>(std::move(anchors));
-        std::lock_guard<std::mutex> lock(m_anchorMutex);
-        m_anchors = std::move(snapshot);
+        std::shared_ptr<const ChunkLoadAnchors> previous;
+        {
+            std::lock_guard<std::mutex> lock(m_anchorMutex);
+            previous = m_anchors;
+            m_anchors = snapshot;
+        }
+
+        // DequeueJob re-files only jobs that fell BEHIND. A job filed before
+        // an anchor existed — a portal's far side, whose route appears when
+        // the player comes near it or on the first pass of a join — sits in
+        // a far bucket behind everything, although it is now among the
+        // nearest. So when an anchor appears that no previous anchor stood
+        // for (a new place, or one now much nearer), every queued chunk job
+        // is re-filed once. Rare (portals change rarely), O(queue).
+        bool gained = false;
+        for (int slot = 0; slot < Game::kDimensionCount && !gained; ++slot) {
+            for (const ChunkLoadAnchor& a : (*snapshot)[slot]) {
+                bool known = false;
+                if (previous) {
+                    for (const ChunkLoadAnchor& b : (*previous)[slot]) {
+                        if (std::max(std::abs(a.pos.x - b.pos.x), std::abs(a.pos.z - b.pos.z)) <= 2 &&
+                            b.bias <= a.bias + 2) { known = true; break; }
+                    }
+                }
+                if (!known) { gained = true; break; }
+            }
+        }
+        if (!gained) return;
+
+        std::lock_guard<std::mutex> lock(m_jobQueueMutex);
+        if (m_chunkJobCount == 0) return;
+        std::vector<ServerJob> all;
+        all.reserve(m_chunkJobCount);
+        for (auto& bucket : m_chunkBuckets) {
+            for (auto& job : bucket) all.push_back(std::move(job));
+            bucket.clear();
+        }
+        // Stable per bucket: FIFO order within a distance survives.
+        for (auto& job : all) {
+            m_chunkBuckets[DistanceBucket(job, snapshot.get())].push_back(std::move(job));
+        }
     }
 
     void ServerWorkerPool::SendChunkGenResult(Game::DimensionId dimension,

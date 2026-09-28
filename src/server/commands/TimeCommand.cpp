@@ -15,7 +15,16 @@
 namespace Server {
 
     void TimeCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("time", TimeCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC TimeCommand: set (day|noon|night|midnight|<time>) | add <time>
+        // | query (daytime|gametime|day).
+        dispatcher.RegisterCommand("time", TimeCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literal("set")
+                    .Then(Cmd::Literals({"day", "noon", "night", "midnight"}))
+                    .Then(Cmd::Argument("time", Cmd::Arg::Time).Executes()))
+                .Then(Cmd::Literal("add").Then(Cmd::Argument("time", Cmd::Arg::Time).Executes()))
+                .Then(Cmd::Literal("query").Then(Cmd::Literals({"daytime", "gametime", "day"}))));
     }
 
     namespace {
@@ -110,6 +119,17 @@ namespace Server {
         }
 
     } // namespace
+
+    bool TimeCommand::ParseTimeArgumentTicks(const std::string& raw, int minimum,
+                                             int& ticks, std::string& error) {
+        const TimeParse parsed = ParseTimeArgument(raw, minimum);
+        if (!parsed.ok) {
+            error = parsed.error;
+            return false;
+        }
+        ticks = parsed.ticks;
+        return true;
+    }
 
     void TimeCommand::Execute(const CommandSourceStack& source,
                               const std::vector<std::string>& args,

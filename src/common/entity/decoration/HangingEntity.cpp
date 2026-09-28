@@ -1,12 +1,7 @@
 // File: src/common/entity/decoration/HangingEntity.cpp
 #include "common/entity/decoration/HangingEntity.hpp"
 
-#include "common/entity/ArmorStand.hpp"
-#include "common/entity/EndCrystal.hpp"
 #include "common/entity/EntityLevel.hpp"
-#include "common/entity/FallingBlockEntity.hpp"
-#include "common/entity/PrimedTnt.hpp"
-#include "common/entity/projectile/Projectile.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/block/LegacySolid.hpp"
 #include "common/world/block/RedstoneFamilies.hpp"
@@ -18,13 +13,7 @@
 namespace Game {
 
     HangingEntity::HangingEntity(EntityTypeId type, EntityLevel* level)
-        : Mob(type, level, NoAiTag{}) {
-        // No health to speak of; the living attributes exist only because the
-        // Mob pipeline reads them.
-        CreateLivingAttributes(m_attributes);
-        m_health = GetMaxHealth();
-        ClearHoldsEntityRefs();
-    }
+        : BlockAttachedEntity(type, level) {}
 
     // ── Geometry ───────────────────────────────────────────────────────────
 
@@ -142,64 +131,8 @@ namespace Game {
         return CanCoexist(false);
     }
 
-    // ── Ticking and breaking ───────────────────────────────────────────────
-
-    void HangingEntity::Tick() {
-        // MC BlockAttachedEntity.tick — the server's alone.
-        if (!m_level || m_level->IsClientSide()) return;
-        // checkBelowWorld.
-        if (position.y < static_cast<double>(m_level->GetMinY() - 64)) {
-            Remove(RemovalReason::Discarded);
-            return;
-        }
-        if (m_ticksSinceLastCheck++ >= kCheckInterval) {
-            m_ticksSinceLastCheck = 0;
-            if (!IsRemoved() && !StillHangs()) {
-                Remove(RemovalReason::Discarded);
-                DropItem(nullptr);
-            }
-        }
-    }
-
-    void HangingEntity::Kill() {
-        // The ENTITY_DIE game event has no listener here.
-        Remove(RemovalReason::Killed);
-    }
-
-    bool HangingEntity::Hurt(MobDamageSource source, float amount, Entity* attacker) {
-        (void)amount;
-        if (!m_level || m_level->IsClientSide()) return false;
-        // isInvulnerableToBase: the invulnerable flag holds against all but
-        // the void and a creative player (source.isCreativePlayer()).
-        const bool creativePlayer = attacker && attacker->IsPlayer() && attacker->IsCreative();
-        if (IsInvulnerable() && source != MobDamageSource::Void && !creativePlayer) return false;
-        // Mobs break hanging entities only while mob griefing is on. MC
-        // tests source.getEntity() — the CAUSING entity: a projectile's
-        // shooter, primed TNT's igniter — for `instanceof Mob`. The engine's
-        // non-mob entities ride the Mob class (Painting.hpp's note), so they
-        // are resolved to their cause, or passed over, first.
-        if (!m_level->MobGriefing() && attacker && !attacker->IsPlayer()) {
-            Entity* cause = attacker;
-            if (auto* projectile = dynamic_cast<Projectile*>(attacker)) cause = projectile->GetOwner();
-            else if (auto* tnt = dynamic_cast<PrimedTnt*>(attacker))   cause = tnt->GetOwner();
-            const bool causeIsMob = cause && !cause->IsPlayer() && dynamic_cast<Mob*>(cause) &&
-                                    !dynamic_cast<Projectile*>(cause) && !dynamic_cast<PrimedTnt*>(cause) &&
-                                    !dynamic_cast<FallingBlockEntity*>(cause) && !dynamic_cast<EndCrystal*>(cause) &&
-                                    !dynamic_cast<HangingEntity*>(cause) && !dynamic_cast<ArmorStand*>(cause);
-            if (causeIsMob) return false;
-        }
-        if (!IsRemoved()) {
-            Kill();
-            DropItem(attacker);
-        }
-        return true;
-    }
-
-    bool HangingEntity::SkipAttackInteraction(Entity& source) {
-        // (mayInteract — spawn protection — has no counterpart here.)
-        if (!source.IsPlayer()) return false;
-        return Hurt(MobDamageSource::PlayerAttack, 0.0f, &source);
-    }
+    // ── Breaking ───────────────────────────────────────────────────────────
+    // (Tick, Hurt, SkipAttackInteraction and Kill are BlockAttachedEntity's.)
 
     void HangingEntity::SpawnAtLocation(const ItemStack& stack, float yOffs) {
         if (!m_level || stack.IsEmpty()) return;

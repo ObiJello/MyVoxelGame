@@ -5,7 +5,7 @@
 
 namespace Game {
 
-    // 689 items, in MC's Items.java declaration order.
+    // 705 items, in MC's Items.java declaration order.
     const PureItemTableEntry kPureItemTable[] = {
         { "resin_clump", "none", 64 },
         { "redstone", "none", 64 },
@@ -696,6 +696,22 @@ namespace Game {
         { "tenor_voice_key", "none", 1 },
         { "bass_voice_key", "none", 1 },
         { "held_note", "none", 1 },
+        { "white_cushion", "none", 16 },
+        { "orange_cushion", "none", 16 },
+        { "magenta_cushion", "none", 16 },
+        { "light_blue_cushion", "none", 16 },
+        { "yellow_cushion", "none", 16 },
+        { "lime_cushion", "none", 16 },
+        { "pink_cushion", "none", 16 },
+        { "gray_cushion", "none", 16 },
+        { "light_gray_cushion", "none", 16 },
+        { "cyan_cushion", "none", 16 },
+        { "purple_cushion", "none", 16 },
+        { "blue_cushion", "none", 16 },
+        { "brown_cushion", "none", 16 },
+        { "green_cushion", "none", 16 },
+        { "red_cushion", "none", 16 },
+        { "black_cushion", "none", 16 },
     };
     const size_t kPureItemTableSize = sizeof(kPureItemTable) / sizeof(kPureItemTable[0]);
 

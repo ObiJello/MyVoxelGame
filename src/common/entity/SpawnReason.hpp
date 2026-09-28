@@ -29,14 +29,30 @@ namespace Game {
         // illagers). Piglins skip their baby/weapon roll for it, and raiders
         // never become patrol leaders from it.
         Structure,
+        // MC EntitySpawnReason.EVENT — spawned by a CustomSpawner's event:
+        // the wandering trader and its llamas (WanderingTraderSpawner).
+        Event,
+        // MC EntitySpawnReason.BUCKET — released from a mob bucket
+        // (MobBucketItem.spawn). The axolotl skips its variant/baby roll for
+        // it; the bucket data sets what the mob was.
+        Bucket,
+        // MC EntitySpawnReason.TRIAL_SPAWNER — a trial spawner's wave
+        // (TrialSpawnerBlockEntity). A spawner for isSpawner, and the one
+        // reason that ignores light requirements.
+        TrialSpawner,
+        // MC EntitySpawnReason.PATROL — a pillager patrol member
+        // (PatrolSpawner). PatrollingMonster.finalizeSpawn marks the mob
+        // patrolling and never rolls it a leader for it.
+        Patrol,
     };
 
     // MC EntitySpawnReason.isSpawner — SPAWNER || TRIAL_SPAWNER.
-    inline bool IsSpawner(SpawnReason r) { return r == SpawnReason::Spawner; }
+    inline bool IsSpawner(SpawnReason r) {
+        return r == SpawnReason::Spawner || r == SpawnReason::TrialSpawner;
+    }
 
-    // MC EntitySpawnReason.ignoresLightRequirements — TRIAL_SPAWNER only,
-    // which this engine does not have. Kept so every call site reads like the
-    // vanilla line it ports.
-    inline bool IgnoresLightRequirements(SpawnReason) { return false; }
+    // MC EntitySpawnReason.ignoresLightRequirements — TRIAL_SPAWNER only: a
+    // trial chamber's lit corridors still spawn their waves.
+    inline bool IgnoresLightRequirements(SpawnReason r) { return r == SpawnReason::TrialSpawner; }
 
 } // namespace Game

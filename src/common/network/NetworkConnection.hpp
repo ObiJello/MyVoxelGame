@@ -95,8 +95,39 @@ namespace Network {
         // VarInt (see CompressFrame).
         //
         // A negative threshold means off, which is also the initial state.
-        void EnableCompression(int threshold) { m_compressionThreshold = threshold; }
+        void EnableCompression(int threshold) {
+            m_compressionThreshold = threshold;
+            m_compressionHint.store(threshold, std::memory_order_relaxed);
+        }
         bool CompressionEnabled() const { return m_compressionThreshold >= 0; }
+
+        // The threshold compression runs at, as last set (-1 = off), readable
+        // from any thread. A HINT for PreparePacket: the strand checks the real
+        // threshold again before it uses a prepared deflate.
+        int CompressionThresholdHint() const { return m_compressionHint.load(std::memory_order_relaxed); }
+
+        // A packet whose deflate was done ahead of time, off the strand. The
+        // server builds chunk packets on its parallel workers; deflating them
+        // there as well took per-player compression (~250 us a chunk at level
+        // 6) off the single network thread, which was a remote player's chunk
+        // intake (the client's batch estimator measured it as link time).
+        struct PreparedPacket {
+            uint8_t packetId = 0;
+            std::vector<uint8_t> body;       // VarInt packet id + payload
+            std::vector<uint8_t> deflated;   // body deflated for `deflatedFor`; empty = not
+            int deflatedFor = -1;            // the threshold it was deflated for
+        };
+        // Any thread, no connection state: the frame body, and - when
+        // `compressionThreshold` >= 0 and the body reaches it - the body
+        // deflated exactly as FrameForWire would deflate it on the strand.
+        static PreparedPacket PreparePacket(uint8_t packetId, const std::vector<uint8_t>& payload,
+                                            int compressionThreshold);
+        // Queue a prepared packet. Framing still happens on the strand at
+        // write time; the prepared deflate is used only if the stream's
+        // threshold is still the one it was made for, else the body is framed
+        // as SendPacket's would be. The bytes on the wire are the same either
+        // way (libdeflate is deterministic at a fixed level).
+        void SendPrepared(PreparedPacket&& packet);
 
         // True when the peer is on this machine. MC skips compression entirely
         // for its integrated server (Connection.isMemoryConnection, a Netty
@@ -123,6 +154,8 @@ namespace Network {
         // is where Netty's CompressionEncoder sits in the pipeline. Never call
         // it at enqueue time; see ProcessSendQueue.
         std::vector<uint8_t> FrameForWire(const std::vector<uint8_t>& body) const;
+        // The compressed branch of FrameForWire for a body already deflated.
+        static std::vector<uint8_t> FrameDeflated(size_t bodySize, const std::vector<uint8_t>& deflated);
 
         // Refuse to send a packet that is not part of the connection's current
         // protocol phase. Port of MC IdDispatchCodec.encode (:47), which looks
@@ -301,6 +334,7 @@ namespace Network {
         // the switch atomic with respect to the byte stream in both directions;
         // do not set it from a game thread.
         int  m_compressionThreshold = -1;
+        std::atomic<int> m_compressionHint{-1};   // mirror of the above for other threads
         
         // Send queue (thread-safe)
         std::mutex m_sendMutex;
@@ -309,6 +343,8 @@ namespace Network {
         struct PendingSend {
             std::vector<uint8_t> data;
             std::function<void()> onSent;
+            std::vector<uint8_t> deflated;   // SendPrepared: `data` deflated for `deflatedFor`
+            int deflatedFor = -1;
         };
         std::atomic<bool> m_relayed{false};   // see IsLoopback
         std::deque<PendingSend> m_sendQueue;

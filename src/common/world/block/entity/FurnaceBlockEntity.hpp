@@ -91,6 +91,12 @@ namespace Game {
         // (MC AbstractFurnaceBlockEntity.recipesUsed → awardUsedRecipes).
         float TakeStoredExperience() { const float xp = m_storedXp; m_storedXp = 0.0f; return xp; }
 
+        // MC AbstractFurnaceBlockEntity.preRemoveSideEffects: the base's
+        // spill, then the banked smelting experience as orbs at the block's
+        // centre (getRecipesToAwardAndPopExperience) — a furnace blown up
+        // pays out like one mined (the player's break takes it first).
+        void PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos, BlockState oldState) override;
+
         void Save(Network::PacketBuffer& out) const override;
         void Load(Network::PacketReader& in) override;
 

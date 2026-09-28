@@ -2,7 +2,12 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
+#include <vector>
 #include <glm/glm.hpp>
+
+#include "common/world/level/DimensionId.hpp"
+#include "common/world/math/WorldMath.hpp"
 
 namespace Client {
 
@@ -32,11 +37,27 @@ namespace Client {
         // the level counts as ready that long after the section compiled.
         void StartClientLoad(int closeDelayMs = 0);
 
+        // Where the viewer looks from, for the portal-view half of the
+        // readiness test (below).
+        struct ViewInfo {
+            glm::dvec3 eye{0.0};
+            glm::vec3  forward{0.0f, 0.0f, 1.0f};   // unit
+        };
+
         // MC ClientPacketListener.tick's `levelLoadTracker.tickClientLoad()` +
         // `notifyPlayerLoaded()`. Sends PlayerLoadedC2S exactly once per load,
         // the moment the player's own section is compiled (or the timeout
         // expires). `playerFeetPos` is the local player's world position.
-        void Tick(const glm::vec3& playerFeetPos);
+        //
+        // Beyond MC: with `view`, the portals in view close to the player
+        // count too. Once the player's section is ready, the tracker also
+        // waits — at most kPortalViewWait — for the far-side sections
+        // just behind each portal within kPortalViewRange blocks that the
+        // view faces (immersive surfaces, gun pairs; not global surfaces or
+        // mirrors), in whichever level they lie, to be compiled and 30 %
+        // faded in the same way. The hand-over then reveals a filled portal
+        // view, not one that fills in a second later.
+        void Tick(const glm::vec3& playerFeetPos, const ViewInfo* view = nullptr);
 
         // True once the packet has gone out for the current load.
         bool IsLoaded() const { return m_stage == Stage::Ready; }
@@ -49,6 +70,26 @@ namespace Client {
         bool IsPlayerSectionCompiled(const glm::vec3& playerFeetPos) const;
         // Explains a timeout: which section, and which neighbour column is missing.
         void LogWaitDiagnosis(const glm::vec3& playerFeetPos) const;
+
+        // The portal-view half (see Tick).
+        struct PortalViewTarget {
+            Game::DimensionId    dimension = Game::DimensionId::Overworld;
+            Game::Math::ChunkPos chunk{0, 0};
+            int                  sectionY = 0;
+            uint32_t             portalId = 0;   // 0: a vanilla gun pair
+            uint32_t             viewKey  = 0;   // which portal view (one far area) this belongs to
+        };
+        // `log`: say, per portal in range, whether it was taken and why not.
+        static void CollectPortalViewTargets(const ViewInfo& view, std::vector<PortalViewTarget>& out, bool log);
+        // Per portal route (MeshPriority fields): how much of its far area
+        // is loaded and meshed — logged once at the hand-over.
+        static void LogRouteCoverage();
+        static bool IsTargetShown(const PortalViewTarget& target);
+        // True when the portal views are ready or their wait is over.
+        bool PortalViewsReady(const ViewInfo* view);
+        std::vector<PortalViewTarget> m_portalTargets;
+        std::chrono::steady_clock::time_point m_playerSectionReadyAt{};   // portal wait starts here
+        bool m_portalDecisionsLogged = false;
 
         Stage m_stage = Stage::Idle;
         int   m_closeDelayMs = 0;

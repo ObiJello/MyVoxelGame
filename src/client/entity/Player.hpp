@@ -1,6 +1,7 @@
 // File: src/client/entity/Player.hpp
 #pragma once
 
+#include "common/entity/ElytraAnimationState.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/entity/PlayerColors.hpp"
@@ -55,6 +56,9 @@ namespace Game {
         // (PlayerPhysics::SetMorph) and the third-person view draws the
         // body with `morphWalk` for a mob's limbs.
         uint32_t                 morph = Game::Morph::kNone;
+        // The morph's look beyond the code (Game::Morph::DefaultVariantOf),
+        // from the same abilities packet.
+        int32_t                  morphVariant = 0;
         Game::WalkAnimationState morphWalk;
         int                      morphTicks = 0;
         glm::dvec3               morphPrevPos{0.0};
@@ -223,6 +227,26 @@ namespace Game {
         std::optional<glm::ivec3> sleepingPos;
         int  sleepCounter = 0;
         bool IsSleeping() const { return sleepingPos.has_value(); }
+
+        // ── Riding (MC Entity.vehicle) ──────────────────────────────────
+        // The entity the server seated this player on (a cushion), 0 when
+        // none — set and cleared by PlayerMountS2C only. While set, the body
+        // is held at the seat (UpdatePhysics: MC rideTick → positionRider),
+        // input moves nothing, and the sneak key goes to the server as the
+        // request to get up (Player.wantsToStopRiding). `vehicleSeatPos`
+        // is the last seat seen, held if the vehicle's copy is not here.
+        int32_t    vehicleId = 0;
+        glm::dvec3 vehicleSeatPos{0.0};
+        // The main arm swung since the last PlayerMoveC2S (its swung flag —
+        // MC's ServerboundSwingPacket); cleared by the send.
+        bool       swungSinceMoveSend = false;
+
+        // MC LivingEntity.elytraAnimationState and fallFlyTicks for the local
+        // body: the wings layer's angles and the glide's pose ease-in, both
+        // advanced in Tick.
+        Game::ElytraAnimationState elytraAnim;
+        int        fallFlyTicks = 0;
+        bool IsPassenger() const { return vehicleId != 0; }
         float stepHeight = 0.6f;   // How high the player can step up
 
         // Game mode + abilities — synced from the server via
@@ -245,6 +269,18 @@ namespace Game {
 
         bool IsCreative()  const { return gameMode == 1; }
         bool IsSpectator() const { return gameMode == 3; }
+        // MC MultiPlayerGameMode.previousLocalPlayerMode (-1 = none), from
+        // the abilities packet — the mode Debug Modifier+N (key.debug.spectate) returns to.
+        int8_t previousGameMode = -1;
+
+        // MC Minecraft.cameraEntity, from SetCameraS2C: the mob or player
+        // whose eyes the view comes from while spectating it, or
+        // kSelfCamera for the player's own. The body is carried along with
+        // that entity and its own input is ignored until the server hands
+        // the camera back (sneak, the entity dying or leaving).
+        static constexpr int32_t kSelfCamera = -1;
+        int32_t cameraEntityId = kSelfCamera;
+        bool IsCameraDetached() const { return cameraEntityId != kSelfCamera; }
 
         // === Predicted item-use state ===
         // Client-side mirror of the server's hold-to-use lifecycle
@@ -259,6 +295,34 @@ namespace Game {
         int              useItemDuration   = 0;   // total ticks (for pose progress)
         uint32_t         usingHand         = 0;   // 0 = main, 1 = off
         ItemUseAnimation useAnim           = ItemUseAnimation::NONE;
+        // The item the predicted use started on (the spear whose hit sound
+        // a kinetic hit plays — LivingEntity.useItem).
+        ItemID           useItemId         = 0;
+
+        // === Riptide (MC LivingEntity autoSpinAttack*, the local half) ===
+        // TridentItem.releaseUsing runs on the client too: the push along the
+        // look, the 1.2-block hop off the ground and the 20-tick spin are
+        // this client's own movement. While the spin runs the body takes the
+        // SPIN_ATTACK pose (physics.isAutoSpinAttack) and every tick the box
+        // it swept is tested against the entities in reach
+        // (checkAutoSpinAttack): meeting one bounces back (-0.2 × the
+        // motion) and ends the spin; so does a wall. The hit itself is the
+        // server's.
+        int        autoSpinAttackTicks = 0;
+        glm::dvec3 spinPrevPosition{0.0};
+        bool IsAutoSpinAttack() const { return autoSpinAttackTicks > 0; }
+        // `yRot` / `xRot` in MC's convention (the use packet's).
+        void StartRiptide(float strength, float yRot, float xRot, const IBlockAccess* blocks);
+
+        // MC LivingEntity.onKineticHit on the local player (entity event 2):
+        // at most once per KineticWeapon.HIT_FEEDBACK_TICKS the used spear's
+        // hit sound, and the clock the first-person charge recoils on.
+        int  lastKineticHitFeedbackTick = -1000000;
+        void OnKineticHit();
+        float GetTicksSinceKineticHitFeedback(float partialTick) const {
+            if (lastKineticHitFeedbackTick <= -1000000) return 0.0f;
+            return static_cast<float>(tickCount - lastKineticHitFeedbackTick) + partialTick;
+        }
         
         // === Inventory ===
         Inventory inventory;
@@ -337,6 +401,17 @@ namespace Game {
         // by Client::LocalPlayerSounds, independently of the move send
         // (mutable: the sound tick reads the player through a const view).
         mutable float landedFallForSound = 0.0f;
+        // The elytra's wall-impact damage (PlayerPhysics::flyIntoWallDamage)
+        // since the last PlayerMoveC2S send — the server applies it.
+        float flyIntoWallSinceMoveSend = 0.0f;
+        // MC Player.tryToStartFallFlying for the local player: start gliding
+        // when not already, canGlide holds and no liquid is touched. True
+        // when the glide started (the move packet carries it to the server —
+        // MC's START_FALL_FLYING).
+        bool TryToStartFallFlying();
+        // MC canGlideUsing over the worn items: an elytra in the chest slot
+        // that one more point of wear will not break.
+        bool HasUsableGlider() const;
         
         // === Statistics ===
         PlayerStats stats;

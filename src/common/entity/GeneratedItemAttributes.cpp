@@ -106,11 +106,13 @@ namespace Game {
     { "copper_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // copper
     { "copper_horse_armor", ArmorSlotGroup::Body, 4.0f, 0.0f, 0.0f },   // copper
     { "copper_leggings", ArmorSlotGroup::Legs, 3.0f, 0.0f, 0.0f },   // copper
+    { "copper_nautilus_armor", ArmorSlotGroup::Body, 4.0f, 0.0f, 0.0f },   // copper
     { "diamond_boots", ArmorSlotGroup::Feet, 3.0f, 2.0f, 0.0f },   // diamond
     { "diamond_chestplate", ArmorSlotGroup::Chest, 8.0f, 2.0f, 0.0f },   // diamond
     { "diamond_helmet", ArmorSlotGroup::Head, 3.0f, 2.0f, 0.0f },   // diamond
     { "diamond_horse_armor", ArmorSlotGroup::Body, 11.0f, 2.0f, 0.0f },   // diamond
     { "diamond_leggings", ArmorSlotGroup::Legs, 6.0f, 2.0f, 0.0f },   // diamond
+    { "diamond_nautilus_armor", ArmorSlotGroup::Body, 11.0f, 2.0f, 0.0f },   // diamond
     { "fiery_boots", ArmorSlotGroup::Feet, 4.0f, 1.5f, 0.0f },   // fiery
     { "fiery_chestplate", ArmorSlotGroup::Chest, 9.0f, 1.5f, 0.0f },   // fiery
     { "fiery_helmet", ArmorSlotGroup::Head, 4.0f, 1.5f, 0.0f },   // fiery
@@ -120,6 +122,7 @@ namespace Game {
     { "golden_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // gold
     { "golden_horse_armor", ArmorSlotGroup::Body, 7.0f, 0.0f, 0.0f },   // gold
     { "golden_leggings", ArmorSlotGroup::Legs, 3.0f, 0.0f, 0.0f },   // gold
+    { "golden_nautilus_armor", ArmorSlotGroup::Body, 7.0f, 0.0f, 0.0f },   // gold
     { "gravitite_boots", ArmorSlotGroup::Feet, 3.0f, 2.0f, 0.0f },   // gravitite
     { "gravitite_chestplate", ArmorSlotGroup::Chest, 8.0f, 2.0f, 0.0f },   // gravitite
     { "gravitite_helmet", ArmorSlotGroup::Head, 3.0f, 2.0f, 0.0f },   // gravitite
@@ -129,6 +132,7 @@ namespace Game {
     { "iron_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // iron
     { "iron_horse_armor", ArmorSlotGroup::Body, 5.0f, 0.0f, 0.0f },   // iron
     { "iron_leggings", ArmorSlotGroup::Legs, 5.0f, 0.0f, 0.0f },   // iron
+    { "iron_nautilus_armor", ArmorSlotGroup::Body, 5.0f, 0.0f, 0.0f },   // iron
     { "ironwood_boots", ArmorSlotGroup::Feet, 2.0f, 0.0f, 0.0f },   // ironwood
     { "ironwood_chestplate", ArmorSlotGroup::Chest, 7.0f, 0.0f, 0.0f },   // ironwood
     { "ironwood_helmet", ArmorSlotGroup::Head, 2.0f, 0.0f, 0.0f },   // ironwood
@@ -149,6 +153,7 @@ namespace Game {
     { "netherite_helmet", ArmorSlotGroup::Head, 3.0f, 3.0f, 0.1f },   // netherite
     { "netherite_horse_armor", ArmorSlotGroup::Body, 19.0f, 3.0f, 0.1f },   // netherite
     { "netherite_leggings", ArmorSlotGroup::Legs, 6.0f, 3.0f, 0.1f },   // netherite
+    { "netherite_nautilus_armor", ArmorSlotGroup::Body, 19.0f, 3.0f, 0.1f },   // netherite
     { "steeleaf_boots", ArmorSlotGroup::Feet, 3.0f, 0.0f, 0.0f },   // steeleaf
     { "steeleaf_chestplate", ArmorSlotGroup::Chest, 8.0f, 0.0f, 0.0f },   // steeleaf
     { "steeleaf_helmet", ArmorSlotGroup::Head, 3.0f, 0.0f, 0.0f },   // steeleaf

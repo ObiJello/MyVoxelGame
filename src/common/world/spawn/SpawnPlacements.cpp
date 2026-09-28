@@ -56,9 +56,9 @@ namespace Game {
     // scaffolding. Resolved from registry slugs once, like IsSignalSource, so
     // the wood and copper families track BlockDefs.inc.
     //
-    // Not covered: the leaves' `Blocks::ocelotOrParrot` (a per-type rule —
-    // only ocelots and parrots may spawn on leaves), which needs the entity
-    // type this test does not take.
+    // The leaves' `Blocks::ocelotOrParrot` (a per-type rule — only ocelots
+    // and parrots may spawn on leaves) is the typed IsValidSpawnBlock
+    // overload's, which SpawnPlacements' ON_GROUND check uses.
     static bool NeverValidSpawn(BlockID block) {
         static const std::array<bool, static_cast<size_t>(BlockID::Count)> table = [] {
             std::array<bool, static_cast<size_t>(BlockID::Count)> t{};
@@ -87,6 +87,17 @@ namespace Game {
         // magma is separately dangerous).
         if (NeverValidSpawn(blocks.GetBlock(x, y, z))) return false;
         return IsTopFaceSturdy(blocks, x, y, z);
+    }
+
+    bool IsValidSpawnBlock(const IBlockAccess& blocks, int x, int y, int z, EntityTypeId type) {
+        // MC LeavesBlock is registered with isValidSpawn(Blocks::ocelotOrParrot):
+        // its own rule replaces the sturdy-face default — only an ocelot or a
+        // parrot may spawn standing on leaves (a jungle canopy's parrots).
+        const std::string& slug = BlockRegistry::Get(blocks.GetBlock(x, y, z)).registrySlug;
+        if (slug.size() >= 7 && slug.compare(slug.size() - 7, 7, "_leaves") == 0) {
+            return type == EntityTypeId::Ocelot || type == EntityTypeId::Parrot;
+        }
+        return IsValidSpawnBlock(blocks, x, y, z);
     }
 
     bool IsSignalSource(BlockID block) {
@@ -414,7 +425,7 @@ namespace Game {
                 return blocks.GetBlock(x, y, z) == BlockID::Lava;
 
             case SpawnPlacementType::OnGround: {
-                if (!IsValidSpawnBlock(blocks, x, y - 1, z)) return false;
+                if (!IsValidSpawnBlock(blocks, x, y - 1, z, type)) return false;
                 return IsValidEmptySpawnBlock(type, blocks, x, y, z) &&
                        IsValidEmptySpawnBlock(type, blocks, x, y + 1, z);
             }

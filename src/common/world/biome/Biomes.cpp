@@ -4,12 +4,14 @@
 #include "../../core/Log.hpp"
 
 #include "synth/PerlinSimplexNoise.h"   // terrain library: Biome.BIOME_INFO_NOISE
+#include "world/biome/Biome.h"           // terrain library: Biome.getTemperature (climate)
 
 #include "stb_image.h"   // ext/stb_image is on the target's include path
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -117,6 +119,63 @@ namespace Game {
             const double t = std::clamp(static_cast<double>(temperature), 0.0, 1.0);
             const double r = std::clamp(static_cast<double>(downfall), 0.0, 1.0);
             return ColorMapLookup(t, r, map.pixels.data(), map.pixels.size(), fallback);
+        }
+
+        // ── Climate ─────────────────────────────────────────────────────────
+        //
+        // GeneratedBiomeClimate.inc carries the two ClimateSettings fields the
+        // colour table does not; joined on by slug. Each biome's temperature
+        // rule is then the terrain library's own Biome (the same class
+        // SnowAndFreezeFeature asks at generation), so the precipitation tick
+        // and the generator can never disagree about where water freezes.
+        enum class ClimateModifier : uint8_t { None, Frozen };
+
+        struct ClimateRow {
+            std::string_view slug;
+            bool             hasPrecipitation;
+            ClimateModifier  modifier;
+        };
+
+        constexpr ClimateRow kClimate[] = {
+        #define BIOME_CLIMATE(slug, precip, mod) ClimateRow{ slug, precip, ClimateModifier::mod },
+        #include "GeneratedBiomeClimate.inc"
+        #undef BIOME_CLIMATE
+        };
+
+        // One library Biome per engine biome id, built on first use. A biome
+        // with no climate row (a data pack biome the generator has not seen)
+        // keeps MC's ClimateSettings defaults: precipitation on, no modifier.
+        const std::vector<minecraft::world::biome::Biome>& ClimateBiomes() {
+            static std::vector<minecraft::world::biome::Biome> biomes;
+            static std::once_flag once;
+            std::call_once(once, [] {
+                using minecraft::world::biome::ClimateSettings;
+                using minecraft::world::biome::TemperatureModifier;
+                std::unordered_map<std::string_view, const ClimateRow*> bySlug;
+                for (const ClimateRow& row : kClimate) bySlug.emplace(row.slug, &row);
+
+                biomes.reserve(kBiomeCount);
+                for (size_t i = 0; i < kBiomeCount; ++i) {
+                    const BiomeInfo& info = kBiomes[i];
+                    bool precipitation = true;
+                    TemperatureModifier modifier = TemperatureModifier::NONE;
+                    if (auto it = bySlug.find(info.name); it != bySlug.end()) {
+                        precipitation = it->second->hasPrecipitation;
+                        modifier = it->second->modifier == ClimateModifier::Frozen
+                                       ? TemperatureModifier::FROZEN
+                                       : TemperatureModifier::NONE;
+                    }
+                    biomes.emplace_back(static_cast<int32_t>(i), std::string(info.name),
+                                        ClimateSettings(precipitation, info.temperature,
+                                                        modifier, info.downfall));
+                }
+            });
+            return biomes;
+        }
+
+        const minecraft::world::biome::Biome& ClimateOf(BiomeId id) {
+            const auto& biomes = ClimateBiomes();
+            return biomes[id < biomes.size() ? id : FallbackId()];
         }
 
     } // namespace
@@ -240,6 +299,28 @@ namespace Game {
 
         uint32_t FoliageColorAt(float temperature, float downfall) {
             return Sample(s_foliageMap, temperature, downfall, kFoliageDefault);
+        }
+
+        bool HasPrecipitation(BiomeId id) {
+            return ClimateOf(id).hasPrecipitation();
+        }
+
+        float TemperatureAt(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel) {
+            // MC caches this per thread (Biome.temperatureCache, 1024 entries);
+            // a pure function of (biome, pos), so the cache is only speed.
+            return ClimateOf(id).getTemperature(
+                minecraft::core::BlockPos(worldX, worldY, worldZ), seaLevel);
+        }
+
+        bool WarmEnoughToRain(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel) {
+            // MC Biome.warmEnoughToRain: getTemperature(pos) >= 0.15F.
+            return TemperatureAt(id, worldX, worldY, worldZ, seaLevel) >= 0.15f;
+        }
+
+        Precipitation PrecipitationAt(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel) {
+            if (!HasPrecipitation(id)) return Precipitation::None;
+            return ColdEnoughToSnow(id, worldX, worldY, worldZ, seaLevel) ? Precipitation::Snow
+                                                                          : Precipitation::Rain;
         }
 
     } // namespace BiomeRegistry

@@ -50,6 +50,14 @@ namespace Render {
         // OBEY_LIGHT (read once). False: the old uniform night dim.
         static bool Enabled();
 
+        // Video Settings "Lighting" (GameSettings worldLighting), sampled
+        // once per frame by Update (so a toggle applies on the next frame).
+        // Off: every texel is full white (less only the Darkness effect's
+        // pulse, FullBrightValue) — nothing is darkened by sky or block
+        // light, while AO / face shading (vertex colour) are untouched.
+        static bool WorldLightingOn();
+        static float FullBrightValue();
+
         bool Initialize();
         void Shutdown();
 

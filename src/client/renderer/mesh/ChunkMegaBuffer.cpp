@@ -616,6 +616,13 @@ namespace Render {
     // DRAW COMMANDS
     // ========================================================================
 
+    bool ChunkMegaBuffer::GetSectionVertexOffset(const MegaBufferSectionKey& key, size_t& outVertexOffset) const {
+        auto it = m_regions.find(key);
+        if (it == m_regions.end()) return false;
+        outVertexOffset = it->second.vertexOffset;
+        return true;
+    }
+
     bool ChunkMegaBuffer::GetDrawCommand(const MegaBufferSectionKey& key, DrawCommand& outCmd) const {
         auto it = m_regions.find(key);
         if (it == m_regions.end()) return false;

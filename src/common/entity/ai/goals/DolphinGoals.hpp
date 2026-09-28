@@ -76,10 +76,11 @@ namespace Game {
     };
 
     // MC Dolphin.DolphinSwimToTreasureGoal — gated on gotFish (a fed
-    // dolphin), then findNearestMapStructure(DOLPHIN_LOCATED). No structure
-    // registry exists; MC's own start() marks the goal stuck when no
-    // structure is found, and stop() then clears gotFish — which is exactly
-    // what this port runs, so a fed dolphin shrugs once and moves on.
+    // dolphin) and air >= 100, then findNearestMapStructure(DOLPHIN_LOCATED).
+    // The structure search does not reach the entity seam here; MC's own
+    // start() marks the goal stuck when no structure is found, and stop()
+    // then clears gotFish — which is what this port runs, so a fed dolphin
+    // shrugs once and moves on.
     class DolphinSwimToTreasureGoal : public Goal {
     public:
         explicit DolphinSwimToTreasureGoal(Dolphin* dolphin);
@@ -117,12 +118,34 @@ namespace Game {
         LivingEntity* m_player = nullptr;
     };
 
-    // MC Dolphin.PlayWithItemsGoal — toss floating ItemEntities around. Mob
-    // item pickup does not exist in this port, so the goal is inert with it.
+    // MC Dolphin.MoveToItemGoal (priority 7) — swim at 1.2 to the first
+    // pickup-ready item entity floating in water within 8 blocks (the play
+    // sound on start); Mob's looting catches it. Stopping with an item in
+    // the mouth tosses it and cools the goal for nextInt(100) ticks.
+    class DolphinMoveToItemGoal : public Goal {
+    public:
+        explicit DolphinMoveToItemGoal(Dolphin* dolphin);
+        bool CanUse() override;
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
+        const char* Name() const override { return "DolphinMoveToItemGoal"; }
+
+    private:
+        bool FindItem(glm::dvec3& out) const;
+
+        Dolphin* m_dolphin;
+        int      m_cooldown = 0;
+    };
+
+    // MC Dolphin.PlayWithItemsGoal (priority 8) — whatever the dolphin holds
+    // it throws straight back out (ItemGoal.dropItem each tick and on stop).
     class PlayWithItemsGoal : public Goal {
     public:
         explicit PlayWithItemsGoal(Dolphin* dolphin) : m_dolphin(dolphin) {}
-        bool CanUse() override { return false; }
+        bool CanUse() override;
+        void Stop() override;
+        void Tick() override;
         const char* Name() const override { return "PlayWithItemsGoal"; }
 
     private:

@@ -78,8 +78,10 @@ namespace Client {
         ClientPortal orange;
 
         // Teleport flash — both portals light up briefly when something
-        // teleports through the pair. flashEndTimeSec is wall-clock
-        // glfwGetTime() at which the flash expires; the renderer
+        // teleports through the pair. flashEndTimeSec is the world clock
+        // (Client::g_clientTickRate.WorldClockSeconds — every time on this
+        // struct and ClientPortal is, so they all hold while the world is
+        // paused) at which the flash expires; the renderer
         // computes the per-frame intensity by subtracting now() and
         // dividing by kFlashDurationSec. Zero = no flash active.
         double flashEndTimeSec = 0.0;

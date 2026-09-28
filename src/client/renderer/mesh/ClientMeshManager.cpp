@@ -12,6 +12,16 @@
 #include "../backend/RenderBackend.hpp"
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include "MeshPriority.hpp"
+#include "common/core/Features.hpp"
+#include "common/portal/PortalRoute.hpp"
+#if ENABLE_IMMERSIVE_PORTALS
+#include "client/portal/ClientImmersivePortals.hpp"
+#endif
+#if ENABLE_PORTAL_GUN
+#include "client/portal/ClientPortalManager.hpp"
+#endif
 
 namespace Render {
 
@@ -164,8 +174,46 @@ namespace Render {
     // PLAYER POSITION UPDATES
     // ========================================================================
 
+    void ClientMeshManager::SetTranslucentSortCamera(const glm::dvec3& cameraPos) {
+        const Game::DimensionId dimension = m_chunkManager ? m_chunkManager->Dimension()
+                                                           : Client::ClientLevels::BoundDimension();
+        Threading::SetClientWorkerSortCamera(dimension, cameraPos);
+    }
+
+    bool ClientMeshManager::BuildViewSortedTranslucentIndices(Game::Math::ChunkPos chunkPos, int sectionY,
+                                                              const glm::dvec3& cameraPos,
+                                                              std::vector<uint32_t>& outIndices) {
+        outIndices.clear();
+        auto it = m_gpuData.find(SectionKey{chunkPos, sectionY});
+        if (it == m_gpuData.end()) return false;
+        const GPUSectionData& gpuData = it->second;
+        if (gpuData.translucentCentroids.empty() || !gpuData.translucentDrawCmd.valid) return false;
+
+        const MegaBufferSectionKey megaKey{chunkPos, sectionY};
+        size_t vertexOffset = 0;
+        if (!m_translucentMegaBuffer.GetSectionVertexOffset(megaKey, vertexOffset)) return false;
+
+        const glm::ivec3 origin(
+            chunkPos.x * 16,
+            Game::Math::WorldCoordinates::SectionCoordsToWorldY(sectionY, 0),
+            chunkPos.z * 16);
+        TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids,
+                                            TranslucentSort::SectionRelativeCamera(cameraPos, origin),
+                                            m_resortIndexScratch, m_resortOrderScratch,
+                                            m_resortKeyScratch);
+        if (m_resortIndexScratch.size() != static_cast<size_t>(gpuData.translucentDrawCmd.indexCount)) {
+            return false;
+        }
+        outIndices.resize(m_resortIndexScratch.size());
+        const uint32_t base = static_cast<uint32_t>(vertexOffset);
+        for (size_t i = 0; i < m_resortIndexScratch.size(); ++i) {
+            outIndices[i] = base + m_resortIndexScratch[i];
+        }
+        return true;
+    }
+
     bool ClientMeshManager::ResortTranslucentSection(Game::Math::ChunkPos chunkPos, int sectionY,
-                                                     const glm::vec3& cameraPos,
+                                                     const glm::dvec3& cameraPos,
                                                      bool blockPosChanged, bool isNearby) {
         auto it = m_gpuData.find(SectionKey{chunkPos, sectionY});
         if (it == m_gpuData.end()) return false;
@@ -195,7 +243,10 @@ namespace Render {
         // MC-faithful fix; if Resort.Upload dominates, async buys nothing and the
         // problem is the buffer update instead.
         { PROFILE_ZONE_N("Resort.Sort");
-        TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids, cameraPos,
+        // Section-relative, as the centroids are (ClientWorkerPool) — MC
+        // createVertexSorting.
+        TranslucentSort::BuildSortedIndices(gpuData.translucentCentroids,
+                                            TranslucentSort::SectionRelativeCamera(cameraPos, origin),
                                             m_resortIndexScratch, m_resortOrderScratch,
                                             m_resortKeyScratch);
         }
@@ -1172,6 +1223,117 @@ namespace Render {
     void SetClientMeshPlayerPosition(const glm::vec3& position) {
         if (g_clientMeshManager) {
             g_clientMeshManager->SetPlayerPosition(position);
+        }
+    }
+
+    void UpdateMeshPortalRoutes(const glm::dvec3& eye) {
+        auto* pool = Threading::g_clientWorkerPool.get();
+        if (!pool || !Client::ClientLevels::HasSession()) return;
+        PROFILE_ZONE_N("MeshPortalRoutes");
+
+        // The server's reach for a portal's far side (IntegratedServer::
+        // ComputeChunkLoaders: kVisibleRangeChunks for ordinary surfaces,
+        // 256 chunks for global ones), so client and server agree on which
+        // portals reorder anything.
+        constexpr double kRouteRange       = 8.0 * 16.0;
+        constexpr double kGlobalRouteRange = 256.0 * 16.0;
+
+        const Game::DimensionId here = Client::ClientLevels::ActiveDimension();
+        MeshPriority::Fields fields;
+        for (int slot = 0; slot < Game::kDimensionCount; ++slot) {
+            fields[slot].Clear(Game::kAllDimensions[slot] == here);
+        }
+        auto add = [&](const Game::PortalRoute::Route& r) {
+            // A route back into this level whose far point is no farther
+            // from the eye than its surface (a portal whose far side is
+            // right beside the player) never beats the direct distance
+            // (triangle inequality, scale <= 1): it must not take one of the
+            // field's slots from a route that matters.
+            if (r.dimension == here && r.invScale >= 1.0 &&
+                glm::length(r.farPoint - eye) <= r.entryCost + 1.0) return;
+            MeshPriority::Route m;
+            m.farPoint  = glm::vec3(r.farPoint);
+            m.entryCost = static_cast<float>(r.entryCost);
+            m.invScale  = static_cast<float>(r.invScale);
+            m.portalId  = r.portalId;
+            fields[Game::DimensionSlot(r.dimension)].Add(m);
+        };
+
+#if ENABLE_IMMERSIVE_PORTALS
+        // Which portals are close enough to matter changes only when the
+        // portal set does or the viewer changes section: the candidate list
+        // is rebuilt then, and only their routes are re-measured per frame
+        // (a handful of clamps — the entry leg must follow the eye exactly,
+        // a portal a block away being the case this exists for).
+        struct CandidateCache {
+            bool valid = false;
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            glm::ivec3 section{0};
+            uint64_t revision = 0;
+            const Client::ClientImmersivePortals* store = nullptr;
+            std::vector<Game::Immersive::PortalId> ids;
+        };
+        static CandidateCache s_cache;
+        const Client::ClientImmersivePortals& store = Client::ClientLevels::Active().Portals();
+        const glm::ivec3 section(static_cast<int>(std::floor(eye.x)) >> 4,
+                                 static_cast<int>(std::floor(eye.y)) >> 4,
+                                 static_cast<int>(std::floor(eye.z)) >> 4);
+        if (!s_cache.valid || s_cache.dimension != here || s_cache.section != section ||
+            s_cache.revision != store.Revision() || s_cache.store != &store) {
+            s_cache.valid     = true;
+            s_cache.dimension = here;
+            s_cache.section   = section;
+            s_cache.revision  = store.Revision();
+            s_cache.store     = &store;
+            s_cache.ids.clear();
+            // A section's worth of slack: the eye moves within it before
+            // the next rebuild.
+            constexpr double kCandidateRange = kRouteRange + 32.0;
+            store.ForEach([&](const Game::Immersive::Portal& p) {
+                if (!p.Has(Game::Immersive::PortalFlag::Visible)) return;
+                if (!p.Has(Game::Immersive::PortalFlag::Global)) {
+                    glm::dvec3 mn, mx;
+                    p.BoundingBox(mn, mx, 0.0);
+                    if (glm::length(glm::clamp(eye, mn, mx) - eye) > kCandidateRange) return;
+                }
+                s_cache.ids.push_back(p.id);
+            });
+        }
+        for (const Game::Immersive::PortalId id : s_cache.ids) {
+            const Game::Immersive::Portal* p = store.Get(id);
+            if (!p) continue;
+            const double range = p->Has(Game::Immersive::PortalFlag::Global) ? kGlobalRouteRange : kRouteRange;
+            if (auto r = Game::PortalRoute::ThroughImmersive(*p, eye, range)) add(*r);
+        }
+#endif
+
+#if ENABLE_PORTAL_GUN
+        // Vanilla gun pairs (an immersive-mode pair is an immersive record
+        // above). Few, so walked every frame.
+        Client::GetClientPortalManager().ForEachPair([&](uint64_t, const Client::ClientPortalPair& pair) {
+            if (!pair.blue.active || !pair.orange.active) return;
+            if (pair.blue.immersive || pair.orange.immersive) return;
+            const Client::ClientPortal* ends[2][2] = { { &pair.blue, &pair.orange },
+                                                       { &pair.orange, &pair.blue } };
+            for (const auto& end : ends) {
+                const Client::ClientPortal& from = *end[0];
+                const Client::ClientPortal& to   = *end[1];
+                if (from.dimension != here) continue;
+                if (auto r = Game::PortalRoute::ThroughGun(from.origin, glm::dvec3(from.normal), to.dimension,
+                                                           to.origin, glm::dvec3(to.normal), eye, kRouteRange)) {
+                    add(*r);
+                }
+            }
+        });
+#endif
+
+        // Publish only on change: the pool's lock is also every poll's.
+        static MeshPriority::Fields s_published;
+        static bool s_publishedOnce = false;
+        if (!s_publishedOnce || fields != s_published) {
+            pool->SetMeshPriorityFields(fields);
+            s_published = fields;
+            s_publishedOnce = true;
         }
     }
 

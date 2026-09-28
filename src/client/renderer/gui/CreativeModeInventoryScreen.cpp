@@ -1,28 +1,28 @@
 // File: src/client/renderer/gui/CreativeModeInventoryScreen.cpp
 #include "CreativeModeInventoryScreen.hpp"
+#include "CreativeHotbars.hpp"
 #include "EffectsInInventory.hpp"
+#include "FontRenderer.hpp"
 #include "InventoryScreen.hpp"          // GetSurvivalInventoryScreen (gamemode swap)
 #include "GuiGraphics.hpp"
 #include "items/PlayerInventoryPreview.hpp"
 #include "screens/Screen.hpp"           // LoadStandaloneGuiTexture
-#include "common/world/block/BlockRegistry.hpp"
-#include "common/world/block/RedstonePlus.hpp"
-#include "common/entity/GeneratedItemList.hpp"   // Game::Items::Compass etc.
-#include "common/world/enchantment/Enchantment.hpp"
-#include "common/world/enchantment/EnchantmentHelper.hpp"
-#include "common/entity/alchemy/Potions.hpp"
-#include "common/data/DataComponents.hpp"
-#include "common/text/Language.hpp"
-#include "common/entity/decoration/PaintingVariants.hpp"
+#include "screens/Widgets.hpp"          // WidgetDims (page button text colours)
 #include "client/entity/Player.hpp"
-#include "common/world/portal/PortalState.hpp"
-#include "common/core/Features.hpp"
+#include "client/input/KeyMapping.hpp"
+#include "client/sound/ClientSounds.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/entity/GeneratedItemList.hpp"   // Game::Items::Compass etc.
+#include "common/text/Language.hpp"
+#include "common/text/TextComponent.hpp"
+#include "common/world/tags/DataTags.hpp"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <set>
 
 namespace {
     long long NowMillis() {
@@ -30,65 +30,48 @@ namespace {
         return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
     }
 
-    inline std::string ToLower(const std::string& s) {
+    // MC toLowerCase(Locale.ROOT) on the query and every indexed string.
+    std::string ToLower(std::string_view s) {
         std::string r;
         r.reserve(s.size());
-        for (char c : s) r.push_back((char)std::tolower((unsigned char)c));
+        for (char c : s) r.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
         return r;
     }
 
-    // Whether a block has an item form (= can appear in inventory). MC's
-    // Items.java explicitly registers BlockItems for ~1000 blocks; the rest are
-    // placement-only or technical blocks (wall_torch is auto-placed when you
-    // right-click a torch on a wall, redstone_wire is the placed form of
-    // redstone dust, etc.). Without this filter, the search tab shows
-    // duplicates like "Wall Torch" alongside "Torch".
-    //
-    // TODO: replace this hardcoded denylist by extending tools/gen_items.py to
-    // emit a `kBlockItemSlugs` allowlist parsed from Items.java's
-    // `registerBlock(Blocks.X, ...)` calls. That's the MC-faithful approach.
-    // Engine blocks that exist only under a rule: the blue (zero-delay)
-    // redstone torch is offered only while redstone_plus is on (mirrored
-    // through WorldRulesS2C, so a remote client agrees with its host).
-    bool BlockOfferedNow(Game::BlockID id) {
-        if (id == Game::BlockID::BlueRedstoneTorch || id == Game::BlockID::BlueRedstoneWallTorch ||
-            id == Game::BlockID::DisplayBlock) {
-            return Game::RedstonePlus::Enabled();
-        }
-        return true;
+    std::string Trim(std::string_view s) {
+        size_t b = 0, e = s.size();
+        while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+        while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+        return std::string(s.substr(b, e - b));
     }
 
-    bool BlockHasItemForm(const std::string& slug) {
-        // Substring patterns: anything matching is a wall/auto-placed variant.
-        for (const char* needle : {
-            "wall_torch", "wall_sign", "wall_hanging_sign",
-            "wall_banner", "wall_skull", "wall_head", "wall_fan",
-        }) {
-            if (slug.find(needle) != std::string::npos) return false;
-        }
-        // Exact-match technical/placeholder blocks.
-        switch (slug.size()) {
-            default: break;
-            case 3: if (slug == "air") return false; break;
-            case 4: if (slug == "fire" || slug == "lava" || slug == "kelp" || slug == "wheat") return false; break;
-            case 5: if (slug == "water" || slug == "cocoa") return false; break;
-            case 7: if (slug == "carrots" || slug == "tripwire" || slug == "void_air"
-                        || slug == "cave_air" || slug == "frosted_ice") return false; break;
-            case 8: if (slug == "potatoes" || slug == "soul_fire") return false; break;
-            case 9: if (slug == "beetroots" || slug == "kelp_plant") return false; break;
-            case 11: if (slug == "piston_head" || slug == "pumpkin_stem"
-                         || slug == "redstone_wire" || slug == "end_portal"
-                         || slug == "hush_portal" || slug == "melon_stem") return false; break;
-            case 13: if (slug == "moving_piston" || slug == "nether_portal"
-                         || slug == "end_gateway" || slug == "tall_seagrass"
-                         || slug == "bubble_column" || slug == "aether_portal") return false; break;
-            case 15: if (slug == "twilight_portal") return false; break;
-            case 16: if (slug == "sweet_berry_bush" || slug == "bamboo_sapling") return false; break;
-            case 21: if (slug == "attached_melon_stem") return false; break;
-            case 23: if (slug == "attached_pumpkin_stem") return false; break;
-        }
-        return true;
+    bool Contains(const std::string& haystack, const std::string& needle) {
+        return haystack.find(needle) != std::string::npos;
     }
+
+    // "#minecraft:logs" -> ("minecraft", "logs").
+    std::pair<std::string, std::string> SplitTag(std::string_view tag) {
+        if (!tag.empty() && tag.front() == '#') tag.remove_prefix(1);
+        const size_t colon = tag.find(':');
+        if (colon == std::string_view::npos) return {"minecraft", std::string(tag)};
+        return {std::string(tag.substr(0, colon)), std::string(tag.substr(colon + 1))};
+    }
+
+    bool IsBoundKey(const Input::KeyMapping* mapping, int glfwKey) {
+        return mapping && mapping->key == Input::BoundKey::Keyboard(glfwKey);
+    }
+
+    // The hotbar slot `glfwKey` selects (0..8), -1 for none.
+    int HotbarKeyIndex(int glfwKey) {
+        for (int i = 0; i < 9; ++i) {
+            if (IsBoundKey(Input::Binds::Hotbar[i], glfwKey)) return i;
+        }
+        return -1;
+    }
+
+    constexpr uint32_t kTitleColor   = 0xFF404040u;   // MC -12566464
+    constexpr uint32_t kBlue         = 0xFF5555FFu;   // ChatFormatting.BLUE
+    constexpr uint32_t kDarkPurple   = 0xFFAA00AAu;   // ChatFormatting.DARK_PURPLE
 }
 
 namespace Render {
@@ -98,23 +81,46 @@ namespace Render {
         return s;
     }
 
+    // ─── Tab selection ───────────────────────────────────────────
+    const CreativeModeTab& CreativeModeInventoryScreen::SelectedTab() const {
+        const int index = CreativeModeTabs::IndexOf(m_selectedTabKey);
+        if (index < 0) return CreativeModeTabs::DefaultTab();
+        return CreativeModeTabs::AllTabs()[static_cast<size_t>(index)];
+    }
+
     void CreativeModeInventoryScreen::OnOpen() {
-        m_currentTab = Tab::Survival;
+        // MC init: rebuild the tabs if their parameters moved, then re-select
+        // the remembered tab from the default (so a search starts empty).
+        CreativeModeTabs::TryRebuildTabContents(
+            CreativeModeTabs::CurrentParameters(Player() && Player()->IsCreative()));
+        m_searchIndexValid = false;
+        const std::string remembered = m_selectedTabKey;
+        m_selectedTabKey = CreativeModeTabs::DefaultTab().key;
         m_searchText.clear();
         m_searchCursorPos = 0;
         m_searchHighlightPos = 0;
-        m_searchFocused = false;
-        m_scrollOffs = 0.0f;
+        SelectTab(remembered);
+        if (!SelectedTab().ShouldDisplay() || CreativeModeTabs::IndexOf(remembered) < 0) {
+            SelectTab(CreativeModeTabs::DefaultTab().key);
+        }
+        // NeoForge: open on the first page that holds the selected tab.
+        const CreativeModeTab& tab = SelectedTab();
+        m_page = tab.onEveryPage ? 0 : tab.page;
         m_isScrolling = false;
-        m_searchDirty = true;
+        m_ignoreTextInput = false;
         m_hoveredCreativeStack = Game::ItemStack{};
-        // Pre-warm item textures the screen uses so the first render frame can
-        // draw them. Without this the compass appeared one tab-switch late,
-        // because the texture create + bind landed in the same frame as the draw.
-        GuiGraphics::PreloadItem(Game::Items::Compass);
+        m_hoveredCreativeIndex = -1;
+        // Pre-warm the tab icons' textures so the first render frame can draw
+        // them. Without this the search tab's compass appeared one tab-switch
+        // late, because the texture create + bind landed in the same frame as
+        // the draw.
+        for (const CreativeModeTab& t : CreativeModeTabs::AllTabs()) {
+            if (!t.icon.IsEmpty()) GuiGraphics::PreloadItem(t.icon.itemId);
+        }
     }
 
     void CreativeModeInventoryScreen::ContainerTick() {
+        RefreshTabs();
         // The mirror of InventoryScreen::ContainerTick: a player who loses
         // infinite materials (a /gamemode survival while the picker is open)
         // gets handed the survival panel. Silent on both ends so the cursor
@@ -125,16 +131,112 @@ namespace Render {
         }
     }
 
-    void CreativeModeInventoryScreen::SwitchTab(Tab t) {
-        if (m_currentTab == t) return;
-        m_currentTab = t;
+    // MC tryRefreshInvalidatedTabs: a rule, permission or option change
+    // rebuilt the tabs — refresh what the selected one shows, or fall back to
+    // the default when it has nothing left.
+    void CreativeModeInventoryScreen::RefreshTabs() {
+        if (!CreativeModeTabs::TryRebuildTabContents(
+                CreativeModeTabs::CurrentParameters(Player() && Player()->IsCreative()))) {
+            return;
+        }
+        m_searchIndexValid = false;
+        const CreativeModeTab& tab = SelectedTab();
+        if (CreativeModeTabs::IndexOf(m_selectedTabKey) < 0 ||
+            (tab.type == CreativeModeTab::Type::Category && tab.displayItems.empty())) {
+            SelectTab(CreativeModeTabs::DefaultTab().key);
+            m_page = 0;
+        } else {
+            RefreshCurrentTabContents();
+        }
+    }
+
+    // MC refreshCurrentTabContents: new contents, same row.
+    void CreativeModeInventoryScreen::RefreshCurrentTabContents() {
+        const int oldRow = GetRowIndexForScroll(m_scrollOffs);
+        const CreativeModeTab& tab = SelectedTab();
+        m_hoveredCreativeStack = Game::ItemStack{};
+        m_hoveredCreativeIndex = -1;
+        m_items.clear();
+        m_locked.clear();
+        switch (tab.type) {
+            case CreativeModeTab::Type::Search:    RefreshSearchResults(); break;
+            case CreativeModeTab::Type::Hotbar:    FillHotbarTab(); break;
+            case CreativeModeTab::Type::Category:  m_items = tab.displayItems; break;
+            case CreativeModeTab::Type::Inventory: break;
+        }
+        m_locked.resize(m_items.size(), 0);
+        m_scrollOffs = GetScrollForRowIndex(oldRow);
+    }
+
+    // MC selectTab.
+    void CreativeModeInventoryScreen::SelectTab(const std::string& key) {
+        const std::string oldKey = m_selectedTabKey;
+        m_selectedTabKey = key;
+        m_hoveredCreativeStack = Game::ItemStack{};
+        m_hoveredCreativeIndex = -1;
+        const CreativeModeTab& tab = SelectedTab();
+        m_items.clear();
+        m_locked.clear();
+        if (tab.type == CreativeModeTab::Type::Hotbar) {
+            FillHotbarTab();
+        } else if (tab.type == CreativeModeTab::Type::Category) {
+            m_items = tab.displayItems;
+        }
+        m_locked.resize(m_items.size(), 0);
+
+        if (tab.type == CreativeModeTab::Type::Search) {
+            // setCanLoseFocus(false) + setFocused(true); a different tab
+            // starts an empty query.
+            m_searchFocused = true;
+            m_searchFocusedAtMillis = NowMillis();
+            if (oldKey != key) {
+                m_searchText.clear();
+                m_searchCursorPos = 0;
+                m_searchHighlightPos = 0;
+            }
+            RefreshSearchResults();
+        } else {
+            m_searchFocused = false;
+            m_searchText.clear();
+            m_searchCursorPos = 0;
+            m_searchHighlightPos = 0;
+            m_visibleTags.clear();
+        }
         m_scrollOffs = 0.0f;
-        m_searchText.clear();
-        m_searchCursorPos = 0;
-        m_searchHighlightPos = 0;
-        m_searchFocused = (t == Tab::Search);
-        m_searchFocusedAtMillis = NowMillis();
-        m_searchDirty = true;
+        m_isScrolling = false;
+    }
+
+    // MC selectTab(HOTBAR): each saved hotbar as a row; an empty one shows a
+    // locked paper in its own column naming the keys that save it.
+    void CreativeModeInventoryScreen::FillHotbarTab() {
+        m_items.clear();
+        m_locked.clear();
+        auto keyName = [](const Input::KeyMapping* m) { return m ? m->key.DisplayName() : std::string("?"); };
+        for (int i = 0; i < CreativeHotbars::kHotbarCount; ++i) {
+            if (CreativeHotbars::IsEmpty(i)) {
+                for (int y = 0; y < CreativeHotbars::kSlots; ++y) {
+                    if (y == i) {
+                        Game::ItemStack placeholder(Game::Items::Paper, 1);
+                        placeholder.components.set(
+                            Game::DataComponents::ITEM_NAME,
+                            Game::Text::GetString(Game::Text::Component::Translatable(
+                                "inventory.hotbarInfo",
+                                {Game::Text::Component::Literal(keyName(Input::Binds::SaveToolbarActivator)),
+                                 Game::Text::Component::Literal(keyName(Input::Binds::Hotbar[i]))})));
+                        m_items.push_back(std::move(placeholder));
+                        m_locked.push_back(1);
+                    } else {
+                        m_items.emplace_back();
+                        m_locked.push_back(0);
+                    }
+                }
+            } else {
+                for (const Game::ItemStack& stack : CreativeHotbars::Get(i)) {
+                    m_items.push_back(stack);
+                    m_locked.push_back(0);
+                }
+            }
+        }
     }
 
     // ─── Slot layout ─────────────────────────────────────────────
@@ -142,19 +244,18 @@ namespace Render {
         Game::AbstractContainerMenu* menu = Menu();
         if (!menu || !menu->IsValidSlotIndex(menuIndex)) return false;
 
-        // MC CreativeModeInventoryScreen.selectTab lines 524-552 re-wraps every
+        // MC CreativeModeInventoryScreen.selectTab re-wraps every
         // player-inventory slot at a position for THIS panel. Crafting result +
         // grid go to (-2000, -2000) — off-panel, i.e. not drawn or clickable.
         if (menuIndex < Game::Inventory::ARMOR_BEGIN) return false;
 
-        // The Search tab replaces the panel's contents with the item grid; only
-        // the hotbar stays visible beneath it. MC achieves this by swapping the
-        // menu's slot list back to the picker's own. Leaving the main rows
+        // Every tab but the inventory replaces the panel's contents with the
+        // item grid; only the hotbar stays visible beneath it (MC swaps the
+        // menu's slot list back to the picker's own). Leaving the main rows
         // hittable here would route clicks on "empty" grid cells into hidden
         // storage slots.
-        if (m_currentTab != Tab::Survival && !Game::Inventory::IsHotbarSlot(menuIndex)) {
-            return false;
-        }
+        const bool inventoryTab = SelectedType() == CreativeModeTab::Type::Inventory;
+        if (!inventoryTab && !Game::Inventory::IsHotbarSlot(menuIndex)) return false;
 
         if (Game::Inventory::IsArmorSlot(menuIndex)) {
             const int pos = menuIndex - Game::Inventory::ARMOR_BEGIN;
@@ -169,7 +270,8 @@ namespace Render {
         }
 
         // Main rows and hotbar: x = 9 + col*18; y = 54 + row*18, except the
-        // hotbar which is pinned to 112 (MC selectTab lines 542-549).
+        // hotbar which is pinned to 112 (ItemPickerMenu's addInventoryHotbarSlots
+        // and selectTab(INVENTORY) alike).
         const int pos = menuIndex - Game::Inventory::MAIN_BEGIN;
         outX = 9 + (pos % 9) * SLOT_STEP;
         outY = Game::Inventory::IsHotbarSlot(menuIndex) ? 112
@@ -178,228 +280,199 @@ namespace Render {
     }
 
     // ─── Search ──────────────────────────────────────────────────
-    void CreativeModeInventoryScreen::RefreshSearchResults() {
-        if (!m_searchDirty) return;
-        m_searchDirty = false;
-        m_filteredItems.clear();
-        const std::string needle = ToLower(m_searchText);
+    // MC SessionSearchTrees.updateCreativeTooltips / updateCreativeTags: every
+    // stack of the search tab with its tooltip lines (TooltipFlag NORMAL,
+    // formatting stripped, blank lines dropped), its item id, and its tags.
+    void CreativeModeInventoryScreen::EnsureSearchIndex() {
+        if (m_searchIndexValid) return;
+        m_searchIndexValid = true;
+        m_searchIndex.clear();
+        const auto& stacks = CreativeModeTabs::SearchTab().displayItems;
+        m_searchIndex.reserve(stacks.size());
+        std::vector<TooltipLine> lines;
+        for (const Game::ItemStack& stack : stacks) {
+            SearchEntry entry;
+            lines.clear();
+            BuildTooltipLines(stack, /*advanced=*/false, lines);
+            for (const TooltipLine& line : lines) {
+                std::string text = Trim(line.text);
+                if (!text.empty()) entry.lines.push_back(ToLower(text));
+            }
+            entry.idNamespace = CreativeModeTabs::NamespaceOf(stack.itemId);
+            entry.idPath = CreativeModeTabs::NameOf(stack.itemId);
+            for (const std::string& tag : Game::DataTags::TagsFor(Game::DataTags::Registry::Item, entry.idPath)) {
+                entry.tags.push_back(SplitTag(tag));
+            }
+            m_searchIndex.push_back(std::move(entry));
+        }
+    }
 
-        // Iterate ALL items (block items + pure items) so the user can find
-        // Compass etc. Block items have IDs 1..(BlockID::Count-1); pure items
-        // live at PURE_ITEM_BASE+.
-        const int blockItemCount = (int)Game::BlockID::Count;
-        for (int i = 1; i < blockItemCount; ++i) {
-            const auto& block = Game::BlockRegistry::Get((Game::BlockID)i);
-            if (!BlockHasItemForm(block.modelName)) continue;
-            if (!BlockOfferedNow((Game::BlockID)i)) continue;
-            const auto& it = Game::ItemRegistry::Get((Game::ItemID)i);
-            if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
-                m_filteredItems.emplace_back((Game::ItemID)i, 1);
+    // MC refreshSearchResults: the whole search tab for an empty query;
+    // otherwise creativeNameSearch (plain text over the tooltip lines, or
+    // `namespace:path` over the id) or, after '#', creativeTagSearch — each
+    // result in the search tab's own order.
+    void CreativeModeInventoryScreen::RefreshSearchResults() {
+        m_hoveredCreativeStack = Game::ItemStack{};
+        m_hoveredCreativeIndex = -1;
+        m_items.clear();
+        m_locked.clear();
+        m_visibleTags.clear();
+        const auto& stacks = CreativeModeTabs::SearchTab().displayItems;
+        if (m_searchText.empty()) {
+            m_items = stacks;
+        } else {
+            EnsureSearchIndex();
+            std::string term = m_searchText;
+            const bool tagSearch = !term.empty() && term.front() == '#';
+            if (tagSearch) term.erase(0, 1);
+            term = ToLower(term);
+            const size_t colon = term.find(':');
+            const std::string ns   = colon == std::string::npos ? std::string{} : Trim(term.substr(0, colon));
+            const std::string path = colon == std::string::npos ? term : Trim(term.substr(colon + 1));
+
+            if (tagSearch) {
+                // updateVisibleTags: every item tag whose id matches.
+                std::set<std::string> visible;
+                for (const SearchEntry& e : m_searchIndex) {
+                    for (const auto& [tagNs, tagPath] : e.tags) {
+                        const bool match = colon == std::string::npos
+                            ? Contains(tagPath, term)
+                            : Contains(tagNs, ns) && Contains(tagPath, path);
+                        if (match) visible.insert(tagNs + ":" + tagPath);
+                    }
+                }
+                m_visibleTags.assign(visible.begin(), visible.end());
+            }
+
+            for (size_t i = 0; i < m_searchIndex.size() && i < stacks.size(); ++i) {
+                const SearchEntry& e = m_searchIndex[i];
+                bool match = false;
+                if (tagSearch) {
+                    // IdSearchTree over the tags: path alone, or namespace AND path.
+                    for (const auto& [tagNs, tagPath] : e.tags) {
+                        match = colon == std::string::npos
+                            ? Contains(tagPath, term)
+                            : Contains(tagNs, ns) && Contains(tagPath, path);
+                        if (match) break;
+                    }
+                } else if (colon == std::string::npos) {
+                    // FullTextSearchTree.searchPlainText: the tooltip lines.
+                    for (const std::string& line : e.lines) {
+                        if (Contains(line, term)) { match = true; break; }
+                    }
+                } else if (Contains(e.idNamespace, ns)) {
+                    // searchIdentifier: the namespace, and the path either in
+                    // the id or in the tooltip text.
+                    match = Contains(e.idPath, path);
+                    for (size_t l = 0; !match && l < e.lines.size(); ++l) match = Contains(e.lines[l], path);
+                }
+                if (match) m_items.push_back(stacks[i]);
             }
         }
-
-        // Pure items — walk the registered map directly so CUSTOM items past
-        // the kPureItemTable bounds (Portal Gun, future feature items) are
-        // included automatically. Iterating the table directly used to MISS
-        // anything registered after the MC-table loop in ItemRegistry::Initialize.
-        Game::ItemRegistry::ForEachPureItem([&](Game::ItemID id, const Game::Item&) {
-#if ENABLE_PORTAL_GUN
-            // /gamerule portal_gun false: the gun is not offered (WorldRulesS2C
-            // keeps a remote client's flag in step with the host's).
-            if (id == Game::Items::PortalGun && !Game::Portals::PortalGunAllowed()) return;
-#endif
-#if ENABLE_IMMERSIVE_PORTALS
-            // /gamerule immersive_portals false: the wand only makes immersive
-            // portals, so it is not offered either.
-            if (id == Game::Items::PortalWand && !Game::Portals::ImmersiveNetherPortals()) return;
-#endif
-            // Special case: enchanted_book expands into one stack per
-            // (enchantment, level) pair — mirrors MC's
-            // CreativeModeTabs.generateEnchantmentBook TypesAllLevels at
-            // CreativeModeTabs.java:1843-1844, which streams
-            // IntStream.rangeClosed(minLevel, maxLevel) and calls
-            // EnchantmentHelper.createBook(...) for each. The match needle
-            // filters against the enchantment's display name so "sharpness"
-            // finds Sharpness I-V.
-            if (id == Game::Items::EnchantedBook) {
-                // The item itself is "Enchanted Book" — also let users find
-                // every variant by typing the item's own name (or a substring
-                // like "enchant"). MC's search tab matches BOTH the item name
-                // and per-variant tooltip lines this way.
-                const auto& bookItem = Game::ItemRegistry::Get(id);
-                const bool itemNameMatches =
-                    !needle.empty()
-                    && ToLower(bookItem.name).find(needle) != std::string::npos;
-                const auto& all = Game::EnchantmentRegistry::All();
-                for (size_t ei = 0; ei < all.size(); ++ei) {
-                    const auto& ench = all[ei];
-                    const Game::EnchantmentId enchId = static_cast<Game::EnchantmentId>(ei);
-                    for (int level = ench.minLevel; level <= ench.maxLevel; ++level) {
-                        if (needle.empty()
-                            || itemNameMatches
-                            || ToLower(ench.displayName).find(needle) != std::string::npos) {
-                            m_filteredItems.push_back(
-                                Game::EnchantmentHelper::CreateBook({enchId, level}));
-                        }
-                    }
-                }
-                return; // (lambda — equivalent of `continue` in the old for-loop)
-            }
-            // Potions — CreativeModeTabs.generatePotionEffectTypes: one stack
-            // per registered potion, PotionContents.createItemStack(item,
-            // potion), for the potion, splash and lingering potions (FOOD_
-            // AND_DRINKS) and the tipped arrow (COMBAT), all PARENT_AND_
-            // SEARCH. Each variant matches on its own name ("Potion of
-            // Swiftness") or the item's.
-            if (id == Game::Items::Potion || id == Game::Items::SplashPotion ||
-                id == Game::Items::LingeringPotion || id == Game::Items::TippedArrow) {
-                const bool itemNameMatches =
-                    !needle.empty() &&
-                    ToLower(Game::ItemRegistry::Get(id).name).find(needle) != std::string::npos;
-                for (int p = 0; p < Game::kPotionCount; ++p) {
-                    Game::ItemStack variant =
-                        Game::CreatePotionItemStack(id, static_cast<Game::PotionId>(p));
-                    if (needle.empty() || itemNameMatches ||
-                        ToLower(Game::GetItemStackHoverName(variant)).find(needle) != std::string::npos) {
-                        m_filteredItems.push_back(std::move(variant));
-                    }
-                }
-                return;
-            }
-            // Paintings — the plain painting, then CreativeModeTabs.
-            // generatePresetPaintings: one painting per #placeable variant,
-            // PAINTING_VARIANT set, ordered by area then width (a stable sort
-            // over the registry's id order, as MC's sorted() is). Each preset
-            // also matches on its canvas's title and author.
-            if (id == Game::Items::Painting) {
-                const std::string itemName = ToLower(Game::ItemRegistry::Get(id).name);
-                const bool itemNameMatches = needle.empty() || itemName.find(needle) != std::string::npos;
-                if (itemNameMatches) m_filteredItems.emplace_back(id, 1);
-                std::vector<int> presets = Game::PaintingVariants::Placeable();
-                std::sort(presets.begin(), presets.end());
-                std::stable_sort(presets.begin(), presets.end(), [](int a, int b) {
-                    const Game::PaintingVariant* va = Game::PaintingVariants::Get(a);
-                    const Game::PaintingVariant* vb = Game::PaintingVariants::Get(b);
-                    if (va->Area() != vb->Area()) return va->Area() < vb->Area();
-                    return va->width < vb->width;
-                });
-                for (int index : presets) {
-                    const Game::PaintingVariant* variant = Game::PaintingVariants::Get(index);
-                    bool matches = itemNameMatches;
-                    for (const auto* line : { &variant->title, &variant->author }) {
-                        if (matches || !*line) continue;
-                        const std::string text = ToLower(Game::Language::GetOrDefault((*line)->translate, ""));
-                        matches = !text.empty() && text.find(needle) != std::string::npos;
-                    }
-                    if (!matches) continue;
-                    Game::ItemStack preset(id, 1);
-                    preset.components.set(Game::DataComponents::PAINTING_VARIANT, variant->id);
-                    m_filteredItems.push_back(std::move(preset));
-                }
-                return;
-            }
-            // Suspicious stew — CreativeModeTabs.generateSuspiciousStews: one
-            // stew per SuspiciousEffectHolder (every flower), deduplicated by
-            // components (ItemStackLinkedSet.createTypeAndComponentsSet), so
-            // the three 7-tick saturation flowers make a single stew.
-            if (id == Game::Items::SuspiciousStew) {
-                const auto& stewItem = Game::ItemRegistry::Get(id);
-                if (!needle.empty() && ToLower(stewItem.name).find(needle) == std::string::npos) return;
-                std::vector<Game::SuspiciousStewEffects> seen;
-                for (Game::BlockID flower : Game::GetSuspiciousEffectFlowers()) {
-                    const Game::SuspiciousStewEffects* effects = Game::GetFlowerSuspiciousEffects(flower);
-                    if (!effects) continue;
-                    bool duplicate = false;
-                    for (const auto& s : seen) if (s == *effects) { duplicate = true; break; }
-                    if (duplicate) continue;
-                    seen.push_back(*effects);
-                    Game::ItemStack stew(id, 1);
-                    stew.components.set(Game::DataComponents::SUSPICIOUS_STEW_EFFECTS, *effects);
-                    m_filteredItems.push_back(std::move(stew));
-                }
-                return;
-            }
-            const auto& it = Game::ItemRegistry::Get(id);
-            if (needle.empty() || ToLower(it.name).find(needle) != std::string::npos) {
-                m_filteredItems.emplace_back(id, 1);
-            }
-        });
+        m_locked.assign(m_items.size(), 0);
         m_scrollOffs = 0.0f;
     }
 
-    int CreativeModeInventoryScreen::GetRowCount() const {
-        int rows = ((int)m_filteredItems.size() + GRID_COLS - 1) / GRID_COLS; // ceil(n/9)
-        return std::max(0, rows - GRID_ROWS);
+    // ─── Scroll (ItemPickerMenu) ─────────────────────────────────
+    int CreativeModeInventoryScreen::CalculateRowCount() const {
+        return (static_cast<int>(m_items.size()) + GRID_COLS - 1) / GRID_COLS - GRID_ROWS;
     }
-    int CreativeModeInventoryScreen::GetRowIndex() const {
-        const int rc = GetRowCount();
-        if (rc <= 0) return 0;
-        const int idx = (int)std::floor(m_scrollOffs * rc + 0.5f);
-        return std::max(0, std::min(idx, rc));
+    int CreativeModeInventoryScreen::GetRowIndexForScroll(float scroll) const {
+        return std::max(static_cast<int>(static_cast<double>(scroll * static_cast<float>(CalculateRowCount())) + 0.5), 0);
     }
-    bool CreativeModeInventoryScreen::HasScrollBar() const {
-        return (int)m_filteredItems.size() > GRID_COLS * GRID_ROWS;
+    float CreativeModeInventoryScreen::GetScrollForRowIndex(int row) const {
+        const int rows = CalculateRowCount();
+        if (rows <= 0) return 0.0f;
+        return std::clamp(static_cast<float>(row) / static_cast<float>(rows), 0.0f, 1.0f);
+    }
+    bool CreativeModeInventoryScreen::CanScroll() const {
+        return SelectedTab().canScroll && static_cast<int>(m_items.size()) > GRID_COLS * GRID_ROWS;
+    }
+
+    // ─── Tabs ────────────────────────────────────────────────────
+    bool CreativeModeInventoryScreen::TabVisibleOnPage(const CreativeModeTab& tab) const {
+        return tab.ShouldDisplay() && (tab.onEveryPage || tab.page == m_page);
+    }
+
+    int CreativeModeInventoryScreen::TabX(const CreativeModeTab& tab) const {
+        // MC getTabX.
+        if (tab.alignedRight) return IMAGE_W - TAB_SPACING * (7 - tab.column) + 1;
+        return TAB_SPACING * tab.column;
+    }
+
+    int CreativeModeInventoryScreen::TabY(const CreativeModeTab& tab) const {
+        // MC getTabY.
+        return tab.row == CreativeModeTab::Row::Top ? -32 : IMAGE_H;
+    }
+
+    void CreativeModeInventoryScreen::SetPage(int page) {
+        m_page = std::clamp(page, 0, CreativeModeTabs::PageCount() - 1);
     }
 
     // ─── Hit testing ─────────────────────────────────────────────
     int CreativeModeInventoryScreen::HitTestExtras(int lx, int ly) {
-        // Clear the search-grid hover cache up front. The grid branch below is
-        // its only writer, and sets it back when the cursor IS over an occupied
-        // cell. Without this clear the cache would hold stale data when:
-        //   • the cursor moves off an item to an empty cell or off-grid,
-        //   • search results change underneath the cursor (typing filters the
-        //     grid, so the cell under the mouse may now be empty or different),
-        //   • a click on the grid causes the server to clear the cursor — the
-        //     tooltip path runs after the click and would still read the
-        //     pre-click hover stack.
-        // Resetting here ties the cache strictly to the current frame's hover.
+        // The grid hover is recomputed from scratch every frame, so it can
+        // never outlive the cell, the results or the click that emptied it.
         m_hoveredCreativeStack = Game::ItemStack{};
+        m_hoveredCreativeIndex = -1;
 
-        // Tabs sit ABOVE the panel (MC Row.TOP): y = -28 .. -28 + TAB_H, of
-        // which only the top 28px are visible — the panel covers the last 4.
-        const int tabY = -28;
-        if (ly >= tabY && ly < tabY + TAB_H - 4) {
-            if (lx >= 0 && lx < TAB_W) return HIT_TAB_SURVIVAL;
-            if (lx >= TAB_SPACING && lx < TAB_SPACING + TAB_W) return HIT_TAB_SEARCH;
+        // MC checkTabClicked (inclusive bounds), for the tabs on this page.
+        const auto& tabs = CreativeModeTabs::AllTabs();
+        for (size_t i = 0; i < tabs.size(); ++i) {
+            const CreativeModeTab& tab = tabs[i];
+            if (!TabVisibleOnPage(tab)) continue;
+            const int x = TabX(tab);
+            const int y = TabY(tab);
+            if (lx >= x && lx <= x + TAB_W && ly >= y && ly <= y + TAB_H) {
+                return HIT_TAB_BASE - static_cast<int>(i);
+            }
         }
 
-        if (m_currentTab == Tab::Search) {
-            if (lx >= SEARCH_X && lx < SEARCH_X + SEARCH_W &&
-                ly >= SEARCH_Y && ly < SEARCH_Y + SEARCH_H) {
-                return HIT_SEARCH_BOX;
-            }
-            if (lx >= SCROLLBAR_X && lx < SCROLLBAR_X2 &&
-                ly >= SCROLLBAR_Y && ly < SCROLLBAR_Y2) {
-                return HIT_SCROLLBAR;
-            }
-            if (lx >= GRID_X && lx < GRID_X + GRID_COLS * SLOT_STEP &&
-                ly >= GRID_Y && ly < GRID_Y + GRID_ROWS * SLOT_STEP) {
-                const int col = (lx - GRID_X) / SLOT_STEP;
-                const int row = (ly - GRID_Y) / SLOT_STEP;
-                // Slots are 16x16 inside an 18-wide cell — reject the 2px gutter.
-                if ((lx - GRID_X) - col * SLOT_STEP < SLOT_SIZE &&
-                    (ly - GRID_Y) - row * SLOT_STEP < SLOT_SIZE) {
-                    const int idx = (GetRowIndex() + row) * GRID_COLS + col;
-                    // Always claim the cell — empty cells still need the hover
-                    // highlight and still absorb clicks (dropping a carried
-                    // stack on one is the search tab's delete gesture).
-                    if (idx >= 0 && idx < (int)m_filteredItems.size()) {
-                        m_hoveredCreativeStack = m_filteredItems[idx];
-                    }
-                    return HIT_CREATIVE_GRID;
+        if (CreativeModeTabs::PageCount() > 1 &&
+            ly >= PAGE_BUTTON_Y && ly < PAGE_BUTTON_Y + PAGE_BUTTON_SIZE) {
+            if (lx >= 0 && lx < PAGE_BUTTON_SIZE) return HIT_PAGE_PREV;
+            if (lx >= IMAGE_W - PAGE_BUTTON_SIZE && lx < IMAGE_W) return HIT_PAGE_NEXT;
+        }
+
+        const CreativeModeTab::Type type = SelectedType();
+        if (type == CreativeModeTab::Type::Search &&
+            lx >= SEARCH_X && lx < SEARCH_X + SEARCH_W &&
+            ly >= SEARCH_Y && ly < SEARCH_Y + SEARCH_H) {
+            return HIT_SEARCH_BOX;
+        }
+        // MC insideScrollbar (only a scrolling tab has one).
+        if (SelectedTab().canScroll &&
+            lx >= SCROLLBAR_X && lx < SCROLLBAR_X2 && ly >= SCROLLBAR_Y && ly < SCROLLBAR_Y2) {
+            return HIT_SCROLLBAR;
+        }
+        if (type != CreativeModeTab::Type::Inventory &&
+            lx >= GRID_X - 1 && lx < GRID_X - 1 + GRID_COLS * SLOT_STEP &&
+            ly >= GRID_Y - 1 && ly < GRID_Y - 1 + GRID_ROWS * SLOT_STEP) {
+            // MC isHovering: each 16x16 slot grown by 1 px on every side, so
+            // the 18 px cells tile the grid with no dead gutter.
+            const int col = (lx - (GRID_X - 1)) / SLOT_STEP;
+            const int row = (ly - (GRID_Y - 1)) / SLOT_STEP;
+            {
+                const int idx = (GetRowIndexForScroll(m_scrollOffs) + row) * GRID_COLS + col;
+                // Always claim the cell — empty cells still need the hover
+                // highlight and still absorb clicks (dropping a carried
+                // stack on one is the picker's delete gesture).
+                if (idx >= 0 && idx < static_cast<int>(m_items.size()) && !m_items[idx].IsEmpty()) {
+                    m_hoveredCreativeStack = m_items[idx];
+                    m_hoveredCreativeIndex = idx;
                 }
+                return HIT_CREATIVE_GRID;
             }
         }
 
-        // Trash slot — MC's selectTab(INVENTORY) line 556 adds destroyItemSlot
-        // at (173, 112) ONLY on the Survival Inventory tab. The X icon is part
-        // of tab_inventory.png; clicking it deletes whatever is on the cursor.
-        if (m_currentTab == Tab::Survival &&
-            lx >= TRASH_X && lx < TRASH_X + SLOT_SIZE &&
-            ly >= TRASH_Y && ly < TRASH_Y + SLOT_SIZE) {
+        // The destroy-item slot — MC selectTab(INVENTORY) adds it at
+        // (173, 112) on the Survival Inventory tab only; the X icon is part
+        // of tab_inventory.png.
+        if (type == CreativeModeTab::Type::Inventory &&
+            lx >= TRASH_X - 1 && lx < TRASH_X + SLOT_SIZE + 1 &&
+            ly >= TRASH_Y - 1 && ly < TRASH_Y + SLOT_SIZE + 1) {
             return HIT_TRASH;
         }
-
         return HIT_NONE;
     }
 
@@ -407,20 +480,53 @@ namespace Render {
         return &m_hoveredCreativeStack;   // empty unless a grid cell is hovered
     }
 
-    // ─── Input ───────────────────────────────────────────────────
-    // Shift decides stack vs. single for the pick paths, so left/right make no
-    // difference there. The one place the button DOES matter is deleting the
-    // cursor on the item grid, where vanilla clears it on left and removes a
-    // single item on right (CreativeModeInventoryScreen:254-257).
-    bool CreativeModeInventoryScreen::HandleExtraClick(int hit, int glfwButton, bool shift) {
-        if (hit == HIT_TAB_SURVIVAL) { SwitchTab(Tab::Survival); return true; }
-        if (hit == HIT_TAB_SEARCH)   { SwitchTab(Tab::Search);   return true; }
+    // MC getTooltipFromContainerItem: in a category tab a picker slot's
+    // tooltip is the item's own; anywhere else each displayed tab holding the
+    // stack is named under the item name in blue, and in the search tab the
+    // matched '#' tags the stack carries in dark purple.
+    void CreativeModeInventoryScreen::DecorateItemTooltip(const Game::ItemStack& stack,
+                                                          std::vector<TooltipLine>& lines) {
+        if (lines.empty()) return;
+        const bool creativeSlot = HoveredSlot() == HIT_CREATIVE_GRID;
+        const CreativeModeTab::Type type = SelectedType();
+        if (type == CreativeModeTab::Type::Category && creativeSlot) return;
+        if (type == CreativeModeTab::Type::Search && creativeSlot && !m_visibleTags.empty()) {
+            const std::string path = CreativeModeTabs::NameOf(stack.itemId);
+            for (const std::string& tag : m_visibleTags) {
+                if (Game::DataTags::HasTag(Game::DataTags::Registry::Item, path, tag)) {
+                    lines.insert(lines.begin() + 1, TooltipLine{"#" + tag, kDarkPurple});
+                }
+            }
+        }
+        size_t at = 1;
+        for (const CreativeModeTab* tab : CreativeModeTabs::Tabs()) {
+            if (tab->type != CreativeModeTab::Type::Search && tab->Contains(stack)) {
+                lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(at++),
+                             TooltipLine{tab->DisplayName(), kBlue});
+            }
+        }
+    }
 
-        // Runs on EVERY press, so clicking anywhere else drops search focus.
-        // MC keeps the search box focused for the whole Search tab (selectTab
-        // → setFocused(true); nothing unfocuses it), which is what lets you
-        // grab an item and keep typing. A click IN the box collapses any
-        // selection onto the cursor (EditBox.onClick → moveCursorTo(…, shift)).
+    // ─── Input ───────────────────────────────────────────────────
+    bool CreativeModeInventoryScreen::HandleExtraClick(int hit, int glfwButton, bool shift) {
+        if (hit <= HIT_TAB_BASE) {
+            const auto& tabs = CreativeModeTabs::AllTabs();
+            const size_t index = static_cast<size_t>(HIT_TAB_BASE - hit);
+            if (glfwButton == GLFW_MOUSE_BUTTON_LEFT && index < tabs.size()) SelectTab(tabs[index].key);
+            return true;
+        }
+        if (hit == HIT_PAGE_PREV || hit == HIT_PAGE_NEXT) {
+            const int target = m_page + (hit == HIT_PAGE_NEXT ? 1 : -1);
+            if (glfwButton == GLFW_MOUSE_BUTTON_LEFT && target >= 0 && target < CreativeModeTabs::PageCount()) {
+                Client::Sounds::PlayButtonClick();
+                SetPage(target);
+            }
+            return true;
+        }
+
+        // A click IN the box collapses any selection onto the cursor
+        // (EditBox.onClick → moveCursorTo(…, shift)); the box never loses
+        // focus on the search tab (setCanLoseFocus(false)).
         if (hit == HIT_SEARCH_BOX) {
             m_searchFocused = true;
             SearchMoveCursorTo(m_searchCursorPos, shift);
@@ -428,7 +534,7 @@ namespace Render {
         }
 
         if (hit == HIT_SCROLLBAR) {
-            m_isScrolling = true;
+            m_isScrolling = CanScroll();
             return true;
         }
 
@@ -436,48 +542,57 @@ namespace Render {
             // MC slotClicked on a creative slot: moveCursorToEnd(false) +
             // setHighlightPos(0) — the query is selected, so backspace or a
             // letter replaces it.
-            if (m_currentTab == Tab::Search) SearchSelectAll();
-            // Empty cell + held cursor → DELETE the held item. Vanilla
-            // CreativeModeInventoryScreen:254-257 calls setCarried(EMPTY) on
-            // left click and carried.shrink(1) on right — the stack ceases to
-            // exist. This used to send THROW/OUTSIDE, which is the DROP path:
-            // the item you were trying to void landed on the floor at your
-            // feet and was picked straight back up.
-            if (m_hoveredCreativeStack.IsEmpty()) {
-                if (!Carried().IsEmpty()) {
-                    const uint8_t deleteButton =
-                        (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
-                    QueueClick(Network::ContainerInput::CREATIVE_DELETE_CARRIED,
-                               Network::InventorySlotSentinel::OUTSIDE,
-                               deleteButton);
-                }
+            if (SelectedType() == CreativeModeTab::Type::Search) SearchSelectAll();
+            const int idx = m_hoveredCreativeIndex < static_cast<int>(m_items.size()) ? m_hoveredCreativeIndex : -1;
+            // CustomCreativeSlot.mayPickup: a locked placeholder does nothing.
+            if (idx >= 0 && idx < static_cast<int>(m_locked.size()) && m_locked[idx]) return true;
+
+            const Game::ItemStack& carried = Carried();
+            const Game::ItemStack  clicked = idx >= 0 ? m_items[idx] : Game::ItemStack{};
+            auto pick = [&](uint8_t button) {
+                QueueClick(Network::ContainerInput::PICKUP, Network::InventorySlotSentinel::CREATIVE_GRID,
+                           button, clicked.itemId, &clicked);
+            };
+            auto shrinkOrClear = [&](uint8_t button) {   // 0 = clear the cursor, 1 = one fewer
+                QueueClick(Network::ContainerInput::CREATIVE_DELETE_CARRIED,
+                           Network::InventorySlotSentinel::OUTSIDE, button);
+            };
+
+            // CLONE (middle click): a full stack onto an empty cursor.
+            if (glfwButton == GLFW_MOUSE_BUTTON_MIDDLE) {
+                if (carried.IsEmpty() && !clicked.IsEmpty()) pick(0);
                 return true;
             }
-            // Server-side button semantics in HandleCreativePickup:
-            //   button=0 → cursor = full stack of this item
-            //   button=1 → cursor = 1 of this item (or +1 if same; clear if different)
-            //
-            // Mapping (shift = stack, no-shift = single, regardless of L/R):
-            //   plain left   → 1 on cursor
-            //   plain right  → 1 on cursor (or +1 if same item already held)
-            //   shift+left   → full stack on cursor
-            //   shift+right  → full stack on cursor
-            const uint8_t btn = shift ? 0 : 1;
-            QueueClick(Network::ContainerInput::PICKUP,
-                       Network::InventorySlotSentinel::CREATIVE_GRID, btn,
-                       m_hoveredCreativeStack.itemId,
-                       &m_hoveredCreativeStack);
+            const int button = glfwButton == GLFW_MOUSE_BUTTON_RIGHT ? 1 : 0;
+            // MC's four cases, expressed in the creative-grid actions:
+            //   PICKUP 0 = cursor becomes a full stack of the cell,
+            //   PICKUP 1 = one of it (or one more when it is the same stack),
+            //   PICKUP 2 = the cell's stack as shown (a saved hotbar's count),
+            //   CREATIVE_DELETE_CARRIED 0/1 = clear the cursor / one fewer.
+            if (!carried.IsEmpty() && !clicked.IsEmpty() && Game::IsSameItemSameComponents(carried, clicked)) {
+                if (button == 0) {
+                    const int maxStack = Game::ItemRegistry::Get(carried.itemId).maxStackSize;
+                    if (shift) pick(0);
+                    else if (carried.count < maxStack) pick(1);
+                } else {
+                    shrinkOrClear(1);
+                }
+            } else if (!clicked.IsEmpty() && carried.IsEmpty()) {
+                if (shift) pick(0);
+                else pick(clicked.count > 1 ? 2 : 1);
+            } else if (button == 0) {
+                if (!carried.IsEmpty()) shrinkOrClear(0);
+            } else if (!carried.IsEmpty()) {
+                shrinkOrClear(1);
+            }
             return true;
         }
 
-        // Trash slot:
-        //   • Shift+click → clear ALL inventory slots (MC's
-        //     CreativeModeInventoryScreen line 189-193:
+        // Destroy-item slot:
+        //   • Shift+click → clear ALL inventory slots (MC slotClicked:
         //     `if (slot == this.destroyItemSlot && quickKey)`).
-        //   • Plain click with a carried stack → DELETE the cursor. MC:195-196
-        //     is `menu.setCarried(ItemStack.EMPTY)` — no drop, whichever
-        //     button was used. This used to send THROW, which spawned the item
-        //     on the ground instead of destroying it.
+        //   • Plain click with a carried stack → DELETE the cursor
+        //     (`menu.setCarried(ItemStack.EMPTY)` — no drop, either button).
         if (hit == HIT_TRASH) {
             if (shift) {
                 QueueClick(Network::ContainerInput::CREATIVE_DESTROY_ALL,
@@ -519,10 +634,11 @@ namespace Render {
         const int room  = SEARCH_MAX_LEN - (int)m_searchText.size() + (end - start);
         if (room <= 0) return;
         const std::string text = input.substr(0, (size_t)room);
+        const std::string old = m_searchText;
         m_searchText.replace((size_t)start, (size_t)(end - start), text);
         SearchMoveCursorTo(start + (int)text.size(), false);
-        m_searchDirty = true;
-        RefreshSearchResults();
+        // MC charTyped / keyPressed: refresh only when the value changed.
+        if (m_searchText != old) RefreshSearchResults();
     }
 
     void CreativeModeInventoryScreen::SearchDeleteChars(int dir) {
@@ -539,16 +655,59 @@ namespace Render {
         if (start == end) return;
         m_searchText.erase((size_t)start, (size_t)(end - start));
         SearchMoveCursorTo(start, false);
-        m_searchDirty = true;
         RefreshSearchResults();
     }
 
     bool CreativeModeInventoryScreen::HandleExtraKey(int glfwKey, int glfwMods) {
-        if (m_currentTab != Tab::Search || !m_searchFocused) return false;
+        // MC keyPressed: every press starts by clearing ignoreTextInput.
+        m_ignoreTextInput = false;
+        const CreativeModeTab::Type type = SelectedType();
 
-        // E must produce the letter rather than close the screen while typing;
-        // consuming it here lets OnCharInput append the actual character.
-        if (glfwKey == GLFW_KEY_E) return true;
+        // AbstractContainerScreen.checkHotbarKeyPressed, run first: a hotbar
+        // key over a hovered slot with an empty cursor swaps. Over a picker
+        // cell that is MC's creative SWAP — the hotbar slot takes a full
+        // stack of the cell (a creative slot write, CREATIVE_FILL_SLOT 0).
+        auto checkHotbarKeyPressed = [&]() -> bool {
+            const int hotbar = HotbarKeyIndex(glfwKey);
+            if (hotbar < 0 || !Carried().IsEmpty()) return false;
+            if (HoveredSlot() == HIT_CREATIVE_GRID) {
+                if (m_hoveredCreativeIndex < 0 || m_hoveredCreativeIndex >= static_cast<int>(m_items.size())) {
+                    return false;
+                }
+                if (!m_locked[static_cast<size_t>(m_hoveredCreativeIndex)]) {
+                    const Game::ItemStack cell = m_items[static_cast<size_t>(m_hoveredCreativeIndex)];
+                    QueueClick(Network::ContainerInput::CREATIVE_FILL_SLOT,
+                               static_cast<int16_t>(Game::Inventory::HotbarToIndex(hotbar)), 0,
+                               cell.itemId, &cell);
+                }
+                return true;
+            }
+            if (HoveredSlot() >= 0) {
+                QueueClick(Network::ContainerInput::SWAP, static_cast<int16_t>(HoveredSlot()),
+                           static_cast<uint8_t>(hotbar));
+                return true;
+            }
+            return false;
+        };
+
+        if (type != CreativeModeTab::Type::Search) {
+            // The chat key jumps to the search tab (and types nothing).
+            if (IsBoundKey(Input::Binds::Chat, glfwKey)) {
+                m_ignoreTextInput = true;
+                SelectTab("search");
+                if (!SelectedTab().onEveryPage) m_page = SelectedTab().page;
+                return true;
+            }
+            return checkHotbarKeyPressed();
+        }
+
+        // Search tab: a hotbar key swaps unless the cursor rests on an empty
+        // picker cell (then the digit is typed).
+        const bool doQuickSwap = HoveredSlot() != HIT_CREATIVE_GRID || m_hoveredCreativeIndex >= 0;
+        if (doQuickSwap && checkHotbarKeyPressed()) {
+            m_ignoreTextInput = true;
+            return true;
+        }
 
         const bool shift = (glfwMods & GLFW_MOD_SHIFT) != 0;
         // MC isSelectAll: Ctrl+A (Cmd+A on macOS).
@@ -563,132 +722,116 @@ namespace Render {
         if (glfwKey == GLFW_KEY_HOME)  { SearchMoveCursorTo(0, shift); return true; }
         if (glfwKey == GLFW_KEY_END)   { SearchMoveCursorTo((int)m_searchText.size(), shift); return true; }
 
-        return false;
+        // MC: `searchBox.capturesInput() && !event.isEscape()` — the focused
+        // box keeps every other key (ESC was handled before this), so the
+        // letter that is also the inventory, drop or offhand key types
+        // instead of acting; OnCharInput appends it.
+        return true;
     }
 
     bool CreativeModeInventoryScreen::HandleExtraCharInput(unsigned int codepoint) {
-        if (m_currentTab != Tab::Search || !m_searchFocused) return false;
+        if (SelectedType() != CreativeModeTab::Type::Search) return false;
+        if (m_ignoreTextInput) {
+            m_ignoreTextInput = false;
+            return true;
+        }
         if (codepoint < 32 || codepoint >= 127) return true;
         SearchInsertText(std::string(1, (char)codepoint));
         return true;
     }
 
     bool CreativeModeInventoryScreen::HandleExtraScroll(double dy) {
-        if (m_currentTab != Tab::Search) return false;
-        if (!HasScrollBar()) return false;
-        const int rc = GetRowCount();
-        if (rc <= 0) return false;
-        m_scrollOffs = std::max(0.0f, std::min(1.0f, m_scrollOffs - (float)dy / (float)rc));
+        // MC mouseScrolled → ItemPickerMenu.subtractInputFromScroll.
+        if (!CanScroll()) return false;
+        const int rows = CalculateRowCount();
+        if (rows <= 0) return false;
+        m_scrollOffs = std::clamp(m_scrollOffs - static_cast<float>(dy / static_cast<double>(rows)), 0.0f, 1.0f);
         return true;
     }
 
     void CreativeModeInventoryScreen::OnExtraMouseMove(int /*leftPos*/, int topPos) {
         if (!m_isScrolling) return;
+        // MC mouseDragged.
         const float top    = (float)(topPos + SCROLLBAR_Y);
-        const float trackH = (float)((SCROLLBAR_Y2 - SCROLLBAR_Y) - SCROLL_THUMB_H);
-        const float t      = (MouseGui().y - top - 7.5f) / trackH;
-        m_scrollOffs = std::max(0.0f, std::min(1.0f, t));
+        const float bottom = top + (float)(SCROLLBAR_Y2 - SCROLLBAR_Y);
+        m_scrollOffs = std::clamp((MouseGui().y - top - 7.5f) / ((bottom - top) - 15.0f), 0.0f, 1.0f);
     }
 
     // ─── Background ──────────────────────────────────────────────
-    TextureHandle CreativeModeInventoryScreen::EnsureBackground(bool survival) {
-        TextureHandle& cache = survival ? m_inventoryBg : m_searchBg;
-        bool&          tried = survival ? m_inventoryBgTried : m_searchBgTried;
-        if (tried) return cache;
-        tried = true;
+    TextureHandle CreativeModeInventoryScreen::EnsureBackground(const std::string& path) {
+        auto it = m_backgrounds.find(path);
+        if (it != m_backgrounds.end()) return it->second;
         int w = 0, h = 0;
-        cache = LoadStandaloneGuiTexture(
-            survival ? "assets/textures/gui/container/creative_inventory/tab_inventory.png"
-                     : "assets/textures/gui/container/creative_inventory/tab_item_search.png",
-            w, h);
-        return cache;
-    }
-
-    void CreativeModeInventoryScreen::DrawBackground(GuiGraphics& g, int leftPos, int topPos,
-                                                     TextureHandle bg) {
-        if (bg == INVALID_TEXTURE) {
-            g.Fill(leftPos, topPos, leftPos + IMAGE_W, topPos + IMAGE_H, 0xC0202020);
-            return;
-        }
-        // The textures are 256x256 PNGs; the content is the top-left 195x136.
-        g.Blit(bg, leftPos, topPos, leftPos + IMAGE_W, topPos + IMAGE_H,
-               0.0f, 0.0f, (float)IMAGE_W / 256.0f, (float)IMAGE_H / 256.0f);
+        const TextureHandle handle = LoadStandaloneGuiTexture(path.c_str(), w, h);
+        m_backgrounds.emplace(path, handle);
+        return handle;
     }
 
     // ─── Tab chrome ──────────────────────────────────────────────
-    // MC: CreativeModeTabs.java line 1814 (INVENTORY → Blocks.CHEST) and line
-    // 1253 (SEARCH → Items.COMPASS). One RenderItem(ItemStack, x, y) dispatches
-    // on renderType — block items render 3D, sprite items flat.
-    static void DrawSurvivalIcon(GuiGraphics& g, int x, int y) {
-        Game::ItemStack icon{Game::ItemRegistry::FromBlock(Game::BlockID::Chest), 1};
-        g.RenderItem(icon, x, y);
-    }
-    static void DrawSearchIcon(GuiGraphics& g, int x, int y) {
-        Game::ItemStack icon{Game::Items::Compass, 1};
-        g.RenderItem(icon, x, y);
-    }
-
-    void CreativeModeInventoryScreen::RenderUnselectedTabs(GuiGraphics& g, int leftPos, int topPos) {
-        const int  tabY   = topPos - 28;
-        const bool surSel = (m_currentTab == Tab::Survival);
-        const bool srcSel = (m_currentTab == Tab::Search);
-
-        // Two-phase render so tab icons are FORCED on top of tab backgrounds.
-        // Within a single stratum the GUI renderer doesn't always honour
-        // submission order for blits (texture batching can reorder), and the
-        // compass icon was getting hidden under the unselected Search tab
-        // background. Bumping the stratum between BG and icon is the explicit fix.
-        if (!surSel) {
-            g.BlitSprite("container/creative_inventory/tab_top_unselected_1",
-                         leftPos, tabY, TAB_W, TAB_H);
-        }
-        if (!srcSel) {
-            g.BlitSprite("container/creative_inventory/tab_top_unselected_2",
-                         leftPos + TAB_SPACING, tabY, TAB_W, TAB_H);
-        }
-        g.NextStratum();
-        if (!surSel) DrawSurvivalIcon(g, leftPos + 5, tabY + 9);
-        if (!srcSel) DrawSearchIcon  (g, leftPos + TAB_SPACING + 5, tabY + 9);
+    // MC extractTabButton: tab_{top,bottom}_{selected,unselected}_<column+1>.
+    void CreativeModeInventoryScreen::RenderTabButton(GuiGraphics& g, int leftPos, int topPos,
+                                                      const CreativeModeTab& tab, bool selected) {
+        const bool isTop = tab.row == CreativeModeTab::Row::Top;
+        const int  x = leftPos + TabX(tab);
+        const int  y = isTop ? topPos - 28 : topPos + IMAGE_H - 4;
+        const int  sprite = std::clamp(tab.column, 0, 6) + 1;
+        const std::string name = std::string("container/creative_inventory/tab_") + (isTop ? "top_" : "bottom_") +
+                                 (selected ? "selected_" : "unselected_") + std::to_string(sprite);
+        g.BlitSprite(name, x, y, TAB_W, TAB_H);
     }
 
-    void CreativeModeInventoryScreen::RenderSelectedTab(GuiGraphics& g, int leftPos, int topPos) {
-        const int  tabY   = topPos - 28;
-        const bool surSel = (m_currentTab == Tab::Survival);
-        if (surSel) {
-            g.BlitSprite("container/creative_inventory/tab_top_selected_1",
-                         leftPos, tabY, TAB_W, TAB_H);
-        } else {
-            g.BlitSprite("container/creative_inventory/tab_top_selected_2",
-                         leftPos + TAB_SPACING, tabY, TAB_W, TAB_H);
-        }
-        g.NextStratum();
-        if (surSel) DrawSurvivalIcon(g, leftPos + 5, tabY + 9);
-        else        DrawSearchIcon  (g, leftPos + TAB_SPACING + 5, tabY + 9);
+    // The icon centred on the tab and nudged one pixel towards the panel
+    // (MC: x + 13 - 8, y + 16 - 8 + (isTop ? 1 : -1)).
+    static void RenderTabIcon(GuiGraphics& g, const CreativeModeTab& tab, int tabX, int tabY) {
+        const bool isTop = tab.row == CreativeModeTab::Row::Top;
+        g.RenderItem(tab.icon, tabX + 5, tabY + 8 + (isTop ? 1 : -1));
     }
 
     // ─── Draw layers ─────────────────────────────────────────────
     void CreativeModeInventoryScreen::RenderBehindBg(GuiGraphics& g, int leftPos, int topPos) {
-        RenderUnselectedTabs(g, leftPos, topPos);
+        // MC extractBackground: every displayed tab but the selected one
+        // under the panel (it covers their last 4 px). Icons go one stratum
+        // up — within a stratum blits may batch out of submission order, and
+        // an icon under its own tab background disappears.
+        const std::string& selectedKey = SelectedTab().key;
+        std::vector<const CreativeModeTab*> drawn;
+        for (const CreativeModeTab& tab : CreativeModeTabs::AllTabs()) {
+            if (tab.key == selectedKey || !TabVisibleOnPage(tab)) continue;
+            RenderTabButton(g, leftPos, topPos, tab, false);
+            drawn.push_back(&tab);
+        }
+        g.NextStratum();
+        for (const CreativeModeTab* tab : drawn) {
+            const bool isTop = tab->row == CreativeModeTab::Row::Top;
+            RenderTabIcon(g, *tab, leftPos + TabX(*tab), isTop ? topPos - 28 : topPos + IMAGE_H - 4);
+        }
     }
 
     void CreativeModeInventoryScreen::RenderBg(GuiGraphics& g, int leftPos, int topPos) {
-        const bool survival = (m_currentTab == Tab::Survival);
-        DrawBackground(g, leftPos, topPos, EnsureBackground(survival));
-        if (!survival) return;
+        const CreativeModeTab& tab = SelectedTab();
+        const TextureHandle bg = EnsureBackground(tab.backgroundTexture);
+        if (bg == INVALID_TEXTURE) {
+            g.Fill(leftPos, topPos, leftPos + IMAGE_W, topPos + IMAGE_H, 0xC0202020);
+        } else {
+            // 256x256 PNGs; the panel is the top-left 195x136.
+            g.Blit(bg, leftPos, topPos, leftPos + IMAGE_W, topPos + IMAGE_H,
+                   0.0f, 0.0f, (float)IMAGE_W / 256.0f, (float)IMAGE_H / 256.0f);
+        }
+        if (tab.type != CreativeModeTab::Type::Inventory) return;
 
         Game::ClientPlayer* player = Player();
         if (!player) return;
 
-        // Player preview — MC CreativeModeInventoryScreen.java:702 calls
-        // InventoryScreen.renderEntityInInventoryFollowsMouse(graphics,
+        // Player preview — MC extractEntityInInventoryFollowsMouse(graphics,
         // leftPos+73, topPos+6, leftPos+105, topPos+49, 20, 0.0625F, xm, ym,
-        // this.minecraft.player). Same rect, same cursor-tracking math.
+        // player). Same rect, same cursor-tracking math.
         g.NextStratum();
         StickFigurePose pose;
         pose.bodyYawDeg   = player->visualYaw;
         pose.headYawDeg   = player->visualYaw;
         pose.headPitchDeg = player->visualPitch;
         pose.isCrouching  = false;
+        pose.isSitting    = player->IsPassenger();
         RenderStickFigureInInventory(
             g,
             leftPos + 73, topPos + 6, leftPos + 105, topPos + 49,
@@ -699,19 +842,16 @@ namespace Render {
     }
 
     void CreativeModeInventoryScreen::RenderExtraSlots(GuiGraphics& g, int leftPos, int topPos) {
-        if (m_currentTab != Tab::Search) return;
-
-        RefreshSearchResults();
-        const int rowIndex = GetRowIndex();
+        if (SelectedType() == CreativeModeTab::Type::Inventory) return;
+        const int rowIndex = GetRowIndexForScroll(m_scrollOffs);
         for (int row = 0; row < GRID_ROWS; ++row) {
             for (int col = 0; col < GRID_COLS; ++col) {
                 const int idx = (rowIndex + row) * GRID_COLS + col;
-                if (idx >= (int)m_filteredItems.size()) continue;
-                // Render the pre-built ItemStack directly — it carries the
-                // correct DataComponents (e.g. STORED_ENCHANTMENTS for an
-                // enchanted_book variant), which RenderItem and its glint pass
-                // read for foil detection.
-                const auto& stack = m_filteredItems[idx];
+                if (idx < 0 || idx >= (int)m_items.size() || m_items[idx].IsEmpty()) continue;
+                // The pre-built stack carries its DataComponents (an enchanted
+                // book's STORED_ENCHANTMENTS), which RenderItem and its glint
+                // pass read for foil.
+                const auto& stack = m_items[idx];
                 const int x = leftPos + GRID_X + col * SLOT_STEP;
                 const int y = topPos  + GRID_Y + row * SLOT_STEP;
                 g.RenderItem(stack, x, y);
@@ -721,13 +861,29 @@ namespace Render {
         }
     }
 
+    void CreativeModeInventoryScreen::RenderLabels(GuiGraphics& g, int leftPos, int topPos) {
+        // MC extractLabels: the tab's title at (8, 6), dark grey, no shadow.
+        const CreativeModeTab& tab = SelectedTab();
+        if (tab.showTitle) g.DrawString(tab.DisplayName(), leftPos + 8, topPos + 6, kTitleColor, false);
+    }
+
     void CreativeModeInventoryScreen::RenderExtras(GuiGraphics& g, int leftPos, int topPos) {
-        if (m_currentTab == Tab::Search) {
-            RenderSearchBox(g, leftPos, topPos);
-            RenderScrollbar(g, leftPos, topPos);
+        const CreativeModeTab& selected = SelectedTab();
+        if (selected.type == CreativeModeTab::Type::Search) RenderSearchBox(g, leftPos, topPos);
+        if (selected.canScroll) RenderScrollbar(g, leftPos, topPos);
+
+        // The selected tab over the panel (its bottom 4 px merge into it) —
+        // drawn only on a page that shows it.
+        if (TabVisibleOnPage(selected)) {
+            g.NextStratum();
+            RenderTabButton(g, leftPos, topPos, selected, true);
+            g.NextStratum();
+            const bool isTop = selected.row == CreativeModeTab::Row::Top;
+            RenderTabIcon(g, selected, leftPos + TabX(selected), isTop ? topPos - 28 : topPos + IMAGE_H - 4);
         }
-        g.NextStratum();
-        RenderSelectedTab(g, leftPos, topPos);
+
+        RenderPageControls(g, leftPos, topPos);
+
         // MC CreativeModeInventoryScreen's EffectsInInventory column.
         if (Player()) {
             g.NextStratum();
@@ -735,6 +891,75 @@ namespace Render {
                                        IMAGE_W, static_cast<int>(MouseGui().x),
                                        static_cast<int>(MouseGui().y));
         }
+
+        // MC extractRenderState: the hovered tab's name (checkTabHovering's
+        // isHovering(x + 3, y + 3, 21, 27), which widens the box by one pixel
+        // each side), or "Destroy Item" over the bin.
+        const int mx = static_cast<int>(std::floor(MouseGui().x));
+        const int my = static_cast<int>(std::floor(MouseGui().y));
+        for (const CreativeModeTab& tab : CreativeModeTabs::AllTabs()) {
+            if (!TabVisibleOnPage(tab)) continue;
+            const int x = leftPos + TabX(tab) + 3;
+            const int y = topPos + TabY(tab) + 3;
+            if (mx >= x - 1 && mx < x + 21 + 1 && my >= y - 1 && my < y + 27 + 1) {
+                g.NextStratum();
+                RenderTextTooltip(g, tab.DisplayName(), mx, my);
+                return;
+            }
+        }
+        if (HoveredSlot() == HIT_TRASH) {
+            g.NextStratum();
+            RenderTextTooltip(g, Game::Language::GetOrDefault("inventory.binSlot", "Destroy Item"), mx, my);
+        }
+    }
+
+    // NeoForge CreativeModeInventoryScreen: "<" / ">" buttons at the panel's
+    // top corners and the "page / pages" label between them.
+    void CreativeModeInventoryScreen::RenderPageControls(GuiGraphics& g, int leftPos, int topPos) {
+        const int pages = CreativeModeTabs::PageCount();
+        if (pages <= 1) return;
+        g.NextStratum();
+        const int mx = static_cast<int>(std::floor(MouseGui().x));
+        const int my = static_cast<int>(std::floor(MouseGui().y));
+        const int y = topPos + PAGE_BUTTON_Y;
+        auto button = [&](int x, const char* label, bool active) {
+            const bool hovered = mx >= x && mx < x + PAGE_BUTTON_SIZE && my >= y && my < y + PAGE_BUTTON_SIZE;
+            const char* sprite = !active ? "widget/button_disabled"
+                               : hovered ? "widget/button_highlighted" : "widget/button";
+            g.BlitSprite(sprite, x, y, PAGE_BUTTON_SIZE, PAGE_BUTTON_SIZE);
+            g.DrawCenteredString(label, x + PAGE_BUTTON_SIZE / 2,
+                                 y + (PAGE_BUTTON_SIZE - FontRenderer::LINE_HEIGHT) / 2 + 1,
+                                 static_cast<uint32_t>(active ? WidgetDims::TEXT_COLOR_ACTIVE
+                                                              : WidgetDims::TEXT_COLOR_INACTIVE));
+        };
+        button(leftPos, "<", m_page > 0);
+        button(leftPos + IMAGE_W - PAGE_BUTTON_SIZE, ">", m_page < pages - 1);
+        const std::string label = std::to_string(m_page + 1) + " / " + std::to_string(pages);
+        g.DrawString(label, leftPos + IMAGE_W / 2 - g.GetStringWidth(label) / 2, topPos + PAGE_LABEL_Y,
+                     0xFFFFFFFFu, true);
+    }
+
+    // A one-line tooltip in MC's tooltip frame (the item tooltip's style).
+    void CreativeModeInventoryScreen::RenderTextTooltip(GuiGraphics& g, const std::string& text, int mx, int my) {
+        if (text.empty()) return;
+        const int textW = g.GetStringWidth(text);
+        const int totalH = 8;
+        int x = mx + 12;
+        const int y = my - 12;
+        if (x + textW + 4 > g.GuiWidth()) x = std::max(4, mx - 16 - textW);
+        const uint32_t bg     = 0xF0100010;
+        const uint32_t border = 0x505000FF;
+        g.Fill(x - 3, y - 4,           x + textW + 3, y - 3,           bg);
+        g.Fill(x - 3, y + totalH + 3,  x + textW + 3, y + totalH + 4,  bg);
+        g.Fill(x - 3, y - 3,           x + textW + 3, y + totalH + 3,  bg);
+        g.Fill(x - 4, y - 3,           x - 3,         y + totalH + 3,  bg);
+        g.Fill(x + textW + 3, y - 3,   x + textW + 4, y + totalH + 3,  bg);
+        g.Fill(x - 3,         y - 3 + 1, x - 3 + 1,     y + totalH + 3 - 1, border);
+        g.Fill(x + textW + 2, y - 3 + 1, x + textW + 3, y + totalH + 3 - 1, border);
+        g.Fill(x - 3,         y - 3,     x + textW + 3, y - 3 + 1,          border);
+        g.Fill(x - 3,         y + totalH + 2, x + textW + 3, y + totalH + 3, border);
+        g.NextStratum();
+        g.DrawString(text, x, y, 0xFFFFFFFFu, true);
     }
 
     void CreativeModeInventoryScreen::RenderExtraHoverHighlight(GuiGraphics& g,
@@ -745,9 +970,8 @@ namespace Render {
         }
         if (HoveredSlot() != HIT_CREATIVE_GRID) return;
 
-        // Highlight ANY hovered grid cell (occupied OR empty) — empty cells are
-        // interactive too: clicking one with a held cursor deletes the cursor,
-        // so it needs the same feedback as an occupied cell.
+        // Every hovered picker cell, occupied or empty — an empty one takes
+        // clicks too (a carried stack dropped on it is deleted).
         const int mx  = (int)std::floor(MouseGui().x) - leftPos;
         const int my  = (int)std::floor(MouseGui().y) - topPos;
         const int col = (mx - GRID_X) / SLOT_STEP;
@@ -798,10 +1022,11 @@ namespace Render {
     }
 
     void CreativeModeInventoryScreen::RenderScrollbar(GuiGraphics& g, int leftPos, int topPos) {
-        const int x      = leftPos + SCROLLBAR_X;
-        const int trackH = (SCROLLBAR_Y2 - SCROLLBAR_Y) - SCROLL_THUMB_H;
-        const int y      = topPos + SCROLLBAR_Y + (int)((float)trackH * m_scrollOffs);
-        const char* sprite = HasScrollBar()
+        // MC: blitSprite(scroller, xscr, yscr + (int)((yscr2 - yscr - 17) * scrollOffs), 12, 15).
+        const int x = leftPos + SCROLLBAR_X;
+        const int y = topPos + SCROLLBAR_Y +
+                      (int)((float)(SCROLLBAR_Y2 - SCROLLBAR_Y - 17) * m_scrollOffs);
+        const char* sprite = CanScroll()
             ? "container/creative_inventory/scroller"
             : "container/creative_inventory/scroller_disabled";
         g.BlitSprite(sprite, x, y, SCROLL_THUMB_W, SCROLL_THUMB_H);

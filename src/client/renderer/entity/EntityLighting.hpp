@@ -44,6 +44,19 @@ namespace Render::EntityLighting {
     // mob seen through a nether portal is lit the Nether's way, as in MC.
     inline LightSet Current() { return ForDimension(Client::ClientLevels::BoundDimension()); }
 
+    // An entity drawn into a GUI box (MobRenderer::CaptureForGui): MC lights
+    // it with Lighting.Entry.ENTITY_IN_UI — INVENTORY_DIFFUSE_LIGHT_0/1 in
+    // the box's own space — instead of the level pair. The capture sets the
+    // two lights carried back into render space for as long as it runs.
+    struct LightOverride {
+        bool active = false;
+        glm::vec3 light0{0.0f}, light1{0.0f};
+    };
+    inline LightOverride& UiLightOverride() {
+        static thread_local LightOverride o;
+        return o;
+    }
+
     // minecraft_mix_light for a world-space normal (need not be unit length).
     inline float Shade(const glm::vec3& worldNormal, LightSet set) {
         const float len = glm::length(worldNormal);
@@ -52,6 +65,11 @@ namespace Render::EntityLighting {
         static const glm::vec3 kLight0       = glm::normalize(glm::vec3( 0.2f,  1.0f, -0.7f));
         static const glm::vec3 kLight1       = glm::normalize(glm::vec3(-0.2f,  1.0f,  0.7f));
         static const glm::vec3 kNetherLight1 = glm::normalize(glm::vec3(-0.2f, -1.0f,  0.7f));
+        if (const LightOverride& ui = UiLightOverride(); ui.active) {
+            const float a = std::max(0.0f, glm::dot(ui.light0, n));
+            const float b = std::max(0.0f, glm::dot(ui.light1, n));
+            return std::min(1.0f, (a + b) * 0.6f + 0.4f);
+        }
         const glm::vec3& l1 = (set == LightSet::Nether) ? kNetherLight1 : kLight1;
         const float a = std::max(0.0f, glm::dot(kLight0, n));
         const float b = std::max(0.0f, glm::dot(l1, n));

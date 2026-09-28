@@ -5,8 +5,11 @@
 #include "common/core/Log.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/Instruments.hpp"
 #include "common/entity/Item.hpp"
+#include "common/text/Language.hpp"
 #include "common/text/TextComponent.hpp"
+#include "common/world/map/MapItem.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/world/enchantment/EnchantmentDefinitions.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
@@ -45,6 +48,14 @@ namespace Game::ChestLoot {
         std::string StripNamespace(const std::string& id) {
             const size_t colon = id.find(':');
             return colon == std::string::npos ? id : id.substr(colon + 1);
+        }
+
+        // A HolderSet in JSON: one id / "#tag", or a list of ids.
+        std::vector<std::string> ReadStringOrListOf(const nlohmann::json& j) {
+            std::vector<std::string> out;
+            if (j.is_string()) out.push_back(j.get<std::string>());
+            else if (j.is_array()) for (const auto& e : j) if (e.is_string()) out.push_back(e.get<std::string>());
+            return out;
         }
 
         // ── Parsed representation ────────────────────────────────────────
@@ -86,10 +97,19 @@ namespace Game::ChestLoot {
         };
 
         struct Condition {
-            enum class Kind : uint8_t { RandomChance, Unsupported };
+            enum class Kind : uint8_t { RandomChance, Inverted, AllOf, AnyOf, LocationCheck, FishingHookOpenWater, Unsupported };
             Kind  kind = Kind::Unsupported;
             float chance = 1.0f;
             std::string name;
+            std::vector<Condition> terms;       // inverted (one) / all_of / any_of
+            // location_check: LocationPredicate.biomes (ids or "#tags") at
+            // ORIGIN + offset.
+            std::vector<std::string> biomes;
+            glm::ivec3 offset{0};
+            // entity_properties {entity: this, predicate: {type_specific:
+            // {type: fishing_hook, in_open_water}}}: the required value.
+            bool hasInOpenWater = false;
+            bool inOpenWater = true;
         };
 
         // MC ListOperation (loot/functions/ListOperation.java) — how a
@@ -157,7 +177,8 @@ namespace Game::ChestLoot {
             enum class Kind : uint8_t {
                 SetCount, SetName, EnchantRandomly, EnchantWithLevels, SetEnchantments,
                 SetPotion, SetStewEffect, SetWrittenBookPages, SetBookCover, SetWritableBookPages,
-                SetDamage, Unsupported
+                SetDamage, ExplorationMap, Filtered, Discard,
+                SetOminousBottleAmplifier, SetComponents, SetInstrument, Unsupported
             };
             Kind kind = Kind::Unsupported;
             std::string name;                  // the JSON "function" id, for logging
@@ -165,6 +186,13 @@ namespace Game::ChestLoot {
             NumberProvider count;              // set_count / enchant_with_levels levels / set_damage damage
             bool add = false;                  // set_count / set_damage add
             std::string text;                  // set_name
+            bool itemName = false;             // set_name target "item_name" (else custom_name)
+            ExplorationMapParams exploration;  // exploration_map
+            // filtered: ItemPredicate {items?, predicates: {map_id?}} and the
+            // functions to run on a pass / a fail.
+            std::vector<ItemID> filterItems;
+            bool filterNeedsMapId = false;
+            std::vector<Function> onPass, onFail;
             bool hasOptions = false;           // enchant_*: options present
             std::vector<EnchantmentId> options;
             bool onlyCompatible = true;        // enchant_randomly
@@ -177,6 +205,12 @@ namespace Game::ChestLoot {
             std::optional<Filterable<std::string>>   coverTitle;                  // set_book_cover
             std::optional<std::string>               coverAuthor;
             std::optional<int>                       coverGeneration;
+            // set_components: the patch, component id -> its JSON value, in
+            // file order (applyComponentsAndValidate applies them in turn).
+            std::vector<std::pair<std::string, nlohmann::json>> components;
+            // set_instrument: the `options` HolderSet ("#minecraft:
+            // regular_goat_horns" or one id), resolved at parse time.
+            std::vector<std::string> instrumentOptions;
         };
 
         struct Table;
@@ -186,6 +220,11 @@ namespace Game::ChestLoot {
             Kind kind = Kind::Unsupported;
             ItemID item = Items::Air;
             std::string tableRef;              // loot_table entry: the key
+            // MC NestedLootTable.value is a HolderSet<LootTable>: besides one
+            // key, a list of keys and inline tables — every table in it is
+            // rolled in turn (the equipment tables nest theirs inline).
+            std::vector<std::string> moreTableRefs;
+            std::vector<std::shared_ptr<Table>> inlineTables;
             int weight = 1;
             int quality = 0;
             std::vector<Condition> conditions;
@@ -234,17 +273,62 @@ namespace Game::ChestLoot {
             return p;
         }
 
+        std::vector<Condition> ParseConditions(const nlohmann::json& j);
+
+        Condition ParseCondition(const nlohmann::json& c) {
+            Condition cond;
+            if (!c.is_object()) return cond;
+            cond.name = StripNamespace(c.value("condition", std::string()));
+            if (cond.name == "random_chance") {
+                cond.kind = Condition::Kind::RandomChance;
+                cond.chance = c.contains("chance") ? ParseNumber(c["chance"], 1.0f).a : 1.0f;
+            } else if (cond.name == "inverted" && c.contains("term")) {
+                // InvertedLootItemCondition {term}.
+                cond.kind = Condition::Kind::Inverted;
+                cond.terms.push_back(ParseCondition(c["term"]));
+            } else if ((cond.name == "all_of" || cond.name == "any_of") && c.contains("terms")) {
+                cond.kind = cond.name == "all_of" ? Condition::Kind::AllOf : Condition::Kind::AnyOf;
+                cond.terms = ParseConditions(c["terms"]);
+            } else if (cond.name == "entity_properties") {
+                // LootItemEntityPropertyCondition {entity, predicate}. The
+                // one shape the data pack uses outside entity drops: the
+                // fishing table's treasure gate on the hook itself —
+                // EntityPredicate {type_specific: FishingHookPredicate
+                // {in_open_water}}. Any other predicate stays Unsupported.
+                const std::string entity = c.value("entity", std::string());
+                const nlohmann::json predicate = c.value("predicate", nlohmann::json::object());
+                if (entity == "this" && predicate.is_object() && predicate.size() == 1 &&
+                    predicate.contains("type_specific") && predicate["type_specific"].is_object()) {
+                    const nlohmann::json& ts = predicate["type_specific"];
+                    if (StripNamespace(ts.value("type", std::string())) == "fishing_hook") {
+                        cond.kind = Condition::Kind::FishingHookOpenWater;
+                        // FishingHookPredicate.inOpenWater is Optional<Boolean>:
+                        // absent matches any hook.
+                        if (ts.contains("in_open_water") && ts["in_open_water"].is_boolean()) {
+                            cond.hasInOpenWater = true;
+                            cond.inOpenWater = ts["in_open_water"].get<bool>();
+                        }
+                    }
+                }
+            } else if (cond.name == "location_check") {
+                // LocationCheck {predicate: LocationPredicate, offsetX/Y/Z};
+                // the biome clause is the one the data pack uses.
+                const nlohmann::json predicate = c.value("predicate", nlohmann::json::object());
+                if (predicate.is_object() && predicate.contains("biomes") && predicate.size() == 1) {
+                    cond.kind = Condition::Kind::LocationCheck;
+                    cond.biomes = ReadStringOrListOf(predicate["biomes"]);
+                    cond.offset = glm::ivec3(c.value("offsetX", 0), c.value("offsetY", 0), c.value("offsetZ", 0));
+                }
+            }
+            return cond;
+        }
+
         std::vector<Condition> ParseConditions(const nlohmann::json& j) {
             std::vector<Condition> out;
-            if (!j.is_array()) return out;
-            for (const auto& c : j) {
-                Condition cond;
-                cond.name = StripNamespace(c.value("condition", std::string()));
-                if (cond.name == "random_chance") {
-                    cond.kind = Condition::Kind::RandomChance;
-                    cond.chance = c.contains("chance") ? ParseNumber(c["chance"], 1.0f).a : 1.0f;
-                }
-                out.push_back(std::move(cond));
+            if (j.is_object()) {
+                out.push_back(ParseCondition(j));
+            } else if (j.is_array()) {
+                for (const auto& c : j) out.push_back(ParseCondition(c));
             }
             return out;
         }
@@ -258,7 +342,12 @@ namespace Game::ChestLoot {
             if (j.is_object()) {
                 if (j.contains("text") && j["text"].is_string()) return j["text"].get<std::string>();
                 if (j.contains("translate") && j["translate"].is_string()) {
+                    // The key through the language table ("filled_map.
+                    // buried_treasure" → "Buried Treasure Map"); a key the
+                    // table lacks falls back to its last segment.
                     std::string key = j["translate"].get<std::string>();
+                    const std::string translated = Language::Get(key);
+                    if (!translated.empty() && translated != key) return translated;
                     const size_t dot = key.rfind('.');
                     if (dot != std::string::npos) key = key.substr(dot + 1);
                     std::replace(key.begin(), key.end(), '_', ' ');
@@ -368,8 +457,10 @@ namespace Game::ChestLoot {
             return true;
         }
 
-        std::vector<Function> ParseFunctions(const nlohmann::json& j) {
+        std::vector<Function> ParseFunctions(const nlohmann::json& input) {
             std::vector<Function> out;
+            nlohmann::json j = input;
+            if (j.is_object()) j = nlohmann::json::array({input});   // a single function
             if (!j.is_array()) return out;
             for (const auto& f : j) {
                 Function fn;
@@ -386,8 +477,50 @@ namespace Game::ChestLoot {
                     fn.count = f.contains("damage") ? ParseNumber(f["damage"], 1.0f) : NumberProvider{};
                     fn.add   = f.value("add", false);
                 } else if (fn.name == "set_name") {
+                    // SetNameFunction {name, target: custom_name | item_name}.
                     fn.kind = Function::Kind::SetName;
                     if (f.contains("name")) fn.text = ParseText(f["name"]);
+                    fn.itemName = StripNamespace(f.value("target", std::string("custom_name"))) == "item_name";
+                } else if (fn.name == "exploration_map") {
+                    // ExplorationMapFunction {destination, decoration?, zoom?,
+                    // search_radius?, skip_existing_chunks?}.
+                    fn.kind = Function::Kind::ExplorationMap;
+                    fn.exploration.destination = f.value("destination", std::string("#minecraft:on_treasure_maps"));
+                    if (f.contains("decoration") && f["decoration"].is_string()) {
+                        if (auto type = Maps::DecorationTypeFromKey(f["decoration"].get<std::string>())) {
+                            fn.exploration.decoration = *type;
+                        } else {
+                            Log::Warning("[ChestLoot] exploration_map: unknown decoration %s",
+                                         f["decoration"].dump().c_str());
+                        }
+                    }
+                    fn.exploration.zoom = f.value("zoom", 2);
+                    fn.exploration.searchRadius = f.value("search_radius", 50);
+                    fn.exploration.skipKnownStructures = f.value("skip_existing_chunks", true);
+                } else if (fn.name == "filtered") {
+                    // FilteredFunction {item_filter: ItemPredicate, on_pass?, on_fail?}.
+                    fn.kind = Function::Kind::Filtered;
+                    const nlohmann::json filter = f.value("item_filter", nlohmann::json::object());
+                    if (filter.is_object()) {
+                        if (filter.contains("items")) {
+                            for (const std::string& id : ReadStringOrListOf(filter["items"])) {
+                                if (id.empty() || id[0] == '#') continue;
+                                const ItemID item = RecipeManager::ItemFromSlug(StripNamespace(id));
+                                if (item != Items::Air) fn.filterItems.push_back(item);
+                            }
+                        }
+                        if (filter.contains("predicates") && filter["predicates"].is_object()) {
+                            for (auto it = filter["predicates"].begin(); it != filter["predicates"].end(); ++it) {
+                                if (StripNamespace(it.key()) == "map_id") fn.filterNeedsMapId = true;
+                                else Log::Warning("[ChestLoot] filtered: item predicate '%s' is not modelled",
+                                                  it.key().c_str());
+                            }
+                        }
+                    }
+                    if (f.contains("on_pass")) fn.onPass = ParseFunctions(f["on_pass"]);
+                    if (f.contains("on_fail")) fn.onFail = ParseFunctions(f["on_fail"]);
+                } else if (fn.name == "discard") {
+                    fn.kind = Function::Kind::Discard;
                 } else if (fn.name == "enchant_randomly") {
                     fn.kind = Function::Kind::EnchantRandomly;
                     if (f.contains("options")) {
@@ -481,6 +614,29 @@ namespace Game::ChestLoot {
                     if (ok) fn.kind = Function::Kind::SetBookCover;
                     else Log::Warning("[ChestLoot] set_book_cover: invalid title, author or generation in %s",
                                       f.dump().c_str());
+                } else if (fn.name == "set_ominous_bottle_amplifier") {
+                    // SetOminousBottleAmplifierFunction {amplifier: int provider}.
+                    fn.kind  = Function::Kind::SetOminousBottleAmplifier;
+                    fn.count = f.contains("amplifier") ? ParseNumber(f["amplifier"], 0.0f) : NumberProvider{};
+                } else if (fn.name == "set_instrument") {
+                    // SetInstrumentFunction {options: TagKey<Instrument>}
+                    // ("#minecraft:regular_goat_horns" - the pillager
+                    // outpost's horn).
+                    fn.kind = Function::Kind::SetInstrument;
+                    std::string spec;
+                    if (f.contains("options") && f["options"].is_string()) spec = f["options"].get<std::string>();
+                    fn.instrumentOptions = Instruments::Resolve(spec);
+                    if (fn.instrumentOptions.empty()) {
+                        Log::Warning("[ChestLoot] set_instrument: no instrument in '%s'", spec.c_str());
+                    }
+                } else if (fn.name == "set_components") {
+                    // SetComponentsFunction {components: DataComponentPatch}.
+                    fn.kind = Function::Kind::SetComponents;
+                    if (f.contains("components") && f["components"].is_object()) {
+                        for (auto it = f["components"].begin(); it != f["components"].end(); ++it) {
+                            fn.components.emplace_back(it.key(), it.value());
+                        }
+                    }
                 } else if (fn.name == "set_enchantments") {
                     fn.kind = Function::Kind::SetEnchantments;
                     fn.add  = f.value("add", false);
@@ -496,6 +652,8 @@ namespace Game::ChestLoot {
             }
             return out;
         }
+
+        std::unique_ptr<Table> ParseTable(const std::string& key, const nlohmann::json& j);
 
         Entry ParseEntry(const nlohmann::json& j) {
             Entry e;
@@ -516,8 +674,26 @@ namespace Game::ChestLoot {
                 e.kind = Entry::Kind::Empty;
             } else if (type == "loot_table") {
                 e.kind = Entry::Kind::LootTableRef;
-                if (j.contains("value") && j["value"].is_string()) e.tableRef = WithNamespace(j["value"].get<std::string>());
-                else e.kind = Entry::Kind::Unsupported;   // inline tables are not used by the data pack
+                const auto addOne = [&e](const nlohmann::json& v) {
+                    if (v.is_string()) {
+                        std::string key = WithNamespace(v.get<std::string>());
+                        if (e.tableRef.empty()) e.tableRef = std::move(key);
+                        else e.moreTableRefs.push_back(std::move(key));
+                        return true;
+                    }
+                    if (v.is_object()) {
+                        e.inlineTables.push_back(ParseTable("<inline>", v));
+                        return true;
+                    }
+                    return false;
+                };
+                bool ok = j.contains("value");
+                if (ok && j["value"].is_array()) {
+                    for (const auto& v : j["value"]) ok = addOne(v) && ok;
+                } else if (ok) {
+                    ok = addOne(j["value"]);
+                }
+                if (!ok) e.kind = Entry::Kind::Unsupported;
             }
             return e;
         }
@@ -585,7 +761,14 @@ namespace Game::ChestLoot {
             JavaRandom& random;
             float luck = 0.0f;                 // LootContext.getLuck — the opener's LUCK
             std::set<std::string> visiting;    // loot_table refs: no cycles
+            const LootLevelContext* level = nullptr;   // the level + ORIGIN, when the roll has them
         };
+
+        bool Test(const std::vector<Condition>& conditions, Context& ctx, Table& table);
+
+        bool TestOne(const Condition& c, Context& ctx, Table& table) {
+            return Test(std::vector<Condition>{c}, ctx, table);
+        }
 
         bool Test(const std::vector<Condition>& conditions, Context& ctx, Table& table) {
             for (const Condition& c : conditions) {
@@ -593,6 +776,38 @@ namespace Game::ChestLoot {
                     case Condition::Kind::RandomChance:
                         if (!(ctx.random.NextFloat() < c.chance)) return false;
                         break;
+                    case Condition::Kind::Inverted:
+                        if (c.terms.empty() || TestOne(c.terms.front(), ctx, table)) return false;
+                        break;
+                    case Condition::Kind::AllOf:
+                        if (!Test(c.terms, ctx, table)) return false;
+                        break;
+                    case Condition::Kind::AnyOf: {
+                        bool any = false;
+                        for (const Condition& term : c.terms) {
+                            if (TestOne(term, ctx, table)) { any = true; break; }
+                        }
+                        if (!any) return false;
+                        break;
+                    }
+                    case Condition::Kind::LocationCheck: {
+                        // LocationCheck.test: ORIGIN + offset in the biome
+                        // set; no ORIGIN (a /loot roll) never matches.
+                        if (!ctx.level || !ctx.level->origin) return false;
+                        const glm::dvec3& o = *ctx.level->origin;
+                        const glm::ivec3 pos(static_cast<int>(std::floor(o.x)) + c.offset.x,
+                                             static_cast<int>(std::floor(o.y)) + c.offset.y,
+                                             static_cast<int>(std::floor(o.z)) + c.offset.z);
+                        if (!MapItemBridge::BiomeIn(ctx.level->dimensionId, pos, c.biomes)) return false;
+                        break;
+                    }
+                    case Condition::Kind::FishingHookOpenWater: {
+                        // EntityPredicate.matches(null) is false: a roll with
+                        // no hook as THIS never passes.
+                        if (!ctx.level || !ctx.level->fishingHookInOpenWater) return false;
+                        if (c.hasInOpenWater && *ctx.level->fishingHookInOpenWater != c.inOpenWater) return false;
+                        break;
+                    }
                     case Condition::Kind::Unsupported:
                         if (!table.warnedUnsupported) {
                             table.warnedUnsupported = true;
@@ -603,6 +818,95 @@ namespace Game::ChestLoot {
                 }
             }
             return true;
+        }
+
+        // OMINOUS_BOTTLE_AMPLIFIER as a patch: a value equal to the item's
+        // own default is no patch at all (PatchedDataComponentMap.set), so a
+        // looted level-0 bottle stacks with a crafted one.
+        void SetOminousBottleAmplifier(ItemStack& stack, int amplifier) {
+            const auto prototype = ItemRegistry::Get(stack.itemId)
+                                       .defaultComponents.get(DataComponents::OMINOUS_BOTTLE_AMPLIFIER);
+            if (prototype && *prototype == amplifier) {
+                stack.components.remove(DataComponents::OMINOUS_BOTTLE_AMPLIFIER);
+            } else {
+                stack.components.set(DataComponents::OMINOUS_BOTTLE_AMPLIFIER, amplifier);
+            }
+        }
+
+        // One entry of a DataComponentPatch in its JSON form, for the item
+        // components this engine carries. "!id" removes the component. False
+        // for a component the engine has no field for (armor trims, …).
+        bool ApplyComponent(ItemStack& stack, const std::string& rawId, const nlohmann::json& value) {
+            const bool removal = !rawId.empty() && rawId[0] == '!';
+            const std::string id = StripNamespace(removal ? rawId.substr(1) : rawId);
+            const auto intOf = [&value](int& out) {
+                if (value.is_number_integer()) { out = value.get<int>(); return true; }
+                if (value.is_object() && value.contains("value") && value["value"].is_number_integer()) {
+                    out = value["value"].get<int>();
+                    return true;
+                }
+                return false;
+            };
+            int n = 0;
+            if (id == "ominous_bottle_amplifier") {
+                if (removal) { stack.components.remove(DataComponents::OMINOUS_BOTTLE_AMPLIFIER); return true; }
+                if (!intOf(n)) return false;
+                SetOminousBottleAmplifier(stack, std::clamp(n, 0, DataComponents::kOminousBottleMaxAmplifier));
+                return true;
+            }
+            if (id == "custom_name" || id == "item_name") {
+                const auto& type = id == "custom_name" ? DataComponents::CUSTOM_NAME : DataComponents::ITEM_NAME;
+                if (removal) { stack.components.remove(type); return true; }
+                const std::string text = ParseText(value);
+                if (text.empty()) return false;
+                stack.components.set(type, text);
+                return true;
+            }
+            if (id == "rarity") {
+                if (removal) { stack.components.remove(DataComponents::RARITY); return true; }
+                if (!value.is_string()) return false;
+                const std::string r = value.get<std::string>();
+                Rarity rarity;
+                if (r == "common") rarity = Rarity::COMMON;
+                else if (r == "uncommon") rarity = Rarity::UNCOMMON;
+                else if (r == "rare") rarity = Rarity::RARE;
+                else if (r == "epic") rarity = Rarity::EPIC;
+                else return false;
+                stack.components.set(DataComponents::RARITY, rarity);
+                return true;
+            }
+            if (id == "dyed_color") {
+                if (removal) { stack.components.remove(DataComponents::DYED_COLOR); return true; }
+                if (value.is_object() && value.contains("rgb") && value["rgb"].is_number_integer()) {
+                    stack.components.set(DataComponents::DYED_COLOR, value["rgb"].get<int32_t>());
+                    return true;
+                }
+                if (!intOf(n)) return false;
+                stack.components.set(DataComponents::DYED_COLOR, static_cast<int32_t>(n));
+                return true;
+            }
+            if (id == "damage" || id == "max_damage" || id == "repair_cost" || id == "enchantable") {
+                const auto& type = id == "damage" ? DataComponents::DAMAGE
+                                 : id == "max_damage" ? DataComponents::MAX_DAMAGE
+                                 : id == "repair_cost" ? DataComponents::REPAIR_COST
+                                                       : DataComponents::ENCHANTABLE;
+                if (removal) { stack.components.remove(type); return true; }
+                if (!intOf(n)) return false;
+                stack.components.set(type, static_cast<int32_t>(n));
+                return true;
+            }
+            if (id == "unbreakable") {
+                if (removal) stack.components.remove(DataComponents::UNBREAKABLE);
+                else         stack.components.set(DataComponents::UNBREAKABLE, true);
+                return true;
+            }
+            if (id == "enchantment_glint_override") {
+                if (removal) { stack.components.remove(DataComponents::ENCHANTMENT_GLINT_OVERRIDE); return true; }
+                if (!value.is_boolean()) return false;
+                stack.components.set(DataComponents::ENCHANTMENT_GLINT_OVERRIDE, value.get<bool>());
+                return true;
+            }
+            return false;
         }
 
         void Apply(const Function& fn, ItemStack& stack, Context& ctx, Table& table) {
@@ -630,7 +934,34 @@ namespace Game::ChestLoot {
                     break;
                 }
                 case Function::Kind::SetName:
-                    if (!fn.text.empty()) stack.components.set(DataComponents::CUSTOM_NAME, fn.text);
+                    if (fn.text.empty()) break;
+                    stack.components.set(fn.itemName ? DataComponents::ITEM_NAME : DataComponents::CUSTOM_NAME,
+                                         fn.text);
+                    break;
+                case Function::Kind::ExplorationMap:
+                    // ExplorationMapFunction.run: needs the level and ORIGIN;
+                    // without them the item passes through unchanged.
+                    if (ctx.level && ctx.level->origin) {
+                        stack = MapItemBridge::ApplyExplorationMap(stack, ctx.level->dimensionId,
+                                                                   *ctx.level->origin, fn.exploration);
+                    }
+                    break;
+                case Function::Kind::Filtered: {
+                    // FilteredFunction.run: the predicate, then on_pass /
+                    // on_fail (an absent branch leaves the stack alone).
+                    bool pass = fn.filterItems.empty() ||
+                                std::find(fn.filterItems.begin(), fn.filterItems.end(), stack.itemId) !=
+                                    fn.filterItems.end();
+                    if (pass && fn.filterNeedsMapId) pass = stack.get(DataComponents::MAP_ID).has_value();
+                    for (const Function& next : pass ? fn.onPass : fn.onFail) {
+                        if (stack.IsEmpty()) break;
+                        Apply(next, stack, ctx, table);
+                    }
+                    break;
+                }
+                case Function::Kind::Discard:
+                    // DiscardItem: the stack is gone.
+                    stack.Clear();
                     break;
                 case Function::Kind::EnchantRandomly: {
                     // MC EnchantRandomlyFunction.run.
@@ -721,6 +1052,40 @@ namespace Game::ChestLoot {
                     stack.components.set(DataComponents::WRITTEN_BOOK_CONTENT, std::move(content));
                     break;
                 }
+                case Function::Kind::SetOminousBottleAmplifier:
+                    // MC SetOminousBottleAmplifierFunction.run: the provider,
+                    // clamped to 0..4, set on whatever item it is given.
+                    SetOminousBottleAmplifier(stack, std::clamp(fn.count.GetInt(ctx.random), 0,
+                                                                DataComponents::kOminousBottleMaxAmplifier));
+                    break;
+                case Function::Kind::SetInstrument:
+                    // MC SetInstrumentFunction.run: options.getRandomElement
+                    // (random) - list.get(random.nextInt(size)), nothing for
+                    // an empty set - then itemStack.set(INSTRUMENT, ...). A
+                    // value equal to the item's default leaves no patch
+                    // (PatchedDataComponentMap drops it).
+                    if (!fn.instrumentOptions.empty()) {
+                        const int index = ctx.random.NextInt(static_cast<int>(fn.instrumentOptions.size()));
+                        const std::string& chosen = fn.instrumentOptions[static_cast<size_t>(index)];
+                        const auto prototype =
+                            ItemRegistry::Get(stack.itemId).defaultComponents.get(DataComponents::INSTRUMENT);
+                        if (prototype && *prototype == chosen) {
+                            stack.components.remove(DataComponents::INSTRUMENT);
+                        } else {
+                            stack.components.set(DataComponents::INSTRUMENT, chosen);
+                        }
+                    }
+                    break;
+                case Function::Kind::SetComponents:
+                    // MC SetComponentsFunction.run → applyComponentsAndValidate.
+                    for (const auto& [id, value] : fn.components) {
+                        if (!ApplyComponent(stack, id, value) && !table.warnedUnsupported) {
+                            table.warnedUnsupported = true;
+                            Log::Debug("[ChestLoot] %s: set_components '%s' has no item component to write",
+                                       table.key.c_str(), id.c_str());
+                        }
+                    }
+                    break;
                 case Function::Kind::Unsupported:
                     if (!table.warnedUnsupported) {
                         table.warnedUnsupported = true;
@@ -750,12 +1115,19 @@ namespace Game::ChestLoot {
                     produced.emplace_back(entry.item, 1);
                     break;
                 case Entry::Kind::LootTableRef: {
-                    if (ctx.visiting.count(entry.tableRef)) break;   // MC: "Detected infinite loop"
-                    Table* ref = Lookup(entry.tableRef);
-                    if (!ref) break;
-                    ctx.visiting.insert(entry.tableRef);
-                    GetRandomItemsRaw(*ref, ctx, produced);
-                    ctx.visiting.erase(entry.tableRef);
+                    const auto rollRef = [&](const std::string& key) {
+                        if (key.empty() || ctx.visiting.count(key)) return;   // MC: "Detected infinite loop"
+                        Table* ref = Lookup(key);
+                        if (!ref) return;
+                        ctx.visiting.insert(key);
+                        GetRandomItemsRaw(*ref, ctx, produced);
+                        ctx.visiting.erase(key);
+                    };
+                    rollRef(entry.tableRef);
+                    for (const std::string& key : entry.moreTableRefs) rollRef(key);
+                    for (const std::shared_ptr<Table>& inlineTable : entry.inlineTables) {
+                        if (inlineTable) GetRandomItemsRaw(*inlineTable, ctx, produced);
+                    }
                     break;
                 }
                 case Entry::Kind::Empty:
@@ -881,7 +1253,7 @@ namespace Game::ChestLoot {
     } // namespace
 
     bool Fill(IContainer& container, const std::string& key, int64_t seed, JavaRandom* levelRandom,
-              float luck) {
+              float luck, const LootLevelContext* level) {
         std::lock_guard<std::mutex> lock(g_mutex);
         Table* table = Lookup(key);
         if (!table) return false;
@@ -894,6 +1266,7 @@ namespace Game::ChestLoot {
             std::chrono::steady_clock::now().time_since_epoch().count()));
         JavaRandom& random = seed != 0 ? seeded : (levelRandom ? *levelRandom : fallback);
         Context ctx{random};
+        ctx.level = level;
         // LootParams.Builder.withLuck(player.getLuck()) — RandomizableContainer
         // .unpackLootTable passes the opening player's LUCK attribute (LUCK /
         // UNLUCK effects, +-1 a level); 0 with no player. It weights every
@@ -918,12 +1291,14 @@ namespace Game::ChestLoot {
         return true;
     }
 
-    bool GetRandomItems(const std::string& key, JavaRandom& random, float luck, std::vector<ItemStack>& out) {
+    bool GetRandomItems(const std::string& key, JavaRandom& random, float luck, std::vector<ItemStack>& out,
+                        const LootLevelContext* level) {
         std::lock_guard<std::mutex> lock(g_mutex);
         Table* table = Lookup(key);
         if (!table) return false;
         Context ctx{random};
         ctx.luck = luck;
+        ctx.level = level;
         // LootTable.getRandomItems: getRandomItemsRaw through
         // createStackSplitter — no slot shuffling, that is fill()'s.
         std::vector<ItemStack> stacks;

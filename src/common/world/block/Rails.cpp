@@ -9,6 +9,10 @@
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
+#include "common/entity/EntityLevel.hpp"
+#include "common/entity/vehicle/Minecart.hpp"
+#include "common/physics/Physics.hpp"
+#include "common/world/ticks/ScheduledTickAccess.hpp"
 
 #include <optional>
 #include <vector>
@@ -250,11 +254,15 @@ namespace Game {
 
         // ── PoweredRailBlock ─────────────────────────────────────────────
 
+        // One PoweredRailBlock class serves both the powered and the
+        // activator rail (isActivator); the power runs along rails of the
+        // SAME block only (`state.is(this)`).
         bool IsSameRailWithPower(ILevelWrite& level, const glm::ivec3& pos, bool forward, int searchDepth,
-                                 RailShape dir);
+                                 RailShape dir, BlockID railBlock);
 
         bool FindPoweredRailSignal(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
                                    bool forward, int searchDepth) {
+            const BlockID railBlock = state.Block();
             if (searchDepth >= 8) return false;
             int x = pos.x, y = pos.y, z = pos.z;
             bool checkBelow = true;
@@ -284,14 +292,15 @@ namespace Game {
                     break;
                 default: break;
             }
-            if (IsSameRailWithPower(level, glm::ivec3(x, y, z), forward, searchDepth, shape)) return true;
-            return checkBelow && IsSameRailWithPower(level, glm::ivec3(x, y - 1, z), forward, searchDepth, shape);
+            if (IsSameRailWithPower(level, glm::ivec3(x, y, z), forward, searchDepth, shape, railBlock)) return true;
+            return checkBelow &&
+                   IsSameRailWithPower(level, glm::ivec3(x, y - 1, z), forward, searchDepth, shape, railBlock);
         }
 
         bool IsSameRailWithPower(ILevelWrite& level, const glm::ivec3& pos, bool forward, int searchDepth,
-                                 RailShape dir) {
+                                 RailShape dir, BlockID railBlock) {
             const BlockState state = StateAt(level, pos);
-            if (!state.Is(BlockID::PoweredRail)) return false;
+            if (!state.Is(railBlock)) return false;
             const RailShape myShape = RailShapeOf(state);
             if (dir == RailShape::EastWest &&
                 (myShape == RailShape::NorthSouth || myShape == RailShape::AscendingNorth ||
@@ -318,7 +327,7 @@ namespace Game {
                 }
                 return;
             }
-            if (id == BlockID::PoweredRail) {
+            if (id == BlockID::PoweredRail || id == BlockID::ActivatorRail) {
                 const bool isPowered = PoweredOf(state);
                 const bool shouldPower = HasNeighborSignal(level, pos) ||
                                          FindPoweredRailSignal(level, pos, state, true, 0) ||
@@ -330,7 +339,8 @@ namespace Game {
                 }
                 return;
             }
-            // Activator rail: shape only. Detector rail: no minecarts to detect.
+            // Detector rail: BaseRailBlock.updateState — shape only (its
+            // power comes from the minecarts on it, CheckPressed below).
         }
 
         // BaseRailBlock.updateState(state, level, pos, movedByPiston) — the
@@ -371,8 +381,93 @@ namespace Game {
             }
         }
 
-        // Detector rail signal (never powered without minecarts, but the
-        // hooks exist so a track reading is complete).
+        // ── DetectorRailBlock ────────────────────────────────────────────
+
+        // getSearchBB: the cell shrunk by 0.2 at the sides and the top.
+        AABB DetectorSearchBox(const glm::ivec3& pos) {
+            return AABB::FromMinMax(glm::vec3(pos.x + 0.2f, static_cast<float>(pos.y), pos.z + 0.2f),
+                                    glm::vec3(pos.x + 1.0f - 0.2f, pos.y + 1.0f - 0.2f, pos.z + 1.0f - 0.2f));
+        }
+
+        // getInteractingMinecartOfType(level, pos, AbstractMinecart.class, …).
+        void MinecartsOnDetector(ILevelWrite& level, const glm::ivec3& pos, std::vector<AbstractMinecart*>& out) {
+            out.clear();
+            EntityLevel* entities = level.Entities();
+            if (!entities) return;
+            std::vector<Entity*> found;
+            entities->GetEntitiesInBox(DetectorSearchBox(pos), nullptr, found);
+            for (Entity* e : found) {
+                if (!e || e->IsRemoved() || !IsMinecartEntityType(e->GetType())) continue;
+                if (auto* cart = dynamic_cast<AbstractMinecart*>(e)) out.push_back(cart);
+            }
+        }
+
+        // updatePowerToConnected: every rail this one connects to is told.
+        void DetectorUpdatePowerToConnected(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+            auto* world = dynamic_cast<World*>(&level);
+            if (!world) return;
+            RailState rail(level, pos, state);
+            for (const glm::ivec3& connection : rail.GetConnections()) {
+                const BlockState connectionState = StateAt(level, connection);
+                world->NeighborChanged(connectionState, connection, connectionState.Block(), false);
+            }
+        }
+
+        // MC DetectorRailBlock.checkPressed.
+        void DetectorCheckPressed(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+            if (!CanSupportRigidBlock(level, Below(pos))) return;   // canSurvive
+            const bool wasPressed = PoweredOf(state);
+            thread_local std::vector<AbstractMinecart*> t_carts;
+            MinecartsOnDetector(level, pos, t_carts);
+            const bool shouldBePressed = !t_carts.empty();
+            if (shouldBePressed != wasPressed) {
+                const BlockState newState = WithPowered(state, shouldBePressed);
+                SetBlockAndUpdate(level, pos, newState);
+                DetectorUpdatePowerToConnected(level, pos, newState);
+                level.UpdateNeighborsAt(pos, BlockID::DetectorRail);
+                level.UpdateNeighborsAt(Below(pos), BlockID::DetectorRail);
+            }
+            if (shouldBePressed) {
+                if (ScheduledTickAccess* ticks = level.Ticks()) ticks->ScheduleTick(pos, BlockID::DetectorRail, 20);
+            }
+            level.UpdateNeighbourForOutputSignal(pos, BlockID::DetectorRail);
+        }
+
+        void DetectorEntityInside(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Entity& entity) {
+            (void)entity;
+            if (level.IsClientSide() || PoweredOf(state)) return;
+            DetectorCheckPressed(level, pos, state);
+        }
+
+        void DetectorTick(ILevelWrite& level, const glm::ivec3& pos, BlockState state, JavaRandom& random) {
+            (void)random;
+            if (PoweredOf(state)) DetectorCheckPressed(level, pos, state);
+        }
+
+        void DetectorOnPlace(ILevelWrite& level, const glm::ivec3& pos, BlockState state, BlockState oldState,
+                             bool movedByPiston) {
+            if (oldState.Block() == state.Block()) return;
+            const BlockState newState = UpdateStateOnPlace(level, pos, state, movedByPiston);
+            if (!level.IsClientSide()) DetectorCheckPressed(level, pos, newState);
+        }
+
+        // MC DetectorRailBlock.getAnalogOutputSignal: a command block cart's
+        // success count, else the first container cart's fill level.
+        int DetectorAnalogOutput(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Direction) {
+            if (!PoweredOf(state)) return 0;
+            thread_local std::vector<AbstractMinecart*> t_carts;
+            MinecartsOnDetector(level, pos, t_carts);
+            for (AbstractMinecart* cart : t_carts) {
+                if (auto* command = dynamic_cast<MinecartCommandBlock*>(cart)) return command->GetSuccessCount();
+            }
+            for (AbstractMinecart* cart : t_carts) {
+                if (auto* container = dynamic_cast<MinecartContainerBase*>(cart)) {
+                    return container->Container().RedstoneSignal();
+                }
+            }
+            return 0;
+        }
+
         int DetectorGetSignal(const IBlockAccess&, const glm::ivec3&, BlockState state, Direction) {
             return PoweredOf(state) ? 15 : 0;
         }
@@ -408,9 +503,14 @@ namespace Game {
             b.affectNeighborsAfterRemoval = &RailAfterRemoval;
         }
         Block& detector = blocks[static_cast<size_t>(BlockID::DetectorRail)];
-        detector.isSignalSource  = true;
-        detector.getSignal       = &DetectorGetSignal;
-        detector.getDirectSignal = &DetectorGetDirectSignal;
+        detector.isSignalSource        = true;
+        detector.getSignal             = &DetectorGetSignal;
+        detector.getDirectSignal       = &DetectorGetDirectSignal;
+        detector.onPlace               = &DetectorOnPlace;
+        detector.entityInside          = &DetectorEntityInside;
+        detector.tick                  = &DetectorTick;
+        detector.hasAnalogOutputSignal = true;
+        detector.getAnalogOutputSignal = &DetectorAnalogOutput;
     }
 
 } // namespace Game

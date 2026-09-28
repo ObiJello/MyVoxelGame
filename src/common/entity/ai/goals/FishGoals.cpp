@@ -4,6 +4,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 
+#include <algorithm>
 #include <vector>
 
 namespace Game {
@@ -68,9 +69,14 @@ namespace Game {
         }
         m_nextStartTick = NextStartTick();
 
-        // MC: gather same-type schooling fish within 8 blocks that either
-        // lead a school with room or are leaderless; join the first leader,
-        // else recruit the leaderless (self included as recruiter).
+        // MC: every same-class fish within the box inflated by 8 that
+        // either leads a school with room or follows nobody — THIS fish
+        // included (getEntitiesOfClass does not skip the caller). Any leader
+        // with room among them takes the lot (DataFixUtils.orElse(…
+        // canBeFollowed().findAny(), this)): every non-follower in the list,
+        // up to its free places, joins it — so a lone fish meeting a school
+        // brings its own leaderless neighbours along, and with no such leader
+        // this fish recruits them itself.
         EntityLevel* level = m_fish->Level();
         if (!level) return false;
 
@@ -78,28 +84,31 @@ namespace Game {
         box.min -= glm::vec3(8.0f);
         box.max += glm::vec3(8.0f);
         std::vector<Entity*> nearby;
-        level->GetEntitiesInBox(box, m_fish, nearby);
+        level->GetEntitiesInBox(box, nullptr, nearby);
 
-        SchoolingFish* leader = nullptr;
-        std::vector<SchoolingFish*> loners;
+        std::vector<SchoolingFish*> candidates;
+        candidates.reserve(nearby.size());
         for (Entity* e : nearby) {
+            if (e->GetType() != m_fish->GetType()) continue;
             auto* other = dynamic_cast<SchoolingFish*>(e);
-            if (!other || other->GetType() != m_fish->GetType()) continue;
-            if (other->CanBeFollowed() && !leader) leader = other;
-            else if (!other->IsFollower()) loners.push_back(other);
+            if (!other || !other->IsAlive()) continue;
+            if (other->CanBeFollowed() || !other->IsFollower()) candidates.push_back(other);
+        }
+        // The caller is always its own candidate (it follows nobody here).
+        if (std::find(candidates.begin(), candidates.end(), m_fish) == candidates.end()) {
+            candidates.push_back(m_fish);
         }
 
-        if (leader) {
-            m_fish->StartFollowing(leader);
-        } else {
-            // The recruiter becomes the leader of every loner in range, up to
-            // the school size.
-            for (SchoolingFish* loner : loners) {
-                if (!m_fish->CanBeFollowed() && m_fish->HasFollowers()) break;
-                if (loner == m_fish) continue;
-                loner->StartFollowing(m_fish);
-            }
+        SchoolingFish* leader = m_fish;
+        for (SchoolingFish* other : candidates) {
+            if (other->CanBeFollowed()) { leader = other; break; }
         }
+        std::vector<SchoolingFish*> loners;
+        loners.reserve(candidates.size());
+        for (SchoolingFish* other : candidates) {
+            if (!other->IsFollower()) loners.push_back(other);
+        }
+        leader->AddFollowers(loners);
         return m_fish->IsFollower();
     }
 

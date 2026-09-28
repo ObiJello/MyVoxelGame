@@ -797,6 +797,22 @@ namespace Render {
     }
 
     void GLBackend::BindShader(ShaderHandle handle) {
+        if (m_oitStage != OitStage::None) {
+            // Improved Transparency: the engine shader's variant for the
+            // stage, or no draws at all with it.
+            const ShaderHandle variant = OitVariantFor(handle);
+            m_oitSkipDraw = variant == INVALID_SHADER;
+            if (!m_oitSkipDraw) {
+                auto vit = m_shaders.find(variant);
+                if (vit != m_shaders.end()) {
+                    glUseProgram(vit->second.programId);
+                    const GLint loc = vit->second.GetUniform("OitProjParams");
+                    if (loc != -1) glUniform4fv(loc, 1, glm::value_ptr(m_oitProjParams));
+                }
+            }
+            m_boundShader = handle;
+            return;
+        }
         if (!m_overrideMode) {
             if (handle == m_boundShader) return;
             auto it = m_shaders.find(handle);
@@ -981,6 +997,26 @@ namespace Render {
         glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(bound));
     }
 
+    bool GLBackend::CopyFramebufferToRenderTarget(RenderTargetHandle dst) {
+        auto d = m_renderTargets.find(dst);
+        if (d == m_renderTargets.end() || d->second.fbo == 0) return false;
+        GLint bound = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
+        if (bound != 0) return false;   // only the default framebuffer is "main"
+        // glBlitFramebuffer honours the scissor test: a stale scissor rect
+        // would copy part of the frame.
+        const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+        if (scissor) glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->second.fbo);
+        glBlitFramebuffer(0, 0, d->second.width, d->second.height,
+                          0, 0, d->second.width, d->second.height,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (scissor) glEnable(GL_SCISSOR_TEST);
+        return true;
+    }
+
     void GLBackend::SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) {
         auto it = m_shaders.find(ResolveShader(handle));
         if (it == m_shaders.end()) return;
@@ -1150,24 +1186,25 @@ namespace Render {
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(x, y, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rows.data());
         // GL hands rows back bottom-up; the contract is top-down.
-        m_readbackPixels.resize(rows.size());
+        Readback rb;
+        rb.pixels.resize(rows.size());
         for (int r = 0; r < h; ++r) {
-            std::memcpy(&m_readbackPixels[static_cast<size_t>(r) * stride],
+            std::memcpy(&rb.pixels[static_cast<size_t>(r) * stride],
                         &rows[static_cast<size_t>(h - 1 - r) * stride], stride);
         }
-        m_readbackW = w;
-        m_readbackH = h;
-        m_readbackReady = true;
+        rb.w = w;
+        rb.h = h;
+        m_readbacks.push_back(std::move(rb));
         return true;
     }
 
     bool GLBackend::TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
-        if (!m_readbackReady) return false;
-        outRgba.swap(m_readbackPixels);
-        m_readbackPixels.clear();
-        outW = m_readbackW;
-        outH = m_readbackH;
-        m_readbackReady = false;
+        if (m_readbacks.empty()) return false;
+        Readback& rb = m_readbacks.front();
+        outRgba.swap(rb.pixels);
+        outW = rb.w;
+        outH = rb.h;
+        m_readbacks.pop_front();
         return true;
     }
 
@@ -1313,6 +1350,7 @@ namespace Render {
         return it->second.colorTexture;
     }
 
+
     void GLBackend::ResizeRenderTarget(RenderTargetHandle rt, int w, int h) {
         if (rt == INVALID_RENDER_TARGET || w <= 0 || h <= 0) return;
         auto it = m_renderTargets.find(rt);
@@ -1366,6 +1404,7 @@ namespace Render {
         // not modify-on-fail — and the override always enables stencil
         // testing.
         PipelineState state = state_;
+        m_requestedState = state_;
         if (m_stencilOverride.enabled) {
             state.stencilTestEnabled = true;
             state.stencilCompareOp   = m_stencilOverride.compareOp;
@@ -1385,6 +1424,20 @@ namespace Render {
         if (m_cullInvert) {
             state.frontFace = (state.frontFace == FrontFace::CounterClockwise)
                                   ? FrontFace::Clockwise : FrontFace::CounterClockwise;
+        }
+        // Improved Transparency (MC 26.3 OIT): inside a stage every draw is
+        // MC's OIT snippet — depth tested, not written (the clouds' depth
+        // bounds excepted), blended One/One (the equation — MAX for the
+        // depth bounds, ADD otherwise — is SetOitStage's). No stage: the
+        // caller's state, untouched.
+        if (m_oitStage != OitStage::None) {
+            state.depthTestEnabled  = true;
+            state.depthCompareOp    = CompareOp::LessEqual;
+            state.depthWriteEnabled = m_oitStage == OitStage::DepthBounds && m_oitDbWritesDepth;
+            state.blendEnabled      = true;
+            state.srcBlendFactor    = BlendFactor::One;
+            state.dstBlendFactor    = BlendFactor::One;
+            state.colorWriteEnabled = true;
         }
 
         // Depth test
@@ -1532,6 +1585,7 @@ namespace Render {
     }
 
     void GLBackend::DrawIndexed(MeshHandle mesh, uint32_t indexCount, uint32_t indexOffset) {
+        if (m_oitSkipDraw) return;   // an OIT stage, and the shader has no variant
         auto it = m_meshes.find(mesh);
         if (it == m_meshes.end()) return;
 
@@ -1612,7 +1666,7 @@ namespace Render {
     void GLBackend::DrawIndexedInstanced(MeshHandle mesh, uint32_t indexCount,
                                          uint32_t indexOffset, uint32_t instanceCount,
                                          uint32_t instanceByteOffset) {
-        if (instanceCount == 0 || indexCount == 0) return;
+        if (instanceCount == 0 || indexCount == 0 || m_oitSkipDraw) return;
         auto it = m_meshes.find(mesh);
         if (it == m_meshes.end()) return;
 
@@ -1648,6 +1702,7 @@ namespace Render {
     }
 
     void GLBackend::DrawArrays(MeshHandle mesh, uint32_t vertexCount, uint32_t firstVertex) {
+        if (m_oitSkipDraw) return;
         auto it = m_meshes.find(mesh);
         if (it == m_meshes.end()) return;
 
@@ -1707,6 +1762,7 @@ namespace Render {
 
     void GLBackend::DrawIndexedBaseVertex(uint32_t indexCount, size_t indexByteOffset, int32_t baseVertex,
                                           IndexType indexType) {
+        if (m_oitSkipDraw) return;
         glDrawElementsBaseVertex(
             GL_TRIANGLES,
             static_cast<GLsizei>(indexCount),
@@ -1720,7 +1776,7 @@ namespace Render {
                                                 const int32_t* baseVertices,
                                                 uint32_t drawCount,
                                                 IndexType indexType) {
-        if (drawCount == 0) return;
+        if (drawCount == 0 || m_oitSkipDraw) return;
         const GLenum glIndexType =
             indexType == IndexType::Uint16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
         // Convert size_t byte offsets to const void* for GL. Persistent scratch:
@@ -1959,6 +2015,232 @@ namespace Render {
             case StencilOp::DecrWrap:  return GL_DECR_WRAP;
         }
         return GL_KEEP;
+    }
+
+    // ========================================================================
+    // IMPROVED TRANSPARENCY — MC 26.3 WAVELET OIT
+    // ========================================================================
+
+    ShaderHandle GLBackend::ResolveOit(ShaderHandle handle) const {
+        auto it = m_oitVariants.find(handle);
+        if (it == m_oitVariants.end()) return handle;
+        const ShaderHandle v = it->second.shader[static_cast<size_t>(m_oitStage)];
+        return v != INVALID_SHADER ? v : handle;
+    }
+
+    ShaderHandle GLBackend::OitVariantFor(ShaderHandle engine) {
+        const size_t stage = static_cast<size_t>(m_oitStage);
+        OitVariants& v = m_oitVariants[engine];
+        if (v.tried[stage]) return v.shader[stage];
+        v.tried[stage] = true;
+        auto it = m_shaders.find(engine);
+        if (it == m_shaders.end()) return INVALID_SHADER;
+
+        // A shader takes part only if its fragment source says where MC's
+        // oit.glsl goes (under #ifdef OIT, so the engine's own compile never
+        // sees it).
+        // Copies: CreateShader below inserts into m_shaders.
+        const std::string vert = it->second.vertexSource;
+        std::string frag = it->second.fragmentSource;
+        if (!SpliceOitLibrary(frag)) return INVALID_SHADER;
+        // MC's pipeline defines, right after #version.
+        const char* stageDefines =
+            m_oitStage == OitStage::DepthBounds   ? "#define OIT\n#define OIT_ALPHA_ONLY\n#define OIT_DEPTH_BOUNDS\n" :
+            m_oitStage == OitStage::Transmittance ? "#define OIT\n#define OIT_ALPHA_ONLY\n#define OIT_TRANSMITTANCE\n" :
+                                                    "#define OIT\n#define OIT_ACCUMULATE\n";
+        const size_t version = frag.find("#version");
+        const size_t lineEnd = version == std::string::npos ? std::string::npos : frag.find('\n', version);
+        if (lineEnd == std::string::npos) return INVALID_SHADER;
+        frag.insert(lineEnd + 1, stageDefines);
+
+        const ShaderHandle variant = CreateShader(vert, frag);
+        if (variant == INVALID_SHADER) {
+            Log::Error("GLBackend: OIT variant (stage %zu) of shader %u failed to compile", stage, engine);
+            return INVALID_SHADER;
+        }
+        AssignOitSamplerUnits(variant);
+        v.shader[stage] = variant;
+        return variant;
+    }
+
+    bool GLBackend::SpliceOitLibrary(std::string& fragmentSource) {
+        static const std::string kMarker = "#pragma oit_library";
+        const size_t marker = fragmentSource.find(kMarker);
+        if (marker == std::string::npos) return false;
+        if (m_oitLibrary.empty()) m_oitLibrary = ReadFileContents("shaders/oit_lib.glsl");
+        if (m_oitLibrary.empty()) {
+            Log::Error("GLBackend: shaders/oit_lib.glsl missing - Improved Transparency unavailable");
+            return false;
+        }
+        fragmentSource.replace(marker, kMarker.size(), m_oitLibrary);
+        return true;
+    }
+
+    void GLBackend::AssignOitSamplerUnits(ShaderHandle shader) {
+        // MC's DepthBoundsSampler / Coeff0 / Coeff1 on their fixed units
+        // (SetOitStage binds them there); Sampler0 — the composite's and the
+        // helper passes' own input — on unit 0.
+        auto it = m_shaders.find(shader);
+        if (it == m_shaders.end()) return;
+        GLint current = 0;
+        glGetIntegerv(GL_CURRENT_PROGRAM, &current);
+        glUseProgram(it->second.programId);
+        const GLint db = it->second.GetUniform("DepthBoundsSampler");
+        const GLint c0 = it->second.GetUniform("Coeff0");
+        const GLint c1 = it->second.GetUniform("Coeff1");
+        const GLint s0 = it->second.GetUniform("Sampler0");
+        if (db != -1) glUniform1i(db, kOitUnitDepthBounds);
+        if (c0 != -1) glUniform1i(c0, kOitUnitCoeff0);
+        if (c1 != -1) glUniform1i(c1, kOitUnitCoeff1);
+        if (s0 != -1) glUniform1i(s0, 0);
+        glUseProgram(static_cast<GLuint>(current));
+    }
+
+    ShaderHandle GLBackend::CreateOitShaderFromFiles(const std::string& vertexPath,
+                                                     const std::string& fragmentPath) {
+        const std::string vert = ReadFileContents(vertexPath);
+        std::string frag = ReadFileContents(fragmentPath);
+        if (vert.empty() || frag.empty()) return INVALID_SHADER;
+        // Only the composite and the cull include the library; the blits
+        // have no marker and compile as they are.
+        if (frag.find("#pragma oit_library") != std::string::npos && !SpliceOitLibrary(frag)) {
+            return INVALID_SHADER;
+        }
+        const ShaderHandle shader = CreateShader(vert, frag);
+        if (shader != INVALID_SHADER) AssignOitSamplerUnits(shader);
+        return shader;
+    }
+
+    void GLBackend::SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) {
+        m_oitStage = stage;
+        m_oitProjParams = projParams;
+        m_oitDbWritesDepth = depthBoundsWriteDepth;
+        m_oitSkipDraw = false;
+        m_boundShader = INVALID_SHADER;   // the next BindShader resolves the variant
+        // MC's OIT colour targets: MAX into the depth bounds, ADD elsewhere.
+        glBlendEquation(stage == OitStage::DepthBounds ? GL_MAX : GL_FUNC_ADD);
+        if (stage != OitStage::None) {
+            // The stage's samplers: the depth bounds (the original while the
+            // depth bounds are being drawn — the cull reads it — the culled
+            // ones after), and the coefficients for the accumulation.
+            m_oitSamplerStage = stage;
+            const TextureHandle bounds = stage == OitStage::DepthBounds ? m_oit.depthBounds : m_oit.culled;
+            const bool acc = stage == OitStage::Accumulate;
+            BindTexture(bounds, kOitUnitDepthBounds);
+            BindTexture(acc ? m_oit.coeff0 : m_oit.dummy, kOitUnitCoeff0);
+            BindTexture(acc ? m_oit.coeff1 : m_oit.dummy, kOitUnitCoeff1);
+            glActiveTexture(GL_TEXTURE0);   // a texture made mid-stage must not unbind a stage sampler
+        }
+        if (m_stateInitialized) SetPipelineState(m_requestedState);   // re-splice for the new stage
+    }
+
+    bool GLBackend::OitEnsureTargets(int width, int height) {
+        if (width <= 0 || height <= 0) return false;
+        if (m_oit.depthBounds != INVALID_TEXTURE && m_oit.width == width && m_oit.height == height) return true;
+        OitDestroyTargets();
+        OitTargets& t = m_oit;
+        t.width = width;
+        t.height = height;
+        t.depthBounds = CreateTexture2D(width, height, TextureFormat::RGBA32F, nullptr);
+        t.culled      = CreateTexture2D(width, height, TextureFormat::RGBA32F, nullptr);
+        t.coeff0      = CreateTexture2D(width, height, TextureFormat::RGBA16F, nullptr);
+        t.coeff1      = CreateTexture2D(width, height, TextureFormat::RGBA16F, nullptr);
+        t.accumulate  = CreateTexture2D(width, height, TextureFormat::RGBA16F, nullptr);
+        t.depthCopy   = CreateTexture2D(width, height, TextureFormat::Depth24Stencil8, nullptr);
+        t.cloudDepth  = CreateTexture2D(width, height, TextureFormat::Depth24Stencil8, nullptr);
+        const unsigned char none[4] = {0, 0, 0, 0};
+        t.dummy       = CreateTexture2D(1, 1, TextureFormat::RGBA8, none);
+        const TextureHandle all[] = {t.depthBounds, t.culled, t.coeff0, t.coeff1, t.accumulate,
+                                     t.depthCopy, t.cloudDepth, t.dummy};
+        for (TextureHandle h : all) {
+            if (h == INVALID_TEXTURE) { OitDestroyTargets(); return false; }
+        }
+        const TextureHandle coeffs[2] = {t.coeff0, t.coeff1};
+        auto make = [&](OitPass pass, const TextureHandle* colors, int count, TextureHandle depth) {
+            t.fbos[static_cast<size_t>(pass)] = CreateRenderTargetFromTextures(colors, count, depth);
+            return t.fbos[static_cast<size_t>(pass)] != INVALID_RENDER_TARGET;
+        };
+        const bool ok =
+            make(OitPass::DepthBounds,        &t.depthBounds, 1, t.depthCopy) &&
+            make(OitPass::DepthBoundsCull,    &t.culled,      1, t.depthCopy) &&
+            make(OitPass::CloudDepthBounds,   &t.culled,      1, t.cloudDepth) &&
+            make(OitPass::Transmittance,      coeffs,         2, t.depthCopy) &&
+            make(OitPass::CloudTransmittance, coeffs,         2, t.cloudDepth) &&
+            make(OitPass::Accumulate,         &t.accumulate,  1, t.depthCopy) &&
+            make(OitPass::CloudAccumulate,    &t.accumulate,  1, t.cloudDepth);
+        if (!ok) { OitDestroyTargets(); return false; }
+        return true;
+    }
+
+    void GLBackend::OitDestroyTargets() {
+        for (RenderTargetHandle& fbo : m_oit.fbos) {
+            if (fbo != INVALID_RENDER_TARGET) DestroyRenderTarget(fbo);   // wraps: textures stay
+            fbo = INVALID_RENDER_TARGET;
+        }
+        for (TextureHandle* h : {&m_oit.depthBounds, &m_oit.culled, &m_oit.coeff0, &m_oit.coeff1,
+                                 &m_oit.accumulate, &m_oit.depthCopy, &m_oit.cloudDepth, &m_oit.dummy}) {
+            if (*h != INVALID_TEXTURE) DestroyTexture(*h);
+            *h = INVALID_TEXTURE;
+        }
+        m_oit.width = m_oit.height = 0;
+        // The variants live with the option: compiled again when it comes back.
+        for (auto& [engine, v] : m_oitVariants) {
+            for (ShaderHandle h : v.shader) {
+                if (h != INVALID_SHADER) DestroyShader(h);
+            }
+        }
+        m_oitVariants.clear();
+    }
+
+    bool GLBackend::OitBeginPass(OitPass pass, bool clearColor) {
+        if (m_oitPassOpen || m_oit.depthBounds == INVALID_TEXTURE) return false;
+        // The frame's depth, snapshotted where the first pass of the frame
+        // opens: the OIT passes can't attach FBO 0's own.
+        if (pass == OitPass::DepthBounds) {
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            if (!CopyFramebufferDepthToTexture(m_oit.depthCopy)) return false;
+        }
+        const RenderTargetHandle fbo = m_oit.fbos[static_cast<size_t>(pass)];
+        if (fbo == INVALID_RENDER_TARGET) return false;
+        BindRenderTarget(fbo);
+        if (clearColor) {
+            // MC's clear values: the depth bounds (-FLT_MAX, 0, 0, 0) so MAX
+            // blending finds the nearest and farthest, the rest zero. The
+            // colour mask and scissor would limit the clear: open both.
+            const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
+            if (scissor) glDisable(GL_SCISSOR_TEST);
+            glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            const bool bounds = pass == OitPass::DepthBounds || pass == OitPass::DepthBoundsCull ||
+                                pass == OitPass::CloudDepthBounds;
+            const GLfloat boundsClear[4] = {-3.4028235e38f, 0.0f, 0.0f, 0.0f};
+            const GLfloat zero[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            glClearBufferfv(GL_COLOR, 0, bounds ? boundsClear : zero);
+            if (pass == OitPass::Transmittance || pass == OitPass::CloudTransmittance) {
+                glClearBufferfv(GL_COLOR, 1, zero);
+            }
+            if (scissor) glEnable(GL_SCISSOR_TEST);
+            m_stateInitialized = false;   // the colour mask moved under the cache
+        }
+        m_oitPassOpen = true;
+        return true;
+    }
+
+    void GLBackend::OitEndPass() {
+        if (!m_oitPassOpen) return;
+        m_oitPassOpen = false;
+        BindRenderTarget(INVALID_RENDER_TARGET);
+    }
+
+    TextureHandle GLBackend::OitTexture(OitImage image) const {
+        switch (image) {
+            case OitImage::DepthBounds:       return m_oit.depthBounds;
+            case OitImage::DepthBoundsCulled: return m_oit.culled;
+            case OitImage::Coeff0:            return m_oit.coeff0;
+            case OitImage::Coeff1:            return m_oit.coeff1;
+            case OitImage::Accumulate:        return m_oit.accumulate;
+            case OitImage::FrameDepth:        return m_oit.depthCopy;
+        }
+        return INVALID_TEXTURE;
     }
 
     std::string GLBackend::ReadFileContents(const std::string& path) const {

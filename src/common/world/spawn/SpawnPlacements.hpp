@@ -104,6 +104,10 @@ namespace Game {
     // getLightEmission() < 14 (no spawning on glowstone/magma); this engine
     // stores no light emission, so that clause is absent until it does.
     bool IsValidSpawnBlock(const IBlockAccess& blocks, int x, int y, int z);
+    // The same for a known entity type — MC isValidSpawn(level, pos, type),
+    // which lets a block's own rule see the type: leaves take only ocelots
+    // and parrots (Blocks::ocelotOrParrot).
+    bool IsValidSpawnBlock(const IBlockAccess& blocks, int x, int y, int z, EntityTypeId type);
 
     // MC NaturalSpawner.isValidEmptySpawnBlock — the position itself must be
     // free: not a full collision cube, not a redstone signal source, no fluid,

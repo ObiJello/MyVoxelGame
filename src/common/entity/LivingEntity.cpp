@@ -1,5 +1,12 @@
 // File: src/common/entity/LivingEntity.cpp
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/SpearItem.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+
+#include <atomic>
+#include "common/particle/ParticleOptions.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/entity/MobCategory.hpp"
 #include "common/world/block/BlockBounce.hpp"
 #include "common/world/block/BlockFriction.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -17,6 +24,8 @@
 #include "common/sound/SoundType.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/entity/TamableAnimal.hpp"
+#include "common/core/Log.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -41,12 +50,16 @@ namespace Game {
 
     LivingEntity::LivingEntity(EntityTypeId type, EntityLevel* level)
         : Entity(type, level) {
+        // Living entities are what references point at (owners, attackers,
+        // targets): their liveness token exists from the start.
+        EnsureLivenessToken();
         CreateLivingAttributes(m_attributes);
         m_health = GetMaxHealth();
     }
 
     LivingEntity::LivingEntity(EntityTypeId type, EntityLevel* level, NoAttributesTag)
         : Entity(type, level) {
+        EnsureLivenessToken();
         // No CreateLivingAttributes — see the header. GetMaxHealth still reads
         // 20.0 here, out of kAttributeTable rather than out of a registered
         // instance, so the starting health is the same number by the same rule.
@@ -345,7 +358,12 @@ namespace Game {
     }
 
     bool LivingEntity::IsEffectiveAi() const {
-        return m_level && !m_level->IsClientSide();
+        // MC Entity.isEffectiveAi = isLocalInstanceAuthoritative: not on the
+        // server while a player steers this mob (its goals and
+        // serverAiStep rest; the steering client moves it). The client's
+        // copies stay non-effective — their travel is AiStep's own branch.
+        if (!m_level || m_level->IsClientSide()) return false;
+        return !(IsVehicle() && IsSteeredByPlayer());
     }
 
     void LivingEntity::SetLastHurtByMob(Entity* e) {
@@ -400,6 +418,12 @@ namespace Game {
         // FATIGUE adds (1 + amp) * 2 — the visibly sluggish arm an elder
         // guardian's aura gives everything it touches.
         int swingDuration = 6;
+        // The swing's SwingAnimation: the main hand's ATTACK_ANIMATION — a
+        // spear STABs for its attack duration (Item.Properties.spear).
+        if (const ItemStack* main = const_cast<LivingEntity*>(this)->EquipmentInSlot(EquipmentSlot::MAINHAND);
+            main && !main->IsEmpty()) {
+            swingDuration = Spear::AttackAnimationDuration(main->itemId);
+        }
         if (HasDigSpeed(EffectStorage())) {
             // MobEffectUtil.hasDigSpeed: HASTE or CONDUIT_POWER, the larger
             // of the two amplifiers.
@@ -513,11 +537,16 @@ namespace Game {
                 return movement;
             };
 
-            if (IsInWater()) {
+            // A subclass's own travelInWater (AbstractFish) replaces the
+            // whole body below, jumpOutOfFluid included.
+            bool customWaterTravel = false;
+            if (IsInWater() && TravelInWaterOverride(input, baseGravity, isFalling, oldY)) {
+                customWaterTravel = true;
+            } else if (IsInWater()) {
                 // MC travelInWater. Not carried: WATER_MOVEMENT_EFFICIENCY
                 // (depth strider) — no such attribute here. DOLPHINS_GRACE
                 // replaces the slow-down outright.
-                float slowDown = IsSprinting() ? 0.9f : 0.8f;   // getWaterSlowDown
+                float slowDown = IsSprinting() ? 0.9f : GetWaterSlowDown();
                 if (HasEffect(MobEffectId::DolphinsGrace)) slowDown = 0.96f;
                 const float speed    = 0.02f;
                 MoveRelative(speed, input);
@@ -574,10 +603,18 @@ namespace Game {
                             if (blocks->IsBlockFluid(bx, by, bz)) return false;
                 return true;
             };
-            if (horizontalCollision &&
+            if (!customWaterTravel && horizontalCollision &&
                 movedBoxIsFree(velocity.x, velocity.y + 0.6 - position.y + oldY,
                                velocity.z)) {
                 velocity.y = 0.3;
+            }
+            // MC travelInFluid's floatInLiquidWhileRidden(ENTITY_FLOATABLE):
+            // a mount of EntityTypeTags.CAN_FLOAT_WHILE_RIDDEN carrying anyone
+            // bobs up in water deeper than its jump threshold, so a ridden
+            // horse swims instead of sinking with its rider.
+            if (IsVehicle() && CanFloatWhileRidden(GetType()) &&
+                GetFluidHeight(FluidType::Water) > GetFluidJumpThreshold()) {
+                velocity.y += 0.03999999910593033;
             }
             return;
         }
@@ -703,6 +740,36 @@ namespace Game {
         if (!bounced) return;   // nothing to restitute: Move()'s zeros stand
         velocity = after;
         needsSync = true;
+        // MC restituteMovementAfterCollisions: gameEvent(BOUNCE).
+        GameEvent(GameEventId::Bounce);
+    }
+
+    void LivingEntity::CheckFallDamage(double dy, bool onGroundNow) {
+        if (m_level && !m_level->IsClientSide() && onGroundNow && fallDistance > 0.0f) {
+            // calculateFallPower = fd + 1e-6 - SAFE_FALL_DISTANCE, floored.
+            const double power = std::max(0.0, std::floor(static_cast<double>(fallDistance) + 1.0e-6 -
+                                                          GetAttributeValue(Attribute::SafeFallDistance)));
+            const IBlockAccess* blocks = m_level->Blocks();
+            // The block landed on: getOnPosLegacy (0.2 below the feet).
+            const glm::ivec3 pos(static_cast<int>(std::floor(position.x)), static_cast<int>(std::floor(position.y - 0.2)),
+                                 static_cast<int>(std::floor(position.z)));
+            const BlockState onState = blocks ? blocks->GetBlockState(pos.x, pos.y, pos.z) : BlockState();
+            if (power > 0.0 && onState.Block() != BlockID::Air) {
+                double x = position.x, z = position.z;
+                if (pos.x != static_cast<int>(std::floor(position.x)) || pos.z != static_cast<int>(std::floor(position.z))) {
+                    const double xDiff = x - pos.x - 0.5;
+                    const double zDiff = z - pos.z - 0.5;
+                    const double maxDiff = std::max(std::abs(xDiff), std::abs(zDiff));
+                    x = pos.x + 0.5 + xDiff / maxDiff * 0.5;
+                    z = pos.z + 0.5 + zDiff / maxDiff * 0.5;
+                }
+                const double scale = std::min(0.20000000298023224 + power / 15.0, 2.5);
+                const int particles = static_cast<int>(150.0 * scale);
+                m_level->SendParticles(ParticleOptions::Block(onState), x, position.y, z, particles,
+                                       0.0, 0.0, 0.0, 0.15000000596046448);
+            }
+        }
+        Entity::CheckFallDamage(dy, onGroundNow);
     }
 
     int LivingEntity::CalculateFallDamage(double fallDist, float damageMultiplier) const {
@@ -719,8 +786,16 @@ namespace Game {
         // damaging there would desync health.
         if (m_level && m_level->IsClientSide()) return false;
 
+        // MC LivingEntity.causeFallDamage: a fall that began with an impulse
+        // (a wind charge's blast, a mace's bounce) pays only for the height
+        // below where the impulse happened, and the context is spent (or its
+        // grace window asked to end) by the landing.
+        fallDist = GetImpulseContext().EffectiveFallDistance(fallDist, position.y);
+
         const int damage = CalculateFallDamage(fallDist, damageMultiplier);
         if (damage <= 0) return false;
+        // MC: a landing that hurts ends the impulse outright.
+        GetImpulseContext().Reset();
         // MC LivingEntity.causeFallDamage: the fall-damage thud (big above 4)
         // and the landed-on block's fall sound, then the hurt. A player's
         // are its client's own (the player half of the sound port).
@@ -802,6 +877,73 @@ namespace Game {
         else walkAnimation.Stop();
     }
 
+    // ── Steered by a riding player ─────────────────────────────────────────
+
+    namespace {
+        std::atomic<LivingEntity::RiderControlFn> s_serverRiderControl{nullptr};
+        std::atomic<LivingEntity::RiderControlFn> s_clientRiderControl{nullptr};
+    }
+
+    void LivingEntity::SetRiderControlResolver(bool clientSide, RiderControlFn fn) {
+        (clientSide ? s_clientRiderControl : s_serverRiderControl).store(fn, std::memory_order_release);
+    }
+
+    bool LivingEntity::CanFloatWhileRidden(EntityTypeId type) {
+        // EntityTypeTags.CAN_FLOAT_WHILE_RIDDEN (26.3 data): horse, zombie
+        // horse, mule, donkey, camel, camel husk — not the skeleton horse,
+        // which walks the bottom.
+        switch (type) {
+            case EntityTypeId::Horse:
+            case EntityTypeId::ZombieHorse:
+            case EntityTypeId::Mule:
+            case EntityTypeId::Donkey:
+            case EntityTypeId::Camel:
+            case EntityTypeId::CamelHusk:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    bool LivingEntity::GetFirstPlayerRider(RiderControl& out) const {
+        const bool clientSide = m_level && m_level->IsClientSide();
+        const RiderControlFn fn = (clientSide ? s_clientRiderControl : s_serverRiderControl)
+                                      .load(std::memory_order_acquire);
+        if (!fn || !IsVehicle() && !(m_level && m_level->IsClientSide() && !m_syncedRiders.empty())) return false;
+        out = RiderControl{};
+        return fn(*this, out);
+    }
+
+    bool LivingEntity::GetSteeringRider(RiderControl& out) const {
+        if (!IsAlive() || IsRemoved()) return false;
+        if (!GetFirstPlayerRider(out)) return false;
+        return CanBeSteeredBy(out);
+    }
+
+    bool LivingEntity::IsSteeredByPlayer() const {
+        RiderControl rider;
+        return GetSteeringRider(rider);
+    }
+
+    bool LivingEntity::IsLocallySteered() const {
+        if (!m_level || !m_level->IsClientSide() || !LocalPlayerRidesFirst()) return false;
+        RiderControl rider;
+        return GetSteeringRider(rider) && rider.local;
+    }
+
+    bool LivingEntity::CanSimulateMountMovement() const {
+        if (m_level && m_level->IsClientSide()) return IsLocallySteered();
+        return !IsSteeredByPlayer();
+    }
+
+    Entity* LivingEntity::GetSteeringPassenger() const {
+        if (!m_level || m_level->IsClientSide()) return nullptr;
+        const auto& riders = GetPassengers();
+        if (riders.empty() || !riders.front() || !riders.front()->IsPlayer()) return nullptr;
+        RiderControl rider;
+        return GetSteeringRider(rider) ? riders.front() : nullptr;
+    }
+
     void LivingEntity::AiStep() {
         PROFILE_ZONE_N("Living.AiStep");
         if (m_noJumpDelay > 0) --m_noJumpDelay;
@@ -865,8 +1007,29 @@ namespace Game {
 
         // ── Travel ─────────────────────────────────────────────────────────
         const glm::dvec3 input(xxa, yya, zza);
-        if (IsEffectiveAi() || (m_level && m_level->IsClientSide())) {
+        RiderControl steering;
+        if (GetSteeringRider(steering)) {
+            // MC travelRidden: the rider's keys become the mount's input;
+            // only the side that simulates the mount (the steering player's
+            // client) moves it — the server's copy stands still between the
+            // client's reported moves.
+            const glm::dvec3 riddenInput = GetRiddenInput(steering, input);
+            TickRidden(steering, riddenInput);
+            if (CanSimulateMountMovement()) {
+                SetSpeed(GetRiddenSpeed(steering));
+                Travel(riddenInput);
+            } else {
+                velocity = glm::dvec3(0.0);
+            }
+        } else if (IsEffectiveAi() || (m_level && m_level->IsClientSide() && SimulatesMovementOnClient())) {
             Travel(input);
+        } else if (m_level && m_level->IsClientSide()) {
+            // Interpolation only (SimulatesMovementOnClient): the position is
+            // the server's, eased in by ClientMobManager before this tick.
+            // The motion the renderers read (a bee's hover-vs-perched test,
+            // pitch-by-climb) is this tick's interpolated displacement, not a
+            // stale packet velocity decaying toward nothing.
+            velocity = position - oldPosition;
         }
 
         if (m_level && m_level->IsClientSide()) {
@@ -923,6 +1086,14 @@ namespace Game {
         // unpushable. (Pushing a player view moves nothing — player motion
         // is client-authoritative — but the mob's half still applies, which
         // is how a player wades through a crowd.)
+        // MC doPush is `entity.push(this)`: a boat or a minecart answers with
+        // its own push (AbstractBoat.push / AbstractMinecart.push).
+        if (IsVehicleEntityType(other.GetType())) {
+            if (auto* vehicle = dynamic_cast<VehicleEntity*>(&other)) {
+                vehicle->PushEntity(*this);
+                return;
+            }
+        }
         const auto rootVehicle = [](Entity* e) {
             while (e->GetVehicle()) e = e->GetVehicle();
             return e;
@@ -991,7 +1162,8 @@ namespace Game {
                 if (ShouldTakeDrowningDamage()) {
                     SetAirSupply(0);
                     // MC broadcasts entity event 67 here — the client's drown
-                    // bubble particles; no particle system to land them in.
+                    // bubbles (MakeDrownParticles).
+                    if (m_level && !m_level->IsClientSide()) m_level->BroadcastEntityEvent(*this, 67);
                     Hurt(MobDamageSource::Drown, 2.0f, nullptr);
                 }
             } else if (GetAirSupply() < GetMaxAirSupply() &&
@@ -1039,6 +1211,13 @@ namespace Game {
 
         TickCombatTimers();
 
+        // MC onClimbable's lastClimbablePos (for "fell off a ladder") and
+        // LivingEntity.tick's every-20-ticks combatTracker.recheckStatus.
+        if (m_level && !m_level->IsClientSide()) {
+            m_combatTracker.TrackClimbable(*this);
+            if (tickCount % 20 == 0) m_combatTracker.RecheckStatus(*this);
+        }
+
         // Fire damage: 1.0 every 20 ticks while burning. Fire-immune types
         // (blaze, zombified piglin) shed the ticks without the damage. MC
         // Entity.baseTick skips the on-fire tick while in lava — the lava
@@ -1065,11 +1244,19 @@ namespace Game {
     void LivingEntity::Tick() {
         BaseTick();
 
+        // MC LivingEntity.tick: super.tick(), then updatingUsingItem.
+        UpdatingUsingItem();
+
         UpdateSwingTime();
 
         if (!IsRemoved()) {
             AiStep();
         }
+
+        // MC LivingEntity.tick, after aiStep: the post-impulse grace window
+        // counts down (the player views, which are never Tick()ed, count
+        // theirs on the ServerPlayer).
+        GetImpulseContext().Tick();
 
         // ── Body yaw follows the direction of travel (MC LivingEntity.tick) ─
         const double xd = position.x - oldPosition.x;
@@ -1179,8 +1366,20 @@ namespace Game {
         amount = std::max(amount - GetAbsorptionAmount(), 0.0f);
         SetAbsorptionAmountClamped(GetAbsorptionAmount() - (originalDamage - amount));
         if (amount <= 0.0f) return;
+        // MC actuallyHurt: getCombatTracker().recordDamage(source, dmg) before
+        // the health comes off. A player's death line has its own path
+        // (ServerPlayer), so only the mobs keep a tracker running.
+        if (m_level && !m_level->IsClientSide() && !IsPlayer()) {
+            Entity* const direct = m_hurtDirectEntity ? m_hurtDirectEntity : attacker;
+            m_combatTracker.RecordDamage(*this, DamageSourceInfo::TypeIdFor(source, attacker, direct),
+                                         amount, attacker, direct);
+        }
         SetHealth(m_health - amount);
         SetAbsorptionAmountClamped(GetAbsorptionAmount() - amount);
+        // MC actuallyHurt: gameEvent(ENTITY_DAMAGE) for any hit that took
+        // health. (A player's view forwards to ServerPlayer::damage, which
+        // raises its own.)
+        GameEvent(GameEventId::EntityDamage);
     }
 
     bool LivingEntity::HurtFrom(MobDamageSource source, float amount, Entity* causingEntity,
@@ -1337,6 +1536,53 @@ namespace Game {
         return true;
     }
 
+    void LivingEntity::StopRiding() {
+        Entity* oldVehicle = GetVehicle();
+        Entity::StopRiding();
+        if (!oldVehicle || oldVehicle == GetVehicle() || !m_level || m_level->IsClientSide()) return;
+        // A player's view is overridden (PlayerEntityView::StopRiding); this
+        // is the mob's dismountVehicle.
+        if (IsPlayer()) return;
+
+        // MC dismountVehicle(vehicle).
+        glm::dvec3 target = position;
+        if (IsRemoved()) {
+            target = position;
+        } else {
+            const IBlockAccess* blocks = m_level->Blocks();
+            const glm::ivec3 vehicleCell = oldVehicle->BlockPosition();
+            const BlockID atVehicle = blocks ? blocks->GetBlock(vehicleCell.x, vehicleCell.y, vehicleCell.z)
+                                             : BlockID::Air;
+            // BlockTags.PORTALS.
+            const bool inPortal = atVehicle == BlockID::NetherPortal || atVehicle == BlockID::EndPortal ||
+                                  atVehicle == BlockID::EndGateway;
+            if (!oldVehicle->IsRemoved() && !inPortal) {
+                target = oldVehicle->GetDismountLocationForPassenger(*this);
+            } else {
+                // The vehicle is gone: the higher of the two feet, then
+                // Level.findFreePosition for a small box — the first clear
+                // spot rising from there.
+                target = glm::dvec3(position.x, std::max(position.y, oldVehicle->position.y), position.z);
+                const double w = GetBbWidth(), h = GetBbHeight();
+                if (w <= 4.0 && h <= 4.0 && blocks) {
+                    PhysicsContext context = m_level->Physics();
+                    for (int step = 0; step <= 16; ++step) {
+                        const glm::dvec3 at = target + glm::dvec3(0.0, 0.0625 * step, 0.0);
+                        const AABBd box = AABBd::FromMinMax(at - glm::dvec3(w * 0.5, 0.0, w * 0.5),
+                                                            at + glm::dvec3(w * 0.5, h, w * 0.5));
+                        if (!CollidesAt(box, context)) { target = at; break; }
+                    }
+                }
+            }
+        }
+        // LivingEntity.dismountTo → teleportTo: the rider stands there.
+        position = target;
+        oldPosition = target;
+        velocity = glm::dvec3(0.0);
+        needsSync = true;
+        physicsParked = false;
+    }
+
     void LivingEntity::Knockback(double power, double dx, double dz) {
         power *= 1.0 - GetAttributeValue(Attribute::KnockbackResistance);
         if (power <= 0.0) return;
@@ -1373,9 +1619,47 @@ namespace Game {
         m_dead = true;
         deathTime = 0;
 
+        // MC LivingEntity.die: sourceEntity.killedEntity(level, this, source).
+        if (m_level && !m_level->IsClientSide()) {
+            if (auto* killer = dynamic_cast<LivingEntity*>(attacker); killer && killer != this) {
+                killer->KilledEntity(*this);
+            }
+        }
+
+        if (m_level && !m_level->IsClientSide() && !IsPlayer()) AnnounceDeath();
+
         if (m_level && !m_level->IsClientSide()) {
             // Entity event 3 — the client plays the death animation and sound.
             m_level->BroadcastEntityEvent(*this, 3);
+        }
+    }
+
+    bool LivingEntity::ShouldDropExperience() const {
+        // MC LivingEntity.shouldDropExperience `!isBaby()`, overridden by
+        // Monster to `true` — a baby zombie still pays.
+        return IsMonsterCategory(TypeInfo().category) || !IsBaby();
+    }
+
+    void LivingEntity::AnnounceDeath() {
+        // MC LivingEntity.die logs a named entity's death ("Named entity {}
+        // died: {}"); this engine also tells every player, as it does for a
+        // player's death — under the same show_death_messages rule. MC
+        // TamableAnimal.die sends the line to the owner (an online player)
+        // when the rule is on; a named pet's owner is among "every player"
+        // and gets it once.
+        const bool named = HasCustomName();
+        const auto* tamable = dynamic_cast<const TamableAnimal*>(this);
+        LivingEntity* owner = tamable && tamable->HasOwner() ? tamable->GetOwner() : nullptr;
+        if (owner && !owner->IsPlayer()) owner = nullptr;
+        if (!named && !owner) return;
+
+        const std::string message = m_combatTracker.GetDeathMessage(*this);
+        if (named) Log::Info("Named entity %s died: %s", GetCustomName()->c_str(), message.c_str());
+        if (!Rules::GetBool(Rules::Id::ShowDeathMessages)) return;
+        if (named) {
+            m_level->BroadcastSystemMessage(message);
+        } else {
+            m_level->DisplayClientMessage(*owner, message, false);
         }
     }
 
@@ -1383,12 +1667,29 @@ namespace Game {
         // 60: LivingEntity's death poof. 20: MC Mob.handleEntityEvent's
         // spawnAnim — a monster spawner's new mob arrives in the same puff
         // (only mobs are ever sent it).
+        EquipmentSlot brokenSlot{};
         if (id == 60 || id == 20) {
             MakePoofParticles();
+        } else if (id == 67) {
+            MakeDrownParticles();
+        } else if (EquipmentSlotForBreakEvent(id, brokenSlot)) {
+            // MC breakItem(getItemBySlot(slot)): the stack's break sound,
+            // locally, then five crumbs. The client copy still holds the
+            // stack — its equipment update follows the event.
+            if (ItemStack* stack = EquipmentInSlot(brokenSlot); stack && !stack->IsEmpty() && m_level) {
+                if (!IsSilent()) {
+                    const float pitch = 0.8f + m_level->Random().NextFloat() * 0.4f;
+                    m_level->PlayLocalSound(position, GetBreakSound(*stack), GetSoundSource(), 0.8f, pitch, false);
+                }
+                SpawnItemParticles(*stack, 5);
+            }
         } else if (id == kEntityEventSwing) {
             // The server's melee whack (MC's Animate packet stand-in) — run
             // the local swing clock. Client side, so Swing() won't rebroadcast.
             Swing();
+        } else if (id == 2) {
+            // MC handleEntityEvent 2: onKineticHit — a charging spear struck.
+            OnKineticHit();
         } else {
             Entity::HandleEntityEvent(id);
         }
@@ -1401,6 +1702,53 @@ namespace Game {
         (void)broken;
         if (m_level && !m_level->IsClientSide()) {
             m_level->BroadcastEntityEvent(*this, EntityEventForEquipmentBreak(slot));
+        }
+    }
+
+    void LivingEntity::SpawnItemParticles(const ItemStack& stack, int count) {
+        if (!m_level || stack.IsEmpty()) return;
+        JavaRandom& r = m_level->Random();
+        const ParticleOptions particle = ParticleOptions::Item(stack.itemId);
+        // Vec3.xRot(-xRot) then .yRot(-yRot).
+        const double xa = -static_cast<double>(xRot) * 0.017453292;
+        const double ya = -static_cast<double>(yRot) * 0.017453292;
+        const double xc = std::cos(xa), xs = std::sin(xa), yc = std::cos(ya), ys = std::sin(ya);
+        const auto rotate = [&](glm::dvec3 v) {
+            v = glm::dvec3(v.x, v.y * xc + v.z * xs, v.z * xc - v.y * xs);
+            return glm::dvec3(v.x * yc + v.z * ys, v.y, v.z * yc - v.x * ys);
+        };
+        for (int i = 0; i < count; ++i) {
+            const glm::dvec3 d = rotate(glm::dvec3((static_cast<double>(r.NextFloat()) - 0.5) * 0.1,
+                                                   static_cast<double>(r.NextFloat()) * 0.1 + 0.1, 0.0));
+            const double y1 = static_cast<double>(-r.NextFloat()) * 0.6 - 0.3;
+            glm::dvec3 p = rotate(glm::dvec3((static_cast<double>(r.NextFloat()) - 0.5) * 0.3, y1, 0.6));
+            p += glm::dvec3(position.x, GetEyeY(), position.z);
+            m_level->AddParticle(particle, p.x, p.y, p.z, d.x, d.y + 0.05, d.z);
+        }
+    }
+
+    void LivingEntity::SendHappyVillagerParticle() {
+        if (!m_level) return;
+        JavaRandom& r = m_level->Random();
+        const double w = static_cast<double>(GetBbWidth());
+        const double px = position.x + w * (2.0 * r.NextDouble() - 1.0);
+        const double py = position.y + static_cast<double>(GetBbHeight()) * r.NextDouble() + 0.5;
+        const double pz = position.z + w * (2.0 * r.NextDouble() - 1.0);
+        m_level->SendParticles(ParticleOptions(ParticleKind::HappyVillager), false, false, px, py, pz, 0, 0.0, 0.0,
+                               0.0, 0.0);
+    }
+
+    void LivingEntity::MakeDrownParticles() {
+        if (!m_level) return;
+        JavaRandom& r = m_level->Random();
+        const glm::dvec3 movement = velocity;
+        for (int i = 0; i < 8; ++i) {
+            // random.triangle(0, 1) on each axis.
+            const double xo = r.NextDouble() - r.NextDouble();
+            const double yo = r.NextDouble() - r.NextDouble();
+            const double zo = r.NextDouble() - r.NextDouble();
+            m_level->AddParticle(ParticleKind::Bubble, position.x + xo, position.y + yo, position.z + zo,
+                                 movement.x, movement.y, movement.z);
         }
     }
 

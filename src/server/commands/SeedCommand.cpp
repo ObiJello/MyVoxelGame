@@ -11,7 +11,7 @@
 namespace Server {
 
     void SeedCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("seed", SeedCommand::Execute);
+        dispatcher.RegisterCommand("seed", SeedCommand::Execute, Game::Cmd::Root().Executes());
     }
 
     void SeedCommand::Execute(const CommandSourceStack& source,

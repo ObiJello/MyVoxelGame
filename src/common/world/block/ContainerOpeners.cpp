@@ -1,5 +1,6 @@
 // File: src/common/world/block/ContainerOpeners.cpp
 #include "common/world/block/ContainerOpeners.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/SoundEvents.hpp"
@@ -110,20 +111,29 @@ namespace Game::ContainerOpeners {
         return KindOf(level.GetBlock(pos.x, pos.y, pos.z)) != Kind::None;
     }
 
-    void StartOpen(ILevelWrite& level, const glm::ivec3& pos) {
+    void StartOpen(ILevelWrite& level, const glm::ivec3& pos, Entity* user) {
         if (!Handles(level, pos)) return;
         int& count = Counts()[Key{&level, pos.x, pos.y, pos.z}];
-        if (++count == 1) Signal(level, pos, true);
+        if (++count == 1) {
+            Signal(level, pos, true);
+            // incrementOpeners / ShulkerBoxBlockEntity.startOpen:
+            // gameEvent(user, CONTAINER_OPEN, pos).
+            level.GameEvent(user, GameEventId::ContainerOpen, pos);
+        }
     }
 
-    void StopOpen(ILevelWrite& level, const glm::ivec3& pos) {
+    void StopOpen(ILevelWrite& level, const glm::ivec3& pos, Entity* user) {
         auto& counts = Counts();
         const auto it = counts.find(Key{&level, pos.x, pos.y, pos.z});
         if (it == counts.end()) return;
         if (--it->second > 0) return;
         counts.erase(it);
         // The block may have been broken with the menu open: nothing to close.
-        if (Handles(level, pos)) Signal(level, pos, false);
+        if (Handles(level, pos)) {
+            Signal(level, pos, false);
+            // decrementOpeners / stopOpen: gameEvent(user, CONTAINER_CLOSE, pos).
+            level.GameEvent(user, GameEventId::ContainerClose, pos);
+        }
     }
 
 } // namespace Game::ContainerOpeners

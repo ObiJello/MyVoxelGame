@@ -89,7 +89,7 @@ namespace Game {
     }
 
     void PlayerMovementSounds::Tick(const IBlockAccess& blocks, const Input& in, JavaRandom& random,
-                                    std::vector<PlayerMovementSound>& out) {
+                                    std::vector<PlayerMovementSound>& out, Events* events) {
         ++m_tickCount;
         const glm::dvec3 movement = in.position - in.previousPosition;
 
@@ -108,6 +108,8 @@ namespace Game {
             const float pitch = 1.0f + (random.NextFloat() - random.NextFloat()) * 0.4f;
             Emit(out, speed < 0.25f ? SoundEvents::PLAYER_SPLASH : SoundEvents::PLAYER_SPLASH_HIGH_SPEED,
                  speed, pitch);
+            // doWaterSplashEffect's tail: gameEvent(SPLASH).
+            if (events) events->splash = true;
         }
         m_wasTouchingWater = in.inWater;
         m_firstTick = false;
@@ -129,9 +131,33 @@ namespace Game {
 
         if (!(m_moveDist > m_nextStep) || onAir) return;   // (flapping: players do not flap)
 
-        // vibrationAndSoundEffectsFromBlock(effectPos == supportingPos).
+        // vibrationAndSoundEffectsFromBlock for the effect block, then (when
+        // it is not the same block) for the supporting one: the effect
+        // block's call vibrates only when it IS the supporting block;
+        // otherwise the supporting block's call carries the STEP event.
+        const glm::ivec3 supportingPos = BlockContaining(in.position.x, in.position.y - 1.0e-5, in.position.z);
+        const bool onlyEffectState = supportingPos == onPos;
+        const auto conditions = [&](BlockState state) {
+            if (state.Block() == BlockID::Air) return false;
+            const bool stateClimbable = HasTag(state.Block(), kClimbable) || state.Block() == BlockID::PowderSnow;
+            return (in.onGround || stateClimbable || (in.crouching && movement.y == 0.0)) && !in.swimming;
+        };
         bool produced = false;
+        if (!onlyEffectState) {
+            const BlockState supportingState = blocks.GetBlockState(supportingPos.x, supportingPos.y, supportingPos.z);
+            if (conditions(supportingState)) {
+                produced = true;
+                if (events) {
+                    events->step = true;
+                    events->stepState = supportingState;
+                }
+            }
+        }
         if ((in.onGround || climbing || (in.crouching && movement.y == 0.0)) && !in.swimming) {
+            if (events && onlyEffectState) {
+                events->step = true;
+                events->stepState = onState;
+            }
             produced = true;
             // walkingStepSound → Player.playStepSound.
             if (in.inWater) {
@@ -173,6 +199,7 @@ namespace Game {
         } else if (in.inWater) {
             m_nextStep = static_cast<float>(static_cast<int>(m_moveDist) + 1);
             WaterSwimSound(movement, random, out);
+            if (events) events->swim = true;
         }
     }
 

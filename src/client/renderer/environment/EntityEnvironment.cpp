@@ -34,6 +34,8 @@ namespace Render::EntityEnvironment {
     }
 
     float Lit() {
+        // Video Settings "Lighting: OFF": fully lit, like the lightmap.
+        if (!Lightmap::WorldLightingOn()) return Lightmap::FullBrightValue();
         return EnvironmentState::Get().Frame().skyBrightness;
     }
 
@@ -77,7 +79,7 @@ namespace Render::EntityEnvironment {
         namespace L = Game::Lighting;
         const int block = L::LightCoords::Block(packedLight);
         const int sky = L::LightCoords::Sky(packedLight);
-        if (!Lightmap::Enabled()) {
+        if (!Lightmap::Enabled() || !Lightmap::WorldLightingOn()) {
             return glm::vec3(block >= 15 ? FullBlockLight() : Lit());
         }
         return Lightmap::Get().SampleFor(EnvironmentState::Get().Frame(), block, sky);

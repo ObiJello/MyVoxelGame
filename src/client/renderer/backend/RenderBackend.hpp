@@ -316,10 +316,13 @@ namespace Render {
         // a later Take, which hands it over as tightly packed RGBA8, rows top
         // to bottom, once the GPU is done with it. Take must come on a LATER
         // frame than the Request (after that frame's EndFrame has submitted
-        // it); one request may be outstanding at a time, and a new Request
-        // drops an untaken one. Both answer false when unsupported. Whatever
-        // is drawn after the Request does not reach the copy, so the caller
-        // is free to clear and draw the real frame over the captured one.
+        // it). Several may be outstanding; Take hands them over oldest first
+        // (a backend may drop the oldest past a small limit — Vulkan keeps
+        // four), and taking one two frames after its request costs no wait.
+        // Both answer false when unsupported (Vulkan's Request also with a
+        // render target bound: it suspends and resumes the frame's pass).
+        // Whatever is drawn after the Request does not reach the copy, so the
+        // caller is free to clear and draw the real frame over the captured one.
         virtual bool RequestBackbufferReadback(int /*x*/, int /*y*/, int /*w*/, int /*h*/) {
             return false;
         }
@@ -372,6 +375,15 @@ namespace Render {
         // same size (a shader pack's depthtex1/depthtex2 snapshots). The
         // bound target is unchanged afterwards. Optional.
         virtual void BlitRenderTargetDepth(RenderTargetHandle /*src*/, RenderTargetHandle /*dst*/) {}
+        // Copy the DEFAULT framebuffer's colour, as it stands at this call,
+        // into `dst`'s colour attachment — the post chains' "minecraft:main"
+        // input (Render::PostChain). `dst` must be the framebuffer's exact
+        // size, and the default framebuffer must be the one bound. On Vulkan
+        // this suspends and resumes the frame's pass (its depth is discarded,
+        // as any render-target interruption discards it). False when the
+        // backend cannot (the sizes differ, a target is bound, the swapchain
+        // cannot be a transfer source).
+        virtual bool CopyFramebufferToRenderTarget(RenderTargetHandle /*dst*/) { return false; }
 
         // ── Shader overrides (shader packs) ─────────────────────────────
         // While override mode is on, BindShader of an ENGINE shader that has
@@ -414,6 +426,74 @@ namespace Render {
                                         uint32_t  /*reference*/  = 0,
                                         uint32_t  /*readMask*/   = 0xFFu,
                                         uint32_t  /*writeMask*/  = 0xFFu) {}
+
+        // ── Improved Transparency (Render::ImprovedTransparency) ────────
+        // MC 26.3's "Improved Transparency": wavelet order-independent
+        // transparency (LevelRenderer.executeOit, oit/*, shaders/include/
+        // oit*.glsl). Every translucent feature is drawn three times — its
+        // DEPTH BOUNDS, its TRANSMITTANCE (wavelet coefficients of the
+        // absorbance along the view ray) and its ACCUMULATED colour, each
+        // weighted by the transmittance in front of it — and one composite
+        // resolves the result over the frame. Everything below exists only
+        // for that path; none of it is touched while the option is off.
+        //
+        // The stage the draws that follow belong to. A shader bound while a
+        // stage is set is replaced by its OIT variant (OpenGL: its own
+        // sources recompiled with the stage's defines and shaders/
+        // oit_lib.glsl; Vulkan: <frag>_oit_{db,tr,ac}_vk.frag.spv); a shader
+        // with no variant draws nothing. The pipeline state is MC's OIT
+        // snippet's: depth tested (never written — except the clouds' depth
+        // bounds, `depthBoundsWriteDepth`), blended MAX into the depth
+        // bounds, additively into the coefficients and the accumulation.
+        // `projParams`: the view projection's [2][2] and [3][2] (MC
+        // deviceToLinearDepth). None ends the stage; the stage's samplers
+        // (depth bounds, coefficients) stay bound for the auxiliary passes.
+        enum class OitStage : uint8_t { None = 0, DepthBounds, Transmittance, Accumulate };
+        virtual void SetOitStage(OitStage /*stage*/, const glm::vec4& /*projParams*/,
+                                 bool /*depthBoundsWriteDepth*/) {}
+        // The OIT render targets (one set per frame slot on Vulkan): depth
+        // bounds + culled depth bounds (RGBA32F), two transmittance
+        // coefficient targets and the accumulation (RGBA16F), the clouds'
+        // own depth. Made or remade at this size; false when unavailable.
+        virtual bool OitEnsureTargets(int /*width*/, int /*height*/) { return false; }
+        virtual void OitDestroyTargets() {}
+        // MC's OIT render passes. The frame's pass is suspended while one is
+        // open; OitEndPass resumes it. `clearColor`: the pass's colour
+        // targets start from MC's clear values (depth bounds (-FLT_MAX, 0,
+        // 0, 0), the rest zero) instead of what they hold.
+        enum class OitPass : uint8_t {
+            DepthBounds,        // depth bounds          | the frame's depth
+            DepthBoundsCull,    // culled depth bounds   | the frame's depth (written)
+            CloudDepthBounds,   // culled depth bounds   | the clouds' depth
+            Transmittance,      // coefficients 0 and 1  | the frame's depth
+            CloudTransmittance, // coefficients 0 and 1  | the clouds' depth
+            Accumulate,         // accumulation          | the frame's depth
+            CloudAccumulate,    // accumulation          | the clouds' depth
+        };
+        virtual bool OitBeginPass(OitPass /*pass*/, bool /*clearColor*/) { return false; }
+        virtual void OitEndPass() {}
+        // This frame's OIT images, for binding as textures. FrameDepth is the
+        // frame's depth as the OIT passes see it (the clouds blit it into
+        // their own).
+        enum class OitImage : uint8_t { DepthBounds, DepthBoundsCulled, Coeff0, Coeff1, Accumulate, FrameDepth };
+        virtual TextureHandle OitTexture(OitImage /*image*/) const { return INVALID_TEXTURE; }
+        // The OIT composite and its helper passes (shaders that include
+        // shaders/oit_lib.glsl themselves): OpenGL splices the library in
+        // at their `#pragma oit_library`; Vulkan gives them the OIT set
+        // (6) of samplers after the texture at slot 0.
+        virtual ShaderHandle CreateOitShaderFromFiles(const std::string& vertexPath,
+                                                      const std::string& fragmentPath) {
+            return CreateShaderFromFiles(vertexPath, fragmentPath);
+        }
+        // Vulkan's frame pass normally discards its depth when a render
+        // target interrupts it. While preserved, the frame's depth is stored
+        // and reloaded across interruptions and can be sampled (the OIT
+        // passes depth-test against it, the clouds copy it). Applied from
+        // the next BeginFrame (it rebuilds the frame's depth images);
+        // FrameDepthPreserved() says whether it is in effect. OpenGL always
+        // keeps the default framebuffer's depth.
+        virtual void SetFrameDepthPreserved(bool /*preserved*/) {}
+        virtual bool FrameDepthPreserved() const { return false; }
 
         // Cull inversion: while set, every SetPipelineState swaps Back and
         // Front culling. A mirror portal's reflection flips winding, so the

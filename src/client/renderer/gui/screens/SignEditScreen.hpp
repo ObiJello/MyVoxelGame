@@ -25,6 +25,8 @@
 
 namespace Render {
 
+    class FontRenderer;
+
     // What the server sent with the open request (OpenSignEditorS2CPacket):
     // the sign block and the face's current text.
     struct SignEditorOpen {
@@ -67,9 +69,12 @@ namespace Render {
 
         TextureHandle m_texture = INVALID_TEXTURE;
         int m_texW = 0, m_texH = 0;
-        // The GUI font's string width, captured from the first Render (the
-        // font lives on GuiGraphics, which a screen only sees when drawing).
-        std::function<int(const std::string&)> m_widthProbe;
+        // The GUI font, taken from Render (a screen only sees it while
+        // drawing) for the width check in CharTyped. The FontRenderer is
+        // the long-lived one GuiGraphics points at; the GuiGraphics itself
+        // is a per-frame stack object and must never be kept — CharTyped
+        // runs in the NEXT frame's input phase, after it is gone.
+        const FontRenderer* m_font = nullptr;
     };
 
     // ── Host-loop hooks ───────────────────────────────────────────────────

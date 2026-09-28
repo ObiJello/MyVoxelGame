@@ -445,6 +445,49 @@ namespace Render {
         // (ClientBiomeZoom.hpp), taken when the region is bound.
         int64_t m_biomeZoomSeed = 0;
 
+        // ResolveBiome's answers for the section being built: the section's
+        // 16 Ys over its 16x16 columns plus the widest blend margin (radius
+        // 7). The biome blend asks for (2r+1)^2 columns per tinted face and
+        // neighbouring blocks share nearly all of them, so each position's
+        // fuzzy zoom used to run dozens of times per build (26% of meshing).
+        // An entry is valid while its stamp equals m_biomeCacheGen; the fill
+        // functions bump the generation, so a new section never sees the last
+        // one's biomes. Positions outside the grid resolve uncached.
+        static constexpr int kBiomeCacheMargin = 8;
+        static constexpr int kBiomeCacheXZ = 16 + 2 * kBiomeCacheMargin;
+        static constexpr int kBiomeCacheSize = kBiomeCacheXZ * kBiomeCacheXZ * 16;
+        mutable std::vector<uint32_t> m_biomeCacheStamp;
+        mutable std::vector<uint16_t> m_biomeCacheValue;
+        uint32_t m_biomeCacheGen = 0;
+        void InvalidateBiomeCache();
+        uint16_t ResolveBiomeUncached(int worldX, int worldY, int worldZ) const;
+
+        // BlockRegistry::GetBlockModel per block state (MC BlockModelShaper's
+        // per-state map): the registry resolves a state to a model NAME and
+        // then hashes the name, for every block of every build. Models are
+        // node-stable in their registry, so a pointer stays good until the
+        // registry's generation moves, and then the table starts over.
+        std::vector<const Game::BlockModel*> m_stateModel;
+        uint32_t m_stateModelGen = 0;
+        const Game::BlockModel& ModelFor(Game::BlockState state);
+
+        // Per state, beside m_stateModel and reset with it: does every face
+        // of the model name a cullface (0 = not asked yet, 1 = no, 2 = yes)?
+        // Such a block with all six neighbours opaque draws nothing — each
+        // face is dropped by ShouldCullFace — so ProcessBlock returns before
+        // walking the model. Most of an underground section is exactly that.
+        std::vector<uint8_t> m_stateAllFacesCull;
+        bool AllFacesCull(Game::BlockState state);
+
+        // BlendedBiomeTint's answers for the section's own blocks, per channel
+        // (MC BlockTintCache). A grass block or a leaf asks the same blend for
+        // every face it emits, and each blend is (2r+1)^2 samples. Same
+        // generation stamp as the biome cache; value is the packed 0xRRGGBB.
+        static constexpr int kTintCacheChannels = 4;
+        static constexpr int kTintCacheSize = kTintCacheChannels * 16 * 16 * 16;
+        mutable std::vector<uint32_t> m_tintCacheStamp;
+        mutable std::vector<uint32_t> m_tintCacheValue;
+
         int m_sectionBaseWorldX;
         int m_sectionBaseWorldY;
         int m_sectionBaseWorldZ;
@@ -578,6 +621,8 @@ namespace Render {
         uint16_t  ResolveBiome(int worldX, int worldY, int worldZ) const;
         glm::vec4 BlendedBiomeTint(BiomeChannel channel,
                                    int worldX, int worldY, int worldZ) const;
+        uint32_t  BlendedBiomeColor(BiomeChannel channel,
+                                    int worldX, int worldY, int worldZ) const;
 
         glm::vec4 CalculateGrassTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);
         glm::vec4 CalculateFoliageTint(Game::BlockID blockId, int worldX, int worldY, int worldZ);

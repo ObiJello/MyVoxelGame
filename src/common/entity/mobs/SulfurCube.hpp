@@ -177,7 +177,8 @@ namespace Game {
         // ── Physics / behaviour ───────────────────────────────────────────
         bool  OmnidirectionalAirMover() const override { return HasBodyItem(); }
         float MaxUpStep() const override { return HasBodyItem() ? 0.0f : Slime::MaxUpStep(); }
-        bool  CanBeLeashed() const { return HasBodyItem(); }
+        // (MC SulfurCube.canBeLeashed — a cube carrying a block — is not
+        // ported: every mob takes a lead here, Mob::CanBeLeashed.)
         void  Tick() override;
         void  AiStep() override;
         void  CustomServerAiStep() override;

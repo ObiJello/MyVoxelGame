@@ -124,7 +124,22 @@ namespace Input {
         extern KeyMapping* Inventory;
         extern KeyMapping* Chat;
         extern KeyMapping* Command;
+        // MC keyPlayerList (held: the tab list), keySpectatorOutlines (held:
+        // other players glow, spectators only) and keySpectatorHotbar (the
+        // spectator menu's select key).
+        extern KeyMapping* PlayerList;
+        extern KeyMapping* SpectatorOutlines;
+        extern KeyMapping* SpectatorHotbar;
+        // MC keyToggleSpectatorShaderEffects (F4): GameRenderer
+        // .toggleSpectatorPostEffect — the spectated creeper / spider /
+        // enderman view on and off.
+        extern KeyMapping* ToggleSpectatorShaderEffects;
         extern KeyMapping* Hotbar[9];
+        // MC Options.keySaveHotbarActivator / keyLoadHotbarActivator (the
+        // Creative Mode category): held with a hotbar key, save that hotbar
+        // to / load it from the saved creative hotbars.
+        extern KeyMapping* SaveToolbarActivator;
+        extern KeyMapping* LoadToolbarActivator;
 
         extern KeyMapping* TogglePerspective;
         // The camera the way Roblox drives it: I/O zoom in and out (all the
@@ -170,6 +185,7 @@ namespace Input {
         extern KeyMapping* DebugSwitchTranslucencyMode;
         // Engine-specific: the ImGui debug panels (no vanilla counterpart).
         extern KeyMapping* DebugImGuiPanels;
+        extern KeyMapping* DebugFillMap;
     }
 
     // True for the F3-chorded mappings above. They share physical keys with

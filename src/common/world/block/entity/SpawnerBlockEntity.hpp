@@ -7,8 +7,7 @@
 // it to.
 //
 //   SpawnData        what to spawn (MC SpawnData: the entity compound, optional
-//                    custom_spawn_rules light ranges; `equipment` is carried by
-//                    MC but this port has no equipment tables — see below)
+//                    custom_spawn_rules light ranges and equipment table)
 //   SpawnPotentials  weighted SpawnData, re-drawn after every spawn cycle
 //   Delay            ticks until the next cycle (20 initially, then
 //                    MinSpawnDelay + nextInt(MaxSpawnDelay - MinSpawnDelay))
@@ -31,16 +30,12 @@
 // SpawnData's type (the mini mob in the cage, SpawnerRenderer).
 //
 // Deviations, each an absent engine system rather than a choice:
-//   * SpawnData.equipment (an EquipmentTable) is not applied — no mob
-//     equipment tables exist here. It is kept on disk round-trip only as far
-//     as the entity compound goes; the equipment field itself is dropped.
 //   * Only mobs spawn: a SpawnData naming a non-mob entity (TNT, an item, a
 //     minecart) has no loader here, so the cycle ends as for an unknown id
 //     (delay and stop). Passengers in the compound are not loaded.
 //   * MC broadcasts LevelEvent 2004 (smoke + flame burst) after each spawn;
 //     this port has no level-event packet, so it rides this block's own
 //     event channel as engine event kEventSpawnParticles (documented below).
-//     GameEvent.ENTITY_PLACE is not raised (no vibration system).
 #pragma once
 
 #include "BlockEntity.hpp"
@@ -48,6 +43,7 @@
 
 #include <glm/glm.hpp>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace Game {
@@ -81,6 +77,16 @@ namespace Game {
         bool hasCustomRules = false;
         int  blockLightMin = 0, blockLightMax = 15;
         int  skyLightMin = 0,   skyLightMax = 15;
+
+        // MC SpawnData.equipment — an EquipmentTable: the loot table the
+        // spawned mob is dressed from (Mob.equip) and the drop chance each
+        // slot then carries. slot_drop_chances is either one float for every
+        // slot (equipmentUniformDrop) or a slot -> chance map; a slot the map
+        // leaves out keeps the mob's own chance (NaN here).
+        bool        hasEquipment = false;
+        std::string equipmentLootTable;
+        bool        equipmentUniformDrop = true;
+        float       equipmentDropChances[8] = { 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f };
     };
 
     // MC Weighted<SpawnData> — one SpawnPotentials entry.
@@ -114,6 +120,9 @@ namespace Game {
         bool (*addFreshEntity)(std::unique_ptr<Mob>& mob, World& world) = nullptr;
     };
     void SetSpawnerServerHooks(const SpawnerServerHooks& hooks);
+    // The installed hooks — the trial spawner builds its mobs through the
+    // same loader and adder (TrialSpawnerBlockEntity).
+    const SpawnerServerHooks& GetSpawnerServerHooks();
 
     class SpawnerBlockEntity : public BlockEntity {
     public:

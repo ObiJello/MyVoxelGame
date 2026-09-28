@@ -138,13 +138,12 @@ namespace Game {
                 t.blockOfState[t.base[b] + s] = static_cast<uint16_t>(b);
             }
         }
+        // The header's inline accessors read these (BlockStates::detail).
+        std::copy(t.base.begin(), t.base.end(), detail::g_base);
+        std::copy(t.count.begin(), t.count.end(), detail::g_count);
+        detail::g_blockOfState = t.blockOfState.data();
+        detail::g_total = t.total;
         t.built = true;
-    }
-
-    BlockID BlockState::Block() const {
-        const Tables& t = T();
-        if (m_id >= t.total) return BlockID::Air;
-        return static_cast<BlockID>(t.blockOfState[m_id]);
     }
 
     namespace {
@@ -224,28 +223,7 @@ namespace Game {
         return BlockState::FromRawId(t.deflt[b]);
     }
 
-    uint32_t BlockStates::Count(BlockID id) {
-        const size_t b = static_cast<size_t>(id);
-        return b < kBlockCount ? T().count[b] : 0;
-    }
-
-    uint32_t BlockStates::Base(BlockID id) {
-        const size_t b = static_cast<size_t>(id);
-        return b < kBlockCount ? T().base[b] : 0;
-    }
-
     uint32_t BlockStates::Total() { return T().total; }
-
-    BlockStateIndex BlockState::Index() const {
-        return static_cast<BlockStateIndex>(m_id - BlockStates::Base(Block()));
-    }
-
-    BlockState BlockStates::FromIndex(BlockID id, BlockStateIndex stateIndex) {
-        const uint32_t n = Count(id);
-        if (n == 0) return BlockState{};                 // unregistered -> air
-        const uint32_t st = (stateIndex < n) ? stateIndex : n - 1;
-        return BlockState::FromRawId(Base(id) + st);
-    }
 
     BlockState BlockStates::FromSlug(std::string_view slug) {
         const Tables& t = T();

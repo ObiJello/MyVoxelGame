@@ -9,9 +9,14 @@
 #include "../core/Log.hpp"
 #include "../world/level/WorldDrops.hpp"
 #include "../world/enchantment/EnchantmentHelper.hpp"
+#include "Mob.hpp"
+#include "../sound/SoundEvents.hpp"
+#include "../world/block/Blocks.hpp"
 #include "server/player/ServerPlayer.hpp"
 
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Game::EquipmentBehavior {
 
@@ -119,6 +124,8 @@ namespace Game {
     // ItemRegistry_RegisterBehaviors. Rows cite Items.java; equip sounds from
     // ArmorMaterials.java. All armor stacksTo(1) (Item.Properties.humanoidArmor
     // → durability → stacksTo(1)).
+    void ItemRegistry_RegisterMountEquipment(std::unordered_map<ItemID, Item>& pureItems);
+
     void ItemRegistry_RegisterEquipment(std::unordered_map<ItemID, Item>& pureItems) {
         using DataComponents::EQUIPPABLE;
         using DataComponents::BLOCKS_ATTACKS;
@@ -159,8 +166,9 @@ namespace Game {
         SetArmor(Items::NagaChestplate, EquipmentSlot::CHEST, "item.armor.equip_generic");
         SetArmor(Items::NagaLeggings,   EquipmentSlot::LEGS,  "item.armor.equip_generic");
 
-        // Elytra — CHEST slot, equip_elytra (Items.java elytra row). Data-only:
-        // no gliding system, but it equips/renders in the chest slot.
+        // Elytra — CHEST slot, equip_elytra (Items.java elytra row). Its
+        // GLIDER is the item itself: the glide is PlayerPhysics' fall-flying
+        // (client) and ServerPlayer::canGlide / the wear tick (server).
         // `.setDamageOnHurt(false)`: the elytra wears only while gliding, never
         // from the hits that wear armour (LivingEntity.doHurtEquipment).
         SetArmor(Items::Elytra, EquipmentSlot::CHEST, "item.armor.equip_elytra");
@@ -202,6 +210,160 @@ namespace Game {
         }
 
         Log::Info("[ItemRegistry] Registered EQUIPPABLE on 57 armor items + shield BLOCKS_ATTACKS");
+
+        ItemRegistry_RegisterMountEquipment(pureItems);
+    }
+
+    namespace {
+
+        // DyeColor order (DyeColor.java) — ColorCollection registers the
+        // sixteen harnesses and carpets in it.
+        constexpr const char* kDyeColorNames[16] = {
+            "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+            "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
+        };
+
+        // MC ItemStack.interactLivingEntity's component half: an EQUIPPABLE
+        // with equipOnInteract goes through Equippable.equipOnTarget before
+        // the item's own interactLivingEntity (none of these items has one).
+        // The saddle, the harnesses and nautilus armour carry it; the mob
+        // classes reach it from their mobInteract exactly where MC calls
+        // itemStack.interactLivingEntity (AbstractHorse, Camel, the nautili)
+        // and the interaction dispatch after a PASS (the pig, the strider,
+        // the happy ghast).
+        UseResult InteractEntity_EquipOnInteract(ItemStack& stack, LivingEntity& target) {
+            const auto equippable = stack.get(DataComponents::EQUIPPABLE);
+            if (!equippable || !equippable->equipOnInteract) return UseResult::Pass;
+            auto* mob = dynamic_cast<Mob*>(&target);
+            if (!mob) return UseResult::Pass;
+            return mob->EquipOnTarget(*equippable, stack);
+        }
+
+    } // namespace
+
+    // The mount equipment of Items.java 26.3 — Equippable.saddle(),
+    // Equippable.harness(color), Item.Properties.horseArmor /
+    // nautilusArmor (their BODY attribute rows are GeneratedItemAttributes'),
+    // with every field as the builders set it.
+    void ItemRegistry_RegisterMountEquipment(std::unordered_map<ItemID, Item>& pureItems) {
+        using DataComponents::EQUIPPABLE;
+        int registered = 0;
+        auto set = [&](ItemID id, const Equippable& equippable) {
+            auto it = pureItems.find(id);
+            if (it == pureItems.end()) return;
+            it->second.defaultComponents.set(EQUIPPABLE, equippable);
+            it->second.maxStackSize = 1;   // .stacksTo(1)
+            if (equippable.equipOnInteract) it->second.interactLivingEntity = &InteractEntity_EquipOnInteract;
+            ++registered;
+        };
+
+        // Equippable.saddle(): SADDLE, HORSE_SADDLE, asset "saddle",
+        // #can_equip_saddle, equipOnInteract, canBeSheared with
+        // SADDLE_UNEQUIP.
+        {
+            Equippable saddle;
+            saddle.slot            = EquipmentSlot::SADDLE;
+            saddle.equipSound      = SoundEvents::HORSE_SADDLE;
+            saddle.assetId         = "saddle";
+            saddle.allowedEntities = {"#minecraft:can_equip_saddle"};
+            saddle.equipOnInteract = true;
+            saddle.canBeSheared    = true;
+            saddle.shearingSound   = SoundEvents::SADDLE_UNEQUIP;
+            set(Items::Saddle, saddle);
+        }
+
+        // Equippable.harness(color): BODY, HARNESS_EQUIP, asset
+        // "<color>_harness", #can_equip_harness, equipOnInteract,
+        // canBeSheared with HARNESS_UNEQUIP.
+        {
+            static constexpr ItemID kHarnesses[16] = {
+                Items::WhiteHarness, Items::OrangeHarness, Items::MagentaHarness, Items::LightBlueHarness,
+                Items::YellowHarness, Items::LimeHarness, Items::PinkHarness, Items::GrayHarness,
+                Items::LightGrayHarness, Items::CyanHarness, Items::PurpleHarness, Items::BlueHarness,
+                Items::BrownHarness, Items::GreenHarness, Items::RedHarness, Items::BlackHarness,
+            };
+            for (int color = 0; color < 16; ++color) {
+                Equippable harness;
+                harness.slot            = EquipmentSlot::BODY;
+                harness.equipSound      = SoundEvents::HARNESS_EQUIP;
+                harness.assetId         = std::string(kDyeColorNames[color]) + "_harness";
+                harness.allowedEntities = {"#minecraft:can_equip_harness"};
+                harness.equipOnInteract = true;
+                harness.canBeSheared    = true;
+                harness.shearingSound   = SoundEvents::HARNESS_UNEQUIP;
+                set(kHarnesses[color], harness);
+            }
+        }
+
+        // Item.Properties.horseArmor(material): BODY, HORSE_ARMOR, the
+        // material's asset, #can_wear_horse_armor, no wear on hurt,
+        // canBeSheared with HORSE_ARMOR_UNEQUIP (not equip-on-interact —
+        // AbstractHorse.mobInteract equips it itself).
+        auto horseArmor = [&](ItemID id, const char* asset) {
+            Equippable armor;
+            armor.slot            = EquipmentSlot::BODY;
+            armor.equipSound      = SoundEvents::HORSE_ARMOR;
+            armor.assetId         = asset;
+            armor.allowedEntities = {"#minecraft:can_wear_horse_armor"};
+            armor.damageOnHurt    = false;
+            armor.canBeSheared    = true;
+            armor.shearingSound   = SoundEvents::HORSE_ARMOR_UNEQUIP;
+            set(id, armor);
+        };
+        horseArmor(Items::LeatherHorseArmor,   "leather");
+        horseArmor(Items::CopperHorseArmor,    "copper");
+        horseArmor(Items::IronHorseArmor,      "iron");
+        horseArmor(Items::GoldenHorseArmor,    "gold");
+        horseArmor(Items::DiamondHorseArmor,   "diamond");
+        horseArmor(Items::NetheriteHorseArmor, "netherite");
+
+        // Item.Properties.nautilusArmor(material): BODY, ARMOR_EQUIP_NAUTILUS,
+        // #can_wear_nautilus_armor, no wear on hurt, equipOnInteract,
+        // canBeSheared with ARMOR_UNEQUIP_NAUTILUS.
+        auto nautilusArmor = [&](ItemID id, const char* asset) {
+            Equippable armor;
+            armor.slot            = EquipmentSlot::BODY;
+            armor.equipSound      = SoundEvents::ARMOR_EQUIP_NAUTILUS;
+            armor.assetId         = asset;
+            armor.allowedEntities = {"#minecraft:can_wear_nautilus_armor"};
+            armor.damageOnHurt    = false;
+            armor.equipOnInteract = true;
+            armor.canBeSheared    = true;
+            armor.shearingSound   = SoundEvents::ARMOR_UNEQUIP_NAUTILUS;
+            set(id, armor);
+        };
+        nautilusArmor(Items::CopperNautilusArmor,    "copper");
+        nautilusArmor(Items::IronNautilusArmor,      "iron");
+        nautilusArmor(Items::GoldenNautilusArmor,    "gold");
+        nautilusArmor(Items::DiamondNautilusArmor,   "diamond");
+        nautilusArmor(Items::NetheriteNautilusArmor, "netherite");
+
+        Log::Info("[ItemRegistry] Registered EQUIPPABLE on %d mount equipment items", registered);
+    }
+
+    void ItemRegistry_RegisterBlockItemEquipment(std::vector<Item>& blockItems) {
+        // Items.java's wool carpets: `.component(EQUIPPABLE,
+        // Equippable.llamaSwag(color))` — BODY, LLAMA_SWAG, asset
+        // "<color>_carpet", allowed llama and trader llama, canBeSheared with
+        // LLAMA_CARPET_UNEQUIP. They keep their stack size of 64.
+        static constexpr BlockID kCarpets[16] = {
+            BlockID::WhiteCarpet, BlockID::OrangeCarpet, BlockID::MagentaCarpet, BlockID::LightBlueCarpet,
+            BlockID::YellowCarpet, BlockID::LimeCarpet, BlockID::PinkCarpet, BlockID::GrayCarpet,
+            BlockID::LightGrayCarpet, BlockID::CyanCarpet, BlockID::PurpleCarpet, BlockID::BlueCarpet,
+            BlockID::BrownCarpet, BlockID::GreenCarpet, BlockID::RedCarpet, BlockID::BlackCarpet,
+        };
+        for (int color = 0; color < 16; ++color) {
+            const size_t index = static_cast<size_t>(kCarpets[color]);
+            if (index >= blockItems.size()) continue;
+            Equippable swag;
+            swag.slot            = EquipmentSlot::BODY;
+            swag.equipSound      = SoundEvents::LLAMA_SWAG;
+            swag.assetId         = std::string(kDyeColorNames[color]) + "_carpet";
+            swag.allowedEntities = {"minecraft:llama", "minecraft:trader_llama"};
+            swag.canBeSheared    = true;
+            swag.shearingSound   = SoundEvents::LLAMA_CARPET_UNEQUIP;
+            blockItems[index].defaultComponents.set(DataComponents::EQUIPPABLE, swag);
+        }
     }
 
 } // namespace Game

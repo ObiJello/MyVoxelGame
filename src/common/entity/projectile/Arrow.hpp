@@ -32,6 +32,10 @@
 #include "common/entity/alchemy/Potions.hpp"
 #include "common/sound/SoundEvents.hpp"
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 namespace Game {
 
     struct DamageSourceInfo;
@@ -82,7 +86,41 @@ namespace Game {
             return m_firedFromWeapon.IsEmpty() ? nullptr : &m_firedFromWeapon;
         }
         // MC AbstractArrow.onItemBreak: an effect wore the launcher copy out.
-        void OnItemBreak(const ItemStack&) { m_firedFromWeapon = ItemStack{}; }
+        // (A trident's weapon IS the trident: it kills itself instead.)
+        virtual void OnItemBreak(const ItemStack&) { m_firedFromWeapon = ItemStack{}; }
+
+        // ── Pickup (MC AbstractArrow.pickup / pickupItemStack) ─────────────
+        //
+        // A player-fired arrow (or trident) can be collected once it sticks:
+        // ALLOWED gives the pickup stack back, CREATIVE_ONLY lets a creative
+        // player sweep it up (an infinite shot's), DISALLOWED — every mob's —
+        // never. Collected by walking into it (Player.aiStep's touch, run
+        // here from the arrow's side: TouchPlayers).
+        enum class Pickup : uint8_t { Disallowed = 0, Allowed = 1, CreativeOnly = 2 };
+        Pickup GetPickup() const { return m_pickup; }
+        void   SetPickup(Pickup pickup) { m_pickup = pickup; }
+        // MC pickupItemStack: what a pickup hands back — the fired arrow
+        // (tipped arrows keep their potion), the thrown trident. Empty = the
+        // type's default (getDefaultPickupItem).
+        const ItemStack& GetPickupItemStack() const { return m_pickupItemStack; }
+        void SetPickupItemStack(const ItemStack& stack) {
+            m_pickupItemStack = stack;
+            if (!m_pickupItemStack.IsEmpty()) m_pickupItemStack.count = 1;
+        }
+        // MC getPickupItem: a copy of the pickup stack.
+        ItemStack GetPickupItem() const {
+            return m_pickupItemStack.IsEmpty() ? GetDefaultPickupItem() : m_pickupItemStack;
+        }
+        // MC AbstractArrow.playerTouch: stuck (or flying free of physics)
+        // and done shaking, a successful tryPickup takes it — the pickup
+        // sound, and the arrow is gone. Server only.
+        virtual void PlayerTouch(LivingEntity& player);
+
+        // MC AbstractArrow.isNoPhysics / setNoPhysics (ID_FLAGS bit 2): no
+        // block or entity collision, no gravity — a Loyalty trident flying
+        // home. Synced in the variant byte.
+        bool IsNoPhysics() const { return m_noPhysics; }
+        void SetNoPhysics(bool noPhysics) { m_noPhysics = noPhysics; }
 
         // MC AbstractArrow.setCritArrow / isCritArrow — a fully drawn bow's
         // shot, which adds nextInt(damage / 2 + 2) on the hit.
@@ -90,8 +128,26 @@ namespace Game {
         bool IsCritArrow() const { return m_critArrow; }
         // MC AbstractArrow ID_FLAGS bit 1 (the crit flag) rides the variant
         // byte — the client needs it for the flight trail.
-        uint8_t GetVariantByte() const override { return m_critArrow ? 1 : 0; }
-        void    SetVariantByte(uint8_t v) override { m_critArrow = (v & 1) != 0; }
+        // Bit 1 is MC's FLAG_NOPHYSICS.
+        uint8_t GetVariantByte() const override {
+            return static_cast<uint8_t>((m_critArrow ? 1 : 0) | (m_noPhysics ? 2 : 0));
+        }
+        void    SetVariantByte(uint8_t v) override {
+            m_critArrow = (v & 1) != 0;
+            m_noPhysics = (v & 2) != 0;
+        }
+
+        // MC AbstractArrow.setPierceLevel / getPierceLevel — a Piercing
+        // crossbow's arrow passes through this many entities (and is spent
+        // on the next).
+        void SetPierceLevel(int level) { m_pierceLevel = std::clamp(level, 0, 127); }
+        int  GetPierceLevel() const { return m_pierceLevel; }
+        // MC AbstractArrow.setSoundEvent — the hit sound (a crossbow's arrow
+        // is CROSSBOW_HIT). Empty = the type's default (GetHitGroundSound).
+        void SetSoundEvent(std::string sound) { m_soundEvent = std::move(sound); }
+        const char* HitSoundEvent() const {
+            return m_soundEvent.empty() ? GetHitGroundSound() : m_soundEvent.c_str();
+        }
 
         bool IsInGroundArrow() const { return m_inGround; }
         // MC AbstractArrow.isPushedByFluid: an arrow stuck in a block is
@@ -137,6 +193,7 @@ namespace Game {
         virtual const char* GetHitGroundSound() const { return SoundEvents::ARROW_HIT; }
 
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
+        bool CanHitEntity(const Entity& entity) const override;
         virtual void OnHitBlockArrow(const glm::dvec3& hitPos,
                                      const glm::ivec3& blockPos);
 
@@ -148,7 +205,26 @@ namespace Game {
         void ApplyInertia(float inertia);
         bool ShouldFall() const;
         void StartFalling();
-        void TickDespawn();
+        // MC tickDespawn — the ThrownTrident keeps a loyal, collectable one.
+        virtual void TickDespawn();
+
+        // MC tryPickup / getDefaultPickupItem.
+        virtual bool TryPickup(LivingEntity& player);
+        virtual ItemStack GetDefaultPickupItem() const;
+        // Player.aiStep's touch of this arrow: every player whose pickup box
+        // (its box inflated 1 x 0.5 x 1) overlaps it (server).
+        void TouchPlayers();
+        // MC ThrownTrident.hitBlockEnchantmentEffects: where the hit_block
+        // effects are run — the hit location (the trident clamps it into
+        // the struck block, so a lightning rod hit from above is the rod's).
+        virtual glm::dvec3 HitBlockEffectsLocation(const glm::dvec3& hitPos,
+                                                   const glm::ivec3& blockPos) const {
+            (void)blockPos;
+            return hitPos;
+        }
+
+        // MC Arrow.makeParticle / handleEntityEvent(0), sent from the server.
+        void SendTippedParticles(int amount);
 
         double  m_baseDamage = kArrowBaseDamage;
         // MC Arrow's potion contents and duration scale — what its pickup
@@ -158,6 +234,13 @@ namespace Game {
         float          m_potionDurationScale = 1.0f;
         ItemStack      m_firedFromWeapon;
         bool           m_critArrow = false;
+        // MC pierceLevel / piercingIgnoreEntityIds / soundEvent.
+        int                  m_pierceLevel = 0;
+        std::vector<int32_t> m_piercingIgnore;
+        std::string          m_soundEvent;
+        Pickup    m_pickup = Pickup::Disallowed;
+        ItemStack m_pickupItemStack;
+        bool      m_noPhysics = false;
         bool    m_inGround = false;
         int     m_inGroundTime = 0;
         int     m_life = 0;

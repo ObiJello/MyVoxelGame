@@ -18,8 +18,10 @@
 namespace Server {
 
     void DimensionCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("dimension", DimensionCommand::Execute);
-        dispatcher.RegisterCommand("dim", DimensionCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        const Cmd::Node tree = Cmd::Root().Then(Cmd::Argument("dimension", Cmd::Arg::Dimension).Executes());
+        dispatcher.RegisterCommand("dimension", DimensionCommand::Execute, tree);
+        dispatcher.RegisterCommand("dim", DimensionCommand::Execute, tree);
     }
 
     std::optional<Game::DimensionId> DimensionCommand::ParseDimension(std::string name) {

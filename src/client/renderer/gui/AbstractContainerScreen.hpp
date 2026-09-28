@@ -228,6 +228,18 @@ namespace Render {
         void RenderHoverHighlight(GuiGraphics& g, int x, int y, bool front);
         void RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack, int mx, int my);
 
+        // One tooltip line: text and ARGB colour.
+        struct TooltipLine { std::string text; uint32_t color; };
+        // MC ItemStack.getTooltipLines (TooltipFlag.ADVANCED when `advanced`):
+        // the name line, then every component's lines. RenderTooltip draws
+        // these; empty for an empty stack.
+        void BuildTooltipLines(const Game::ItemStack& stack, bool advanced,
+                               std::vector<TooltipLine>& lines);
+        // MC getTooltipFromContainerItem — a screen's additions to a hovered
+        // item's lines, after they are built and before they are drawn.
+        virtual void DecorateItemTooltip(const Game::ItemStack& /*stack*/,
+                                         std::vector<TooltipLine>& /*lines*/) {}
+
     private:
         // ── Rendering passes ─────────────────────────────────────────────
         void RenderSlots(GuiGraphics& g, int leftPos, int topPos);
@@ -235,6 +247,16 @@ namespace Render {
         void RenderCarriedItem(GuiGraphics& g);
 
         int  HitTest(int leftPos, int topPos);
+        // The shown menu slot under a GUI point, or HIT_NONE — slots only, no
+        // screen-owned zones and no side effects (the shift-drag path samples
+        // points between two frames' cursor positions with it).
+        int  SlotAtGuiPoint(glm::vec2 gui, int leftPos, int topPos) const;
+
+        // ── Shift-drag quick move ────────────────────────────────────────
+        // Shift + left-drag with an empty cursor quick-moves every slot the
+        // cursor crosses, once each (Mouse Tweaks' gesture; see OnMouseButton).
+        void ShiftDragQuickMove(int slot);
+        void EndShiftDrag();
 
         // ── Drag-distribute preview ──────────────────────────────────────
         // The server only commits a drag at QUICK_CRAFT END (mouse up), so
@@ -258,6 +280,14 @@ namespace Render {
         // Cursor count when the drag began — the preview subtracts what has
         // been distributed so far so the held stack visibly shrinks.
         int                  m_dragStartCarriedCount = 0;
+
+        // Shift-drag quick move. `m_shiftDragDone[i]` marks menu slot i as
+        // spent for this drag: crossed by the cursor, or written by one of the
+        // drag's own moves — so a stack the drag delivered is never carried
+        // back when the cursor later crosses where it landed.
+        bool                 m_isShiftDragging = false;
+        std::vector<bool>    m_shiftDragDone;
+        glm::vec2            m_shiftDragLastGui{0.0f, 0.0f};
 
         // Double-click (PICKUP_ALL)
         long long m_lastClickTimeMs = 0;

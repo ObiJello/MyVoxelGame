@@ -1,10 +1,15 @@
 // File: shaders/terrain_solid_vk.frag (Vulkan twin of terrain_solid.frag)
-// No-discard TERRAIN fragment shader: block_solid_vk.frag plus the
-// greedy-meshing tile-rect sample path. Used for the translucent pass; the
+// Translucent-pass TERRAIN fragment shader: block_solid_vk.frag plus the
+// greedy-meshing tile-rect sample path and MC's translucent cutout (MC 26.3
+// TRANSLUCENT_TERRAIN, ALPHA_CUTOUT 0.1 — see terrain_solid.frag for why a
+// depth-writing translucent pass must discard). Used for the translucent pass; the
 // mesher never merges translucent quads (sort granularity), so the tiled
 // branch is dormant here — kept so all three terrain fragment shaders share
 // one vertex format. Keep in step with the GL terrain_solid.frag.
 #version 450
+#ifdef OIT
+#extension GL_GOOGLE_include_directive : require
+#endif
 
 // Input from vertex shader
 layout (location = 0) in vec2 fragTexCoord;
@@ -67,7 +72,17 @@ layout (std140, set = 1, binding = 0) uniform Common {
 } U;
 
 // Output
+#ifndef OIT_ALPHA_ONLY
 layout (location = 0) out vec4 FragColor;
+#endif
+
+// Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency): the
+// OIT variants are this file compiled with -DOIT and a stage define
+// (<name>_oit_{db,tr,ac}_vk.frag.spv, CMake). The engine's own compile never
+// sees any of it.
+#ifdef OIT
+#include "oit_lib.glsl"
+#endif
 
 float linearFog(float d, float s, float e) {
     if (d <= s) return 0.0;
@@ -195,6 +210,17 @@ void main() {
     if (mapped) rec = fetchFaceRecord(uv);
     vec4 textureColor = sampleTerrainAtlas(mapped ? rec.sprite : (fragSprite & 0xFFFF), uv);
     vec4 vcol = shadedVertexColor(mapped, rec, uv);
+    // MC terrain.fsh: `if (color.a < ALPHA_CUTOUT) discard;` on texture x
+    // vertex colour. A discarded texel writes no depth, which is what keeps
+    // an invisible pane interior from hiding the water behind it.
+    float alpha = textureColor.a * vcol.a;
+    if (alpha < pc.uAlphaTest) {
+        discard;
+    }
+#ifdef OIT_ALPHA_ONLY
+    // MC terrain.fsh: the depth-bounds / transmittance stages read alpha only.
+    executeAlphaOnlyPhase(gl_FragCoord.z, alpha);
+#else
     vec3 finalColor = textureColor.rgb * vcol.rgb;
 
     // MC lightmap (Render::Lightmap): the vertex colour is already lit;
@@ -211,5 +237,11 @@ void main() {
     finalColor = mix(U.uFogColor_.rgb, finalColor, fragVisibility);
 
     finalColor = mix(finalColor, U.uOverlayColor_.rgb, U.uOverlayColor_.a);
-    FragColor = vec4(finalColor, textureColor.a * vcol.a);
+    FragColor = vec4(finalColor, alpha);
+#ifdef OIT_ACCUMULATE
+    // MC calculateFinalColor: premultiplied, weighted by the transmittance
+    // in front of it (the fog is already in the colour).
+    FragColor = sampleColorForAccumulation(FragColor);
+#endif
+#endif
 }

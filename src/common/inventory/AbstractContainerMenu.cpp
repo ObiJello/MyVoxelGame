@@ -557,6 +557,13 @@ namespace Game {
         if (button == 0) {
             m_carried = source;             // identity copy — components ride along
             m_carried.count = maxStack;
+        } else if (button == 2) {
+            // The stack as the slot shows it, count included — MC
+            // `clicked.copyWithCount(clicked.getCount())`, which differs from
+            // one only on the Saved Hotbars tab (a saved stack keeps its size).
+            if (!m_carried.IsEmpty()) return result;
+            m_carried = source;
+            m_carried.count = std::clamp(source.count, 1, maxStack);
         } else if (m_carried.IsEmpty()) {
             m_carried = source;
             m_carried.count = 1;
@@ -619,7 +626,8 @@ namespace Game {
     // Pick-block (P key), routed through the server so the authoritative
     // inventory reflects it. Mirrors ServerboundSetCreativeModeSlotPacket.
     ContainerClickResult AbstractContainerMenu::HandleCreativeFillSlot(int slotIndex,
-                                                                       const ItemStack& source) {
+                                                                       const ItemStack& source,
+                                                                       uint8_t button) {
         ContainerClickResult result;
         if (!IsValidSlotIndex(slotIndex)) return result;
         Slot& s = GetSlot(slotIndex);
@@ -637,7 +645,8 @@ namespace Game {
         // than a full item-sized stack.
         if (!s.MayPlace(source)) return result;
         ItemStack placed = source;          // identity copy — components ride along
-        placed.count = s.GetMaxStackSize(source);
+        const int maxCount = s.GetMaxStackSize(source);
+        placed.count = button == 1 ? std::clamp(source.count, 1, maxCount) : maxCount;
         s.SetByPlayer(placed);
         MarkChanged(result, slotIndex);
         return result;
@@ -690,7 +699,7 @@ namespace Game {
                 case Network::ContainerInput::CREATIVE_DELETE_CARRIED:
                     result = HandleCreativeDeleteCarried(click.button); break;
                 case Network::ContainerInput::CREATIVE_FILL_SLOT:
-                    result = HandleCreativeFillSlot(slot, creativeSource); break;
+                    result = HandleCreativeFillSlot(slot, creativeSource, click.button); break;
                 default:
                     Log::Warning("[AbstractContainerMenu] Unknown action %u", (unsigned)click.action);
                     break;

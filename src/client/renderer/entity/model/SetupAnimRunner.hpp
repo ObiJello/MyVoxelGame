@@ -65,6 +65,8 @@ namespace Render {
             LieOnBack, RollAmount, SneezeTime, CrouchAmount, PeekAmount,
             SpinningProgress, OfferFlowerTick, RoarAnim, YHeadRotAbs,
             YBodyRotAbs, MobArmPose, MobPose, SwingAnimType,
+            // HumanoidRenderState's item-use clock (crossbow charge, spear).
+            TicksUsingItem, MaxCrossbowCharge, UseItemHand,
             // Booleans (AnimOp::BState), read as 1.0 / 0.0.
             IsAggressive, IsBaby, IsCrouching, IsSprinting, IsInWater,
             IsOnGround, IsFallFlying, IsPassenger, IsUsingItem, IsSitting,

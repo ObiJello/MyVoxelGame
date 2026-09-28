@@ -63,6 +63,9 @@ namespace Game {
         ILevelWrite* GetLevel() const { return m_level; }
         void SetLevel(ILevelWrite* level) { m_level = level; }
         const glm::ivec3&      GetWorldPos() const { return m_worldPos; }
+        // A block entity carried by an ENTITY rather than a chunk — the
+        // spawner minecart's BaseSpawner — follows its carrier's cell.
+        void                   MoveCarriedTo(const glm::ivec3& pos) { m_worldPos = pos; }
         BlockID                GetBlockId() const { return m_blockId; }
 
         // Dirty bit: set by mutators (subclass logic), drained by the per-tick
@@ -107,6 +110,14 @@ namespace Game {
         // dye color, …). Default: no-op. Called by PlayerSession after a
         // successful placement creates this BE.
         virtual void ApplyItemComponents(const DataComponentMap& /*components*/) {}
+
+        // MC BlockEntity.collectComponents → collectImplicitComponents: the
+        // components this entity would hand the item its block drops (a
+        // banner's patterns and name, a pot's sherds and stack, a shulker
+        // box's contents). The block's loot table picks from them with
+        // copy_components (source block_entity, its `include` list) —
+        // LootTables, via LootContext::blockEntity. Default: nothing.
+        virtual void CollectComponents(DataComponentMap& /*out*/) const {}
 
         // The client replaces its copy of a block entity with a fresh one
         // built from every BlockEntityDataS2C; MC instead loads the update

@@ -57,7 +57,7 @@ namespace Game {
         float            knockbackResistance;   // ADD_VALUE onto KNOCKBACK_RESISTANCE (0 = no modifier)
     };
 
-    inline constexpr int kItemArmorCount = 62;
+    inline constexpr int kItemArmorCount = 67;
     extern const ItemArmorRow kItemArmorAttributes[kItemArmorCount];
 
     // Resolves slugs to ItemIDs once at startup, like the recipe and mob-food

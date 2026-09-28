@@ -152,6 +152,9 @@ namespace Server {
             bool xSeen = false, ySeen = false, zSeen = false;
             bool dxSeen = false, dySeen = false, dzSeen = false;
             bool nameSeen = false;
+            // A positive `name=` (not `name=!x`): the engine's named-entity
+            // lookup beyond the loaded chunks keys on it.
+            std::optional<std::string> nameEquals;
             // MC tracks the two gamemode forms separately: repeated
             // NEGATIVE tests are legal (`gamemode=!creative,gamemode=!spectator`),
             // a second positive one is not.
@@ -384,6 +387,7 @@ namespace Server {
                 // the quote escaped) or a bare word.
                 std::string want;
                 if (!UnquoteString(value, want, error)) return false;
+                if (!inverted) sel.nameEquals = want;
                 sel.predicates.push_back([want, inverted](const SelectedEntity& e) {
                     return (e.name == want) != inverted;
                 });
@@ -515,6 +519,11 @@ namespace Server {
         }
 
     } // namespace
+
+    NamedEntityDeferral& CurrentNamedEntityDeferral() {
+        thread_local NamedEntityDeferral deferral;
+        return deferral;
+    }
 
     bool ResolveSelector(const std::string& token, SelectorKind kind,
                          const CommandSource& source,
@@ -679,25 +688,79 @@ namespace Server {
         }
 
         // ── Filter ──────────────────────────────────────────────────────────
-        std::vector<SelectedEntity> matched;
-        for (SelectedEntity& e : candidates) {
+        const auto passes = [&](const SelectedEntity& e) {
             if (selectOnlyAlive && e.kind == SelectedEntity::Kind::Mob &&
                 e.mob && !e.mob->IsAlive()) {
-                continue;
+                return false;
             }
-            if (haveBox && !box.Intersects(e.box)) continue;
-
+            if (haveBox && !box.Intersects(e.box)) return false;
             if (!sel.distance.Any()) {
                 const glm::dvec3 d = e.position - origin;
-                if (!sel.distance.MatchesSq(glm::dot(d, d))) continue;
+                if (!sel.distance.MatchesSq(glm::dot(d, d))) return false;
             }
-
-            bool ok = true;
             for (const Predicate& p : sel.predicates) {
-                if (!p(e)) { ok = false; break; }
+                if (!p(e)) return false;
             }
-            if (!ok) continue;
+            return true;
+        };
 
+        // ── Named entities beyond the loaded chunks (engine deviation) ──────
+        //
+        // A positive `name=` also reaches custom-named entities saved in
+        // chunks nobody has loaded (NamedEntityIndex.hpp), in every
+        // dimension unless a position option limits it to this one (MC's
+        // worldLimited: distance, x/y/z, dx/dy/dz) — MC's own non-limited
+        // selectors walk every level too. Loaded mobs of the other levels
+        // are candidates at once; saved ones make the command wait: their
+        // chunks are held loaded and the dispatcher runs the command again
+        // once their entities are in (CommandDispatcher::ProcessDeferred).
+        if (sel.nameEquals && sel.includesEntities && !sel.currentEntity && g_integratedServer) {
+            const bool worldLimited = sel.distanceSeen || sel.xSeen || sel.ySeen || sel.zSeen ||
+                                      sel.dxSeen || sel.dySeen || sel.dzSeen;
+            if (!worldLimited) {
+                for (const Game::DimensionId d : Game::kAllDimensions) {
+                    if (d == source.dimension || !g_integratedServer->GetLevel(d)) continue;
+                    CommandSource scoped = source;
+                    scoped.dimension = d;
+                    CollectMobs(scoped, candidates);
+                }
+            }
+            std::vector<NamedEntities::ChunkRef> waitFor;
+            size_t waiting = 0;
+            for (const Game::DimensionId d : Game::kAllDimensions) {
+                if (worldLimited && d != source.dimension) continue;
+                for (const NamedEntities::Entry& entry : NamedEntities::Find(d, *sel.nameEquals)) {
+                    if (NamedEntities::EntitiesLive(d, entry.chunk)) continue;   // found live, or gone
+                    SelectedEntity saved;
+                    saved.kind      = SelectedEntity::Kind::Mob;
+                    saved.position  = entry.position;
+                    saved.box.min   = glm::vec3(entry.position) + glm::vec3(-0.3f, 0.0f, -0.3f);
+                    saved.box.max   = glm::vec3(entry.position) + glm::vec3( 0.3f, 1.8f,  0.3f);
+                    saved.dimension = d;
+                    saved.typeSlug  = entry.typeSlug;
+                    saved.name      = entry.name;
+                    if (!passes(saved)) continue;
+                    ++waiting;
+                    const NamedEntities::ChunkRef ref{d, entry.chunk};
+                    if (std::find(waitFor.begin(), waitFor.end(), ref) == waitFor.end()) waitFor.push_back(ref);
+                }
+            }
+            NamedEntityDeferral& deferral = CurrentNamedEntityDeferral();
+            if (!waitFor.empty() && deferral.allowed) {
+                for (const NamedEntities::ChunkRef& ref : waitFor) {
+                    if (std::find(deferral.chunks.begin(), deferral.chunks.end(), ref) == deferral.chunks.end()) {
+                        deferral.chunks.push_back(ref);
+                    }
+                }
+                error = "Loading " + std::to_string(waiting) + (waiting == 1 ? " named entity" : " named entities") +
+                        " from unloaded chunks...";
+                return false;
+            }
+        }
+
+        std::vector<SelectedEntity> matched;
+        for (SelectedEntity& e : candidates) {
+            if (!passes(e)) continue;
             matched.push_back(std::move(e));
         }
 

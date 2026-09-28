@@ -11,8 +11,11 @@
 // registration and this one about behaviour, and gives new interactive blocks
 // (chest, furnace, doors) an obvious home.
 #include "BlockRegistry.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "BlockInteraction.hpp"
 #include "BlockPlacement.hpp"
+#include "FireBlock.hpp"
 #include "RedstoneWire.hpp"
 #include "RedstoneComponents.hpp"
 #include "RedstoneStateUtil.hpp"   // FacingOf — the amethyst cluster hook
@@ -20,6 +23,13 @@
 #include "piston/PistonBaseBlock.hpp"
 #include "RedstoneContainers.hpp"
 #include "LecternBlock.hpp"
+#include "JukeboxBlock.hpp"
+#include "common/world/block/entity/BellBlockEntity.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "DecoratedPotBlock.hpp"
+#include "CopperGolemStatueBlock.hpp"
+#include "ChiseledBookShelfBlock.hpp"
+#include "TrialChamberBlocks.hpp"
 #include "FallingBlock.hpp"
 #include "RedstoneSignal.hpp"      // HasNeighborSignal — enchanted gravitite
 #include "TntBlock.hpp"
@@ -31,6 +41,11 @@
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "BedBlock.hpp"
+#include "CandleBlocks.hpp"
+#include "PlantBlocks.hpp"
+#include "TurtleEggBlock.hpp"
+#include "CopperChestBlock.hpp"
+#include "SculkBlocks.hpp"
 #include "entity/ChestBlockEntity.hpp"
 #include "entity/SpawnerBlockEntity.hpp"
 #include "common/world/portal/PortalFamily.hpp"
@@ -55,7 +70,10 @@
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/SoundType.hpp"
 #include "common/world/block/BlockAmbientSounds.hpp"
+#include "common/world/block/BlockAnimateParticles.hpp"
 #include "common/world/level/WorldMobSpawn.hpp"
+#include "common/world/level/GameRules.hpp"
+#include "common/world/spawn/SpawnPlacements.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
 #include "GeneratedBlockStates.hpp"
 #include "common/world/lighting/BlockLightProperties.hpp"
@@ -66,6 +84,7 @@
 #include "common/inventory/MenuType.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include <algorithm>
 #include <array>
@@ -86,9 +105,9 @@ namespace Game {
 
         // ── Bell ──────────────────────────────────────────────────────────
         // MC BellBlock.useItemOn → onHit: a hit on the swinging face rings it
-        // (attemptToRing: BELL_BLOCK at volume 2 from the server, for
-        // everyone). The swing itself is BellBlockEntity's, which this engine
-        // does not carry, so the ring is the sound alone.
+        // (attemptToRing: the block entity's onHit — the swing and its block
+        // event, whose triggerEvent tells the villagers within 32 blocks —
+        // then BELL_BLOCK at volume 2 from the server, for everyone).
         //
         // MC isProperHit: never the top or bottom face, never above y 0.8124
         // (the yoke), and by attachment — a floor bell along its facing axis,
@@ -104,36 +123,46 @@ namespace Game {
             return true;   // ceiling
         }
 
-        UseResult BellUse(ILevelWrite* world, const glm::ivec3& pos, IUsePlayer* /*player*/,
+        // The bell's entity; the server makes one for a bell that has none (a
+        // chunk saved before bells carried one), as MC always has one.
+        BellBlockEntity* BellAt(ILevelWrite& level, const glm::ivec3& pos) {
+            BlockEntity* be = level.GetBlockEntity(pos);
+            if (!be && !level.IsClientSide()) {
+                if (const BlockEntityType* type = BlockEntityTypes::ForBlock(BlockID::Bell)) {
+                    level.SetBlockEntity(pos, type->Create(pos, BlockID::Bell));
+                    be = level.GetBlockEntity(pos);
+                }
+            }
+            auto* bell = dynamic_cast<BellBlockEntity*>(be);
+            if (bell && !bell->GetLevel()) bell->SetLevel(&level);
+            return bell;
+        }
+
+        UseResult BellUse(ILevelWrite* world, const glm::ivec3& pos, IUsePlayer* player,
                           const BlockHitResult& hit) {
             if (!world) return UseResult::Pass;
             const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
             if (!state.Is(BlockID::Bell)) return UseResult::Pass;
             if (!BellIsProperHit(state, hit.face, hit.hitPoint.y - pos.y)) return UseResult::Pass;
-            // attemptToRing: `!level.isClientSide()` — the client only swings.
+            // attemptToRing: `!level.isClientSide()` — the client only swings
+            // its arm; the bell's swing arrives with the block event.
             if (!world->IsClientSide()) {
-                world->PlaySound(nullptr, pos, SoundEvents::BELL_BLOCK, SoundSource::Blocks, 2.0f, 1.0f);
-                // BellBlockEntity.updateEntities (via the ring's block event):
-                // every living thing within 48 whose position is inside 32 of
-                // the bell's centre hears it — a villager then runs to hide
-                // (ReactToBell). setMemory on a brain without the memory is
-                // a no-op in MC; the IsRegistered test is that.
-                if (EntityLevel* level = world->Entities()) {
-                    const glm::vec3 centre(pos.x + 0.5f, pos.y + 0.5f, pos.z + 0.5f);
-                    std::vector<Entity*> nearby;
-                    level->GetEntitiesInBox(AABB(centre, glm::vec3(97.0f)), nullptr, nearby);
-                    for (Entity* e : nearby) {
-                        LivingEntity* living = e ? e->AsLiving() : nullptr;
-                        Brain* brain = living ? living->GetBrain() : nullptr;
-                        if (!brain || !living->IsAlive() || living->IsRemoved()) continue;
-                        const glm::dvec3 d = living->position - glm::dvec3(centre);
-                        if (glm::dot(d, d) >= 32.0 * 32.0) continue;
-                        if (!brain->IsRegistered(MemoryModule::HeardBellTime)) continue;
-                        brain->SetMemory(MemoryModule::HeardBellTime, level->GetGameTime());
-                    }
+                if (BellBlockEntity* bell = BellAt(*world, pos)) {
+                    bell->OnHit(*world, hit.face);
+                    world->PlaySound(nullptr, pos, SoundEvents::BELL_BLOCK, SoundSource::Blocks, 2.0f, 1.0f);
+                    // attemptToRing: gameEvent(ringingEntity, BLOCK_CHANGE, pos).
+                    world->GameEvent(player ? player->GameEventSource() : nullptr, GameEventId::BlockChange, pos);
                 }
             }
             return UseResult::Success;
+        }
+
+        // BaseEntityBlock.triggerEvent: the ring's block event to the bell's
+        // entity (on the server when it comes due, on every client after).
+        bool BellTriggerEvent(ILevelWrite& level, const glm::ivec3& pos, BlockState /*state*/, int b0, int b1) {
+            BlockEntity* be = level.GetBlockEntity(pos);
+            if (be && !be->GetLevel()) be->SetLevel(&level);
+            return be && be->TriggerEvent(b0, b1);
         }
         UseResult BellUseItemOn(ItemStack& /*stack*/, ILevelWrite* world, const glm::ivec3& pos,
                                 IUsePlayer* player, uint32_t /*hand*/, const BlockHitResult& hit) {
@@ -187,14 +216,17 @@ namespace Game {
                     continue;
                 }
                 if (!world->IsClientSide()) {
-                    // MC: setBlock(dest, state, 2) + removeBlock(origin).
+                    // MC: levelEvent 2015 (the portal trail from the old
+                    // cell to the new), setBlock(dest, state, 2) +
+                    // removeBlock(origin).
+                    world->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_DRAGON_EGG_TELEPORT, pos,
+                                          ClampedPackDifferenceInPosition(pos, testPos, 16, 8, 16));
                     world->SetBlock(testPos.x, testPos.y, testPos.z,
                                     BlockID::DragonEgg,
                                     World::UpdateFlags::All);
                     world->SetBlock(pos.x, pos.y, pos.z, BlockID::Air,
                                     World::UpdateFlags::All);
                 }
-                // MC's client draws the 128-particle portal trail here.
                 return UseResult::Success;
             }
             return UseResult::Success;
@@ -273,13 +305,28 @@ namespace Game {
         void FireOnPlace(ILevelWrite& level, const glm::ivec3& pos,
                          BlockState newState, BlockState oldState,
                          bool /*movedByPiston*/) {
+            // MC FireBlock.onPlace: after BaseFireBlock's, on EVERY placement
+            // (an age change included), the fire's next tick is booked
+            // (FireBlock.cpp — ageing, burning, spreading, the rain). Booked
+            // first here; the queue keys on (pos, block), so the order does
+            // not show.
+            FireScheduleTick(level, pos);
             // MC BaseFireBlock.onPlace: `if (!oldState.is(state.getBlock()))`.
             // Fire has an `age` property, so a state-only write reaches here
             // and must not re-run the portal search.
             if (oldState.Block() == newState.Block()) return;
+            // BaseFireBlock.onPlace's tail: no portal made, and the fire
+            // cannot stay where it was put — it goes.
+            const auto removeIfCannotSurvive = [&] {
+                if (level.IsClientSide() || FireBlockCanSurvive(level, pos, newState)) return;
+                if (auto* world = dynamic_cast<World*>(&level)) world->RemoveBlock(pos, false);
+            };
             // MC inPortalDimension: overworld or nether only. An obsidian
             // frame in the End just holds a fire.
-            if (!DimensionAllowsNetherPortal(level.GetDimension())) return;
+            if (!DimensionAllowsNetherPortal(level.GetDimension())) {
+                removeIfCannotSurvive();
+                return;
+            }
 
             // Immersive mode: any closed obsidian loop becomes a see-through
             // surface, decided server-side (the handler finds the loop and
@@ -293,6 +340,7 @@ namespace Game {
                 if (auto handler = Portals::GetImmersiveFrameLitHandler()) {
                     handler(level, pos, PortalFamilyId::Nether);
                 }
+                removeIfCannotSurvive();
                 return;
             }
 
@@ -302,9 +350,11 @@ namespace Game {
             // in CanFireBePlacedAt is only about whether the fire is ALLOWED,
             // not about which way the portal ends up facing.
             auto shape = PortalShape::FindEmptyPortalShape(level, pos, Axis::X, NetherFamily());
-            if (!shape) return;
-
-            shape->CreatePortalBlocks(level);
+            if (shape) {
+                shape->CreatePortalBlocks(level);
+                return;
+            }
+            removeIfCannotSurvive();
         }
 
         // MC NetherPortalBlock.entityInside (:92) and EndPortalBlock
@@ -375,6 +425,14 @@ namespace Game {
         // isInvulnerableTo(wither()): a creative / spectator player
         // (abilities.invulnerable) or an entity flagged Invulnerable; the
         // wither boss refuses the effect itself (CanBeAffected).
+        // MC WaterlilyBlock.entityInside: a boat breaks a lily pad it runs
+        // into (destroyBlock with drops).
+        void LilyPadEntityInside(ILevelWrite& level, const glm::ivec3& pos, BlockState /*state*/,
+                                 Entity& entity) {
+            if (level.IsClientSide() || !IsBoatEntityType(entity.GetType())) return;
+            level.DestroyBlock(pos, /*dropResources=*/true);
+        }
+
         void WitherRoseEntityInside(ILevelWrite& /*level*/, const glm::ivec3& /*pos*/,
                                     BlockState /*state*/, Entity& entity) {
             EntityLevel* level = entity.Level();
@@ -750,29 +808,42 @@ namespace Game {
                 world->PlaySound(player, pos, opens ? wood->fenceGateOpen : wood->fenceGateClose,
                                  SoundSource::Blocks, 1.0f, OpenCloseJitter(*world));
             }
+            // :130 gameEvent(player, opens ? BLOCK_OPEN : BLOCK_CLOSE, pos).
+            world->GameEvent(player ? player->GameEventSource() : nullptr,
+                             next.GetIndex(PropertyId::OPEN) == 0 ? GameEventId::BlockOpen : GameEventId::BlockClose,
+                             pos);
             return UseResult::Success;
         }
 
         // ── Nether portal: zombified piglins ─────────────────────────────
-        // MC NetherPortalBlock.randomTick: in a natural dimension (the
-        // Overworld), with mob spawning on, each random tick of a portal
-        // block has `difficulty / 2000` odds of putting a zombified piglin
-        // in the air above it. Peaceful is 0, so nothing on peaceful.
+        // MC NetherPortalBlock.randomTick: while the level spawns monsters
+        // (spawn_mobs and spawn_monsters), off Peaceful, where the
+        // NETHER_PORTAL_SPAWNS_PIGLINS attribute holds (the overworld's
+        // dimension type), nextInt(2000) < the difficulty id, and a
+        // non-spectator player within 128 blocks of the chunk
+        // (anyPlayerCloseEnoughForSpawning): walk down out of the portal
+        // column, and if the frame block below it is a valid spawn floor for
+        // a zombified piglin, spawn one in the bottom portal block
+        // (EntityType.spawn at pos.above(), STRUCTURE — no slide-down), with
+        // the 300-tick portal cooldown (setPortalCooldown) so it does not
+        // step straight back through.
         bool NetherPortalTicksRandomly(BlockState /*state*/) { return true; }
         void NetherPortalRandomTick(ILevelWrite& level, const glm::ivec3& pos,
                                     BlockState /*state*/, JavaRandom& random) {
             if (level.IsClientSide()) return;
             if (level.GetDimension() != DimensionId::Overworld) return;
             const World* world = dynamic_cast<const World*>(&level);
-            if (!world || !world->GetDoMobSpawning()) return;
+            if (!world || !world->GetDoMobSpawning() || !Rules::GetBool(Rules::Id::SpawnMonsters)) return;
+            if (world->GetDifficulty() == Difficulty::Peaceful) return;
             const int difficultyId = static_cast<int>(world->GetDifficulty());
             if (random.NextInt(2000) >= difficultyId) return;
-            const glm::ivec3 above = pos + glm::ivec3(0, 1, 0);
-            if (level.GetBlock(above.x, above.y, above.z) != BlockID::Air) return;
-            // MC: the spawned piglin gets setPortalCooldown (300 ticks), so
-            // it does not step straight back through the portal it stands in.
-            SpawnMobFromItem(EntityTypeId::ZombifiedPiglin, above, /*tryMoveDown=*/false,
-                             /*movedUp=*/false, level.GetDimension(), /*portalCooldownTicks=*/300);
+            if (!AnyPlayerCloseEnoughForSpawning(level.GetDimension(), pos)) return;
+            glm::ivec3 floor = pos;
+            while (level.GetBlock(floor.x, floor.y, floor.z) == BlockID::NetherPortal) --floor.y;
+            if (!IsValidSpawnBlock(level, floor.x, floor.y, floor.z, EntityTypeId::ZombifiedPiglin)) return;
+            SpawnMobFromItem(EntityTypeId::ZombifiedPiglin, floor + glm::ivec3(0, 1, 0), /*tryMoveDown=*/false,
+                             /*movedUp=*/false, level.GetDimension(), /*portalCooldownTicks=*/300,
+                             {}, SpawnReason::Structure);
         }
 
         // ── Doors ─────────────────────────────────────────────────────────
@@ -845,6 +916,9 @@ namespace Game {
                 world->PlaySound(player, pos, wasOpen ? set->doorClose : set->doorOpen,
                                  SoundSource::Blocks, 1.0f, OpenCloseJitter(*world));
             }
+            // :164 gameEvent(player, isOpen ? BLOCK_OPEN : BLOCK_CLOSE, pos).
+            world->GameEvent(player ? player->GameEventSource() : nullptr,
+                             wasOpen ? GameEventId::BlockClose : GameEventId::BlockOpen, pos);
             return UseResult::Success;
         }
 
@@ -899,6 +973,9 @@ namespace Game {
                 world->PlaySound(player, pos, wasOpen ? set->trapdoorClose : set->trapdoorOpen,
                                  SoundSource::Blocks, 1.0f, OpenCloseJitter(*world));
             }
+            // TrapDoorBlock.playSound: gameEvent(player, OPEN / CLOSE, pos).
+            world->GameEvent(player ? player->GameEventSource() : nullptr,
+                             wasOpen ? GameEventId::BlockClose : GameEventId::BlockOpen, pos);
             return UseResult::Success;
         }
 
@@ -1032,8 +1109,11 @@ namespace Game {
                 level.SetBlock(pos.x, pos.y, pos.z, BlockStates::Default(BlockID::Air), World::UpdateFlags::All);
                 return;
             }
+            const BlockState state = level.GetBlockState(pos.x, pos.y, pos.z);
             level.SetBlock(pos.x, pos.y, pos.z, BlockStates::Default(BlockID::Water), World::UpdateFlags::All);
             level.NeighborChanged(pos, BlockID::Water);
+            // gameEvent(BLOCK_DESTROY, pos, Context.of(state)).
+            level.GameEvent(GameEventId::BlockDestroy, pos, GameEventContext::Of(state));
         }
 
         // FrostedIceBlock.fewerNeigboursThan (sic): fewer than `limit` of the
@@ -1233,6 +1313,8 @@ namespace Game {
 
         // ── The wither rose (MC WitherRoseBlock) ──────────────────────────
         if (Block* rose = forSlug("wither_rose")) rose->entityInside = &WitherRoseEntityInside;
+        // ── The lily pad (MC WaterlilyBlock) ──────────────────────────────
+        if (Block* lily = forSlug("lily_pad")) lily->entityInside = &LilyPadEntityInside;
         if (Block* eyeblossom = forSlug("open_eyeblossom")) {
             eyeblossom->entityInside = &EyeblossomEntityInside;
         }
@@ -1474,6 +1556,7 @@ namespace Game {
         if (Block* bell = forSlug("bell")) {
             bell->useItemOn      = &BellUseItemOn;
             bell->useWithoutItem = &BellUse;
+            bell->triggerEvent   = &BellTriggerEvent;
         }
 
         if (Block* tnt = forSlug("tnt")) {
@@ -1504,6 +1587,12 @@ namespace Game {
         // block — until that exists it opens its own block container, which is
         // the same UI with per-block storage.
         attachContainers({"chest", "trapped_chest", "ender_chest", "barrel",
+                          // CopperChestBlock extends ChestBlock: the same
+                          // chest menu, single or double.
+                          "copper_chest", "exposed_copper_chest",
+                          "weathered_copper_chest", "oxidized_copper_chest",
+                          "waxed_copper_chest", "waxed_exposed_copper_chest",
+                          "waxed_weathered_copper_chest", "waxed_oxidized_copper_chest",
                           "shulker_box",
                           "white_shulker_box",      "orange_shulker_box",
                           "magenta_shulker_box",    "light_blue_shulker_box",
@@ -1518,7 +1607,11 @@ namespace Game {
         // The chest lid: its recheck tick and the block event that carries
         // the opener count (ChestBlockEntity.cpp). A trapped chest is also a
         // redstone source, powered by that count.
-        for (BlockID id : {BlockID::Chest, BlockID::TrappedChest, BlockID::EnderChest}) {
+        for (BlockID id : {BlockID::Chest, BlockID::TrappedChest, BlockID::EnderChest,
+                           BlockID::CopperChest, BlockID::ExposedCopperChest,
+                           BlockID::WeatheredCopperChest, BlockID::OxidizedCopperChest,
+                           BlockID::WaxedCopperChest, BlockID::WaxedExposedCopperChest,
+                           BlockID::WaxedWeatheredCopperChest, BlockID::WaxedOxidizedCopperChest}) {
             Block& chest = blocks[static_cast<size_t>(id)];
             chest.tick         = &ChestTick;
             chest.triggerEvent = &BlockEntityTriggerEvent;
@@ -1579,9 +1672,47 @@ namespace Game {
         // The lectern: book placing, its reading menu, the page-turn pulse
         // and the comparator reading (LecternBlock.cpp).
         RegisterLecternBehaviors(blocks);
+        // The jukebox: discs in and out, the signal while a song plays and
+        // the comparator reading of the disc (JukeboxBlock.cpp).
+        RegisterJukeboxBehaviors(blocks);
+        // The decorated pot: an item in, the wobble (DecoratedPotBlock.cpp;
+        // its contents, sherds and loot are its block entity's).
+        RegisterDecoratedPotBehaviors(blocks);
+        // Copper golem statues: pose turning, comparator, weathering
+        // (CopperGolemStatueBlock.cpp).
+        RegisterCopperGolemStatueBehaviors(blocks);
+        // The chiseled bookshelf: books in and out by slot, the comparator
+        // (ChiseledBookShelfBlock.cpp).
+        RegisterChiseledBookShelfBehaviors(blocks);
+        // The vault's key slot (TrialChamberBlocks.cpp; the trial spawner
+        // and the vault themselves run in their block entities).
+        RegisterTrialChamberBlockBehaviors(blocks);
         // Potent sulfur: the geyser's state, eruption start, bubbles and
         // hiss (PotentSulfurBlock.cpp; the tickers are its block entity's).
         RegisterPotentSulfurBehaviors(blocks);
+        // Candles, candle cakes and cake: lighting, putting out, stacking a
+        // candle onto a cake and eating it (CandleBlocks.cpp).
+        RegisterCandleBehaviors(blocks);
+        // Sea pickles, lily pads, frogspawn and the small mushrooms:
+        // survival, spread and bone meal (PlantBlocks.cpp).
+        RegisterPlantBehaviors(blocks);
+        // Turtle eggs: hatching, trampling and the sand sparkle
+        // (TurtleEggBlock.cpp).
+        RegisterTurtleEggBehaviors(blocks);
+        // Copper chests: the pair sharing one oxidation, and the weathering
+        // of the unwaxed four (CopperChestBlock.cpp).
+        RegisterCopperChestBehaviors(blocks);
+        // Fire: the scheduled tick (age, burn, spread, rain) and survival
+        // (FireBlock.cpp).
+        RegisterFireBehaviors(blocks);
+        // The sculk family: sensors (phases, redstone, comparator, step-on),
+        // the shrieker, the catalyst's bloom and the amethyst chime
+        // (SculkBlocks.cpp; the listeners are their block entities').
+        RegisterSculkBehaviors(blocks);
+        // The animateTick particles of every vanilla block (torches, fire,
+        // furnaces, portals, leaves, drips, redstone…): chained onto what the
+        // registrations above installed (BlockAnimateParticles.cpp).
+        RegisterBlockAnimateParticles(blocks);
         // The ambient block sounds (fire, furnaces, candles, portals…):
         // truly last, because they CHAIN onto whatever animateTick the
         // registrations above installed.

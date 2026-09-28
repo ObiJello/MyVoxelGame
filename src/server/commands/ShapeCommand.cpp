@@ -1,4 +1,5 @@
 #include "ShapeCommand.hpp"
+#include "BlockStateArgument.hpp"
 #include "CommandCoords.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../player/ServerPlayer.hpp"
@@ -10,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <string>
 
 namespace Server {
@@ -26,6 +28,14 @@ namespace Server {
         bool BlockFromName(const std::string& raw, Game::BlockID& out) {
             const std::string want = Lower(raw);
             if (want == "air") { out = Game::BlockID::Air; return true; }
+            // The registry id first ("oak_planks", "minecraft:stone") — what
+            // /setblock takes and what the completion offers — then the
+            // display name this command was first written against.
+            {
+                Game::BlockState state;
+                std::string error;
+                if (ParseBlockState(want, state, error)) { out = state.Block(); return true; }
+            }
             for (size_t i = 0; i < static_cast<size_t>(Game::BlockID::Count); ++i) {
                 const auto id = static_cast<Game::BlockID>(i);
                 std::string name = Lower(Game::BlockRegistry::Get(id).name);
@@ -59,7 +69,38 @@ namespace Server {
     } // namespace
 
     void ShapeCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("shape", ShapeCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        using Cmd::Arg;
+        // /shape <block> <form> <sizes...> [hollow|frame|checker|spaced=N]...
+        // [at <pos>] — the quirks in any order, so the tree offers them
+        // again after each one (three deep).
+        std::function<std::vector<Cmd::Node>(int)> quirks = [&](int depth) {
+            std::vector<Cmd::Node> out;
+            for (const char* q : {"hollow", "frame", "checker"}) {
+                Cmd::Node n = Cmd::Literal(q).Executes();
+                if (depth > 0) n.Then(quirks(depth - 1));
+                out.push_back(std::move(n));
+            }
+            Cmd::Node spaced = Cmd::Argument("spacing", Arg::Word)
+                .Suggests({"spaced=2", "spaced=3", "spaced=4"}).Executes();
+            if (depth > 0) spaced.Then(quirks(depth - 1));
+            out.push_back(std::move(spaced));
+            out.push_back(Cmd::Literal("at").Then(Cmd::Argument("pos", Arg::Vec3).Executes()));
+            return out;
+        };
+        const auto size = [](const char* name) {
+            return Cmd::Argument(name, Arg::Integer).Suggests({"5", "10", "20", "50"});
+        };
+        const auto tail = [&](Cmd::Node n) { return std::move(n).Executes().Then(quirks(2)); };
+        dispatcher.RegisterCommand("shape", ShapeCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("block", Arg::Block)
+                .Then(Cmd::Literal("cube").Then(tail(size("size"))))
+                .Then(Cmd::Literal("box").Then(size("sx").Then(size("sy").Then(tail(size("sz"))))))
+                .Then(Cmd::Literal("wall").Then(tail(size("width")).Then(tail(size("height")))))
+                .Then(Cmd::Literal("sphere").Then(tail(size("radius"))))
+                .Then(Cmd::Literal("dome").Then(tail(size("radius"))))
+                .Then(Cmd::Literal("cylinder").Then(tail(size("radius")).Then(tail(size("height")))))
+                .Then(Cmd::Literal("pyramid").Then(tail(size("base"))))));
     }
 
     void ShapeCommand::Execute(const CommandSourceStack& source,

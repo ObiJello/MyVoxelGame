@@ -1,5 +1,6 @@
 // File: src/common/entity/Item.cpp
 #include "Item.hpp"
+#include "FireworkItems.hpp"
 #include "IUsePlayer.hpp"
 #include "EntityLevel.hpp"
 #include "GeneratedItemList.hpp"
@@ -21,6 +22,7 @@
 #include <vector>
 #include <fstream>
 #include <filesystem>
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +34,7 @@ namespace PlatformMain { std::string GetAssetPath(const std::string& relativePat
 namespace Game {
     // Implemented in ItemBehaviors.cpp — wires up FlintAndSteel/Hoe/Shovel etc.
     void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems);
+    void ItemRegistry_RegisterBlockItemEquipment(std::vector<Item>& blockItems);
     // Implemented in ItemDurability.cpp — MAX_DAMAGE / DAMAGE / ENCHANTABLE /
     // REPAIRABLE / WEAPON / TOOL damage_per_block from GeneratedItemDurability.
     void ItemRegistry_RegisterDurability(std::unordered_map<ItemID, Item>& pureItems);
@@ -419,6 +422,12 @@ namespace Game {
             .defaultComponents.set(DataComponents::RARITY, Rarity::EPIC);
         g_blockItems[static_cast<size_t>(BlockID::Light)]
             .defaultComponents.set(DataComponents::RARITY, Rarity::EPIC);
+        // Items.java:1559 — the heavy core, the ominous vaults' rarest reward.
+        g_blockItems[static_cast<size_t>(BlockID::HeavyCore)]
+            .defaultComponents.set(DataComponents::RARITY, Rarity::EPIC);
+        // The wool carpets' llama decor (Equippable.llamaSwag) —
+        // EquipmentBehavior.cpp.
+        ItemRegistry_RegisterBlockItemEquipment(g_blockItems);
 
         // Slot 0 (Air) is special — render type doesn't matter, but mark it as a sprite
         // with no texture so accidental rendering is a no-op.
@@ -550,6 +559,8 @@ namespace Game {
         // Wire per-item useOn / use callbacks (FlintAndSteel, Hoe, Shovel, …).
         // Mirrors MC's per-Item-subclass override pattern — see ItemBehaviors.cpp.
         ItemRegistry_RegisterBehaviors(g_pureItems);
+        // The firework rocket and the crossbow (FireworkItems.cpp).
+        FireworkItems::RegisterBehaviors(g_pureItems);
 
         // Durability and enchanting defaults (Item.Properties.durability /
         // enchantable / repairable, the tool materials' WEAPON). After the
@@ -665,7 +676,8 @@ namespace Game {
     // ── Base Item.use dispatch + use-duration helpers ───────────────────────
     // Mirrors Item.java:196-219 / :304-313 / :315-322. The EQUIPPABLE /
     // BLOCKS_ATTACKS branches light up with the equipment phase; the dispatch
-    // shape is final. (KINETIC_WEAPON is omitted throughout — no combat.)
+    // shape is final. (KINETIC_WEAPON is the spears' item callbacks —
+    // SpearItem.hpp / WeaponItems.hpp.)
 
     UseResult Item_DefaultUse(World* world, Server::ServerPlayer* player,
                               uint32_t hand, ItemStack& stack) {
@@ -751,6 +763,35 @@ namespace Game {
             }
             return fixed;
         }
+        if (layer < item.layerTintKinds.size() &&
+            item.layerTintKinds[layer] == ItemTintKind::MapColor) {
+            // MC ItemTintSources MapColor.calculate: the stack's MAP_COLOR,
+            // else the JSON default (4603950) — ARGB.opaque either way.
+            if (auto color = stack.get(DataComponents::MAP_COLOR)) {
+                return static_cast<uint32_t>(*color) | 0xFF000000u;
+            }
+            return fixed | 0xFF000000u;
+        }
+        if (layer < item.layerTintKinds.size() &&
+            item.layerTintKinds[layer] == ItemTintKind::Firework) {
+            // MC client/color/item/Firework.calculate: no colours → the
+            // default (-7697782, the grey star); one → ARGB.opaque(it);
+            // several → the per-channel average (ARGB.color, opaque).
+            const auto explosion = stack.get(DataComponents::FIREWORK_EXPLOSION);
+            if (!explosion || explosion->colors.empty()) return fixed | 0xFF000000u;
+            if (explosion->colors.size() == 1) {
+                return static_cast<uint32_t>(explosion->colors[0]) | 0xFF000000u;
+            }
+            int r = 0, g = 0, b = 0;
+            for (const int32_t c : explosion->colors) {
+                r += (c >> 16) & 0xFF;
+                g += (c >> 8) & 0xFF;
+                b += c & 0xFF;
+            }
+            const int n = static_cast<int>(explosion->colors.size());
+            return 0xFF000000u | (static_cast<uint32_t>(r / n) << 16) |
+                   (static_cast<uint32_t>(g / n) << 8) | static_cast<uint32_t>(b / n);
+        }
         return fixed;
     }
 
@@ -799,6 +840,22 @@ namespace Game {
 
     const ItemRenderContext& ItemRegistry::GetRenderContext() {
         return g_renderContext;
+    }
+
+    namespace {
+        thread_local int t_renderSlot = -1;
+    }
+
+    void ItemRegistry::SetRenderSlot(int inventoryIndex) { t_renderSlot = inventoryIndex; }
+    int  ItemRegistry::GetRenderSlot() { return t_renderSlot; }
+
+    int ItemStackUseTicks(const ItemStack& stack) {
+        const ItemRenderContext& ctx = g_renderContext;
+        if (ctx.useSlot < 0 || stack.IsEmpty() || t_renderSlot != ctx.useSlot ||
+            stack.itemId != ctx.useItemId) {
+            return -1;
+        }
+        return std::max(0, ctx.useTicks);
     }
 
     void ItemRegistry::TickAnimated(float dtSeconds) {

@@ -4,10 +4,12 @@
 // SpawnerBlockEntity that owns it. See the header for the representation and
 // the deviations.
 #include "SpawnerBlockEntity.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/MobEquipment.hpp"
 #include "common/entity/MobCategory.hpp"
 #include "common/entity/SpawnReason.hpp"
 #include "common/nbt/NbtWrite.hpp"
@@ -41,6 +43,7 @@ namespace Game {
     } // namespace
 
     void SetSpawnerServerHooks(const SpawnerServerHooks& hooks) { g_hooks = hooks; }
+    const SpawnerServerHooks& GetSpawnerServerHooks() { return g_hooks; }
 
     // ── MC BaseSpawner.serverTick ─────────────────────────────────────────
 
@@ -175,8 +178,10 @@ namespace Game {
             if (!next.hasCustomRules && !mob->CheckSpawnRules(*level, SpawnReason::Spawner)) continue;
             if (!mob->CheckSpawnObstruction(*level)) continue;
             // Only a bare {id} is finalized: a configured compound already
-            // says what the mob is. (SpawnData.equipment: see the header.)
+            // says what the mob is. Then nextSpawnData.getEquipment()
+            // .ifPresent(mob::equip).
             if (next.bareId) mob->FinalizeSpawn(SpawnReason::Spawner, nullptr);
+            MobEquipment::EquipFromSpawnData(*mob, next);
 
             // tryAddFreshEntityWithPassengers (a refusal delays and stops),
             // then LevelEvent 2004 (engine block event, header) and
@@ -191,6 +196,8 @@ namespace Game {
                 level->AddFreshEntity(std::move(mob));
             }
             world->BlockEvent(pos, GetBlockId(), kEventSpawnParticles, 0);
+            // gameEvent(entity, ENTITY_PLACE, spawnBlockPos).
+            world->GameEvent(placed, GameEventId::EntityPlace, spawnBlockPos);
             level->BroadcastEntityEvent(*placed, 20);
             delay = true;
         }

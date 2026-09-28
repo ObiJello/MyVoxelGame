@@ -10,6 +10,11 @@
 #include "common/core/Mth.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/block/GeneratedBlockStates.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/WorldDrops.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 
 #include <cmath>
 #include <vector>
@@ -60,25 +65,22 @@ namespace Game {
         }
 
         // MC Fox.FoxAlertableEntitiesSelector — what interrupts a nap or a
-        // perch. Ported term for term; the pieces this engine cannot answer
-        // are named:
-        //   - trust: never granted (item layer), so the exemption is moot
-        //   - target.isSleeping / isDiscrete: no player sleep or sneak state
-        //     reaches mobs, so the final test reduces to true, as it does in
-        //     MC for any awake, upright entity.
+        // perch, term for term. isSleeping is read off the SLEEPING pose (a
+        // villager in bed); a player's bed rest does not reach the mob side
+        // (the player view carries no pose), so a sleeping player still
+        // counts as awake here.
         bool IsAlertableEntity(const Fox& fox, const LivingEntity& target) {
             if (target.GetType() == EntityTypeId::Fox) return false;
             if (IsStalkablePrey(target)) return true;
             if (IsMonsterCategory(target.TypeInfo().category)) return true;
-            // TamableAnimal → !isTame; no taming exists, so always alertable.
-            if (target.GetType() == EntityTypeId::Wolf
-                || target.GetType() == EntityTypeId::Cat
-                || target.GetType() == EntityTypeId::Parrot) {
-                return true;
+            // TamableAnimal → !isTame: a wild wolf/cat/parrot alerts, a pet
+            // does not.
+            if (const auto* tamable = dynamic_cast<const TamableAnimal*>(&target)) {
+                return !tamable->IsTame();
             }
-            if (target.IsSpectator() || target.IsCreative()) return false;
-            (void)fox;
-            return true;
+            if (target.IsPlayer() && (target.IsSpectator() || target.IsCreative())) return false;
+            if (fox.Trusts(target)) return false;
+            return target.GetPose() != Pose::Sleeping && !target.IsDiscrete();
         }
 
         // MC FoxBehaviorGoal.alertable — anything alertable within the
@@ -366,7 +368,10 @@ namespace Game {
         }
         m_interval = 100;
         // MC also rejects village positions; no villages exist here.
-        return level->IsDay() && level->CanSeeSky(pos.x, pos.y, pos.z)
+        // Level.isBrightOutside: skyDarken below 4 (weather-darkened) and no
+        // fixed time.
+        const bool brightOutside = !DimensionFixedTime(level->Dimension()).has_value() && level->GetSkyDarken() < 4;
+        return brightOutside && level->CanSeeSky(pos.x, pos.y, pos.z)
             && SetWantedPos();
     }
 
@@ -454,7 +459,8 @@ namespace Game {
         if (!level) return false;
         // MC isBrightOutside && shelter && nothing alertable && !powder snow
         // (no powder snow entity state exists here).
-        return level->IsDay() && FoxHasShelter(*m_fox) && !FoxAlertable(*m_fox);
+        const bool brightOutside = !DimensionFixedTime(level->Dimension()).has_value() && level->GetSkyDarken() < 4;
+        return brightOutside && FoxHasShelter(*m_fox) && !FoxAlertable(*m_fox);
     }
 
     void SleepGoal::Stop() {
@@ -479,6 +485,130 @@ namespace Game {
 
     PerchAndSearchGoal::PerchAndSearchGoal(Fox* fox) : m_fox(fox) {
         SetFlags(GoalFlag::Move | GoalFlag::Look);
+    }
+
+    // ── FoxSearchForItemsGoal ──────────────────────────────────────────────
+
+    bool FoxSearchForItemsGoal::FindItem(glm::dvec3& out) const {
+        EntityLevel* level = m_fox->Level();
+        if (!level) return false;
+        AABBd box = m_fox->GetAABBd();
+        box.min -= glm::dvec3(8.0);
+        box.max += glm::dvec3(8.0);
+        std::vector<EntityLevel::NearbyItemEntity> items;
+        level->GetItemEntitiesInBox(box, items);
+        for (const auto& item : items) {
+            if (!item.canPickUp || item.count <= 0) continue;   // ALLOWED_ITEMS
+            out = item.pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool FoxSearchForItemsGoal::CanUse() {
+        if (!m_fox->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty()) return false;
+        if (m_fox->GetTarget() != nullptr || m_fox->GetLastHurtByMob() != nullptr) return false;
+        if (!m_fox->CanMove()) return false;
+        EntityLevel* level = m_fox->Level();
+        if (!level || level->Random().NextInt(ReducedTickDelay(10)) != 0) return false;
+        glm::dvec3 at;
+        return FindItem(at) && m_fox->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty();
+    }
+
+    void FoxSearchForItemsGoal::Tick() {
+        glm::dvec3 at;
+        if (m_fox->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty() && FindItem(at)) {
+            m_fox->GetNavigation().MoveTo(at.x, at.y, at.z, 1.2000000476837158);
+        }
+    }
+
+    void FoxSearchForItemsGoal::Start() {
+        glm::dvec3 at;
+        if (FindItem(at)) m_fox->GetNavigation().MoveTo(at.x, at.y, at.z, 1.2000000476837158);
+    }
+
+    // ── FoxEatBerriesGoal ─────────────────────────────────────────────────
+
+    FoxEatBerriesGoal::FoxEatBerriesGoal(Fox* fox, double speedModifier, int searchRange,
+                                         int verticalSearchRange)
+        : MoveToBlockGoal(fox, speedModifier, searchRange, verticalSearchRange), m_fox(fox) {}
+
+    bool FoxEatBerriesGoal::IsValidTarget(const IBlockAccess& blocks, const glm::ivec3& pos) const {
+        const BlockState state = blocks.GetBlockState(pos.x, pos.y, pos.z);
+        if (state.Is(BlockID::SweetBerryBush)) return state.GetIndex(PropertyId::AGE_3) >= 2;
+        // CaveVines.hasGlowBerries: a cave vine (head or body) with berries.
+        if (state.Is(BlockID::CaveVines) || state.Is(BlockID::CaveVinesPlant)) {
+            return state.GetName(PropertyId::BERRIES) == "true";
+        }
+        return false;
+    }
+
+    bool FoxEatBerriesGoal::CanUse() {
+        return !m_fox->IsSleeping() && MoveToBlockGoal::CanUse();
+    }
+
+    void FoxEatBerriesGoal::Start() {
+        m_ticksWaited = 0;
+        m_fox->SetSitting(false);
+        MoveToBlockGoal::Start();
+    }
+
+    void FoxEatBerriesGoal::Tick() {
+        if (IsReachedTarget()) {
+            if (m_ticksWaited >= 40) OnReachedTarget();
+            else ++m_ticksWaited;
+        } else if (m_fox->Level() && m_fox->Level()->Random().NextFloat() < 0.05f) {
+            m_fox->PlaySound(SoundEvents::FOX_SNIFF, 1.0f, 1.0f);
+        }
+        MoveToBlockGoal::Tick();
+    }
+
+    void FoxEatBerriesGoal::OnReachedTarget() {
+        EntityLevel* level = m_fox->Level();
+        if (!level || level->IsClientSide() || !level->MobGriefing()) return;
+        const IBlockAccess* blocks = level->Blocks();
+        if (!blocks) return;
+        const BlockState state = blocks->GetBlockState(m_blockPos.x, m_blockPos.y, m_blockPos.z);
+        if (state.Is(BlockID::SweetBerryBush)) {
+            PickSweetBerries(state);
+        } else if ((state.Is(BlockID::CaveVines) || state.Is(BlockID::CaveVinesPlant)) &&
+                   state.GetName(PropertyId::BERRIES) == "true") {
+            PickGlowBerry(state);
+        }
+    }
+
+    void FoxEatBerriesGoal::PickGlowBerry(BlockState state) {
+        // MC CaveVines.use(entity, state, level, pos): pop one glow berry,
+        // the pick sound (1.0, 0.8..1.2), berries off (flag 2), BLOCK_CHANGE.
+        EntityLevel* level = m_fox->Level();
+        DropItemStackNear(level->Dimension(), m_blockPos, ItemStack(Items::GlowBerries, 1));
+        const float pitch = 0.8f + level->Random().NextFloat() * 0.4f;
+        level->PlaySeededSound(nullptr, glm::dvec3(m_blockPos) + glm::dvec3(0.5),
+                               SoundEvents::CAVE_VINES_PICK_BERRIES, SoundSource::Blocks, 1.0f, pitch,
+                               level->Random().NextLong());
+        const BlockState picked = state.SetName(PropertyId::BERRIES, "false");
+        level->SetBlockState(m_blockPos, picked);
+        if (ILevelWrite* write = level->MutableBlocks()) {
+            write->GameEvent(GameEventId::BlockChange, m_blockPos, GameEventContext::Of(m_fox, picked));
+        }
+    }
+
+    void FoxEatBerriesGoal::PickSweetBerries(BlockState state) {
+        EntityLevel* level = m_fox->Level();
+        const int age = state.GetIndex(PropertyId::AGE_3);
+        int count = 1 + level->Random().NextInt(2) + (age == 3 ? 1 : 0);
+        if (m_fox->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty()) {
+            m_fox->SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::SweetBerries, 1));
+            --count;
+        }
+        if (count > 0) {
+            DropItemStackNear(level->Dimension(), m_blockPos, ItemStack(Items::SweetBerries, count));
+        }
+        m_fox->PlaySound(SoundEvents::SWEET_BERRY_BUSH_PICK_BERRIES, 1.0f, 1.0f);
+        level->SetBlockState(m_blockPos, state.SetIndex(PropertyId::AGE_3, 1));
+        if (ILevelWrite* write = level->MutableBlocks()) {
+            write->GameEvent(GameEventId::BlockChange, m_blockPos, GameEventContext::Of(m_fox));
+        }
     }
 
     bool PerchAndSearchGoal::CanUse() {
@@ -565,7 +695,9 @@ namespace Game {
                                            double sprintSpeedModifier)
         : AvoidEntityGoal(fox, maxDistance, walkSpeedModifier,
                           sprintSpeedModifier),
-          m_fox(fox) {}
+          m_fox(fox) {
+        SetFiltersThreats(true);
+    }
 
     FoxAvoidEntityGoal::FoxAvoidEntityGoal(Fox* fox, const EntityTypeId* types,
                                            int typeCount, float maxDistance,
@@ -573,7 +705,9 @@ namespace Game {
                                            double sprintSpeedModifier)
         : AvoidEntityGoal(fox, types, typeCount, maxDistance,
                           walkSpeedModifier, sprintSpeedModifier),
-          m_fox(fox) {}
+          m_fox(fox) {
+        SetFiltersThreats(true);
+    }
 
     bool FoxAvoidEntityGoal::CanUse() {
         return !m_fox->IsDefending() && AvoidEntityGoal::CanUse();
@@ -581,6 +715,74 @@ namespace Game {
 
     bool FoxAvoidEntityGoal::CanContinueToUse() {
         return !m_fox->IsDefending() && AvoidEntityGoal::CanContinueToUse();
+    }
+
+    bool FoxAvoidEntityGoal::AcceptsThreat(const LivingEntity& candidate) const {
+        if (candidate.IsPlayer()) {
+            // AVOID_PLAYERS: !isDiscrete && NO_CREATIVE_OR_SPECTATOR; then !trusts.
+            return !candidate.IsDiscrete() && !candidate.IsCreative() &&
+                   !candidate.IsSpectator() && !m_fox->Trusts(candidate);
+        }
+        // The wolf goal's !((Wolf) entity).isTame().
+        if (const auto* tamable = dynamic_cast<const TamableAnimal*>(&candidate)) {
+            return !tamable->IsTame();
+        }
+        return true;
+    }
+
+    // ── DefendTrustedTargetGoal ────────────────────────────────────────────
+
+    DefendTrustedTargetGoal::DefendTrustedTargetGoal(Fox* fox)
+        : TargetGoal(fox, /*mustSee=*/false, /*mustReach=*/false), m_fox(fox) {}
+
+    bool DefendTrustedTargetGoal::CanUse() {
+        EntityLevel* level = m_fox->Level();
+        if (!level || level->IsClientSide()) return false;
+        // NearestAttackableTargetGoal's randomInterval (10, reducedTickDelay).
+        if (level->Random().NextInt(10) != 0) return false;
+
+        // The first trusted identity that resolves to a living entity in this
+        // level (MC EntityReference.getEntity(level, LivingEntity.class)).
+        LivingEntity* trusted = nullptr;
+        for (const Uuid& uuid : m_fox->GetTrustedUuids()) {
+            EntityRef ref;
+            ref.SetUnresolved(uuid);
+            LivingEntity* e = ref.GetLiving(*level);
+            if (e && e->Level() == level) { trusted = e; break; }
+        }
+        if (!trusted) return false;
+
+        m_trustedLastHurt = trusted;
+        Entity* hurtBy = trusted->GetLastHurtByMob();
+        m_trustedLastHurtBy = dynamic_cast<LivingEntity*>(hurtBy);
+        const int64_t timestamp = trusted->GetLastHurtByMobTimestamp();
+        if (timestamp == m_timestamp || !m_trustedLastHurtBy) return false;
+
+        // TargetGoal.canAttack with the goal's conditions: forCombat over the
+        // follow range, the selector = TRUSTED_TARGET_SELECTOR && !trusts.
+        LivingEntity& target = *m_trustedLastHurtBy;
+        if (target.GetLastHurtMob() == nullptr) return false;
+        if (!(target.GetLastHurtMobTimestamp() < level->GetGameTime() + 600)) return false;
+        if (m_fox->Trusts(target)) return false;
+        const TargetingConditions conditions =
+            TargetingConditions::ForCombat().Range(GetFollowDistance()).IgnoreLineOfSight();
+        return conditions.Test(m_fox, target);
+    }
+
+    void DefendTrustedTargetGoal::Start() {
+        m_fox->SetTarget(m_trustedLastHurtBy);
+        m_targetMob = m_trustedLastHurtBy;
+        if (m_trustedLastHurt) m_timestamp = m_trustedLastHurt->GetLastHurtByMobTimestamp();
+        m_fox->PlaySound(SoundEvents::FOX_AGGRO, 1.0f, 1.0f);
+        m_fox->SetDefending(true);
+        m_fox->WakeUp();
+        TargetGoal::Start();
+    }
+
+    void DefendTrustedTargetGoal::ClearReferenceTo(const Entity* entity) {
+        TargetGoal::ClearReferenceTo(entity);
+        if (m_trustedLastHurtBy == entity) m_trustedLastHurtBy = nullptr;
+        if (m_trustedLastHurt == entity) m_trustedLastHurt = nullptr;
     }
 
     // ── FoxPreyTargetGoal ──────────────────────────────────────────────────

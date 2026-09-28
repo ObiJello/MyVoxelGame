@@ -1,4 +1,15 @@
 // File: src/client/network/ClientPacketHandler.cpp
+#include "common/entity/projectile/FireworkRocket.hpp"
+#include "common/entity/SpearItem.hpp"
+#include "client/entity/ClientFishing.hpp"
+#include "client/entity/ClientFireworks.hpp"
+#include "common/entity/projectile/FishingHook.hpp"
+#include "client/map/ClientMaps.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "client/entity/ClientVehicles.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/network/packets/game/VehiclePackets.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Features.hpp"
 #include "common/world/level/GameRules.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
@@ -13,6 +24,7 @@
 #include "../world/ClientChunkManager.hpp"
 #include "../entity/Player.hpp"
 #include "../entity/RemotePlayerManager.hpp"
+#include "../entity/ShoulderParrots.hpp"
 #include "../entity/ItemEntityManager.hpp"
 #include "../entity/XpOrbManager.hpp"
 #include "../entity/ClientMobManager.hpp"
@@ -25,12 +37,18 @@
 #include "common/core/Log.hpp"
 #include "../renderer/gui/BossBarState.hpp"
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
+#include "../renderer/gui/CommandSuggestions.hpp"
 #include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
 #include "../sound/ClientSounds.hpp"
 #include "../sound/SoundInstance.hpp"             // ResolveSoundEntity
 #include "../sound/LocalPlayerSounds.hpp"         // portal travel whoosh
 #include "../sound/SoundHost.hpp"                 // the dimension-change sound reset
+#include "../sound/JukeboxSongPlayback.hpp"       // level events 1010 / 1011
+#include "../sound/SoundManager.hpp"              // /stopsound
+#include "../world/ClientLevelEvents.hpp"          // every other level event, level particles
+#include "../world/ClientParticleTicks.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/sound/LevelSound.hpp"
 #include "common/core/JavaRandom.hpp"
 #include <chrono>
 #include "../renderer/environment/SkyRenderer.hpp"  // per-dimension sky
@@ -59,6 +77,8 @@ namespace Render {
                                 const std::vector<Game::ItemStack>& slots);
     void OpenClientContainerScreen(Game::MenuType type, uint32_t containerId,
                                    const std::string& title);
+    // Defined in MountInventoryScreen.cpp — MC handleMountScreenOpen.
+    void OpenClientMountScreen(uint32_t containerId, int inventoryColumns, int32_t entityId);
     // Defined in MerchantScreen.cpp — MC handleMerchantOffers.
     void ApplyMerchantOffers(const Network::MerchantOffersS2CPacket& packet);
     // Defined in screens/DeathScreen.cpp — death flow hooks (health<=0 opens,
@@ -97,7 +117,9 @@ namespace Client {
         // Process chunk data on main thread
         const auto t0 = std::chrono::steady_clock::now();
         g_clientChunkManager->ProcessChunkDataS2CPacket(packet);
-        m_batchCalculator.onChunkApplied(std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count());
+        m_batchCalculator.onChunkApplied(
+            packet.decodeNanos,
+            std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0).count());
         m_stats.chunksReceived++;
         m_stats.packetsProcessed++;
         
@@ -274,8 +296,14 @@ namespace Client {
                 visuals.particles = packet.effectParticles;
                 g_remotePlayerManager->SetEffectVisuals(packet.playerId, std::move(visuals));
             }
-            g_remotePlayerManager->SetMorph(packet.playerId, packet.morph);
+            g_remotePlayerManager->SetMorph(packet.playerId, packet.morph,
+                                            packet.hasMorphVariant ? packet.morphVariant
+                                                                   : Game::Morph::DefaultVariantOf(packet.morph));
             g_remotePlayerManager->SetMorphAnim(packet.playerId, packet.morphAnim);
+            g_remotePlayerManager->SetArmPoses(packet.playerId, packet.rightArmPose, packet.leftArmPose,
+                                               packet.usingItem, packet.useItemHand, packet.ticksUsingItem,
+                                               packet.maxCrossbowCharge);
+            g_remotePlayerManager->SetAutoSpinAttack(packet.playerId, packet.autoSpinAttack);
             Game::DimensionId dim = Game::DimensionFromRaw(packet.dimensionId);
             glm::dvec3 updatePos = packet.position;   // dvec3 on the wire; stays double
             glm::vec2 updateRot = packet.rotation;
@@ -336,6 +364,9 @@ namespace Client {
                                                 dim);
             g_remotePlayerManager->SetHurtTime(packet.playerId, packet.hurtTime);
             g_remotePlayerManager->SetDeathTime(packet.playerId, packet.deathTime);
+            g_remotePlayerManager->SetSprinting(packet.playerId, packet.sprinting);
+            g_remotePlayerManager->SetFallFlying(packet.playerId, packet.fallFlying);
+            g_remotePlayerManager->SetElytraFlags(packet.playerId, packet.elytraFlags);
         }
         m_stats.playerUpdates++;
         m_stats.packetsProcessed++;
@@ -504,6 +535,22 @@ namespace Client {
             return;
         }
         if (g_clientMobManager) {
+            // The exact angles, body yaw, limb swing and animation age, when
+            // the server sent them (AddEntityS2C's appended block).
+            ClientMobManager::SpawnExactState exact;
+            if (packet.hasExactRot) {
+                exact.yRot         = packet.exactYRot;
+                exact.xRot         = packet.exactXRot;
+                exact.yHeadRot     = packet.exactYHeadRot;
+                exact.yBodyRot     = packet.exactYBodyRot;
+                exact.walkPosition = packet.walkPosition;
+                exact.walkSpeed    = packet.walkSpeed;
+                exact.walkSpeedOld = packet.walkSpeedOld;
+                exact.walkScale    = packet.walkScale;
+                exact.animAge      = packet.animAge;
+                exact.renderPhaseCount = packet.renderPhaseCount;
+                for (int i = 0; i < 8; ++i) exact.renderPhase[i] = packet.renderPhase[i];
+            }
             g_clientMobManager->Spawn(packet.entityId, packet.entityType, packet.position,
                                       packet.velocity,
                                       Game::Mth::UnpackDegrees(packet.yRot),
@@ -511,7 +558,8 @@ namespace Client {
                                       Game::Mth::UnpackDegrees(packet.yHeadRot),
                                       packet.health, packet.flags, packet.variantData,
                                       packet.pose, packet.animState,
-                                      packet.blockStateRaw);
+                                      packet.blockStateRaw,
+                                      packet.hasExactRot ? &exact : nullptr);
             g_clientMobManager->SetEntityScale(packet.entityId, packet.scale);
             g_clientMobManager->SetEffectVisuals(packet.entityId, packet.effectFlags,
                                                  packet.effectParticles);
@@ -605,6 +653,24 @@ namespace Client {
 
     void ClientPacketHandler::handleSetEntityMotion(
             const Network::SetEntityMotionS2CPacket& packet) {
+        // MC handleSetEntityMotion → entity.lerpMotion, which for the local
+        // player is setDeltaMovement: the server's word on OUR motion (a
+        // knockback, the mace's smash bounce). The player's id is its
+        // connection id. Blocks per tick on the wire, blocks per second in
+        // PlayerPhysics (the same conversion handleExplode makes).
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && localId != 0 && static_cast<uint32_t>(packet.entityId) == localId) {
+            constexpr float kTicksPerSecond = 20.0f;
+            // setDeltaMovement replaces all of it: the vertical part in
+            // `velocity`, the horizontal as ordinary deltaMovement with MC's
+            // friction (PlayerPhysics::pushVelocity) — not the portal
+            // momentum `velocity` carries horizontally.
+            const glm::vec3 motion = packet.velocity * kTicksPerSecond;
+            m_player->physics.velocity = glm::vec3(0.0f, motion.y, 0.0f);
+            m_player->physics.pushVelocity = glm::vec3(motion.x, 0.0f, motion.z);
+            m_stats.packetsProcessed++;
+            return;
+        }
         if (g_clientFallingBlocks && g_clientFallingBlocks->Owns(packet.entityId)) {
             g_clientFallingBlocks->SetMotion(packet.entityId, packet.velocity);
         } else if (g_clientMobManager) {
@@ -626,6 +692,77 @@ namespace Client {
             g_clientMobManager->SetCustomName(packet.entityId, packet.customName,
                                               packet.customNameVisible);
         }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onPlayerMountS2C(const Network::PlayerMountS2CPacket& packet) {
+        // MC handleSetEntityPassengersPacket, for a player: the local one is
+        // put in the seat (or let go — the server's teleport to the dismount
+        // spot follows), a remote one is drawn sitting. The "Press Shift to
+        // get up" line is the frame loop's, off the vehicleId edge.
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && packet.playerId == localId) {
+            const int32_t oldVehicle = m_player->vehicleId;
+            m_player->vehicleId = packet.vehicleId;
+            if (packet.vehicleId != 0) {
+                m_player->vehicleSeatPos = m_player->physics.position;
+                // LocalPlayer.startRiding: a minecart's riding loops.
+                if (packet.vehicleId != oldVehicle) Client::Vehicles::OnLocalMounted(packet.vehicleId);
+            } else if (oldVehicle != 0) {
+                // Off the seat — which sits a third of a block inside the
+                // block below — onto the cushion's top (Entity.
+                // getDismountLocationForPassenger) until the server's
+                // teleport, a packet behind, puts the player exactly.
+                if (g_clientMobManager) {
+                    if (const ClientMob* v = g_clientMobManager->GetMob(oldVehicle); v && v->mob) {
+                        if (const auto* cushion = dynamic_cast<const Game::Cushion*>(v->mob.get())) {
+                            m_player->physics.position = cushion->DismountLocation();
+                            m_player->predictedPos = m_player->physics.position;
+                        } else if (Game::IsVehicleEntityType(v->mob->GetType())) {
+                            // Off a boat or a cart: where the vehicle would
+                            // put a rider (the server's teleport confirms it).
+                            m_player->physics.position = glm::dvec3(v->mob->position.x,
+                                                                    v->mob->GetAABBd().max.y,
+                                                                    v->mob->position.z);
+                            m_player->predictedPos = m_player->physics.position;
+                        }
+                    }
+                }
+            }
+        } else if (g_remotePlayerManager) {
+            g_remotePlayerManager->SetVehicle(packet.playerId, packet.vehicleId);
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onSetPassengersS2C(const Network::SetPassengersS2CPacket& packet) {
+        // MC handleSetEntityPassengersPacket: the seat order (and whether this
+        // client now drives the vehicle).
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        Client::Vehicles::OnSetPassengers(packet, localId);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onMoveVehicleS2C(const Network::MoveVehicleS2CPacket& packet) {
+        Client::Vehicles::OnMoveVehicle(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onVehicleDataS2C(const Network::VehicleDataS2CPacket& packet) {
+        Client::Vehicles::OnVehicleData(packet);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onMountScreenOpenS2C(const Network::MountScreenOpenS2CPacket& packet) {
+        // MC handleMountScreenOpen: the mount's menu (over a fresh container
+        // the snapshot right behind fills) and its screen.
+        ::Render::OpenClientMountScreen(packet.fullContainerId, packet.inventoryColumns, packet.entityId);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onPlayerSwingS2C(const Network::PlayerSwingS2CPacket& packet) {
+        // MC handleAnimate SWING_MAIN_HAND / SWING_OFF_HAND: entity.swing(hand).
+        if (g_remotePlayerManager) g_remotePlayerManager->StartSwing(packet.playerId, packet.hand);
         m_stats.packetsProcessed++;
     }
 
@@ -653,6 +790,14 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    // MC Player's DATA_SHOULDER_PARROT_LEFT/RIGHT entity-data update: the
+    // variants ParrotOnShoulderLayer draws on that player (this client's own
+    // included — the third-person body wears them too).
+    void ClientPacketHandler::onShoulderParrotsS2C(const Network::ShoulderParrotsS2CPacket& packet) {
+        ShoulderParrots::Set(packet.playerId, packet.left, packet.right);
+        m_stats.packetsProcessed++;
+    }
+
     // MC ClientPacketListener.handleSoundEvent: level.playSeededSound(player,
     // ...) with the local player as `except`, i.e. play it. A packet scoped to
     // a level other than the one the player stands in (an immersive portal's
@@ -660,9 +805,68 @@ namespace Client {
     // dimensions — so it is dropped.
     void ClientPacketHandler::onSoundS2C(const Network::SoundS2CPacket& packet) {
         m_stats.packetsProcessed++;
+        // MC handleStopSoundEvent (the stop rides this packet's trailing
+        // flags): SoundManager.stop(name, source) — whatever level the sound
+        // was started in, so before the level check below.
+        if (packet.stop) {
+            const std::optional<Game::SoundSource> source =
+                packet.stopHasSource ? std::optional<Game::SoundSource>(packet.source) : std::nullopt;
+            SoundManager::Get().Stop(packet.event.empty() ? nullptr : &packet.event, source);
+            return;
+        }
         if (ClientLevels::HasSession() && ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) return;
         Sounds::PlayAt(packet.Position(), packet.event, packet.source, packet.volume, packet.pitch,
                        false, packet.seed);
+    }
+
+    // MC ClientPacketListener.handleLevelEvent → ClientLevel.levelEvent /
+    // globalLevelEvent → LevelEventHandler. Only the events whose client half
+    // is more than a sound come this way (LevelEventS2CPacket.hpp); like a
+    // sound, an event for a level the player is not standing in is dropped.
+    void ClientPacketHandler::onLevelEventS2C(const Network::LevelEventS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        if (ClientLevels::HasSession() && ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) return;
+        const glm::ivec3 pos(packet.x, packet.y, packet.z);
+        switch (packet.type) {
+            case 1010:   // LevelEvent.SOUND_PLAY_JUKEBOX_SONG
+                JukeboxSongPlayback::Play(packet.data, pos, packet.startTicks);
+                break;
+            case 1011:   // LevelEvent.SOUND_STOP_JUKEBOX_SONG
+                JukeboxSongPlayback::StopAndNotifyNearby(pos);
+                break;
+            default:
+                // Every other event: LevelEventHandler's particle half (and
+                // the sounds not sent as their own packet) —
+                // client/world/ClientLevelEvents.cpp. A global event has no
+                // particles (its sound is networked on its own).
+                if (!packet.globalEvent) LevelEvents::LevelEvent(packet.type, pos, packet.data);
+                break;
+        }
+    }
+
+    // MC ClientPacketListener.handleParticleEvent — ServerLevel.sendParticles.
+    // Like a level event, a burst for a level the player is not standing in
+    // is dropped.
+    void ClientPacketHandler::onLevelParticlesS2C(const Network::LevelParticlesS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        if (ClientLevels::HasSession() && ClientLevels::BoundDimension() != ClientLevels::ActiveDimension()) return;
+        LevelEvents::LevelParticles(packet);
+    }
+
+    // The local player's /invisible flag: no sprint or landing dust while set.
+    void ClientPacketHandler::onSelfParticleStateS2C(const Network::SelfParticleStateS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        ParticleTicks::SetLocalPlayerInvisible(packet.invisible);
+    }
+
+    // Engine packet: a jukebox song anywhere on the server. Not dimension-
+    // filtered — "Jukebox Range: Global" plays songs from every dimension,
+    // and the record is kept on Normal range too (JukeboxSongPlayback).
+    void ClientPacketHandler::onJukeboxSongS2C(const Network::JukeboxSongS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        JukeboxSongPlayback::OnJukeboxSong(Game::DimensionFromRaw(packet.dimension),
+                                           glm::ivec3(packet.x, packet.y, packet.z),
+                                           packet.songId, packet.ticks, packet.fresh);
     }
 
     // MC handleSoundEntityEvent: only for an entity this client knows.
@@ -699,6 +903,22 @@ namespace Client {
             m_player->ApplyEffectRemove(static_cast<Game::MobEffectId>(packet.effectId));
         }
         m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onSetCameraS2C(const Network::SetCameraS2CPacket& packet) {
+        // MC handleSetCamera: `Entity entity = packet.getEntity(level); if
+        // (entity != null) minecraft.setCameraEntity(entity)`. Our own id (or
+        // kSelfCamera) is our own eyes; any other id is looked up per frame by
+        // the camera (PlatformMain), which hands the view back to the body
+        // when the entity is not there to look through.
+        m_stats.packetsProcessed++;
+        if (!m_player) return;
+        const uint32_t selfId = m_connection ? m_connection->GetPlayerId() : 0;
+        const bool self = packet.entityId == Game::ClientPlayer::kSelfCamera ||
+                          (packet.entityId >= 0 && static_cast<uint32_t>(packet.entityId) == selfId);
+        m_player->cameraEntityId = self ? Game::ClientPlayer::kSelfCamera : packet.entityId;
+        Log::Info("[ClientPacketHandler] Camera: %s",
+                  self ? "own eyes" : ("entity " + std::to_string(packet.entityId)).c_str());
     }
 
     void ClientPacketHandler::onMerchantOffersS2C(const Network::MerchantOffersS2CPacket& packet) {
@@ -776,8 +996,94 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::onMapItemDataS2C(const Network::MapItemDataS2CPacket& packet) {
+        // ClientPacketListener.handleMapItemData: the map (created on first
+        // sight), the patch applied, the texture marked for re-upload.
+        Client::Maps::HandleMapItemData(packet);
+    }
+
+    void ClientPacketHandler::onFishingHookDataS2C(const Network::FishingHookDataS2CPacket& packet) {
+        // MC onSyncedDataUpdated for the bobber: owner, hooked entity, bite.
+        Client::Fishing::ApplyHookData(packet);
+        m_stats.packetsProcessed++;
+    }
+
     void ClientPacketHandler::handleItemFrameData(const Network::ItemFrameDataS2CPacket& packet) {
         if (g_clientMobManager) g_clientMobManager->SetItemFrameItem(packet.entityId, packet.item);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleSetEntityLink(const Network::SetEntityLinkS2CPacket& packet) {
+        // MC handleEntityLinkPacket: a Leashable source takes the holder id
+        // (setDelayedLeashHolderId); the rope resolves it when drawn.
+        if (g_clientMobManager) g_clientMobManager->SetLeashHolder(packet.sourceId, packet.destId);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onUpdateAttributesS2C(const Network::UpdateAttributesS2CPacket& packet) {
+        // MC ClientPacketListener.handleUpdateAttributes: each attribute's
+        // base value and modifier stack replace the client copy's (an
+        // attribute the copy never registered is added — MC warns and skips
+        // an unknown one; every attribute here is known).
+        if (g_clientMobManager) {
+            if (const ClientMob* entry = g_clientMobManager->GetMob(packet.entityId); entry && entry->mob) {
+                Game::AttributeMap& attributes = entry->mob->Attributes();
+                for (const auto& synced : packet.attributes) {
+                    attributes.SetBaseValue(synced.attribute, synced.base);
+                    Game::AttributeInstance* inst = attributes.Find(synced.attribute);
+                    if (!inst) continue;
+                    std::vector<uint32_t> stale;
+                    for (const Game::AttributeModifier& mod : inst->Modifiers()) stale.push_back(mod.id);
+                    for (uint32_t id : stale) inst->RemoveModifier(static_cast<Game::ModifierId>(id));
+                    for (const Game::AttributeModifier& mod : synced.modifiers) inst->AddModifier(mod);
+                }
+            }
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onFireworkRocketDataS2C(const Network::FireworkRocketDataS2CPacket& packet) {
+        // MC FireworkRocketEntity's synched data, applied to the client copy.
+        bool found = false;
+        if (g_clientMobManager) {
+            if (const ClientMob* entry = g_clientMobManager->GetMob(packet.entityId);
+                entry && entry->mob && entry->mob->GetType() == Game::EntityTypeId::FireworkRocket) {
+                auto& rocket = static_cast<Game::FireworkRocket&>(*entry->mob);
+                rocket.SetItem(packet.item);
+                rocket.SetAttachedToId(packet.attachedToId);
+                rocket.SetShotAtAngle(packet.shotAtAngle);
+                rocket.SetLifetime(packet.lifetime);
+                found = true;
+            }
+        }
+        Client::Fireworks::OnRocketData(packet.entityId, packet.attachedToId, packet.lifetime, found);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleBodyArmor(const Network::BodyArmorS2CPacket& packet) {
+        // MC ClientboundSetEquipmentPacket for a PLAYER (a connection id, not
+        // a mob id): what another player holds and wears, which their
+        // /morph body draws (ItemInHandLayer / HumanoidArmorLayer).
+        if (packet.entityId >= 0 && packet.entityId < Game::kItemEntityIdBase) {
+            if (g_remotePlayerManager) {
+                g_remotePlayerManager->SetEquipment(static_cast<uint32_t>(packet.entityId), packet.slot, packet.item);
+            }
+            m_stats.packetsProcessed++;
+            return;
+        }
+        if (g_clientMobManager) {
+            // The appended slot: MAINHAND is a held item (the allay's), the
+            // default BODY the wolf's armour.
+            if (packet.slot == Game::EquipmentSlot::MAINHAND) {
+                g_clientMobManager->SetMainHandItem(packet.entityId, packet.item);
+            } else if (packet.slot == Game::EquipmentSlot::BODY) {
+                g_clientMobManager->SetBodyArmor(packet.entityId, packet.item);
+            } else {
+                // The other humanoid slots — a mob's worn armour and offhand
+                // (Mob::SetEquipment).
+                g_clientMobManager->SetEquipment(packet.entityId, packet.slot, packet.item);
+            }
+        }
         m_stats.packetsProcessed++;
     }
 
@@ -798,7 +1104,38 @@ namespace Client {
                                   1.0f, 1.0f);
             }
         }
+        // MC handleEntityEvent 2 on a player: LivingEntity.onKineticHit — a
+        // charging spear struck something: the used spear's hit sound at the
+        // player (at most once per HIT_FEEDBACK_TICKS) and the hand's recoil.
+        if (packet.event == Game::Spear::kEntityEventKineticHit && !Game::IsMobEntityId(packet.entityId)) {
+            const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+            if (m_player && localId != 0 && static_cast<uint32_t>(packet.entityId) == localId) {
+                m_player->OnKineticHit();
+            } else if (g_remotePlayerManager &&
+                       g_remotePlayerManager->OnKineticHit(static_cast<uint32_t>(packet.entityId))) {
+                const auto* eq = g_remotePlayerManager->GetEquipment(static_cast<uint32_t>(packet.entityId));
+                const auto& players = g_remotePlayerManager->GetPlayers();
+                const auto it = players.find(static_cast<uint32_t>(packet.entityId));
+                if (eq && it != players.end() && it->second.usingItem) {
+                    const Game::ItemStack& held = (*eq)[static_cast<size_t>(
+                        it->second.useItemHand ? Game::EquipmentSlot::OFFHAND : Game::EquipmentSlot::MAINHAND)];
+                    if (const Game::Spear::KineticWeapon* kinetic = Game::Spear::Kinetic(held);
+                        kinetic && kinetic->hitSound) {
+                        Sounds::PlayLocal(it->second.position, kinetic->hitSound, Game::SoundSource::Players,
+                                          1.0f, 1.0f);
+                    }
+                }
+            }
+            m_stats.packetsProcessed++;
+            return;
+        }
         if (g_clientMobManager) {
+            // MC handleEntityEvent 35: particleEngine.createTrackingEmitter(
+            // entity, TOTEM_OF_UNDYING, 30) — the totem's green-gold burst
+            // follows whoever it saved, player or mob.
+            if (packet.event == 35) {
+                g_clientMobManager->CreateTrackingEmitter(packet.entityId, Game::ParticleKind::TotemOfUndying, 30);
+            }
             // MC handleAnimate CRITICAL_HIT / MAGIC_CRITICAL_HIT: the burst
             // on whatever was struck — a player as much as a mob.
             if (packet.event == Game::kEntityEventCrit) {
@@ -806,6 +1143,11 @@ namespace Client {
             } else if (packet.event == Game::kEntityEventMagicCrit) {
                 g_clientMobManager->CreateTrackingEmitter(packet.entityId, Game::ParticleKind::EnchantedHit);
             } else {
+                // MC FishingHook.handleEntityEvent(31): the reel-in pull,
+                // which on a client moves only its own hooked player.
+                if (packet.event == Game::FishingHook::kEventPullHooked) {
+                    Client::Fishing::OnPullEvent(packet.entityId, m_player);
+                }
                 g_clientMobManager->HandleEvent(packet.entityId, packet.event);
             }
         }
@@ -884,12 +1226,18 @@ namespace Client {
 
         m_player->gameMode      = packet.gameMode;
         m_player->gameModeKnown = true;
+        m_player->previousGameMode = packet.previousGameMode;
+        // Only a spectator looks through another entity (the server also
+        // sends SetCameraS2C; this covers the order they land in).
+        if (!m_player->IsSpectator()) m_player->cameraEntityId = Game::ClientPlayer::kSelfCamera;
         m_player->invulnerable = packet.invulnerable();
         m_player->instabuild   = packet.instabuild();
         m_player->flyingSpeed  = packet.flyingSpeed;
         m_player->physics.mayFly = packet.mayFly();
         m_player->physics.scale  = packet.scale;
         m_player->SetMorph(packet.morph, packet.morphSpeed);   // /morph: the body's size, eye and speed
+        m_player->morphVariant = packet.hasMorphVariant ? packet.morphVariant
+                                                        : Game::Morph::DefaultVariantOf(packet.morph);
 
         // MC ClientPacketListener.handlePlayerAbilities:1884 assigns
         // `abilities.flying = packet.isFlying()` unconditionally, and this used
@@ -949,6 +1297,15 @@ namespace Client {
     // Rough analogue of MC ClientPacketListener.handleRespawn, which is what
     // vanilla runs on a dimension change: everything about the level is
     // discarded and rebuilt from the packets that follow.
+    void ClientPacketHandler::handlePufferFishSting() {
+        // MC ClientPacketListener.handleGameEvent: the stung player's own
+        // client plays the sting at itself (ClientLevel.playSound with the
+        // player as `except` — its own sound, played locally).
+        if (!m_player) return;
+        Sounds::PlayAt(glm::dvec3(m_player->physics.position), Game::SoundEvents::PUFFER_FISH_STING,
+                       Game::SoundSource::Neutral, 1.0f, 1.0f, false, Game::Sound::NextSeed());
+    }
+
     void ClientPacketHandler::handleExplode(const Network::ExplodeS2CPacket& packet) {
         // MC ClientPacketListener.handleExplosion: sound, centre particle,
         // debris, then the local player's push.
@@ -967,7 +1324,8 @@ namespace Client {
         if (Client::g_clientMobManager && nearEnough) {
             SpawnExplosionVisualEffects(Client::g_clientMobManager->Level(),
                                         packet.center.x, packet.center.y, packet.center.z,
-                                        packet.radius, packet.small, packet.blockCount);
+                                        packet.radius, packet.small, packet.blockCount,
+                                        packet.particleSet, packet.blockParticles);
         }
 
         // UNIT CONVERSION, and it is easy to miss: the server computes
@@ -977,7 +1335,13 @@ namespace Client {
         // the intended shove.
         if (m_player && glm::length(packet.playerKnockback) > 1.0e-6f) {
             constexpr float kTicksPerSecond = 20.0f;
-            m_player->physics.velocity += packet.playerKnockback * kTicksPerSecond;
+            // The horizontal part is ordinary deltaMovement with MC's
+            // friction (PlayerPhysics::pushVelocity), not the portal
+            // momentum `velocity` carries on land and in the air.
+            const glm::vec3 kick = packet.playerKnockback * kTicksPerSecond;
+            m_player->physics.velocity.y += kick.y;
+            m_player->physics.pushVelocity.x += kick.x;
+            m_player->physics.pushVelocity.z += kick.z;
         }
     }
 
@@ -1003,6 +1367,14 @@ namespace Client {
         // the arrival whoosh, which must come AFTER the stop.
         SoundHost::OnDimensionChanged();
         LocalPlayerSounds::OnDimensionChanged();
+        // MC handleRespawn builds a new ClientLevel — dry; the server's
+        // sendLevelInfo follows with the new level's weather
+        // (ServerWeather::SyncPlayers, keyed on the dimension changing). A
+        // resync into the level the player is already in keeps its weather,
+        // since the server sends nothing for it.
+        if (dimension != ClientLevels::ActiveDimension() || !ClientLevels::HasSession()) {
+            ClientWeather::Reset();
+        }
         ClientLevels::SetActive(dimension, packet.KeepPrevious());
         ClientLevels::SetPacketDimension(dimension);
 
@@ -1036,15 +1408,37 @@ namespace Client {
     // CHUNK BATCH (Adaptive Rate Control)
     // ========================================================================
 
+    void ClientPacketHandler::SetLocalServer(bool local) {
+        // A fresh estimate per connection: nothing carries over from an
+        // earlier session, so a change in how fast this machine or the link
+        // is shows up from the first batch.
+        m_batchCalculator = ChunkBatchSizeCalculator{};
+        m_chunkBacklog.store(0, std::memory_order_relaxed);
+        m_batchCalculator.rateMax = local ? 512.0f : 256.0f;
+        m_batchCalculator.decodeThreads = ChunkDecodeThreadCount();
+        if (const char* e = std::getenv("OBEY_CHUNK_BUDGET_MS")) m_batchCalculator.budgetNanos = std::atof(e) * 1.0e6;
+        if (const char* e = std::getenv("OBEY_CHUNK_RATE_MAX")) m_batchCalculator.rateMax = static_cast<float>(std::atof(e));
+        Log::Info("[ChunkBatch] %s server: %.0f ms main-thread budget a tick, %d decode threads, "
+                  "up to %.0f chunks a tick",
+                  local ? "integrated" : "remote", m_batchCalculator.budgetNanos / 1.0e6,
+                  m_batchCalculator.decodeThreads, static_cast<double>(m_batchCalculator.rateMax));
+    }
+
     void ClientPacketHandler::handleChunkBatchStart() {
-        m_batchCalculator.onBatchStart();
+        m_batchCalculator.onBatchStart(m_packetReceivedAt);
         m_stats.packetsProcessed++;
     }
 
-    void ClientPacketHandler::handleChunkBatchFinished(int batchSize) {
-        m_batchCalculator.onBatchFinished(batchSize);
+    void ClientPacketHandler::handleChunkBatchFinished(int batchSize, uint32_t serverSendMicros) {
+        m_batchCalculator.onBatchFinished(batchSize, m_packetReceivedAt, serverSendMicros,
+                                          std::max(0, m_chunkBacklog.load(std::memory_order_relaxed)));
         float desiredRate = m_batchCalculator.getDesiredChunksPerTick();
-        desiredRate = std::clamp(desiredRate, 0.01f, 256.0f);   // vanilla clamps at 64; our apply is ~10x cheaper than Java's, the 7 ms budget stays the governor
+        desiredRate = std::clamp(desiredRate, 0.01f, m_batchCalculator.rateMax);   // vanilla clamps at 64 (see SetLocalServer)
+        PROFILE_PLOT("ChunkBatch/DesiredPerTick", static_cast<double>(desiredRate));
+        PROFILE_PLOT("ChunkBatch/LinkUsPerChunk", m_batchCalculator.linkNanosPerChunk / 1000.0);
+        PROFILE_PLOT("ChunkBatch/DecodeUsPerChunk", m_batchCalculator.decodeNanosPerChunk / 1000.0);
+        PROFILE_PLOT("ChunkBatch/ApplyUsPerChunk", m_batchCalculator.applyNanosPerChunk / 1000.0);
+        PROFILE_PLOT("ChunkBatch/Backlog", static_cast<int64_t>(m_batchCalculator.backlog));
 
         // Send ack back to server
         if (g_networkClient && g_networkClient->IsConnected()) {
@@ -1126,7 +1520,11 @@ namespace Client {
         if (!packet.held) {
             // The teleport to the holder's hand came just before this; the
             // throw is MC's drop velocity, blocks per tick → per second.
-            m_player->physics.velocity   = packet.throwVel * 20.0f;
+            // Horizontal via pushVelocity (MC friction), not the portal
+            // momentum `velocity` carries.
+            const glm::vec3 thrown = packet.throwVel * 20.0f;
+            m_player->physics.velocity     = glm::vec3(0.0f, thrown.y, 0.0f);
+            m_player->physics.pushVelocity = glm::vec3(thrown.x, 0.0f, thrown.z);
             m_player->physics.isOnGround = false;
         }
         m_stats.packetsProcessed++;
@@ -1253,12 +1651,21 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
-    void ClientPacketHandler::handleCommands(const std::vector<std::string>& commandNames) {
+    void ClientPacketHandler::handleCommands(const Network::CommandsS2CPacket& packet) {
         Log::Info("[ClientPacketHandler] Server advertised %zu commands for tab-completion",
-                  commandNames.size());
+                  packet.commandNames.size());
         // Fully qualified: this file lives in namespace Client, so a bare
         // `Render::` would look for Client::Render first and not find it.
-        ::Render::SetServerCommandNames(commandNames);
+        ::Render::SetServerCommandNames(packet.commandNames);
+        // The argument trees (usage hint + argument completion).
+        std::vector<std::pair<std::string, Game::Cmd::Node>> trees;
+        if (packet.syntax.size() == packet.commandNames.size()) {
+            for (size_t i = 0; i < packet.syntax.size(); ++i) {
+                if (packet.syntax[i].hasSyntax) trees.emplace_back(packet.commandNames[i], packet.syntax[i].root);
+            }
+        }
+        ::Render::CommandSuggestions::SetServerSyntax(std::move(trees));
+        ::Render::CommandSuggestions::SetKnownEntityNames(packet.entityNames);
         m_stats.packetsProcessed++;
     }
 

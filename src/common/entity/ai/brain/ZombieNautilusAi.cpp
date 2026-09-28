@@ -39,8 +39,10 @@ namespace Game {
         brain.AddSensor(std::make_unique<AdultSensor>());
         brain.AddSensor(std::make_unique<PlayerSensor>());
         brain.AddSensor(std::make_unique<HurtBySensor>());
-        brain.AddSensor(std::make_unique<TemptingSensor>([&nautilus](uint32_t item) {
-            return nautilus.IsFood(item);
+        // SensorType.NAUTILUS_TEMPTATIONS: NautilusAi.getTemptations — #nautilus_food.
+        (void)nautilus;
+        brain.AddSensor(std::make_unique<TemptingSensor>([](uint32_t item) {
+            return AbstractNautilus::IsNautilusFood(item);
         }));
 
         // ── CORE (MC initCoreActivity — no AnimalPanic here) ───────────────
@@ -75,7 +77,7 @@ namespace Game {
 
         // ── FIGHT (MC initFightActivity — 0.5 charge speed) ────────────────
         std::vector<BehaviorPtr> fight;
-        fight.push_back(NautilusAi::MakeChargeAttack(0.5f));
+        fight.push_back(NautilusAi::MakeChargeAttack(0.5f, SoundEvents::ZOMBIE_NAUTILUS_DASH));
         brain.AddActivityWithConditions(
             Activity::Fight, 0, std::move(fight),
             { MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent },

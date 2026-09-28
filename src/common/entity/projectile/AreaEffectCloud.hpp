@@ -19,16 +19,19 @@
 //   * potionDurationScale scales stored non-instant durations on application
 //     (MC PotionContents.forEachEffect's withScaledDuration).
 //
-// Not modelled, each named at its site: the particle field (DATA_PARTICLE +
-// clientTick — no particle system; the cloud is INVISIBLE, which is the
-// documented render answer for this wave) and the DATA_RADIUS/DATA_WAITING
-// sync (client renders nothing, so nothing reads them). The contents are MC's
+// The particle field (DATA_PARTICLE + clientTick) is sent by the server
+// every tick as one LevelParticlesS2C in the EffectCloud randomization — its
+// radius, waiting flag and particle — and the receiver runs clientTick's
+// distribution; there is no separate DATA_RADIUS / DATA_WAITING sync. The contents are MC's
 // PotionContents (a lingering potion's potion, or the custom effects a
 // dragon fireball / effect-carrying creeper adds).
 #pragma once
 
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/alchemy/Potions.hpp"
+#include "common/particle/ParticleOptions.hpp"
+
+#include <optional>
 
 #include <unordered_map>
 #include <vector>
@@ -94,6 +97,12 @@ namespace Game {
         // and its POTION_DURATION_SCALE (0.25).
         void ApplyComponentsFromItemStack(const ItemStack& stack);
 
+        // MC setCustomParticle / getParticle: the custom particle (a dragon
+        // fireball's DRAGON_BREATH), else ENTITY_EFFECT in the opaque
+        // potion colour.
+        void SetCustomParticle(const ParticleOptions& particle) { m_customParticle = particle; }
+        ParticleOptions GetParticle() const;
+
         void Tick() override;
 
         void ClearReferenceTo(const Entity* entity) override {
@@ -103,6 +112,11 @@ namespace Game {
 
     private:
         void ServerTick();
+        // MC clientTick's particle field, sent from the server (see
+        // Particles::Randomization::EffectCloud).
+        void SendParticleField(bool waiting);
+
+        std::optional<ParticleOptions> m_customParticle;
 
         float m_radius = kDefaultRadius;
         int   m_duration = -1;              // MC INFINITE_DURATION default

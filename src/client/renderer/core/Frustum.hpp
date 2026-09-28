@@ -111,6 +111,67 @@ struct Frustum {
         return f;
     }
 
+    // The part of a portal rectangle this frustum can see: `corners` in
+    // cyclic order with corners[1]-corners[0] ⟂ corners[3]-corners[0] (a
+    // portal's Corners()). The rectangle is clipped (Sutherland–Hodgman, in
+    // double) against the four side planes and the near plane, and the
+    // clipped polygon is bounded by a rectangle in the quad's OWN axes,
+    // grown by `margin` blocks and clamped to the quad — a conservative
+    // superset of the visible part, still a rectangle, so ThroughQuad can
+    // build a portal frustum from it. A portal partly off-screen then
+    // culls its far view to the on-screen part (Source's portal frustum
+    // from the visible portal rectangle). False — `out` untouched — when
+    // nothing of it is inside or the quad is degenerate; callers keep the
+    // whole quad then.
+    bool VisibleSubRect(const glm::dvec3 corners[4], double margin, glm::dvec3 out[4]) const {
+        const glm::dvec3 e1 = corners[1] - corners[0];
+        const glm::dvec3 e2 = corners[3] - corners[0];
+        const double l1 = glm::dot(e1, e1);
+        const double l2 = glm::dot(e2, e2);
+        if (l1 < 1e-12 || l2 < 1e-12) return false;
+        constexpr int kMax = 16;
+        std::array<glm::dvec3, kMax> poly{}, next{};
+        int count = 4;
+        for (int i = 0; i < 4; ++i) poly[static_cast<size_t>(i)] = corners[i];
+        const int clipPlanes[5] = { 0, 1, 2, 3, 4 };   // left, right, bottom, top, near
+        for (int pi : clipPlanes) {
+            const glm::dvec4 pl(planes[static_cast<size_t>(pi)]);
+            auto dist = [&](const glm::dvec3& p) { return pl.x * p.x + pl.y * p.y + pl.z * p.z + pl.w; };
+            int n = 0;
+            for (int i = 0; i < count && n < kMax - 1; ++i) {
+                const glm::dvec3& a = poly[static_cast<size_t>(i)];
+                const glm::dvec3& b = poly[static_cast<size_t>((i + 1) % count)];
+                const double da = dist(a), db = dist(b);
+                if (da >= 0.0) next[static_cast<size_t>(n++)] = a;
+                if ((da >= 0.0) != (db >= 0.0) && n < kMax) {
+                    const double t = da / (da - db);
+                    next[static_cast<size_t>(n++)] = a + (b - a) * t;
+                }
+            }
+            count = n;
+            if (count == 0) return false;
+            poly = next;
+        }
+        double s0 = 1.0, s1 = 0.0, t0 = 1.0, t1 = 0.0;
+        for (int i = 0; i < count; ++i) {
+            const glm::dvec3 d = poly[static_cast<size_t>(i)] - corners[0];
+            const double s = glm::dot(d, e1) / l1;
+            const double t = glm::dot(d, e2) / l2;
+            s0 = std::min(s0, s); s1 = std::max(s1, s);
+            t0 = std::min(t0, t); t1 = std::max(t1, t);
+        }
+        const double ms = margin / std::sqrt(l1);
+        const double mt = margin / std::sqrt(l2);
+        s0 = std::clamp(s0 - ms, 0.0, 1.0); s1 = std::clamp(s1 + ms, 0.0, 1.0);
+        t0 = std::clamp(t0 - mt, 0.0, 1.0); t1 = std::clamp(t1 + mt, 0.0, 1.0);
+        if (s1 - s0 < 1e-6 || t1 - t0 < 1e-6) return false;
+        out[0] = corners[0] + e1 * s0 + e2 * t0;
+        out[1] = corners[0] + e1 * s1 + e2 * t0;
+        out[2] = corners[0] + e1 * s1 + e2 * t1;
+        out[3] = corners[0] + e1 * s0 + e2 * t1;
+        return true;
+    }
+
     // Test if an AABB is at least partially inside (or intersects) the frustum.
     bool IsBoxVisible(const AABB& box) const {
         return IsBoxVisible(box.min, box.max);

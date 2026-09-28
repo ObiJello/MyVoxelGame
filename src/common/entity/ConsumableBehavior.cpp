@@ -13,6 +13,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include <array>
 #include <cstdlib>
@@ -205,6 +206,14 @@ namespace Game::ConsumableBehavior {
                 player.addEffect(entry.CreateEffectInstance());
             }
         }
+        // OMINOUS_BOTTLE_AMPLIFIER (OminousBottleAmplifier.onConsume): Bad
+        // Omen at the bottle's level for 100 minutes — not ambient, no
+        // particles, an icon.
+        if (auto amplifier = stack.get(DataComponents::OMINOUS_BOTTLE_AMPLIFIER)) {
+            player.addEffect(MobEffectInstance(MobEffectId::BadOmen, DataComponents::kOminousBottleEffectDuration,
+                                               *amplifier, /*ambient=*/false, /*visible=*/false,
+                                               /*showIcon=*/true));
+        }
 
         // :63-65 onConsumeEffects.forEach(apply) — server side, which this
         // always is. The status-effect kinds run through the player's
@@ -214,7 +223,12 @@ namespace Game::ConsumableBehavior {
             ApplyConsumeEffect(player, effect);
         }
 
-        // :67 gameEvent EAT/DRINK — game-event system TODO.
+        // :67 user.gameEvent(animation == DRINK ? DRINK : EAT) — at the
+        // player, sourced from them (their PlayerEntityView).
+        if (Entity* user = player.GameEventSource()) {
+            user->GameEvent(consumable.animation == ItemUseAnimation::DRINK ? GameEventId::Drink
+                                                                            : GameEventId::Eat);
+        }
 
         // :68 stack.consume(1, user) — ItemStack.consume skips the shrink for
         // hasInfiniteMaterials (creative).
@@ -298,6 +312,93 @@ namespace Game::ConsumableBehavior {
                                       spill);
                 }
             }
+        }
+        return result;
+    }
+
+    ItemStack FinishUsingForLiving(LivingEntity& user, ItemStack& handStack) {
+        EntityLevel* level = user.Level();
+        if (!level || level->IsClientSide() || handStack.IsEmpty()) return handStack;
+        const int countBeforeUsing = handStack.count;
+        const auto useRemainder = handStack.get(DataComponents::USE_REMAINDER);
+        if (auto consumable = handStack.get(DataComponents::CONSUMABLE)) {
+            JavaRandom& r = level->Random();
+            // Consumable.emitParticlesAndSounds(random, user, stack, 16).
+            const float eatVolume = r.NextBool() ? 0.5f : 1.0f;
+            const float eatPitch = static_cast<float>(r.Triangle(1.0, 0.2));
+            const float drinkPitch = 0.9f + r.NextFloat() * 0.1f;   // Mth.randomBetween(0.9, 1.0)
+            const bool drink = consumable->animation == ItemUseAnimation::DRINK;
+            if (consumable->hasConsumeParticles) user.SpawnItemParticles(handStack, 16);
+            if (!consumable->sound.empty()) {
+                user.PlaySound(consumable->sound, drink ? 0.5f : eatVolume, drink ? drinkPitch : eatPitch);
+            }
+            // ConsumableListener components.
+            if (auto food = handStack.get(DataComponents::FOOD)) {
+                (void)food;
+                // FoodProperties.onConsume: the consume sound for everyone
+                // (NEUTRAL, triangle(1, 0.4)); the food data and the burp are
+                // the player's.
+                if (!consumable->sound.empty()) {
+                    level->PlaySeededSound(nullptr, user.position, consumable->sound, SoundSource::Neutral,
+                                           1.0f, static_cast<float>(r.Triangle(1.0, 0.4)), r.NextLong());
+                }
+            }
+            if (auto potion = handStack.get(DataComponents::POTION_CONTENTS)) {
+                potion->ApplyToLivingEntity(user, handStack.get(DataComponents::POTION_DURATION_SCALE).value_or(1.0f));
+            }
+            if (auto stew = handStack.get(DataComponents::SUSPICIOUS_STEW_EFFECTS)) {
+                for (const auto& entry : stew->effects) user.AddEffect(entry.CreateEffectInstance());
+            }
+            if (auto amplifier = handStack.get(DataComponents::OMINOUS_BOTTLE_AMPLIFIER)) {
+                user.AddEffect(MobEffectInstance(MobEffectId::BadOmen, DataComponents::kOminousBottleEffectDuration,
+                                                 *amplifier, /*ambient=*/false, /*visible=*/false,
+                                                 /*showIcon=*/true));
+            }
+            // onConsumeEffects.
+            for (const auto& effect : consumable->onConsumeEffects) {
+                switch (effect.type) {
+                    case ConsumeEffect::Type::ApplyStatusEffects: {
+                        const ParsedApply parsed = ParseApplyPayload(effect.payload);
+                        if (r.NextFloat() >= parsed.probability) break;
+                        for (const MobEffectInstance& e : parsed.effects) user.AddEffect(MobEffectInstance(e));
+                        break;
+                    }
+                    case ConsumeEffect::Type::RemoveStatusEffects: {
+                        std::istringstream names(effect.payload);
+                        std::string name;
+                        while (names >> name) {
+                            MobEffectId id;
+                            if (ParseEffectId(name, id)) user.RemoveEffect(id);
+                        }
+                        break;
+                    }
+                    case ConsumeEffect::Type::ClearAllStatusEffects:
+                        user.RemoveAllEffects();
+                        break;
+                    case ConsumeEffect::Type::PlaySound:
+                        // PlaySoundConsumeEffect: at the user, its sound source.
+                        if (!effect.payload.empty()) {
+                            level->PlaySeededSound(nullptr, user.position, effect.payload, user.GetSoundSource(),
+                                                   1.0f, 1.0f, r.NextLong());
+                        }
+                        break;
+                    default:
+                        Log::Debug("[Consume] mob effect type=%u payload='%s' — no system to apply it",
+                                   static_cast<unsigned>(effect.type), effect.payload.c_str());
+                        break;
+                }
+            }
+            user.GameEvent(drink ? GameEventId::Drink : GameEventId::Eat);
+            // stack.consume(1, user) — a mob never has infinite materials.
+            handStack.count -= 1;
+            if (handStack.count <= 0) handStack.Clear();
+        }
+        ItemStack result = handStack;
+        // UseRemainder.convertIntoRemainder: a stack used up becomes its
+        // remainder; a partial one keeps its count (the mob's
+        // handleExtraItemsCreatedOnUse drops nothing).
+        if (useRemainder && result.count < countBeforeUsing && result.IsEmpty()) {
+            return useRemainder->convertInto;
         }
         return result;
     }

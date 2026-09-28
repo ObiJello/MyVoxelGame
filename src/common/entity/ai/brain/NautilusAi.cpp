@@ -10,6 +10,8 @@
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/TamableAnimal.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -30,16 +32,16 @@ namespace Game {
         // MC ai/behavior/ChargeAttack — a straight-line ram: lock a velocity
         // vector at start, sail along it, and hit the first attackable living
         // entity the body touches for attack damage plus speed-scaled
-        // knockback. The dash sound is skipped; the isTame early-out is moot
-        // (no taming system).
+        // knockback, with the variant's dash sound at the start. A tame
+        // nautilus never keeps a charge going.
         class ChargeAttack : public Behavior {
         public:
-            explicit ChargeAttack(float speed)
+            ChargeAttack(float speed, const char* chargeSound)
                 : Behavior({ MemoryCondition{ MemoryModule::ChargeCooldownTicks,
                                               MemoryStatus::ValueAbsent },
                              MemoryCondition{ MemoryModule::AttackTarget,
                                               MemoryStatus::ValuePresent } }),
-                  m_speed(speed) {}
+                  m_speed(speed), m_chargeSound(chargeSound) {}
             const char* DebugString() const override { return "ChargeAttack"; }
 
         protected:
@@ -55,6 +57,11 @@ namespace Game {
                 auto* target = dynamic_cast<LivingEntity*>(
                     brain->GetEntity(MemoryModule::AttackTarget));
                 if (!target) return false;
+                // MC: `body instanceof TamableAnimal t && t.isTame()` → stop.
+                if (const auto* tamable = dynamic_cast<const TamableAnimal*>(&body);
+                    tamable && tamable->IsTame()) {
+                    return false;
+                }
                 const glm::dvec3 travelled = body.position - m_startPosition;
                 if (glm::dot(travelled, travelled)
                     >= kMaxChargeDistance * kMaxChargeDistance) return false;
@@ -76,7 +83,8 @@ namespace Game {
                     m_chargeVelocity = len > 1.0e-7 ? d / len * static_cast<double>(m_speed)
                                                     : glm::dvec3(0.0);
                 }
-                (void)level; (void)timestamp;
+                // MC: the charge sound when the charge can run.
+                if (m_chargeSound && CanStillUse(level, body, timestamp)) body.PlaySound(m_chargeSound);
             }
 
             void Tick(EntityLevel& level, LivingEntity& body, int64_t timestamp) override {
@@ -137,14 +145,15 @@ namespace Game {
 
         private:
             float m_speed;
+            const char* m_chargeSound;
             glm::dvec3 m_chargeVelocity{0.0};
             glm::dvec3 m_startPosition{0.0};
         };
 
     } // namespace
 
-    BehaviorPtr NautilusAi::MakeChargeAttack(float speed) {
-        return std::make_unique<ChargeAttack>(speed);
+    BehaviorPtr NautilusAi::MakeChargeAttack(float speed, const char* chargeSound) {
+        return std::make_unique<ChargeAttack>(speed, chargeSound);
     }
 
     void NautilusAi::InitMemories(Mob& nautilus) {
@@ -169,10 +178,12 @@ namespace Game {
         Brain* brain = mob.GetBrain();
         EntityLevel* level = mob.Level();
         if (!brain || !level) return nullptr;
-        // MC: never while breeding, beached, a baby, or tame (no taming
-        // system — the last is always false).
+        // MC: never while breeding, beached, a baby, or tame.
         if (brain->HasMemoryValue(MemoryModule::BreedTarget)) return nullptr;
         if (!mob.IsInWater() || mob.IsBaby()) return nullptr;
+        if (const auto* tamable = dynamic_cast<const TamableAnimal*>(&mob); tamable && tamable->IsTame()) {
+            return nullptr;
+        }
 
         if (auto* angry =
                 dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt))) {
@@ -226,9 +237,11 @@ namespace Game {
         brain.AddSensor(std::make_unique<AdultSensor>());
         brain.AddSensor(std::make_unique<PlayerSensor>());
         brain.AddSensor(std::make_unique<HurtBySensor>());
-        brain.AddSensor(std::make_unique<TemptingSensor>([&nautilus](uint32_t item) {
-            // ItemTags.NAUTILUS_FOOD — the def's flattened food list.
-            return nautilus.IsFood(item);
+        // MC NautilusAi.getTemptations: ItemTags.NAUTILUS_FOOD (not isFood —
+        // a wild adult still follows a cod it will not take).
+        (void)nautilus;
+        brain.AddSensor(std::make_unique<TemptingSensor>([](uint32_t item) {
+            return AbstractNautilus::IsNautilusFood(item);
         }));
 
         // ── CORE (MC initCoreActivity) ─────────────────────────────────────
@@ -270,7 +283,7 @@ namespace Game {
         // and (unlike the usual FIGHT) erases nothing on exit: ChargeAttack
         // itself clears ATTACK_TARGET when the ram ends.
         std::vector<BehaviorPtr> fight;
-        fight.push_back(MakeChargeAttack(0.6f));
+        fight.push_back(MakeChargeAttack(0.6f, SoundEvents::NAUTILUS_DASH));
         brain.AddActivityWithConditions(
             Activity::Fight, 0, std::move(fight),
             { MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent },

@@ -1235,6 +1235,7 @@ ConfiguredFeature* TwilightFeatures::FIREFLY_CANOPY_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::DEAD_CANOPY_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::MANGROVE_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::DARKWOOD_TREE = nullptr;
+ConfiguredFeature* TwilightFeatures::HOMEGROWN_DARKWOOD_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::DARK_FOREST_OAK_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::DARK_FOREST_BIRCH_TREE = nullptr;
 ConfiguredFeature* TwilightFeatures::DARK_OAK_BUSH = nullptr;
@@ -1544,6 +1545,13 @@ void TwilightFeatures::bootstrap() {
         spheroid(4.5f, 2.25f, 1, 0, 0.45f, 36),
         std::make_shared<TwoLayersFeatureSize>(4, 1, 1), {treeRoots(6, 5, nullptr)}, true, true);
 
+    // homegrown_darkwood_tree.json (dark_canopy_tree): darkwood_tree with
+    // plain dark_leaves for the hardened ones - TFTreeGrowers.DARK, what a
+    // darkwood sapling grows. Never placed by worldgen.
+    HOMEGROWN_DARKWOOD_TREE = tree(darkLog, block("minecraft:dark_leaves", "homegrown darkwood tree"),
+        darkTrunk(), spheroid(4.5f, 2.25f, 1, 0, 0.45f, 36),
+        std::make_shared<TwoLayersFeatureSize>(4, 1, 1), {treeRoots(6, 5, nullptr)}, true, true);
+
     // dark_forest_oak_tree / dark_forest_birch_tree / dark_oak_bush.json (dark_canopy_tree)
     DARK_FOREST_OAK_TREE = tree(oakLog, oakLeaves, std::make_shared<StraightTrunkPlacer>(4, 2, 0),
         blob(2, 0, 3), std::make_shared<TwoLayersFeatureSize>(1, 0, 1), {}, true, true);
@@ -1799,6 +1807,7 @@ void TwilightFeatures::bootstrap() {
         registerConfigured("twilightforest:tree/dead_canopy_tree", DEAD_CANOPY_TREE);
         registerConfigured("twilightforest:tree/mangrove_tree", MANGROVE_TREE);
         registerConfigured("twilightforest:tree/darkwood_tree", DARKWOOD_TREE);
+        registerConfigured("twilightforest:tree/homegrown_darkwood_tree", HOMEGROWN_DARKWOOD_TREE);
         registerConfigured("twilightforest:tree/dark_forest_oak_tree", DARK_FOREST_OAK_TREE);
         registerConfigured("twilightforest:tree/dark_forest_birch_tree", DARK_FOREST_BIRCH_TREE);
         registerConfigured("twilightforest:tree/dark_oak_bush", DARK_OAK_BUSH);

@@ -109,6 +109,10 @@ namespace Server {
         // DimensionScopeS2CPacket.hpp. Server thread only.
         void SendPacketIn(Game::DimensionId dimension, uint8_t packetId,
                           const std::vector<uint8_t>& data);
+        // The same for a packet prepared (and deflated) off the server thread
+        // (NetworkConnection::PreparePacket). No tee: only chunk data takes
+        // this path, and SendPacket mirrors none of it.
+        void SendPreparedIn(Game::DimensionId dimension, PreparedPacket&& packet);
         // The scope the client is in after a ChangeDimensionS2C: the packet
         // itself resets the client's scope, so the server's mirror of it
         // must follow without emitting a marker.
@@ -134,6 +138,9 @@ namespace Server {
         // WorldRulesS2C: the immersive_portals and portal_gun switches, so a
         // remote client's creative search and portal code agree with the host.
         void SendWorldRules();
+        // JukeboxSongS2C for every song in the global jukebox record (at
+        // join, after the world rules).
+        void SendJukeboxSongs();
         // ServerPausedS2C — the server's pause flag (IntegratedServer::IsPaused).
         void SendServerPaused(bool paused);
         void SendCurrentTimeUpdate(); // reads live values from the server world

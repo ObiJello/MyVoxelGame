@@ -12,6 +12,7 @@
 #include <optional>
 #include <cstdint>
 #include <initializer_list>
+#include "common/entity/WardenSpawnTracker.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
@@ -20,17 +21,21 @@
 #include "common/entity/IUsePlayer.hpp"
 #include "common/world/portal/PortalState.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/entity/ImpulseContext.hpp"
+#include "common/entity/ItemCooldowns.hpp"
 #include "FoodData.hpp"
 #include "PlayerExperience.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/PlayerMovementSounds.hpp"
 
 namespace Game {
+    enum class GameEventId : uint8_t;   // common/world/level/gameevent/GameEvent.hpp
     class World;
     class Entity;
     class LivingEntity;
     struct DamageSourceInfo;
 }
+namespace World { class NBTTagCompound; }
 
 namespace Server {
 
@@ -79,6 +84,20 @@ namespace Server {
         WITHER,
         // MC DamageTypes.THORNS — hurt back by the Thorns on what you hit.
         THORNS,
+        // MC DamageTypes.MACE_SMASH — a mace's smash attack (armour applies).
+        MACE_SMASH,
+        // MC DamageTypes.FIREWORKS — a firework rocket went off nearby.
+        FIREWORKS,
+        // MC DamageTypes.FLY_INTO_WALL — an elytra flight into a wall
+        // (armor-bypassing, no knockback).
+        FLY_INTO_WALL,
+        // MC DamageTypes.LIGHTNING_BOLT — struck by lightning (armour
+        // applies, no knockback).
+        LIGHTNING_BOLT,
+        // MC DamageTypes.SPEAR — a spear's jab or charge.
+        SPEAR,
+        // MC DamageTypes.TRIDENT — a thrown trident.
+        TRIDENT,
     };
 
     // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
@@ -130,10 +149,63 @@ namespace Server {
                     return victim + " was slain by " + attackerName;
                 }
                 return victim + " died";
+            // MC death.attack.mace_smash: "%1$s was smashed by %2$s".
+            case DS::MACE_SMASH:
+                if (!attackerName.empty()) {
+                    return victim + " was smashed by " + attackerName;
+                }
+                return victim + " died";
+            // MC death.attack.fireworks / .fireworks.player.
+            case DS::FIREWORKS:
+                if (!attackerName.empty()) {
+                    return victim + " went off with a bang while fighting " + attackerName;
+                }
+                return victim + " went off with a bang";
+            // MC death.attack.flyIntoWall / .flyIntoWall.player.
+            case DS::FLY_INTO_WALL:
+                if (!attackerName.empty()) {
+                    return victim + " experienced kinetic energy while trying to escape " + attackerName;
+                }
+                return victim + " experienced kinetic energy";
+            // MC death.attack.lightningBolt / .lightningBolt.player.
+            case DS::LIGHTNING_BOLT:
+                if (!attackerName.empty()) {
+                    return victim + " was struck by lightning while fighting " + attackerName;
+                }
+                return victim + " was struck by lightning";
+            // MC death.attack.spear: "%1$s was speared by %2$s".
+            case DS::SPEAR:
+                if (!attackerName.empty()) {
+                    return victim + " was speared by " + attackerName;
+                }
+                return victim + " died";
+            // MC death.attack.trident: "%1$s was impaled by %2$s".
+            case DS::TRIDENT:
+                if (!attackerName.empty()) {
+                    return victim + " was impaled by " + attackerName;
+                }
+                return victim + " died";
             case DS::GENERIC:
             default:               return victim + " died";
         }
     }
+
+    class ServerPlayer;
+
+    // MC ServerItemCooldowns — the player's authoritative cooldown table,
+    // telling the player's own client about every group it starts (the
+    // duration) or cancels (0) with a CooldownS2C.
+    class ServerItemCooldowns : public Game::ItemCooldowns {
+    public:
+        explicit ServerItemCooldowns(const ServerPlayer& owner) : m_owner(owner) {}
+
+    protected:
+        void OnCooldownStarted(const std::string& group, int duration) override;
+        void OnCooldownEnded(const std::string& group) override;
+
+    private:
+        const ServerPlayer& m_owner;
+    };
 
     // Server-side player entity representing authoritative gameplay state
     // This class owns all gameplay logic and state for a player
@@ -157,6 +229,10 @@ namespace Server {
         
         // Teleport to position
         void teleport(const glm::dvec3& pos);
+        // MC Entity.absSnapTo: the position alone, silently — the spectator
+        // camera's per-tick follow (ServerPlayer.tick). No client packet, no
+        // log line; the client follows the camera entity itself.
+        void snapTo(const glm::dvec3& pos);
         
         // Set rotation (yaw, pitch)
         void setRotation(float yaw, float pitch);
@@ -255,6 +331,12 @@ namespace Server {
         void OpenMerchantMenu(int32_t merchantEntityId) {
             m_pendingMenuOpen = PendingMenuOpen{Game::MenuType::Merchant, glm::ivec3(0), merchantEntityId};
         }
+        // MC ContainerEntity.interactWithContainerVehicle → player.openMenu:
+        // a chest boat's / container minecart's own inventory (Generic9x3 or
+        // Hopper), backed by the entity rather than a block.
+        void OpenContainerEntityMenu(Game::MenuType type, int32_t containerEntityId) {
+            m_pendingMenuOpen = PendingMenuOpen{type, glm::ivec3(0), containerEntityId};
+        }
         std::optional<PendingMenuOpen> takePendingMenuOpen() {
             auto pending = m_pendingMenuOpen;
             m_pendingMenuOpen.reset();
@@ -282,6 +364,8 @@ namespace Server {
         // player.drop) for PlayerSession::FlushPendingDrops, which owns the
         // item-entity manager; the dispatch itself has no world.
         void CreateFilledResult(Game::ItemStack& held, const Game::ItemStack& filled) override;
+        // IUsePlayer::AddItemOrDrop — Inventory.add, then player.drop.
+        bool AddItemOrDrop(const Game::ItemStack& stack) override;
         // Queue an item the inventory could not take (MC player.drop) for
         // PlayerSession::FlushPendingDrops.
         void queuePendingDrop(const Game::ItemStack& stack) { m_pendingDrops.push_back(stack); }
@@ -321,6 +405,24 @@ namespace Server {
         void releaseUsingItem();              // :3426-3437
         void stopUsingItem();                 // :3439-3449
         void completeUsingItem();             // :3388-3405
+
+        // === RIPTIDE (MC LivingEntity autoSpinAttack*) ===
+        // Player.startAutoSpinAttack(ticks, dmg, stack): the spin's clock,
+        // damage and trident (the hand it was used from), and the synched
+        // spin flag (DATA_LIVING_ENTITY_FLAGS bit 4 — the SPIN_ATTACK pose
+        // and the riptide swirl on every client). The client runs its own
+        // launch; the server checks the swept box each tick
+        // (PlayerEntityView::TickAutoSpinAttack) and attacks what it meets.
+        void  startAutoSpinAttack(int ticks, float damage, uint32_t hand, const Game::ItemStack& stack);
+        void  stopAutoSpinAttack();
+        bool  isAutoSpinAttack() const { return m_autoSpinAttackFlag; }
+        int   getAutoSpinAttackTicks() const { return m_autoSpinAttackTicks; }
+        void  setAutoSpinAttackTicks(int ticks) { m_autoSpinAttackTicks = ticks; }
+        float getAutoSpinAttackDmg() const { return m_autoSpinAttackDmg; }
+        // Player.getWeaponItem while spinning: the trident in the hand the
+        // riptide came from — or, if that hand has changed since, `scratch`
+        // holding a copy (it then wears nothing real).
+        Game::ItemStack& autoSpinAttackWeapon(Game::ItemStack& scratch);
 
         // Mirrors Player.isBlocking / getItemBlockingWith: using a
         // BLOCKS_ATTACKS item AND past its blockDelayTicks (shield = 5 ticks).
@@ -442,8 +544,29 @@ namespace Server {
         
         // === ABILITIES ===
         
-        // Set game mode
-        void setGameMode(GameMode mode);
+        // Set game mode. Mirrors MC ServerPlayerGameMode.changeGameModeForPlayer
+        // + GameType.updatePlayerAbilities: remembers the mode being left as
+        // the previous one (Debug Modifier+N's way back) and returns false, touching
+        // nothing, when the player is already in `mode`. The world-facing
+        // half (camera reset, the tab-list broadcast, the flight/ground rule)
+        // is Server::Spectator::ChangeGameMode.
+        bool setGameMode(GameMode mode);
+        // MC ServerPlayerGameMode.previousGameModeForPlayer (-1 = none), saved
+        // as playerdata's previousPlayerGameType.
+        int  getPreviousGameMode() const { return m_previousGameMode; }
+        void setPreviousGameMode(int mode) { m_previousGameMode = (mode >= 0 && mode <= 3) ? mode : -1; }
+        // MC Player.isSpectator.
+        bool isSpectator() const { return m_gameMode == GameMode::SPECTATOR; }
+
+        // ── Spectator camera — MC ServerPlayer.camera ──────────────────────
+        // The entity whose eyes this player sees through: kSelfCamera for
+        // their own body, else a mob or player id (the id spaces are
+        // disjoint, see Game::kMobEntityIdBase). Only a spectator ever has
+        // another; Server::Spectator::SetCamera keeps the client told.
+        static constexpr int32_t kSelfCamera = -1;
+        int32_t getCameraEntityId() const { return m_cameraEntityId; }
+        void    setCameraEntityId(int32_t id) { m_cameraEntityId = id; }
+        bool    isCameraDetached() const { return m_cameraEntityId != kSelfCamera; }
 
         // Game::IUsePlayer — lets item behaviours ask about creative without
         // common code depending on Server::GameMode.
@@ -481,6 +604,11 @@ namespace Server {
         // === GETTERS ===
         
         uint32_t getPlayerId() const { return m_playerId; }
+        // IUsePlayer: this player's PlayerEntityView in the level it stands
+        // in — the source entity of its game events.
+        Game::Entity* GameEventSource() override;
+        // MC ItemStack.causeUseVibration(this, event).
+        void CauseUseVibration(const Game::ItemStack& stack, Game::GameEventId event);
         const std::string& getName() const { return m_name; }
         std::string getPlainTextName() const override { return m_name; }
         void setName(const std::string& name) { m_name = name; }
@@ -491,6 +619,15 @@ namespace Server {
         void    setColorId(uint8_t id) { m_colorId = id; }
         
         const glm::dvec3& getPosition() const override { return m_position; }
+        // The position the last move packet (or a server teleport / respawn /
+        // snap) put this player at — m_position WITHOUT the between-packet
+        // gravity drift updatePosition integrates. MC's server never moves a
+        // player on its own, so handleMovePlayer's deltas (fall distance,
+        // movedUpwards, the movement stats) are measured from the last
+        // accepted client position; this is that position. Measuring from the
+        // drifted m_position made a falling player's next packet read as an
+        // UPWARD move (the drift outran the client), resetting the fall.
+        const glm::dvec3& getMovePacketBase() const { return m_movePacketBase; }
         float getYaw() const override { return m_rotation.x; }
         float getPitch() const override { return m_rotation.y; }
         const glm::vec2& getRotation() const { return m_rotation; }
@@ -556,6 +693,12 @@ namespace Server {
         FoodData&       getFoodData()       { return m_foodData; }
         const FoodData& getFoodData() const { return m_foodData; }
 
+        // MC ServerPlayer.getWardenSpawnTracker — the sculk shriekers'
+        // warning level. Ticked from tick(), saved as "warden_spawn_tracker",
+        // kept across a respawn (restoreFrom).
+        Game::WardenSpawnTracker&       getWardenSpawnTracker()       { return m_wardenSpawnTracker; }
+        const Game::WardenSpawnTracker& getWardenSpawnTracker() const { return m_wardenSpawnTracker; }
+
         // XP — mirrors Player.experienceLevel / .experienceProgress. Read by
         // the furnace payout, the anvil's level cost and the enchanting table.
         PlayerExperience&       getExperience()       { return m_experience; }
@@ -575,8 +718,8 @@ namespace Server {
 
         // MC LivingEntity.onEquippedItemBroken → breakItem, for the player:
         // the stack's break sound (0.8 volume, 0.8..1.2 pitch) at the player
-        // for everyone nearby, the player included. (MC's five ITEM break
-        // particles have no particle type to draw them with here yet.)
+        // for everyone nearby, the player included, and MC's five ITEM break
+        // particles out of the mouth (sent as direct particles).
         void OnEquippedItemBroken(const Game::ItemStack& broken, Game::EquipmentSlot slot) override;
 
         // ── Sound ────────────────────────────────────────────────────────
@@ -593,7 +736,17 @@ namespace Server {
         bool canEat(bool canAlwaysEat) const {
             return canAlwaysEat || m_foodData.needsFood();
         }
-        
+
+        // IUsePlayer's eating pair (CakeBlock.eat). MC Player.canEat opens
+        // with `abilities.invulnerable`, which creative and spectator set.
+        bool CanEat(bool canAlwaysEat) const override {
+            return m_gameMode == GameMode::CREATIVE || m_gameMode == GameMode::SPECTATOR ||
+                   canEat(canAlwaysEat);
+        }
+        void EatFood(int nutrition, float saturationModifier) override {
+            m_foodData.eat(nutrition, saturationModifier);
+        }
+
         GameMode getGameMode() const { return m_gameMode; }
         bool isFlying() const { return m_flying; }
         // The player's size (1 = vanilla): scaled immersive portals change
@@ -613,7 +766,20 @@ namespace Server {
         uint32_t getMorph()      const { return m_morph; }
         float    getMorphSpeed() const { return m_morphSpeed; }
         bool     isMorphed()     const { return !Game::Morph::IsNone(m_morph); }
-        void     setMorph(uint32_t code, float walkSpeed) { m_morph = code; m_morphSpeed = walkSpeed; m_morphAnim = 0; }
+        // A morph into a DIFFERENT body starts from that body's default
+        // look; a toggle of the same mob (sheared, a door opened) keeps it.
+        void     setMorph(uint32_t code, float walkSpeed) {
+            const bool sameBody = !Game::Morph::IsNone(code) && !Game::Morph::IsNone(m_morph) &&
+                                  Game::Morph::KindOf(code) == Game::Morph::KindOf(m_morph) &&
+                                  Game::Morph::MobTypeOf(code) == Game::Morph::MobTypeOf(m_morph);
+            if (!sameBody) m_morphVariant = Game::Morph::DefaultVariantOf(code);
+            m_morph = code; m_morphSpeed = walkSpeed; m_morphAnim = 0;
+        }
+        // The morph's look beyond the code (Game::Morph::DefaultVariantOf):
+        // a tropical fish's packed variant, a salmon's size — rolled by
+        // /morph, kept with the morph, sent beside it.
+        int32_t  getMorphVariant() const { return m_morphVariant; }
+        void     setMorphVariant(int32_t v) { m_morphVariant = v; }
         uint8_t  getMorphAnim() const { return m_morphAnim; }
         void     setMorphAnim(uint8_t a) { m_morphAnim = a; }
         float getEyeHeight() const { return Game::Morph::DimsOf(m_morph).eyeHeight * m_scale; }
@@ -632,6 +798,18 @@ namespace Server {
         float getFallDistance() const { return m_fallDistance; }
         void  addFallDistance(float d) { m_fallDistance += d; }
         void  resetFallDistance() { m_fallDistance = 0.0f; }
+
+        // MC LivingEntity's current-impulse context (currentImpulseImpactPos,
+        // the reset grace time) and ServerPlayer.spawnExtraParticlesOnFall —
+        // the player's, handed to the mob code through PlayerEntityView::
+        // GetImpulseContext. See ImpulseContext.hpp. Not saved: the fall
+        // and the motion are not either (PlayerDataStore).
+        Game::ImpulseContext&       impulseContext()       { return m_impulseContext; }
+        const Game::ImpulseContext& impulseContext() const { return m_impulseContext; }
+
+        // MC Player.getCooldowns() — the ServerItemCooldowns above.
+        Game::ItemCooldowns&       getCooldowns()       { return m_itemCooldowns; }
+        const Game::ItemCooldowns& getCooldowns() const { return m_itemCooldowns; }
         
         bool isOnGround() const { return m_onGround; }
         void setOnGround(bool onGround) { m_onGround = onGround; }
@@ -657,6 +835,21 @@ namespace Server {
         // player — a sprint-hit is a KNOCKBACK attack in MC, never a crit.
         bool isSprinting() const { return m_sprinting; }
         void setSprinting(bool v) { m_sprinting = v; }
+
+        // ── Elytra flight (MC LivingEntity shared flag 7) ──────────────────
+        // MC LivingEntity.isFallFlying — what a firework rocket boosts.
+        bool isFallFlying() const override { return m_fallFlying; }
+        int  getFallFlyingTicks() const { return m_fallFlyTicks; }
+        // MC Player.canGlide: not flying (abilities), not on the ground, not
+        // riding, no LEVITATION, and a glider worn in its own slot that the
+        // next point of wear will not break (LivingEntity.canGlideUsing).
+        bool canGlide() const;
+        // The client's glide flag from its move packet: MC's START_FALL_FLYING
+        // player command (tryToStartFallFlying, else stopFallFlying) when it
+        // is set, the flag cleared when it is not (the client stops on
+        // landing, in water, on a ladder, as LivingEntity.travel does).
+        void setFallFlyingFromClient(bool fallFlying);
+        void stopFallFlying() { m_fallFlying = false; }
 
         // MC LivingEntity.getKnownMovement, horizontal component, in blocks per
         // tick. Read by the sweep-attack check (Player.isSweepAttack), which
@@ -685,6 +878,45 @@ namespace Server {
         bool IsSneaking() const override { return m_sneaking; }
         void setSneaking(bool sneaking) { m_sneaking = sneaking; }
 
+        // ── Shoulder entities (MC ServerPlayer.shoulderEntityLeft/Right) ──
+        //
+        // The saved compound of what rides each shoulder (a parrot's full
+        // entity NBT, "id" included) — null is MC's empty CompoundTag — and
+        // the Player entity-data pair MC derives from it
+        // (DATA_SHOULDER_PARROT_LEFT/RIGHT: the Parrot.Variant id, -1 for
+        // none). The logic — seating, the drop rules, the respawn, the wire —
+        // is server/entity/ShoulderEntities; this is only the state it keeps.
+        const std::shared_ptr<::World::NBTTagCompound>& getShoulderEntityLeft()  const { return m_shoulderEntityLeft; }
+        const std::shared_ptr<::World::NBTTagCompound>& getShoulderEntityRight() const { return m_shoulderEntityRight; }
+        void setShoulderEntityLeft (std::shared_ptr<::World::NBTTagCompound> tag, int parrotVariant) {
+            m_shoulderEntityLeft = std::move(tag);
+            m_shoulderParrotLeft = parrotVariant;
+        }
+        void setShoulderEntityRight(std::shared_ptr<::World::NBTTagCompound> tag, int parrotVariant) {
+            m_shoulderEntityRight = std::move(tag);
+            m_shoulderParrotRight = parrotVariant;
+        }
+        int  getShoulderParrotLeft()  const { return m_shoulderParrotLeft; }
+        int  getShoulderParrotRight() const { return m_shoulderParrotRight; }
+        // MC ServerPlayer.timeEntitySatOnShoulder (level game time).
+        int64_t getTimeEntitySatOnShoulder() const { return m_timeEntitySatOnShoulder; }
+        void    setTimeEntitySatOnShoulder(int64_t t) { m_timeEntitySatOnShoulder = t; }
+        // Raised where this class has no level to respawn the parrots into —
+        // a jump while sneaking (the engine's only voluntary drop, a
+        // deliberate deviation) and the switch to spectator; the session's
+        // tick (ShoulderEntities::Tick) carries it out.
+        void requestShoulderEntityRemoval() { m_shoulderRemovalRequested = true; }
+        bool takeShoulderEntityRemovalRequest() {
+            const bool requested = m_shoulderRemovalRequested;
+            m_shoulderRemovalRequested = false;
+            return requested;
+        }
+        // The game mode ShoulderEntities::Tick last saw — it answers MC
+        // ServerPlayer.setGameMode(SPECTATOR)'s removeEntitiesOnShoulder on
+        // the edge into spectator.
+        bool shoulderSawSpectator() const { return m_shoulderSawSpectator; }
+        void setShoulderSawSpectator(bool v) { m_shoulderSawSpectator = v; }
+
         // ── Bed / sleeping (MC LivingEntity.sleepingPos, Player.sleepCounter) ──
         //
         // The bed's HEAD cell while asleep; its presence IS isSleeping(), as
@@ -699,6 +931,30 @@ namespace Server {
         int  getSleepTimer() const { return m_sleepCounter; }
         void setSleepTimer(int ticks) { m_sleepCounter = ticks; }
         bool isSleepingLongEnough() const { return isSleeping() && m_sleepCounter >= 100; }
+
+        // ── Riding (MC Entity.vehicle, for a player) ──
+        //
+        // The entity id of what the player sits on (a cushion) and the level
+        // it lives in; 0 = not a passenger. Server::PlayerRiding owns the
+        // transitions and keeps the player in the seat each tick.
+        int32_t getVehicleId() const { return m_vehicleId; }
+        int     getVehicleDimensionId() const { return m_vehicleDimensionId; }
+        bool    isPassenger() const { return m_vehicleId != 0; }
+        void    setVehicle(int32_t entityId, int dimensionId) {
+            m_vehicleId = entityId;
+            m_vehicleDimensionId = dimensionId;
+        }
+        void    clearVehicle() { m_vehicleId = 0; }
+        // MC "RootVehicle" read from the player's file: the vehicle the
+        // player logged out on, restored (and mounted) by PlayerRiding once
+        // the player stands in their level.
+        void setPendingRootVehicle(std::shared_ptr<::World::NBTTagCompound> tag) {
+            m_pendingRootVehicle = std::move(tag);
+        }
+        bool hasPendingRootVehicle() const { return m_pendingRootVehicle != nullptr; }
+        std::shared_ptr<::World::NBTTagCompound> takePendingRootVehicle() {
+            return std::move(m_pendingRootVehicle);
+        }
 
         // ── Respawn point (MC ServerPlayer.RespawnConfig over LevelData.RespawnData) ──
         struct RespawnConfig {
@@ -802,10 +1058,14 @@ namespace Server {
         
         // === TRANSFORM & PHYSICS ===
         glm::dvec3 m_position{0.0, 67.0, 0.0};
+        // See getMovePacketBase.
+        glm::dvec3 m_movePacketBase{0.0, 67.0, 0.0};
         glm::vec2 m_rotation{0.0f, 0.0f}; // yaw, pitch
         glm::vec3 m_velocity{0.0f};
         bool m_onGround = true;
         bool m_sprinting = false;
+        bool m_fallFlying = false;
+        int  m_fallFlyTicks = 0;   // MC LivingEntity.fallFlyTicks
         double m_knownHorizontalMovement = 0.0;
         int  m_attackStrengthTicker = 0;
         // MC Player.lastItemInMainHand — the ticker resets when the held item
@@ -823,6 +1083,16 @@ namespace Server {
         Game::PortalState m_portalState;
         // The bed's head cell while asleep, and MC Player.sleepCounter.
         std::optional<glm::ivec3> m_sleepingPos;
+        int32_t m_vehicleId = 0;            // see getVehicleId
+        int     m_vehicleDimensionId = 0;
+        std::shared_ptr<::World::NBTTagCompound> m_pendingRootVehicle;
+        std::shared_ptr<::World::NBTTagCompound> m_shoulderEntityLeft;
+        std::shared_ptr<::World::NBTTagCompound> m_shoulderEntityRight;
+        int     m_shoulderParrotLeft  = -1;
+        int     m_shoulderParrotRight = -1;
+        int64_t m_timeEntitySatOnShoulder = 0;
+        bool    m_shoulderRemovalRequested = false;
+        bool    m_shoulderSawSpectator = false;
         int m_sleepCounter = 0;
         // Where death sends this player back to (MC ServerPlayer.respawnConfig).
         std::optional<RespawnConfig> m_respawnConfig;
@@ -842,6 +1112,7 @@ namespace Server {
         uint32_t m_damageCounter = 0;
         // Hunger/saturation/exhaustion — MC FoodData port (FoodData.hpp).
         FoodData m_foodData;
+        Game::WardenSpawnTracker m_wardenSpawnTracker;   // see getWardenSpawnTracker
         // XP — MC Player's experienceLevel / experienceProgress /
         // totalExperience, with the level-curve arithmetic (PlayerExperience.hpp).
         PlayerExperience m_experience;
@@ -852,6 +1123,8 @@ namespace Server {
         float m_absorptionAmount = 0.0f;
         float m_stepHeight = 0.6f;
         float m_fallDistance = 0.0f;
+        Game::ImpulseContext m_impulseContext;
+        ServerItemCooldowns  m_itemCooldowns{*this};
         // Set by teleport(); setPosition() bypasses the anti-cheat
         // distance check while this is in the future. Without it, a
         // portal teleport that fires server-side races against the
@@ -864,6 +1137,8 @@ namespace Server {
         
         // === ABILITIES & MODE ===
         GameMode m_gameMode = GameMode::SURVIVAL;
+        int      m_previousGameMode = -1;
+        int32_t  m_cameraEntityId   = kSelfCamera;
         bool m_canFly = false;
         bool m_flying = false;
         bool m_noclip = false;
@@ -874,6 +1149,7 @@ namespace Server {
         uint32_t m_morph      = Game::Morph::kNone;
         float    m_morphSpeed = 0.0f;
         uint8_t  m_morphAnim  = 0;   // the client's, relayed (creeper swell)
+        int32_t  m_morphVariant = 0; // the morph's look (tropical fish variant, salmon size)
         
         // === INVENTORY ===
         // 46-slot MC-compatible inventory (crafting + armor + main + hotbar + offhand).
@@ -922,6 +1198,12 @@ namespace Server {
         int             m_useItemRemaining = 0;   // LivingEntity.useItemRemaining
         uint32_t        m_usedItemHand     = 0;   // flag bit 2 in MC (:3250-3252)
         bool            m_isUsingItem      = false; // flag bit 1 in MC (:3246-3248)
+        // Riptide (see startAutoSpinAttack).
+        int             m_autoSpinAttackTicks = 0;
+        float           m_autoSpinAttackDmg   = 0.0f;
+        bool            m_autoSpinAttackFlag  = false;
+        uint32_t        m_autoSpinAttackHand  = 0;
+        Game::ItemStack m_autoSpinAttackItem;
         // Slots mutated by item-use processing this tick (see dirtySlots()).
         std::vector<int> m_dirtySlots;
 

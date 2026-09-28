@@ -49,7 +49,11 @@ namespace Server {
     } // namespace
 
     void StillnessCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("stillness", StillnessCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("stillness", StillnessCommand::Execute,
+            Cmd::Root().Executes()
+                .Then(Cmd::Literals({"stop", "query"}))
+                .Then(Cmd::Argument("seconds", Cmd::Arg::Float).Suggests({"5", "10", "30", "60"}).Executes()));
     }
 
     void StillnessCommand::Execute(const CommandSourceStack& /*source*/,

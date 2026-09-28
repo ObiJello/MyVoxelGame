@@ -1,11 +1,12 @@
 // File: src/launcher/updater/Installer.cpp
 #include "Installer.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/ZipArchive.hpp"
 #include <filesystem>
 #include <fstream>
+#include <cstdint>
 #include <cstring>
-
-#include "unzip.h"
+#include <vector>
 
 #ifndef _WIN32
 #include <sys/stat.h>
@@ -101,92 +102,59 @@ namespace Launcher {
     }
 
     bool Installer::ExtractZip(const std::string& zipPath, const std::string& destDir, StatusCallback status) {
-        unzFile zip = unzOpen64(zipPath.c_str());
-        if (!zip) {
-            Log::Error("Failed to open zip: %s", zipPath.c_str());
+        Core::ZipArchive zip(zipPath);
+        if (!zip.IsOpen()) {
+            Log::Error("Failed to open zip: %s (%s)", zipPath.c_str(), zip.Error().c_str());
             return false;
         }
 
-        unz_global_info64 globalInfo;
-        if (unzGetGlobalInfo64(zip, &globalInfo) != UNZ_OK) {
-            Log::Error("Failed to read zip info");
-            unzClose(zip);
-            return false;
-        }
+        const auto& entries = zip.Entries();
+        Log::Info("Extracting %zu files...", entries.size());
 
-        Log::Info("Extracting %llu files...", globalInfo.number_entry);
-
-        char filename[1024];
-        char buffer[8192];
-
-        for (uint64_t i = 0; i < globalInfo.number_entry; i++) {
-            unz_file_info64 fileInfo;
-            if (unzGetCurrentFileInfo64(zip, &fileInfo, filename, sizeof(filename),
-                                         nullptr, 0, nullptr, 0) != UNZ_OK) {
-                Log::Error("Failed to get file info at entry %llu", i);
-                unzClose(zip);
-                return false;
-            }
-
+        const auto destCanonical = std::filesystem::weakly_canonical(destDir);
+        std::vector<uint8_t> bytes;
+        for (size_t i = 0; i < entries.size(); i++) {
+            const Core::ZipArchive::Entry& entry = entries[i];
+            const std::string& filename = entry.name;
             std::string fullPath = destDir + "/" + filename;
 
             // Prevent zip slip attacks
             auto canonical = std::filesystem::weakly_canonical(fullPath);
-            auto destCanonical = std::filesystem::weakly_canonical(destDir);
             if (canonical.string().find(destCanonical.string()) != 0) {
-                Log::Warning("Skipping suspicious zip entry: %s", filename);
-                if (i + 1 < globalInfo.number_entry) unzGoToNextFile(zip);
+                Log::Warning("Skipping suspicious zip entry: %s", filename.c_str());
                 continue;
             }
 
-            size_t filenameLen = strlen(filename);
-            if (filenameLen > 0 && (filename[filenameLen - 1] == '/' || filename[filenameLen - 1] == '\\')) {
+            if (!filename.empty() && (filename.back() == '/' || filename.back() == '\\')) {
                 // Directory entry
                 std::filesystem::create_directories(fullPath);
             } else {
-                // File entry
+                // File entry: read whole (the largest is the game binary), then written.
                 std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path());
 
-                if (unzOpenCurrentFile(zip) != UNZ_OK) {
-                    Log::Error("Failed to open zip entry: %s", filename);
-                    unzClose(zip);
+                if (!zip.Read(entry, bytes)) {
+                    Log::Error("Error reading zip entry: %s (%s)", filename.c_str(), zip.Error().c_str());
                     return false;
                 }
 
                 std::ofstream outFile(fullPath, std::ios::binary);
                 if (!outFile.is_open()) {
                     Log::Error("Failed to create file: %s", fullPath.c_str());
-                    unzCloseCurrentFile(zip);
-                    unzClose(zip);
                     return false;
                 }
-
-                int bytesRead;
-                while ((bytesRead = unzReadCurrentFile(zip, buffer, sizeof(buffer))) > 0) {
-                    outFile.write(buffer, bytesRead);
-                }
-
-                outFile.close();
-                unzCloseCurrentFile(zip);
-
-                if (bytesRead < 0) {
-                    Log::Error("Error reading zip entry: %s", filename);
-                    unzClose(zip);
+                outFile.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                if (!outFile) {
+                    Log::Error("Failed to write file: %s", fullPath.c_str());
                     return false;
                 }
             }
 
             if (status && i % 50 == 0) {
                 status("Extracting... (" + std::to_string(i + 1) + "/" +
-                       std::to_string(globalInfo.number_entry) + ")");
-            }
-
-            if (i + 1 < globalInfo.number_entry) {
-                unzGoToNextFile(zip);
+                       std::to_string(entries.size()) + ")");
             }
         }
 
-        unzClose(zip);
         Log::Info("Extraction complete");
         return true;
     }

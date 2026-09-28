@@ -154,6 +154,51 @@ namespace Game::Anvil {
             return false;
         }
 
+        // Fast path: the disk layout IS the engine's (MC SimpleBitStorage: 64/bits
+        // values per word, none spanning two), so whenever the engine would
+        // store these values in a palette of the same width, the words are
+        // adopted as they are - no unpacking to 4096 indices and re-packing
+        // them one Set at a time. Same palette order, same words, same lookup
+        // as BuildFrom builds. Block states up to 256 palette entries and
+        // biomes up to 8 take it; wider ones go global in the engine and need
+        // the conversion below.
+        int entryBits = 0;
+        while ((size_t{1} << entryBits) < palette.size()) ++entryBits;
+        const int engineWidth = strategy.WidthFor(entryBits);
+        if (engineWidth == bits && !strategy.IsGlobal(engineWidth)) {
+            if (bits > 0 && data.size() != DiskWordCount(entryCount, bits)) {
+                error = "packed data is " + std::to_string(data.size()) + " longs, expected "
+                      + std::to_string(DiskWordCount(entryCount, bits))
+                      + " for " + std::to_string(palette.size()) + " palette entries at "
+                      + std::to_string(bits) + " bits";
+                return false;
+            }
+            // BuildFrom's range check: every index must name a palette entry.
+            // Nothing to check when the palette fills every value of the width.
+            if (bits > 0 && palette.size() < (size_t{1} << bits)) {
+                const size_t perLong = static_cast<size_t>(64 / bits);
+                const uint64_t mask = (uint64_t{1} << bits) - 1;
+                const uint64_t limit = palette.size();
+                size_t remaining = entryCount;
+                for (uint64_t word : data) {
+                    const size_t n = std::min(perLong, remaining);
+                    for (size_t k = 0; k < n; ++k) {
+                        if (((word >> (k * static_cast<size_t>(bits))) & mask) >= limit) {
+                            error = "palette index out of range";
+                            return false;
+                        }
+                    }
+                    remaining -= n;
+                }
+            }
+            out = PalettedContainer(strategy, palette[0]);
+            if (!out.ReadFrom(bits, std::vector<uint32_t>(palette), std::vector<uint64_t>(data))) {
+                error = "packed data does not match its palette";
+                return false;
+            }
+            return true;
+        }
+
         std::vector<uint32_t> indices;
         if (!UnpackIndices(data, entryCount, bits, indices)) {
             error = "packed data is " + std::to_string(data.size()) + " longs, expected "

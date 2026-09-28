@@ -161,6 +161,87 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // Riding and vehicles — see VehiclePackets.hpp.
+    class PlayerInputC2SPacketImpl : public IC2SPacket {
+    private:
+        PlayerInputC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PlayerInputC2SPacketImpl(PlayerInputC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerInputC2S(m_data);
+        }
+
+        const PlayerInputC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PlayerInputC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class MoveVehicleC2SPacketImpl : public IC2SPacket {
+    private:
+        MoveVehicleC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit MoveVehicleC2SPacketImpl(MoveVehicleC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onMoveVehicleC2S(m_data);
+        }
+
+        const MoveVehicleC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::MoveVehicleC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class PaddleBoatC2SPacketImpl : public IC2SPacket {
+    private:
+        PaddleBoatC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PaddleBoatC2SPacketImpl(PaddleBoatC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPaddleBoatC2S(m_data);
+        }
+
+        const PaddleBoatC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PaddleBoatC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class RidingCommandC2SPacketImpl : public IC2SPacket {
+    private:
+        RidingCommandC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit RidingCommandC2SPacketImpl(RidingCommandC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onRidingCommandC2S(m_data);
+        }
+
+        const RidingCommandC2SPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::RidingCommandC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     class PlayerAbilitiesC2SPacketImpl : public IC2SPacket {
     private:
         PlayerAbilitiesC2SPacket m_data;
@@ -371,6 +452,36 @@ namespace Packets {
         void apply(IPacketListener& listener) override { listener.onSelectTradeC2S(m_data); }
         const SelectTradeC2SPacket& getData() const { return m_data; }
         PacketId getId() const override { return PacketId::SelectTradeC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundSpectatorActionPacket (SpectatorPackets.hpp).
+    class SpectatorActionC2SPacketImpl : public IC2SPacket {
+    private:
+        SpectatorActionC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SpectatorActionC2SPacketImpl(SpectatorActionC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSpectatorActionC2S(m_data); }
+        const SpectatorActionC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SpectatorActionC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ServerboundTeleportToEntityPacket (SpectatorPackets.hpp).
+    class TeleportToEntityC2SPacketImpl : public IC2SPacket {
+    private:
+        TeleportToEntityC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit TeleportToEntityC2SPacketImpl(TeleportToEntityC2SPacket data)
+            : m_data(data)
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onTeleportToEntityC2S(m_data); }
+        const TeleportToEntityC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::TeleportToEntityC2S; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

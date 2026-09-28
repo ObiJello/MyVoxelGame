@@ -4,6 +4,7 @@
 #include "../session/PlayerSessionManager.hpp"
 #include "../session/PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
+#include "../player/SpectatorMode.hpp"
 #include "common/core/Log.hpp"
 #include <cctype>
 #include <optional>
@@ -12,7 +13,12 @@
 namespace Server {
 
     void GameModeCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("gamemode", GameModeCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC GameModeCommand: <gamemode> [<target>] — the target a player
+        // name here (PlayerList.getPlayerByName).
+        dispatcher.RegisterCommand("gamemode", GameModeCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("gamemode", Cmd::Arg::GameMode).Executes()
+                .Then(Cmd::Argument("target", Cmd::Arg::PlayerName).Executes())));
     }
 
     namespace {
@@ -28,16 +34,6 @@ namespace Server {
             return true;
         }
 
-        // MC GameModeArgument accepts the full names; we also take the
-        // classic short forms + numeric ids as a convenience.
-        std::optional<GameMode> ParseGameMode(std::string arg) {
-            for (auto& c : arg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            if (arg == "survival"  || arg == "s"  || arg == "0") return GameMode::SURVIVAL;
-            if (arg == "creative"  || arg == "c"  || arg == "1") return GameMode::CREATIVE;
-            if (arg == "adventure" || arg == "a"  || arg == "2") return GameMode::ADVENTURE;
-            if (arg == "spectator" || arg == "sp" || arg == "3") return GameMode::SPECTATOR;
-            return std::nullopt;
-        }
 
         // MC's gameMode.<name> display strings ("Creative Mode", …).
         const char* GameModeDisplayName(GameMode mode) {
@@ -52,6 +48,19 @@ namespace Server {
 
     } // namespace
 
+    // MC GameModeArgument takes the four serialized names; this engine also
+    // keeps the pre-1.13 short forms (s/c/a/sp) and numeric ids (0-3) that
+    // players type out of habit, case-insensitively.
+    std::optional<GameMode> GameModeCommand::ParseGameMode(const std::string& raw) {
+        std::string arg = raw;
+        for (char& c : arg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (arg == "survival"  || arg == "s"  || arg == "0") return GameMode::SURVIVAL;
+        if (arg == "creative"  || arg == "c"  || arg == "1") return GameMode::CREATIVE;
+        if (arg == "adventure" || arg == "a"  || arg == "2") return GameMode::ADVENTURE;
+        if (arg == "spectator" || arg == "sp" || arg == "3") return GameMode::SPECTATOR;
+        return std::nullopt;
+    }
+
     void GameModeCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
@@ -64,6 +73,7 @@ namespace Server {
 
         auto mode = ParseGameMode(args[0]);
         if (!mode) {
+            // argument.gamemode.invalid
             connection.SendChatMessage("Unknown game mode: " + args[0], 1);
             return;
         }
@@ -72,8 +82,8 @@ namespace Server {
         // (PlayerList.getPlayerByName, same walk as KickCommand).
         ServerPlayer*     target     = &sender;
         ServerConnection* targetConn = &connection;
+        std::shared_ptr<PlayerSession> targetSession;
         if (args.size() > 1) {
-            std::shared_ptr<PlayerSession> targetSession;
             for (const auto& session : sessionManager.GetAllSessions()) {
                 if (session && session->GetPlayer() &&
                     CaseInsensitiveEquals(session->GetPlayer()->getName(), args[1])) {
@@ -98,8 +108,17 @@ namespace Server {
             return;
         }
 
-        target->setGameMode(*mode);
-        targetConn->SendPlayerAbilities(*target);
+        // MC ServerPlayer.setGameMode: the change plus its consequences — the
+        // spectator camera, the abilities packet, UPDATE_GAME_MODE for every
+        // tab list.
+        if (!targetSession) targetSession = sessionManager.GetSession(target->getPlayerId());
+        if (targetSession) {
+            Spectator::ChangeGameMode(*targetSession, *mode);
+        } else {
+            target->setGameMode(*mode);
+            targetConn->SendPlayerAbilities(*target);
+            Spectator::BroadcastGameMode(*target);
+        }
 
         Log::Info("[GameModeCommand] %s set %s to game mode %d",
                   sender.getName().c_str(), target->getName().c_str(),

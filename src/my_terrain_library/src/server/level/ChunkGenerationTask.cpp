@@ -206,6 +206,23 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
     GenerationChunkHolder* chunkHolder
 ) {
     // Reference: ChunkGenerationTask.java lines 138-157
+    //
+    // This layer's step already completed on the holder: applyStep would
+    // only take the holder's mutex to discover that. Skipping it is what
+    // makes the two 529-holder layers of a FULL pyramid cheap; Java's
+    // volatile reads make it free. (Not the persisted status: a chunk read
+    // from disk is at FEATURES before its loading steps — structure starts
+    // among them — have run.)
+    //
+    // Checked before the persisted status, which chases into the chunk for
+    // every holder of the layer (most of them done, once a view is filling
+    // in). Same outcome: a step's status is written to the chunk before the
+    // holder marks the step completed (ChunkStep::apply, completeFuture) and
+    // only ever rises, so a completed step means `generate` below is false.
+    if (chunkHolder->hasCompletedStep(status)) {
+        return true;
+    }
+
     const ChunkStatus* persistedStatus = chunkHolder->getPersistedStatus();
     bool generate = (persistedStatus != nullptr && status.isAfter(*persistedStatus));
 
@@ -233,16 +250,6 @@ bool ChunkGenerationTask::scheduleChunkInLayer(
             markForCancellation();
         }
         return false;
-    }
-
-    // This layer's step already completed on the holder: applyStep would
-    // only take the holder's mutex to discover that. Skipping it is what
-    // makes the two 529-holder layers of a FULL pyramid cheap; Java's
-    // volatile reads make it free. (Not the persisted status: a chunk read
-    // from disk is at FEATURES before its loading steps — structure starts
-    // among them — have run.)
-    if (chunkHolder->hasCompletedStep(status)) {
-        return true;
     }
 
     FutureType future = chunkHolder->applyStep(

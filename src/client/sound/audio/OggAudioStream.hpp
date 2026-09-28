@@ -55,6 +55,11 @@ namespace Client::Audio {
         const AudioFormat& GetFormat() const override { return m_format; }
         std::vector<int16_t> Read(size_t expectedBytes) override;
 
+        // Start `seconds` into the file (stb_vorbis_seek) — a jukebox song
+        // joined part-way through. False, leaving the stream at its start,
+        // when the file cannot seek or is shorter than that.
+        bool SeekToSeconds(double seconds);
+
     private:
         OggAudioStream() = default;
 

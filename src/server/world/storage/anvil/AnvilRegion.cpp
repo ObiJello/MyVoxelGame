@@ -7,11 +7,20 @@
 #include <string_view>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <zlib.h>
+#include "common/core/Deflate.hpp"
+#include <memory>
 
 #if defined(_WIN32)
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
   #include <io.h>
   #include <share.h>
   #define OBEY_FSYNC(fd)      _commit(fd)
@@ -188,6 +197,41 @@ namespace Game::Anvil {
         return true;
     }
 
+    bool AnvilRegion::PositionalRead(uint64_t offset, void* dst, size_t n, std::string& error) const {
+        if (n == 0) return true;
+#if defined(_WIN32)
+        // ReadFile with an explicit offset. The CRT position the stdio calls
+        // use is irrelevant: ReadAt / WriteAt seek before every operation.
+        HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(OBEY_FILENO(m_file)));
+        auto* out = static_cast<uint8_t*>(dst);
+        while (n > 0) {
+            OVERLAPPED at{};
+            at.Offset = static_cast<DWORD>(offset & 0xFFFFFFFFull);
+            at.OffsetHigh = static_cast<DWORD>(offset >> 32);
+            const DWORD want = static_cast<DWORD>(std::min<size_t>(n, 1u << 30));
+            DWORD got = 0;
+            if (!ReadFile(handle, out, want, &got, &at)) { error = "read failed"; return false; }
+            if (got == 0) { error = "unexpected end of region file"; return false; }
+            out += got; offset += got; n -= got;
+        }
+        return true;
+#else
+        const int fd = OBEY_FILENO(m_file);
+        auto* out = static_cast<uint8_t*>(dst);
+        while (n > 0) {
+            const ssize_t got = ::pread(fd, out, n, static_cast<off_t>(offset));
+            if (got < 0) {
+                if (errno == EINTR) continue;
+                error = Errno("read");
+                return false;
+            }
+            if (got == 0) { error = "unexpected end of region file"; return false; }
+            out += got; offset += static_cast<uint64_t>(got); n -= static_cast<size_t>(got);
+        }
+        return true;
+#endif
+    }
+
     bool AnvilRegion::WriteAt(uint64_t offset, const void* src, size_t n, std::string& error) {
         if (n == 0) return true;
         if (OBEY_FSEEK(m_file, static_cast<int64_t>(offset), SEEK_SET) != 0) { error = Errno("seek"); return false; }
@@ -276,53 +320,36 @@ namespace Game::Anvil {
             return false;
         }
 
-        z_stream s{};
-        // 15 + 32 auto-detects zlib vs gzip, which covers ids 1 and 2 with one
-        // path and also tolerates a file whose id byte disagrees with its
-        // actual wrapper.
-        if (inflateInit2(&s, 15 + 32) != Z_OK) { error = "inflateInit2 failed"; return false; }
-
-        std::vector<uint8_t> result;
-        result.resize(n * 4 + 8192);
-        s.next_in  = const_cast<Bytef*>(src);
-        s.avail_in = static_cast<uInt>(n);
-
-        size_t produced = 0;
-        for (;;) {
-            if (produced == result.size()) {
-                if (result.size() >= kMaxDecompressedBytes) {
-                    inflateEnd(&s);
-                    // Say the real numbers. "implausibly large" told a player
-                    // nothing about what was wrong or what to do about it.
-                    error = "chunk inflates past the "
-                          + std::to_string(kMaxDecompressedBytes / (1024 * 1024))
-                          + " MB cap (" + std::to_string(n / 1024) + " KB compressed)";
-                    return false;
-                }
-                result.resize(std::min(result.size() * 2, kMaxDecompressedBytes));
-            }
-            s.next_out  = result.data() + produced;
-            s.avail_out = static_cast<uInt>(result.size() - produced);
-
-            const int rc = inflate(&s, Z_NO_FLUSH);
-            produced = result.size() - s.avail_out;
-
-            if (rc == Z_STREAM_END) break;
-            if (rc == Z_OK) continue;
-            // Z_BUF_ERROR here means no progress is possible — with input
-            // exhausted it is a truncated stream, not a small output buffer.
-            // The terrain-library port loops forever on exactly this.
-            inflateEnd(&s);
-            error = "inflate failed (" + std::to_string(rc) + ")";
-            return false;
+        // libdeflate (Core::Deflate): ~2-3x zlib's inflate, which was the
+        // largest single cost of loading a saved chunk (sample, 2026-09-26).
+        // Like zlib's auto-detect it took, the wrapper comes from the bytes,
+        // not the id, so a file whose id byte disagrees with its data reads.
+        switch (Core::Deflate::Decompress(src, n, out, kMaxDecompressedBytes)) {
+            case Core::Deflate::Status::Ok:
+                return true;
+            case Core::Deflate::Status::TooLarge:
+                // Say the real numbers. "implausibly large" told a player
+                // nothing about what was wrong or what to do about it.
+                error = "chunk inflates past the "
+                      + std::to_string(kMaxDecompressedBytes / (1024 * 1024))
+                      + " MB cap (" + std::to_string(n / 1024) + " KB compressed)";
+                return false;
+            case Core::Deflate::Status::Corrupt:
+            default:
+                error = "inflate failed (corrupt or truncated " + std::to_string(n) + "-byte stream)";
+                return false;
         }
-        inflateEnd(&s);
-        result.resize(produced);
-        out = std::move(result);
-        return true;
     }
 
     bool AnvilRegion::Read(int localX, int localZ, std::vector<uint8_t>& out, std::string& error) {
+        std::vector<uint8_t> raw;
+        uint8_t compression = 0;
+        if (!ReadCompressed(localX, localZ, raw, compression, error)) return false;
+        return Inflate(raw.data(), raw.size(), compression, out, error);
+    }
+
+    bool AnvilRegion::ReadCompressed(int localX, int localZ, std::vector<uint8_t>& raw, uint8_t& compression,
+                                     std::string& error) const {
         error.clear();
         const int slot = SlotIndex(localX, localZ);
         if (slot < 0 || slot >= kSlots) { error = "chunk is outside this region"; return false; }
@@ -335,7 +362,7 @@ namespace Game::Anvil {
         const uint64_t base = static_cast<uint64_t>(sector) * kSectorBytes;
 
         uint8_t head[kChunkHeader];
-        if (!ReadAt(base, head, sizeof(head), error)) return false;
+        if (!PositionalRead(base, head, sizeof(head), error)) return false;
 
         const int32_t declared = static_cast<int32_t>(ReadBE32(head));
         const uint8_t version  = head[4];
@@ -362,7 +389,7 @@ namespace Game::Anvil {
                 return false;
             }
 
-            std::vector<uint8_t> raw(static_cast<size_t>(extSize));
+            raw.resize(static_cast<size_t>(extSize));
             std::FILE* f = OpenFile(ext, "rb");
             if (!f) { error = Errno("open " + ext.string()); return false; }
             const size_t got = std::fread(raw.data(), 1, raw.size(), f);
@@ -370,7 +397,8 @@ namespace Game::Anvil {
             if (got != raw.size()) { error = "short read on " + ext.filename().string(); return false; }
 
             // The .mcc holds the compressed stream only — no 5-byte header.
-            return Inflate(raw.data(), raw.size(), static_cast<uint8_t>(version & ~kExternalFlag), out, error);
+            compression = static_cast<uint8_t>(version & ~kExternalFlag);
+            return true;
         }
 
         const size_t payload = static_cast<size_t>(declared) - 1;
@@ -381,9 +409,10 @@ namespace Game::Anvil {
             return false;
         }
 
-        std::vector<uint8_t> raw(payload);
-        if (payload > 0 && !ReadAt(base + kChunkHeader, raw.data(), raw.size(), error)) return false;
-        return Inflate(raw.data(), raw.size(), version, out, error);
+        raw.resize(payload);
+        if (payload > 0 && !PositionalRead(base + kChunkHeader, raw.data(), raw.size(), error)) return false;
+        compression = version;
+        return true;
     }
 
     bool AnvilRegion::Write(int localX, int localZ, const std::vector<uint8_t>& payload,

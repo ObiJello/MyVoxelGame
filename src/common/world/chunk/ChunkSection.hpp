@@ -131,6 +131,31 @@ namespace Game {
             RecountRandomTicking();
         }
 
+        // The same for a container decoded off the wire, whose non-air count
+        // came with it: MC LevelChunkSection.read takes nonEmptyBlockCount from
+        // the packet rather than recounting (the sender's census is exact —
+        // see nonAirCount). The rest of the census only needs voxel counts
+        // when the palette holds a randomly ticking block; otherwise it follows
+        // from the palette (m_hasStates may then read true for an entry no
+        // voxel uses, the harmless direction). The full recount walked all
+        // 4096 voxels of every section of every chunk the client received.
+        void AdoptStatesFromWire(PalettedContainer&& states, uint16_t nonEmptyBlockCount) {
+            m_states = std::move(states);
+            if (m_states.IsGlobalPalette()) { RecountRandomTicking(); return; }
+            bool anyState = false;
+            for (const uint32_t id : m_states.Palette()) {
+                const BlockState st = BlockState::FromRawId(id);
+                if (BlockRandomlyTicks(static_cast<uint16_t>(st.Block()))) {
+                    RecountRandomTicking();
+                    return;
+                }
+                if (st != BlockStates::Default(st.Block())) anyState = true;
+            }
+            randomTickingCount = 0;
+            nonAirCount = nonEmptyBlockCount;
+            m_hasStates = anyState;
+        }
+
         // The full state at local (x,y,z) — MC's LevelChunkSection.getBlockState.
         // ONE container read: the flat id IS what is stored, so unlike the
         // (block, index) pair this needs no unpack and no second lookup.

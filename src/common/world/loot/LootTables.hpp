@@ -26,6 +26,8 @@
 
 namespace Game {
 
+    class DataComponentMap;
+
     class JavaRandom;
     class World;
 
@@ -43,8 +45,9 @@ namespace Game {
         const IBlockAccess* blocks = nullptr;
         glm::ivec3       pos{0, 0, 0};
         // MC's `this` entity parameter. True whenever a player/mob broke the
-        // block — false would mean an explosion or a piston did, which nothing
-        // produces yet.
+        // block — false for an entity-less explosion and for DropBlockLoot
+        // (MC dropResources without an entity: melting, lost support, a
+        // piston, flowing water).
         bool             brokenByEntity = true;
         // MC LootContextParams.EXPLOSION_RADIUS. Negative means ABSENT, which
         // is the state for every ordinary block break and is what makes
@@ -54,6 +57,13 @@ namespace Game {
         // (whose decay gamerule defaults false) still drops everything, while a
         // creeper's blast decays at 1/3.
         float            explosionRadius = -1.0f;
+        // MC LootContextParams.BLOCK_ENTITY, as what copy_components (source
+        // block_entity) reads from it: the components the broken block's
+        // entity collected (BlockEntity::CollectComponents) — taken before
+        // the cell is cleared, after its contents spilled, which is MC's
+        // order (removeBlock, then playerDestroy with the old entity). Null =
+        // no block entity.
+        const DataComponentMap* blockEntityComponents = nullptr;
         JavaRandom*      rng        = nullptr;   // required
     };
 

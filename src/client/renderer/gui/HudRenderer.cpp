@@ -1,4 +1,5 @@
 // File: src/client/renderer/gui/HudRenderer.cpp
+#include "SpectatorGui.hpp"
 #include "HudRenderer.hpp"
 #include "EffectsInInventory.hpp"
 #include "BossBarState.hpp"
@@ -8,6 +9,7 @@
 #include "common/network/packets/game/SetHealthS2CPacket.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Mth.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "client/resource/ResourcePacks.hpp"
 #include "stb_image.h"
@@ -92,8 +94,11 @@ namespace Render {
         // MC render order: boss bar first (BossHealthOverlay renders before
         // the hotbar layer), then crosshair → hotbar → health/food/armor → XP.
         RenderBossBar(graphics);
-        RenderAttackIndicator(graphics);
-        RenderItemHotbar(graphics, inventory);
+        if (!m_spectator || m_spectatorCrosshair) RenderAttackIndicator(graphics);
+        // MC Hud.extractHotbarAndDecorations: a spectator's hotbar is the
+        // spectator menu (SpectatorGui.extractHotbar), drawn only while open.
+        if (m_spectator) GetSpectatorGui().RenderHotbar(graphics);
+        else             RenderItemHotbar(graphics, inventory);
 
         graphics.NextStratum();
 
@@ -104,13 +109,23 @@ namespace Render {
             // Armor, hearts, food and air together: their rows are laid out
             // from one health-row count (MC Hud.extractPlayerHealth).
             RenderPlayerHealth(graphics);
-
+        }
+        // MC Hud.extractHotbarAndDecorations: the mount's hearts (in any
+        // game mode), then the contextual bar — the jump bar while riding
+        // a jumpable mount, else the experience bar — and the level.
+        if (!m_spectator) RenderVehicleHealth(graphics);
+        if (m_jumpableVehicle && !m_spectator) {
+            RenderJumpBar(graphics);
+            if (!m_statsHidden) RenderExperienceLevel(graphics);
+        } else if (!m_statsHidden) {
             RenderExperienceBar(graphics);
             RenderExperienceLevel(graphics);
         }
 
-        // Selected item name tooltip
-        RenderSelectedItemName(graphics, inventory);
+        // Selected item name tooltip — or, for a spectator, the menu's
+        // prompt / selected item (SpectatorGui.extractAction).
+        if (m_spectator) GetSpectatorGui().RenderAction(graphics);
+        else             RenderSelectedItemName(graphics, inventory);
 
         // MC Hud.extractRenderState: extractHotbarAndDecorations, then
         // extractEffects.
@@ -260,8 +275,13 @@ namespace Render {
         const int width = graphics.GetStringWidth(m_overlayMessage);
         const int x = graphics.GuiWidth() / 2 - width / 2;
         const int y = graphics.GuiHeight() - 68 - 4;
-        graphics.DrawStringWithBackdrop(m_overlayMessage, x, y, width,
-                                        (static_cast<uint32_t>(alpha) << 24) | 0x00FFFFFFu);
+        // animateOverlayMessageColor: Mth.hsvToArgb(t / 50, 0.7, 0.6, alpha)
+        // — the hue walks with the remaining time, so "Now Playing" cycles
+        // through the colours as it fades; otherwise ARGB.white(alpha).
+        const uint32_t color = m_animateOverlayMessageColor
+            ? Game::Mth::HsvToArgb(ticks / 50.0f, 0.7f, 0.6f, static_cast<uint32_t>(alpha))
+            : ((static_cast<uint32_t>(alpha) << 24) | 0x00FFFFFFu);
+        graphics.DrawStringWithBackdrop(m_overlayMessage, x, y, width, color);
     }
 
     void HudRenderer::OnSelectedSlotChanged(Game::BlockID blockId) {
@@ -372,6 +392,8 @@ namespace Render {
         for (int i = 0; i < 9; i++) {
             int x = screenCenter - 90 + i * 20 + 2;
             int y = bottomY - 16 - 3;
+            // Drawn as that hotbar slot (per-stack using_item models).
+            const Game::ScopedItemRenderSlot renderSlot(Game::Inventory::HotbarToIndex(i));
             RenderSlot(graphics, x, y, inventory.GetSlot(Game::Inventory::HotbarToIndex(i)));
         }
 
@@ -383,6 +405,7 @@ namespace Render {
         if (!offhand.IsEmpty()) {
             graphics.BlitSprite("hud/hotbar_offhand_left",
                                 screenCenter - 91 - 29, bottomY - 23, 29, 24);
+            const Game::ScopedItemRenderSlot renderSlot(Game::Inventory::OFFHAND_BEGIN);
             RenderSlot(graphics, screenCenter - 91 - 26, bottomY - 16 - 3, offhand);
         }
     }
@@ -513,10 +536,16 @@ namespace Render {
         RenderArmor(graphics, yLineBase, numHealthRows, healthRowHeight, xLeft);
         RenderHearts(graphics, xLeft, yLineBase, healthRowHeight, heartOffsetIndex, maxHealth,
                      currentHealth, oldHealth, totalAbsorption, blink);
-        // No ridden vehicle with hearts here, so the food row always draws
-        // and the air row sits above it.
-        RenderFood(graphics, yLineBase, xRight);
-        yLineAir -= 10;
+        // A ridden mount's hearts take the food row's place (Hud
+        // .extractVehicleHealth); the air row then sits above all its rows.
+        if (m_vehicleHearts == 0) {
+            RenderFood(graphics, yLineBase, xRight);
+            yLineAir -= 10;
+        } else {
+            // getAirBubbleYLine.
+            const int rows = (m_vehicleHearts + 9) / 10;
+            yLineAir -= (rows - 1) * 10;
+        }
         RenderAir(graphics, yLineAir, xRight);
     }
 
@@ -679,6 +708,42 @@ namespace Render {
                 graphics.BlitSprite(XP_BAR_PROGRESS_SPRITE, 182, 5,
                                    0, 0, screenCenter - 91, y, progressWidth, 5);
             }
+        }
+    }
+
+    void HudRenderer::RenderJumpBar(GuiGraphics& graphics) {
+        // MC JumpableVehicleBar: left = centre - 91, top = height - 32 + 3.
+        const int left = graphics.GuiWidth() / 2 - 91;
+        const int top = graphics.GuiHeight() - 32 + 3;
+        graphics.BlitSprite("hud/jump_bar_background", left, top, 182, 5);
+        if (m_jumpCooldown) {
+            graphics.BlitSprite("hud/jump_bar_cooldown", left, top, 182, 5);
+            return;
+        }
+        // Mth.lerpDiscrete(scale, 0, 182).
+        const int progress = static_cast<int>(std::floor(m_jumpRidingScale * 181.0f)) +
+                             (m_jumpRidingScale > 0.0f ? 1 : 0);
+        if (progress > 0) {
+            graphics.BlitSprite("hud/jump_bar_progress", 182, 5, 0, 0, left, top, progress, 5);
+        }
+    }
+
+    void HudRenderer::RenderVehicleHealth(GuiGraphics& graphics) {
+        int hearts = m_vehicleHearts;
+        if (hearts <= 0) return;
+        const int currentHealth = m_vehicleHealth;
+        const int xRight = graphics.GuiWidth() / 2 + 91;
+        int yo = graphics.GuiHeight() - 39;
+        for (int baseHealth = 0; hearts > 0; baseHealth += 20) {
+            const int rowHearts = std::min(hearts, 10);
+            hearts -= rowHearts;
+            for (int i = 0; i < rowHearts; ++i) {
+                const int xo = xRight - i * 8 - 9;
+                graphics.BlitSprite("hud/heart/vehicle_container", xo, yo, 9, 9);
+                if (i * 2 + 1 + baseHealth < currentHealth)  graphics.BlitSprite("hud/heart/vehicle_full", xo, yo, 9, 9);
+                if (i * 2 + 1 + baseHealth == currentHealth) graphics.BlitSprite("hud/heart/vehicle_half", xo, yo, 9, 9);
+            }
+            yo -= 10;
         }
     }
 

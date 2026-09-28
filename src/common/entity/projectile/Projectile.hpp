@@ -31,6 +31,11 @@ namespace Game {
         // punch back (isPickable: #minecraft:redirectable_projectile — the
         // fireball and the wind charges), else 0.
         float GetPickRadius() const override;
+        // MC Entity.blocksBuilding is false unless a subclass sets it, and no
+        // projectile does (nor do the lightning bolt, area effect cloud,
+        // evoker fangs and eye of ender that ride this base here): an arrow
+        // stuck in the ground never stops a block going in or a mob spawning.
+        bool BlocksBuilding() const override { return false; }
         // Projectiles ARE serialized. The base Entity default (true) applies:
         // the owner reference that used to make this impossible now round-trips
         // as a UUID through EntityRef, resolved lazily like every other
@@ -133,6 +138,11 @@ namespace Game {
             (void)hit;
         }
         virtual void OnHitBlock(const HitResult& hit) { (void)hit; }
+        // MC Projectile.onHit's tail: gameEvent(PROJECTILE_LAND) — at the
+        // hit point for an entity (no state), at the struck block's centre
+        // with its state for a block. Called by OnHit, and by the arrow's own
+        // hit loop, which does not route through OnHit.
+        void EmitProjectileLand(const HitResult& hit);
 
         // MC: a projectile never hits the dragon ITSELF — it hits a part
         // entity, whose hurt() routes EnderDragon.hurt(part, source, damage):
@@ -184,6 +194,9 @@ namespace Game {
         // engine's equivalent of MC's tick() update — every projectile tick
         // funnels through Clip). Saved as MC's "LeftOwner".
         bool m_leftOwner = false;
+        // MC Projectile.hasBeenShot: PROJECTILE_SHOOT is raised once, on the
+        // first tick (see Clip, the tick funnel).
+        bool m_hasBeenShot = false;
     };
 
 } // namespace Game

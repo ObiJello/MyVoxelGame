@@ -48,23 +48,21 @@ private:
     const NoiseBiomeSource* m_noiseBiomeSource;  // Reference: BiomeManager.java line 15
     int64_t m_biomeZoomSeed;                     // Reference: BiomeManager.java line 16
 
+public:
     /**
-     * Calculate "fiddled" distance with random perturbation
-     * Reference: BiomeManager.java lines 85-98
-     *
-     * This adds small random offsets to grid points to prevent blocky biome boundaries.
-     *
-     * @param seed - Base seed for randomness
-     * @param xRandom - X coordinate for seed mixing
-     * @param yRandom - Y coordinate for seed mixing
-     * @param zRandom - Z coordinate for seed mixing
-     * @param distanceX - Distance in X direction
-     * @param distanceY - Distance in Y direction
-     * @param distanceZ - Distance in Z direction
-     * @return Squared distance with random perturbation
+     * The three fiddle offsets of one quart corner.
+     * Reference: BiomeManager.java getFiddledDistance lines 86-96
      */
-    static double getFiddledDistance(int64_t seed, int32_t xRandom, int32_t yRandom, int32_t zRandom,
-                                    double distanceX, double distanceY, double distanceZ);
+    struct CornerFiddle {
+        int32_t x = 0, y = 0, z = 0;
+        double fiddleX = 0.0, fiddleY = 0.0, fiddleZ = 0.0;
+    };
+
+    // The fiddles of one corner, uncached; getBiome reads them through a
+    // per-thread corner cache (BiomeManager.cpp).
+    static CornerFiddle computeCornerFiddle(int64_t seed, int32_t xRandom, int32_t yRandom, int32_t zRandom);
+
+private:
 
     /**
      * Generate random fiddle value from seed

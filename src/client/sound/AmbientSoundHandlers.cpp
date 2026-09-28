@@ -123,7 +123,6 @@ namespace Client::AmbientSounds {
         float g_moodiness = 0.0f;                     // BiomeAmbientSoundsHandler
         std::optional<std::string> g_previousLoopSound;
         std::map<std::string, std::shared_ptr<LoopSoundInstance>> g_loopSounds;
-        int   g_rainSoundTime = 0;                    // ClientLevel.rainSoundTime
 
         glm::ivec3 Containing(double x, double y, double z) {
             return glm::ivec3(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)),
@@ -269,57 +268,10 @@ namespace Client::AmbientSounds {
             }
         }
 
-        // ── ClientLevel.tickWeatherEffects: the rain's sound half ───────────
-        void TickRain(const SoundHost::TickContext& ctx, const Game::IBlockAccess& blocks) {
-            const float rainLevel = Render::EnvironmentState::Get().RainLevel();
-            if (!(rainLevel > 0.0f)) return;
-            const int particles = Platform::g_gameSettings.GetParticles();   // 0 all, 1 decreased, 2 minimal
-            const int weatherRadius = std::clamp(Platform::g_gameSettings.GetInt("weatherRadius", 10), 3, 10);
-            const int diameter = 2 * weatherRadius + 1;
-            int samples = static_cast<int>(0.225f * static_cast<float>(diameter * diameter) * rainLevel * rainLevel)
-                          / (particles == 1 ? 2 : 1);
-            // Only the LAST qualifying column is what the sound needs; the
-            // particle spawns MC makes from the others are not this module's.
-            // A bounded sample keeps the column scans cheap.
-            samples = std::min(samples, 24);
-
-            const glm::ivec3 camera = Containing(ctx.cameraPosition.x, ctx.cameraPosition.y, ctx.cameraPosition.z);
-            // The MOTION_BLOCKING heightmap within MC's ±10 of the camera:
-            // a column open to the sky over the window, scanned down to its
-            // first solid or fluid cell.
-            std::optional<glm::ivec3> rainPosition;
-            for (int i = 0; i < samples; ++i) {
-                const int x = camera.x + g_random.NextInt(diameter) - weatherRadius;
-                const int z = camera.z + g_random.NextInt(diameter) - weatherRadius;
-                // The column must be open to the sky above the scan window.
-                if (blocks.GetRawBrightness(x, camera.y + 10, z) == 0) continue;
-                std::optional<int> top;
-                for (int y = camera.y + 10; y >= camera.y - 10; --y) {
-                    if (blocks.IsBlockSolid(x, y, z) || blocks.IsBlockFluid(x, y, z)) { top = y; break; }
-                }
-                if (!top) continue;
-                // getPrecipitationAt == RAIN: a biome that rains and is not
-                // cold enough to snow.
-                const Game::BiomeInfo& biome = Game::BiomeRegistry::Get(blocks.GetBiome(x, *top, z));
-                if (!(biome.downfall > 0.0f) || biome.temperature < 0.15f) continue;
-                rainPosition = glm::ivec3(x, *top, z);   // heightmap pos .below()
-                if (particles == 2) break;               // MINIMAL
-            }
-            if (rainPosition && g_random.NextInt(3) < g_rainSoundTime++) {
-                g_rainSoundTime = 0;
-                // MC: the camera's own column is roofed (its heightmap is
-                // above the camera) — the rain is overhead, muffled.
-                const bool roofed = blocks.GetRawBrightness(camera.x, camera.y, camera.z) == 0;
-                const glm::dvec3 at = glm::dvec3(*rainPosition) + glm::dvec3(0.5);
-                if (rainPosition->y > camera.y + 1 && roofed) {
-                    Sounds::PlayLocal(at, Game::SoundEvents::WEATHER_RAIN_ABOVE, Game::SoundSource::Weather,
-                                      0.1f, 0.5f, false);
-                } else {
-                    Sounds::PlayLocal(at, Game::SoundEvents::WEATHER_RAIN, Game::SoundSource::Weather,
-                                      0.2f, 1.0f, false);
-                }
-            }
-        }
+        // The rain sound (ClientLevel.tickWeatherEffects' sound half) lives
+        // with its particle half in Client::ParticleTicks::TickWeather: it
+        // plays at the last splash column the particle loop picked, from the
+        // same seeded random stream, exactly as MC shares them.
 
         void TickStillness(const SoundHost::TickContext& ctx) {
             const bool stilled = ctx.dimension == Game::DimensionId::Hush &&
@@ -341,7 +293,6 @@ namespace Client::AmbientSounds {
         TickUnderwater();
         TickBubbleColumn(player, *ctx.blocks);
         TickBiome(ctx, player, *ctx.blocks);
-        TickRain(ctx, *ctx.blocks);
     }
 
     void Reset() {
@@ -354,7 +305,6 @@ namespace Client::AmbientSounds {
         g_underwaterTickDelay = 0;
         g_wasInBubbleColumn = false;
         g_bubbleFirstTick = true;
-        g_rainSoundTime = 0;
         g_stillnessGain = 1.0f;
         LocalPlayerSounds::Reset();
         // The city loops belong to the same world as the biome loops.

@@ -11,33 +11,32 @@
 //   life starts at 2 (START_LIFE); `flashes` is 1..3.
 //   life == 2, the first tick:
 //       client — the thunder (10000 volume) and impact sounds;
-//       server — spawnFire(4) on NORMAL/HARD difficulty.
+//       server — spawnFire(4) on NORMAL/HARD difficulty, powerLightningRod
+//                (LightningRodBlock.onLightningStrike on a rod under the
+//                strike), clearCopperOnLightningStrike (the de-oxidation
+//                random walk), the LIGHTNING_STRIKE game event.
 //   --life each tick. Once below zero: with no flashes left the bolt
 //   discards; otherwise, after a random 0..9 extra ticks, it re-flashes
 //   (life = 1, a NEW seed so the bolt redraws in a new shape, spawnFire(0)).
 //   While life >= 0:
 //       client — ClientLevel.setSkyFlashTime(2) (EntityLevel::SetSkyFlashTime);
 //       server — unless visual-only, every living entity in the box
-//                (±3 horizontally, -3..+9 vertically) is thunderHit.
+//                (±3 horizontally, -3..+9 vertically) is thunderHit
+//                (Entity::ThunderHit, virtual: the base burn + 5
+//                MobDamageSource::Lightning; the creeper charges, a pig
+//                becomes a zombified piglin and a villager a witch off
+//                Peaceful, a mooshroom swaps red/brown once per bolt, a
+//                turtle dies, an armor stand and the hanging entities
+//                shrug it off, a cushion breaks).
 //
 // Both sides run this tick independently from their own entity random — MC
 // does not sync the seed or the flash count, and neither does this.
 //
-// Not modelled, each named at its site in the .cpp:
-//   * powerLightningRod (LightningRodBlock.onLightningStrike) and
-//     clearCopperOnLightningStrike (the copper de-oxidation walk);
-//   * the per-type thunderHit overrides — creeper powering, pig → zombified
-//     piglin, villager → witch, mooshroom recolour, turtle bowl drop, copper
-//     golem de-oxidation, armor stand / cushion handling (the hanging
-//     entities' — paintings, item frames — is: their thunderHit does nothing).
-//     Every entity gets Entity.thunderHit's base behaviour (ThunderHit below);
-//   * the LIGHTNING_STRIKE / CHANNELED_LIGHTNING advancement triggers, the
-//     `cause` player (trident channeling) and the hitEntities set that only
-//     feeds them, and gameEvent(LIGHTNING_STRIKE) (no sculk);
-//   * a lightning damage type: the 5 damage lands as MobDamageSource::Generic
-//     with no attacker — the same no-knockback, no-attacker hit MC's
-//     lightning_bolt type gives (it is in #no_knockback) — but the death
-//     message reads as a generic death.
+// Not modelled: the LIGHTNING_STRIKE / CHANNELED_LIGHTNING advancement
+// triggers, the `cause` player (trident channeling) and the hitEntities set
+// that only feeds them; the copper golem's weather-state step back (the
+// golem has no weathering here); dropped items and XP orbs are not Entities,
+// so the sweep never burns them (MC's ItemEntity takes the base hit).
 #pragma once
 
 #include "common/core/JavaRandom.hpp"
@@ -96,9 +95,17 @@ namespace Game {
             return groupData;
         }
 
+        // MC getStrikePosition — the block under the bolt.
+        glm::ivec3 GetStrikePosition() const;
+
     private:
         // MC spawnFire(additionalSources).
         void SpawnFire(int additionalSources);
+        // MC powerLightningRod — LightningRodBlock.onLightningStrike on a
+        // rod at the strike position.
+        void PowerLightningRod();
+        // MC clearCopperOnLightningStrike — the de-oxidation random walk.
+        void ClearCopperOnLightningStrike();
 
         // MC Entity.random — the bolt's own stream, seeded from the level's
         // on construction (MC seeds every entity's random the same way).

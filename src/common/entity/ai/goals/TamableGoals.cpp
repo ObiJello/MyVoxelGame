@@ -33,7 +33,8 @@ namespace Game {
         if (!m_mob->onGround) return false;
 
         LivingEntity* owner = m_tamable->GetOwner();
-        if (!owner) return true;   // MC: no (reachable) owner → sit anyway
+        // MC: no owner, or one in another level → sit anyway.
+        if (!owner || owner->Level() != m_mob->Level()) return true;
         // MC: within 12 blocks of an owner who is under attack → refuse, so
         // the pet stands up to defend rather than sitting through the fight.
         return m_mob->DistanceToSqr(*owner) < 144.0 &&
@@ -122,8 +123,20 @@ namespace Game {
 
     TamableAnimalPanicGoal::TamableAnimalPanicGoal(PathfinderMob* mob,
                                                    TamableAnimal* tamable,
-                                                   double speedModifier)
-        : PanicGoal(mob, speedModifier), m_tamable(tamable) {}
+                                                   double speedModifier,
+                                                   Causes causes)
+        : PanicGoal(mob, speedModifier), m_tamable(tamable), m_causes(causes) {}
+
+    bool TamableAnimalPanicGoal::ShouldPanic() const {
+        if (m_causes == Causes::All) return PanicGoal::ShouldPanic();
+        // MC shouldPanic against #panic_environmental_causes. Of that tag
+        // (cactus, freeze, hot_floor, in_fire, lava, lightning_bolt,
+        // on_fire) this engine's damage sources name fire and lava; it has no
+        // cactus, freeze, hot-floor or lightning damage type of its own.
+        if (!m_mob->HasLastDamageSource()) return false;
+        const MobDamageSource source = m_mob->GetLastDamageSource();
+        return source == MobDamageSource::Fire || source == MobDamageSource::Lava;
+    }
 
     void TamableAnimalPanicGoal::Tick() {
         if (!m_tamable->UnableToMoveToOwner() &&
@@ -137,11 +150,14 @@ namespace Game {
 
     namespace {
 
-        // MC TargetGoal.canAttack(target, TargetingConditions.DEFAULT),
-        // reduced to what the port's conditions carry.
-        bool CanAttackOwnerFoe(Mob* mob, LivingEntity* target, double follow) {
+        // MC TargetGoal.canAttack(target, TargetingConditions.DEFAULT).
+        // DEFAULT is a bare forCombat(): line of sight and the combat rules,
+        // but NO range — the owner's foe is taken on however far away it is
+        // (TargetGoal.canContinueToUse then drops it past the follow range),
+        // and the owner's timestamp is spent either way.
+        bool CanAttackOwnerFoe(Mob* mob, LivingEntity* target) {
             if (!target || !target->IsAlive()) return false;
-            return TargetingConditions::ForCombat().Range(follow).Test(mob, *target);
+            return TargetingConditions::ForCombat().Test(mob, *target);
         }
 
     } // namespace
@@ -155,10 +171,20 @@ namespace Game {
         if (!m_tamable->IsTame() || m_tamable->IsOrderedToSit()) return false;
         LivingEntity* owner = m_tamable->GetOwner();
         if (!owner) return false;
+        // MC: owner.getLastDamageSource(100) must be live and not in
+        // #no_wolf_retaliation. That tag's one member is sulfur_cube_hot,
+        // which this engine deals as Fire with the hot sulfur cube as the
+        // attacker (SulfurCube::ApplyContactDamage) — so a burn from a cube
+        // is the one blow the pet lets go.
+        if (!owner->HasLastDamageSourceWithin(100)) return false;
         m_ownerLastHurtBy = dynamic_cast<LivingEntity*>(owner->GetLastHurtByMob());
+        if (owner->GetLastDamageSource() == MobDamageSource::Fire && m_ownerLastHurtBy &&
+            m_ownerLastHurtBy->GetType() == EntityTypeId::SulfurCube) {
+            return false;
+        }
         const int64_t ts = owner->GetLastHurtByMobTimestamp();
         return ts != m_timestamp &&
-               CanAttackOwnerFoe(m_mob, m_ownerLastHurtBy, GetFollowDistance()) &&
+               CanAttackOwnerFoe(m_mob, m_ownerLastHurtBy) &&
                m_tamable->WantsToAttack(*m_ownerLastHurtBy, *owner);
     }
 
@@ -188,7 +214,7 @@ namespace Game {
         m_ownerLastHurt = dynamic_cast<LivingEntity*>(owner->GetLastHurtMob());
         const int64_t ts = owner->GetLastHurtMobTimestamp();
         return ts != m_timestamp &&
-               CanAttackOwnerFoe(m_mob, m_ownerLastHurt, GetFollowDistance()) &&
+               CanAttackOwnerFoe(m_mob, m_ownerLastHurt) &&
                m_tamable->WantsToAttack(*m_ownerLastHurt, *owner);
     }
 
@@ -235,6 +261,10 @@ namespace Game {
         m_wolf->SetIsInterested(true);
         m_lookTime = AdjustedTickDelay(
             40 + m_wolf->Level()->Random().NextInt(40));
+    }
+
+    void BegGoal::ClearReferenceTo(const Entity* entity) {
+        if (m_player && static_cast<const Entity*>(m_player) == entity) m_player = nullptr;
     }
 
     void BegGoal::Stop() {

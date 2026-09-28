@@ -451,6 +451,7 @@ public:
     static levelgen::ConfiguredFeature* DEAD_CANOPY_TREE;
     static levelgen::ConfiguredFeature* MANGROVE_TREE;
     static levelgen::ConfiguredFeature* DARKWOOD_TREE;
+    static levelgen::ConfiguredFeature* HOMEGROWN_DARKWOOD_TREE;   // darkwood sapling's tree
     static levelgen::ConfiguredFeature* DARK_FOREST_OAK_TREE;
     static levelgen::ConfiguredFeature* DARK_FOREST_BIRCH_TREE;
     static levelgen::ConfiguredFeature* DARK_OAK_BUSH;

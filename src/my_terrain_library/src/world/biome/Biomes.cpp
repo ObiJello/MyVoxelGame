@@ -52,7 +52,37 @@ const TwilightClimate* twilightClimate(const BiomeKey& key) {
 
 } // namespace
 
+namespace {
+
+// The biome fill and the carvers resolve a key per quart, from every worldgen
+// worker at once; neighbouring quarts are nearly always the same few biomes.
+// A registry entry is created once and never replaced (nothing calls
+// registerBiome), so a Biome* seen once stays the answer for its key.
+struct RecentBiome {
+    BiomeKey key;
+    Biome* biome = nullptr;
+};
+constexpr size_t kRecentBiomes = 4;
+thread_local RecentBiome t_recentBiomes[kRecentBiomes];
+thread_local size_t t_nextRecentBiome = 0;
+
+} // namespace
+
 BiomeHolder Biomes::get(const BiomeKey& key) {
+    for (const RecentBiome& recent : t_recentBiomes) {
+        if (recent.biome != nullptr && recent.key == key) {
+            return recent.biome;
+        }
+    }
+    Biome* biome = getLocked(key);
+    RecentBiome& slot = t_recentBiomes[t_nextRecentBiome];
+    t_nextRecentBiome = (t_nextRecentBiome + 1) % kRecentBiomes;
+    slot.key = key;
+    slot.biome = biome;
+    return biome;
+}
+
+Biome* Biomes::getLocked(const BiomeKey& key) {
     // Whole find-or-create is under the registry mutex: get() is reached
     // from parallel worldgen phases and inserts on miss.
     std::lock_guard<std::mutex> lock(registryMutex());

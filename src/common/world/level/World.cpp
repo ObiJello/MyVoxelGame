@@ -1,5 +1,7 @@
 // File: src/common/world/level/World.cpp
+#include "common/world/block/CopperGolemStatueBlock.hpp"
 #include "World.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/world/lighting/LevelLightManager.hpp"
 #include "common/world/lighting/BlockLightProperties.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -11,6 +13,8 @@
 #include "../block/entity/BlockEntity.hpp"
 #include "../block/entity/BlockEntityType.hpp"
 #include "../block/entity/BlockEntityTypes.hpp"
+#include "../block/entity/DoubleChest.hpp"   // IsCopperChestBlock: the kept block entity
+#include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "../chunk/Chunk.hpp"
 #include "../math/WorldCoordinates.hpp"
 #include "../../physics/RayCast.hpp"
@@ -27,6 +31,8 @@
 #include "../fluid/FlowingFluid.hpp"
 #include "../block/piston/PistonBaseBlock.hpp"   // UpdateFromNeighbourShapes
 #include "NeighborUpdater.hpp"
+#include "gameevent/GameEventDispatcher.hpp"
+#include "Precipitation.hpp"
 #include "../block/RedstoneComponents.hpp"
 #include "../block/RedstoneStateUtil.hpp"
 #include <unordered_set>
@@ -51,7 +57,8 @@ namespace Game {
 
     World::World()
         : m_neighborUpdater(std::make_unique<CollectingNeighborUpdater>(
-              *this, CollectingNeighborUpdater::kDefaultMaxChainedNeighborUpdates)) {
+              *this, CollectingNeighborUpdater::kDefaultMaxChainedNeighborUpdates)),
+          m_gameEvents(std::make_shared<GameEventDispatcher>(*this)) {
         Log::Info("World created");
     }
 
@@ -392,6 +399,24 @@ namespace Game {
         return worldY > GetSurfaceHeight(worldX, worldZ, HeightmapType::WorldSurface);
     }
 
+    BiomeRegistry::Precipitation World::PrecipitationAt(int worldX, int worldY, int worldZ) const {
+        // MC Level.precipitationAt, in its order.
+        if (!IsRaining()) return BiomeRegistry::Precipitation::None;
+        // canSeeSky — BlockAndLightGetter's form, the stored sky light at
+        // full strength (a leaf canopy, which dims it by one, keeps the rain
+        // off; glass does not, and the heightmap test below catches it).
+        if (GetBrightness(Lighting::LightLayer::Sky, worldX, worldY, worldZ) < 15) {
+            return BiomeRegistry::Precipitation::None;
+        }
+        // getHeightmapPos(MOTION_BLOCKING, pos).getY() > pos.getY(): the
+        // first free cell above the column's top motion-blocking block.
+        if (GetSurfaceHeight(worldX, worldZ, HeightmapType::MotionBlocking) + 1 > worldY) {
+            return BiomeRegistry::Precipitation::None;
+        }
+        return BiomeRegistry::PrecipitationAt(GetBiome(worldX, worldY, worldZ), worldX, worldY, worldZ,
+                                              DimensionSeaLevel(m_dimension));
+    }
+
     bool World::IsValidPosition(int worldX, int worldY, int worldZ) const {
         return worldY >= MIN_Y && worldY <= MAX_Y;
     }
@@ -556,7 +581,15 @@ namespace Game {
         // chest next to the one you just placed, and churning a
         // BlockEntityRemove + BlockEntityData pair at the client for a
         // block that never went away.
-        if (blockChanged && BlockEntityTypes::HasBlockEntity(oldBlockId)) {
+        //
+        // MC BlockBehaviour.shouldChangedStateKeepBlockEntity: a block that
+        // turns into another one sharing its entity keeps it — a copper
+        // chest oxidizing, being waxed or scraped stays the same chest with
+        // the same contents (CopperChestBlock: `oldState.is(#copper_chests)`).
+        // CopperGolemStatueBlock: `oldState.is(#copper_golem_statues)`.
+        const bool keepBlockEntity = (IsCopperChestBlock(blockId) && IsCopperChestBlock(oldBlockId)) ||
+                                     (IsCopperGolemStatue(blockId) && IsCopperGolemStatue(oldBlockId));
+        if (blockChanged && !keepBlockEntity && BlockEntityTypes::HasBlockEntity(oldBlockId)) {
             if (auto chunk = m_chunkProvider->GetChunk(chunkPos)) {
                 // MC BlockEntity.preRemoveSideEffects, gated on flag 256. A
                 // container's contents are dropped by whoever is breaking it
@@ -787,7 +820,13 @@ namespace Game {
         }
         const BlockState next = BlockRegistry::ContainsWater(state)
             ? BlockStates::Default(BlockID::Water) : BlockState{};
-        return SetBlock(pos, next, UpdateFlags::All, updateLimit);
+        const bool destroyed = SetBlock(pos, next, UpdateFlags::All, updateLimit);
+        // MC Level.destroyBlock: gameEvent(BLOCK_DESTROY, pos,
+        // Context.of(breaker, blockState)) once the block is gone. (No
+        // breaker reaches this overload; MC's is null for every caller that
+        // does not pass one.)
+        if (destroyed) GameEvent(GameEventId::BlockDestroy, pos, GameEventContext::Of(state));
+        return destroyed;
     }
 
     bool World::CanBlockSurviveAt(int worldX, int worldY, int worldZ) const {
@@ -895,6 +934,7 @@ namespace Game {
     void World::ExecuteShapeUpdate(Direction direction, const glm::ivec3& pos,
                                    const glm::ivec3& neighborPos, BlockState neighborState,
                                    uint32_t updateFlags, int updateLimit) {
+        (void)neighborPos;
         if (!IsValidPosition(pos.x, pos.y, pos.z)) return;
         const BlockState currentState = GetBlockState(pos.x, pos.y, pos.z);
         const BlockID    id           = currentState.Block();
@@ -906,15 +946,27 @@ namespace Game {
             return;
         }
 
+        const BlockState newState = UpdateShape(currentState, direction, pos, neighborState);
+        UpdateOrDestroy(currentState, newState, pos, updateFlags, updateLimit);
+    }
+
+    // MC BlockState.updateShape, as the engine assembles it: the block's own
+    // hook, the waterlogged tick every SimpleWaterloggedBlock books, and the
+    // generic support rule.
+    BlockState World::UpdateShape(BlockState state, Direction direction, const glm::ivec3& pos,
+                                  BlockState neighborState) {
+        const BlockID id = state.Block();
+        if (id == BlockID::Air) return state;   // air's updateShape is the identity
+
         const Block& def = BlockRegistry::Get(id);
-        BlockState newState = currentState;
+        BlockState newState = state;
 
         // MC BlockState.updateShape — a neighbour may TRANSFORM rather than
         // just survive-or-die.
         bool transformed = false;
         if (def.updateShape) {
             BlockState outState;
-            if (def.updateShape(*this, pos, currentState, direction, neighborState.Block(),
+            if (def.updateShape(*this, pos, state, direction, neighborState.Block(),
                                 outState, &m_blockTicks)) {
                 newState    = outState;
                 transformed = true;
@@ -930,7 +982,7 @@ namespace Game {
         // block that never got its own updateShape ported would otherwise
         // hold its water forever. Plain water/lava cells book their own
         // tick through LiquidBlock's updateShape above.
-        if (id != BlockID::Water && id != BlockID::Lava && BlockRegistry::ContainsWater(currentState)) {
+        if (id != BlockID::Water && id != BlockID::Lava && BlockRegistry::ContainsWater(state)) {
             Fluids::ScheduleTick(*this, pos, FluidType::Water);
         }
 
@@ -942,8 +994,7 @@ namespace Game {
             !CanBlockSurviveAt(pos.x, pos.y, pos.z)) {
             newState = BlockState{};
         }
-
-        UpdateOrDestroy(currentState, newState, pos, updateFlags, updateLimit);
+        return newState;
     }
 
     // MC Block.updateOrDestroy, verbatim: AIR from updateShape is a DESTROY
@@ -953,6 +1004,15 @@ namespace Game {
                                 uint32_t updateFlags, int updateLimit) {
         if (newState == oldState) return;
         if (newState.Block() == BlockID::Air) {
+            // MC Level.destroyBlock: levelEvent 2001 (the break puff and
+            // sound) for anything but fire — a torch whose wall went, the
+            // top of a tall plant, a door's other half.
+            const BlockID oldBlock = oldState.Block();
+            if (oldBlock != BlockID::Air && oldBlock != BlockID::Fire && oldBlock != BlockID::SoulFire &&
+                !IsClientSide()) {
+                PlayLevelEventSound(*this, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                    static_cast<int>(oldState.RawId()), Random());
+            }
             DestroyBlock(pos, (updateFlags & UpdateFlags::SuppressDrops) == 0, updateLimit);
         } else {
             SetBlock(pos, newState, updateFlags & ~UpdateFlags::SuppressDrops, updateLimit);
@@ -1439,12 +1499,10 @@ namespace Game {
                           zo + ((val >> 8) & 15));
     }
 
-    // Port of MC ServerLevel.tickChunk (ServerLevel.java:452-492), block half.
-    //
-    // The precipitation half of tickChunk (ice and snow forming) is deliberately
-    // absent — it needs biome temperature and weather, neither of which exists
-    // here. When either arrives it belongs at the top of this function, in the
-    // same `for i < tickSpeed` shape MC uses.
+    // Port of MC ServerLevel.tickChunk (ServerLevel.java:470-514): the
+    // "iceandsnow" precipitation samples, then the section random ticks, per
+    // chunk and in that order — both draw from the same level random, so the
+    // order is part of the port.
     void World::PerformRandomBlockTick() {
         PROFILE_ZONE_N("RandomTick");
 
@@ -1476,6 +1534,15 @@ namespace Game {
 
             const int minX = cp.x * Math::CHUNK_SIZE_X;
             const int minZ = cp.z * Math::CHUNK_SIZE_Z;
+
+            // MC tickChunk's "iceandsnow": one chance in 48 per sample of
+            // freezing (and, while it rains, snowing on) a random column
+            // (Precipitation.hpp).
+            for (int i = 0; i < tickSpeed; ++i) {
+                if (m_tickRandom.NextInt(48) == 0) {
+                    Precipitation::TickPrecipitation(*this, GetBlockRandomPos(minX, 0, minZ, 15));
+                }
+            }
 
             for (int sectionIndex = 0; sectionIndex < Math::SECTIONS_PER_CHUNK; ++sectionIndex) {
                 ChunkSection* section = chunk->GetSection(sectionIndex);
@@ -1581,6 +1648,13 @@ namespace Game {
         // logic framerate-independent.
         if (!m_chunkProvider) return;
         constexpr float kTickDt = 1.0f / 20.0f;
+        // Game events posted from a parallel batch (see GameEventDispatcher's
+        // THREADS note) reach their listeners before those listeners tick.
+        if (m_gameEvents) {
+            m_gameEvents->FlushDeferred();
+            // Registrations left behind by unloaded chunks, every 30 s.
+            if (m_gameTime % 600 == 0) m_gameEvents->PruneUnloadedSections();
+        }
 
         // Only chunks that hold a block entity, gathered in one pass under the
         // cache lock — walking every loaded chunk through GetChunk cost a lock
@@ -1626,6 +1700,9 @@ namespace Game {
             }
             if (anyDirty) m_chunkProvider->MarkChunkForSave(pos);
         }
+        // A jukebox song that no block entity ticked this pass has left the
+        // world (its chunk unloaded): the global record lets it go.
+        JukeboxSongRegistry::EndTick(GetDimension());
     }
 
     void World::EntityTick() {

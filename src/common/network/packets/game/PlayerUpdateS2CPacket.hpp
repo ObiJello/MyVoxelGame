@@ -54,6 +54,41 @@ namespace Network {
         // `invisible` above as well). Trailing; absent = no effects.
         uint8_t              effectFlags = 0;
         std::vector<uint8_t> effectParticles;
+        // MC Entity.isSprinting (DATA_SHARED_FLAGS bit 3): the receiver kicks
+        // up the sprint dust under this player (Entity.spawnSprintParticle).
+        // Trailing; absent = not sprinting.
+        bool                 sprinting = false;
+        // MC AvatarRenderer.getArmPose for both arms (PlayerArmPose.hpp
+        // ordinals) and the item-use state HumanoidModel reads (isUsingItem,
+        // useItemHand, ticksUsingItem) — a morphed player's humanoid body is
+        // posed from them on every other client.
+        uint8_t   rightArmPose = 0;
+        uint8_t   leftArmPose  = 0;
+        bool      usingItem    = false;
+        uint8_t   useItemHand  = 0;
+        uint32_t  ticksUsingItem = 0;
+        // MC LivingEntity.isFallFlying (shared flag 7): the player glides on
+        // an elytra — a firework rocket attached to them rides at their hand.
+        // Trailing; absent = not gliding.
+        bool      fallFlying = false;
+        // The chest slot's elytra, for MC's WingsLayer on every other client:
+        // bit 0 an elytra is worn (an EQUIPPABLE chest item with the elytra
+        // asset), bit 1 it has the enchantment glint (ItemStack.hasFoil).
+        // Trailing; absent = none.
+        uint8_t   elytraFlags = 0;
+        // HumanoidRenderState.maxCrossbowChargeDuration: the used crossbow's
+        // charge time in ticks (Quick Charge shortens it). Trailing; absent =
+        // 25 (1.25 s).
+        uint8_t   maxCrossbowCharge = 25;
+        // MC LivingEntity.isAutoSpinAttack (DATA_LIVING_ENTITY_FLAGS bit 4):
+        // a riptide in flight — the spinning body and its swirl. Trailing;
+        // absent = not spinning.
+        bool      autoSpinAttack = false;
+        // /morph: the morph's look beyond the code (Game::Morph
+        // DefaultVariantOf — a tropical fish's packed variant, a salmon's
+        // size). Trailing; absent = the type's default.
+        int32_t   morphVariant = 0;
+        bool      hasMorphVariant = false;   // read side: the field was on the wire
     };
 
     namespace Serialization {
@@ -76,6 +111,16 @@ namespace Network {
             buffer.WriteVarInt(packet.morph);
             buffer.WriteByte(packet.morphAnim);
             WriteEffectVisuals(buffer, packet.effectFlags, packet.effectParticles);
+            buffer.WriteByte(packet.sprinting ? 1 : 0);
+            buffer.WriteByte(packet.rightArmPose);
+            buffer.WriteByte(packet.leftArmPose);
+            buffer.WriteByte(static_cast<uint8_t>((packet.usingItem ? 0x01 : 0) | (packet.useItemHand ? 0x02 : 0)));
+            buffer.WriteVarInt(packet.ticksUsingItem);
+            buffer.WriteByte(packet.fallFlying ? 1 : 0);
+            buffer.WriteByte(packet.elytraFlags);
+            buffer.WriteByte(packet.maxCrossbowCharge);
+            buffer.WriteByte(packet.autoSpinAttack ? 1 : 0);
+            buffer.WriteVarInt(static_cast<uint32_t>(packet.morphVariant));
             return buffer.GetData();
         }
 
@@ -98,6 +143,22 @@ namespace Network {
             packet.morph = reader.HasMore() ? reader.ReadVarInt() : 0xFFFFFFFFu;
             packet.morphAnim = reader.HasMore() ? reader.ReadByte() : 0;
             ReadEffectVisuals(reader, packet.effectFlags, packet.effectParticles);
+            packet.sprinting = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            packet.rightArmPose = reader.HasMore() ? reader.ReadByte() : 0;
+            packet.leftArmPose  = reader.HasMore() ? reader.ReadByte() : 0;
+            if (reader.HasMore()) {
+                const uint8_t use = reader.ReadByte();
+                packet.usingItem   = (use & 0x01) != 0;
+                packet.useItemHand = (use & 0x02) ? 1 : 0;
+            }
+            packet.ticksUsingItem = reader.HasMore() ? reader.ReadVarInt() : 0;
+            packet.fallFlying = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            packet.elytraFlags = reader.HasMore() ? reader.ReadByte() : 0;
+            packet.maxCrossbowCharge = reader.HasMore() ? reader.ReadByte() : 25;
+            packet.autoSpinAttack = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            packet.hasMorphVariant = reader.HasMore();
+            packet.morphVariant = packet.hasMorphVariant
+                ? static_cast<int32_t>(reader.ReadVarInt()) : 0;
             return packet;
         }
 

@@ -41,6 +41,10 @@ namespace Client {
         bool IsSneaking() const override {
             return m_player && m_player->physics.isSneaking;
         }
+        // The local player's own glide (MC LocalPlayer.isFallFlying).
+        bool isFallFlying() const override {
+            return m_player && m_player->physics.isFallFlying;
+        }
 
         Game::ItemStack& getItemInHand(uint32_t hand) override {
             static Game::ItemStack s_empty{};
@@ -62,6 +66,16 @@ namespace Client {
         // Server-only concept (queues a re-broadcast). The client's slot state
         // is already local, so there is nothing to mark.
         void markSlotDirty(int /*slotIndex*/) override {}
+
+        // MC Player.canEat for the prediction (LocalPlayer's copy): creative
+        // and spectator are invulnerable, otherwise the food level the server
+        // last sent. EatFood stays the default no-op — the server's FoodData
+        // is the one that changes, and SetHealthS2C brings it back here.
+        bool CanEat(bool canAlwaysEat) const override {
+            if (!m_player) return false;
+            return m_player->IsCreative() || m_player->IsSpectator() || canAlwaysEat ||
+                   m_player->food < 20;
+        }
 
         // MC LocalPlayer.openItemGui: a book and quill opens its editor right
         // here on the client (a written book waits for the server's

@@ -190,6 +190,40 @@ namespace Game {
         Painting = 170,  // "painting"
         GlowItemFrame = 171,  // "glow_item_frame"
         ItemFrame = 172,  // "item_frame"
+        Cushion = 173,  // "cushion"
+        LeashKnot = 174,  // "leash_knot"
+        FishingBobber = 175,  // "fishing_bobber"
+        FireworkRocket = 176,  // "firework_rocket"
+        OakBoat = 177,  // "oak_boat"
+        OakChestBoat = 178,  // "oak_chest_boat"
+        SpruceBoat = 179,  // "spruce_boat"
+        SpruceChestBoat = 180,  // "spruce_chest_boat"
+        BirchBoat = 181,  // "birch_boat"
+        BirchChestBoat = 182,  // "birch_chest_boat"
+        JungleBoat = 183,  // "jungle_boat"
+        JungleChestBoat = 184,  // "jungle_chest_boat"
+        AcaciaBoat = 185,  // "acacia_boat"
+        AcaciaChestBoat = 186,  // "acacia_chest_boat"
+        CherryBoat = 187,  // "cherry_boat"
+        CherryChestBoat = 188,  // "cherry_chest_boat"
+        DarkOakBoat = 189,  // "dark_oak_boat"
+        DarkOakChestBoat = 190,  // "dark_oak_chest_boat"
+        PaleOakBoat = 191,  // "pale_oak_boat"
+        PaleOakChestBoat = 192,  // "pale_oak_chest_boat"
+        MangroveBoat = 193,  // "mangrove_boat"
+        MangroveChestBoat = 194,  // "mangrove_chest_boat"
+        BambooRaft = 195,  // "bamboo_raft"
+        BambooChestRaft = 196,  // "bamboo_chest_raft"
+        PoplarBoat = 197,  // "poplar_boat"
+        PoplarChestBoat = 198,  // "poplar_chest_boat"
+        Minecart = 199,  // "minecart"
+        ChestMinecart = 200,  // "chest_minecart"
+        FurnaceMinecart = 201,  // "furnace_minecart"
+        HopperMinecart = 202,  // "hopper_minecart"
+        TntMinecart = 203,  // "tnt_minecart"
+        SpawnerMinecart = 204,  // "spawner_minecart"
+        CommandBlockMinecart = 205,  // "command_block_minecart"
+        OminousItemSpawner = 206,  // "ominous_item_spawner"
         Count
     };
 
@@ -226,7 +260,7 @@ namespace Game {
     // LivingEntity.DEFAULT_BABY_SCALE — one value for every type.
     inline constexpr float kBabyScale = 0.5f;
 
-    inline constexpr int kEntityTypeCount = 173;
+    inline constexpr int kEntityTypeCount = 207;
     extern const EntityTypeInfo kEntityTypeTable[kEntityTypeCount];
 
     inline const EntityTypeInfo& GetEntityTypeInfo(EntityTypeId t) {

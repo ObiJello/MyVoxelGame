@@ -9,6 +9,7 @@
 #include "common/core/Profiling_Tracy.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -28,6 +29,21 @@ namespace Render {
             return on;
         }();
         return enabled;
+    }
+
+    namespace {
+        // The option as of this frame's Update: per-draw lookups (every
+        // entity, particle batch, block entity) read this, not the settings
+        // map.
+        std::atomic<bool> s_worldLightingOn{true};
+    }
+
+    bool Lightmap::WorldLightingOn() {
+        return s_worldLightingOn.load(std::memory_order_relaxed);
+    }
+
+    float Lightmap::FullBrightValue() {
+        return std::max(0.0f, 1.0f - GetMobEffectView().darknessLightmap);
     }
 
     bool Lightmap::Initialize() {
@@ -99,6 +115,18 @@ namespace Render {
     }
 
     void Lightmap::Compute(const EnvironmentFrame& frame, std::array<uint8_t, 16 * 16 * 4>& out) const {
+        if (!WorldLightingOn()) {
+            // Video Settings "Lighting: OFF": every texel full white, so no
+            // light level darkens anything. Ambient occlusion and face
+            // shading are in the vertex colour and stay. The Darkness
+            // effect's pulse is an effect, not world light, and still dims.
+            const float v = FullBrightValue();
+            for (size_t i = 0; i < out.size(); i += 4) {
+                out[i] = out[i + 1] = out[i + 2] = ToByte(v);
+                out[i + 3] = 255;
+            }
+            return;
+        }
         if (!Enabled()) {
             // The pre-light-engine look: one uniform night dim, full-bright
             // (emissiveRendering) faces left alone.
@@ -178,6 +206,7 @@ namespace Render {
         }
         m_lastTick = gameTime;
 
+        s_worldLightingOn.store(Platform::g_gameSettings.GetWorldLighting(), std::memory_order_relaxed);
         m_mainFrame = &frame;
         ++m_updateSerial;
         Compute(frame, m_texels[0]);

@@ -47,6 +47,16 @@ namespace Server {
                                  std::string_view event, Game::SoundSource source,
                                  float volume, float pitch, int64_t seed) override;
 
+        // MC ServerLevel.levelEvent: a ClientboundLevelEventPacket to every
+        // player in the dimension within 64 blocks of the cell's corner.
+        void LevelEvent(Game::DimensionId dimension, const Game::SoundExcept& except, int type,
+                        const glm::ivec3& pos, int data) override;
+
+        // "Jukebox Range: Global": a JukeboxSongS2C to every player on the
+        // server, whatever their dimension or distance, unscoped.
+        void JukeboxSongEverywhere(Game::DimensionId dimension, const glm::ivec3& pos, int songId,
+                                   int64_t ticks, bool fresh) override;
+
         // Server thread, once per tick: send what other threads queued.
         void Flush();
 
@@ -58,6 +68,9 @@ namespace Server {
             double                  range = 16.0;
             uint8_t                 packetId = 0;
             std::vector<uint8_t>    payload;
+            // Every player on the server, no dimension or range test, sent
+            // unscoped (the payload names its own dimension).
+            bool                    everywhere = false;
         };
 
         // The player id `except` names, if it names a player at all (MC:

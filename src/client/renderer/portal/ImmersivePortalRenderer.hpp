@@ -94,6 +94,13 @@ namespace Render {
                     const Frustum& frustum, float aspect, int renderDistanceChunks, float partialTick,
                     const LevelRenderFn& renderLevel, const LevelRenderFn& renderCrossers);
 
+        // The same pass for an extra view drawn inside a frame — a face of
+        // the leave capture's panorama — leaving the frame's own bookkeeping
+        // (DrewLastFrame, the F3 count) exactly as the main view left it.
+        void RenderCapture(const glm::mat4& projection, const glm::mat4& view, const Camera& camera,
+                           const Frustum& frustum, float aspect, int renderDistanceChunks, float partialTick,
+                           const LevelRenderFn& renderLevel, const LevelRenderFn& renderCrossers);
+
         // Draw a wireframe of every portal of the bound level (debugging;
         // OBEY_PORTAL_OUTLINES=1 or the Render Controls toggle).
         bool outlinesEnabled = false;
@@ -165,6 +172,10 @@ namespace Render {
         // in one frame, every layer counted. OBEY_PORTAL_RENDER_LIMIT=n
         // overrides.
         int m_portalRenderLimit = 200;
+        // RenderCapture is drawing (a panorama face): the top layer's
+        // occlusion gate reads the chunk pass that just ran (the face's),
+        // not the frame's main-view list.
+        bool m_captureView = false;
         // Top-level portals whose far side was drawn, for DrewLastFrame.
         std::unordered_set<Game::Immersive::PortalId> m_drawnThisFrame, m_drawnLastFrame;
 

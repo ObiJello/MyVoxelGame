@@ -90,6 +90,9 @@ namespace Game {
         static constexpr float HEIGHT_SNEAKING = 1.49f;
         static constexpr float EYE_HEIGHT_STANDING = 1.62f;
         static constexpr float EYE_HEIGHT_SNEAKING = 1.42f;
+        // MC Avatar.POSES FALL_FLYING: 0.6 × 0.6, the eye at 0.4.
+        static constexpr float HEIGHT_FALL_FLYING = 0.6f;
+        static constexpr float EYE_HEIGHT_FALL_FLYING = 0.4f;
 
         // Movement momentum system
         static constexpr float CORRECT_JUMP_TIME_WINDOW = 0.1f; // 100 milliseconds window
@@ -102,6 +105,15 @@ namespace Game {
         // comes from (see renderer/core/RenderOrigin.hpp).
         glm::dvec3 position{0.0, 97.0, 0.0};
         glm::vec3 velocity{0.0f};
+        // MC Entity.push on this player (a mob or a boat shoving it,
+        // Client::Vehicles), blocks per SECOND, horizontal. It is MC's
+        // deltaMovement: on land and in the air it is carried apart from
+        // `velocity` — whose horizontal part there is the portal momentum,
+        // with its own long decay — and loses MC's friction every tick
+        // (block friction × 0.91 on the ground, 0.91 in the air); the fluid
+        // model (waterVelocity) and the glide (velocity), whose velocities
+        // ARE deltaMovement, take it in whole.
+        glm::vec3 pushVelocity{0.0f};
         bool isOnGround = false;
         bool isSneaking = false;
         bool isSprinting = false;
@@ -129,14 +141,56 @@ namespace Game {
         // MC LivingEntity.noJumpDelay: ten ticks between ground jumps while
         // the key is held (wading in shallow water re-jumps at that rate).
         float noJumpDelayTicks = 0.0f;
+        // Debug noclip (key N) — no vanilla counterpart: free flight with no
+        // collision and no gravity, whatever isFlying says. Independent of
+        // isFlying: N toggles only this flag and double-tap space toggles
+        // only isFlying (also while noclipping), so when noclip ends the
+        // player flies or falls by that flag.
         bool noclip = false;
 
         // Creative flight state — MC Abilities.flying / Abilities.mayfly.
         // mayFly is server-granted (PlayerAbilitiesS2C, creative only);
         // isFlying toggles via double-tap space and cancels on landing.
-        // Unlike noclip, flying keeps full collision resolution.
+        // Without noclip, flying keeps full collision resolution.
         bool isFlying = false;
         bool mayFly = false;
+
+        // Elytra flight — MC LivingEntity shared flag 7 (isFallFlying) and
+        // Pose.FALL_FLYING. Started by ClientPlayer (LocalPlayer.aiStep's
+        // tryToStartFallFlying on a jump press in the air), moved by
+        // HandleMovement's travelFallFlying branch, ended by the step itself
+        // the moment canGlide stops holding (landing, LEVITATION, the elytra
+        // gone or one point from breaking, creative flight) or a climbable
+        // is touched. `gliderEquipped` is ClientPlayer's canGlideUsing over
+        // the worn items, refreshed before each step.
+        bool  isFallFlying   = false;
+        bool  gliderEquipped = false;
+        // MC Pose.SPIN_ATTACK — a riptide in flight (LivingEntity
+        // isAutoSpinAttack): the 0.6 x 0.6 box, eyes at 0.4 (Player.POSES),
+        // like the glide's. Set by ClientPlayer while its spin runs.
+        bool  isAutoSpinAttack = false;
+        // The whole look vector (MC getLookAngle) and pitch (getXRot, degrees,
+        // positive down) the glide steers by; set by the client each step.
+        glm::vec3 lookDir{0.0f, 0.0f, 1.0f};
+        float     xRotDeg = 0.0f;
+        // MC handleFallFlyingCollisions: the largest fly-into-wall damage
+        // since the last move packet (the client owns the movement, the
+        // server applies the damage). Consumed by ClientPlayer.
+        float flyIntoWallDamage = 0.0f;
+        // MC LivingEntity.canGlide for the local player (Player.canGlide adds
+        // !abilities.flying).
+        bool CanGlide() const {
+            return !isFlying && !isOnGround && effectLevitation < 0 && gliderEquipped && !noPhysics;
+        }
+        // MC Abilities.flyingSpeed — 0.05 unless a spectator's mouse wheel
+        // moved it (0 … 0.2, MouseHandler.onScroll). Flight scales with it:
+        // Player.getFlyingSpeed feeds the horizontal, LocalPlayer.aiStep's
+        // `flyingSpeed * 3` the vertical; FLY_* above are its 0.05 values.
+        float flyingSpeed = 0.05f;
+        // MC Entity.noPhysics — a spectator (Player.tick). Entity.move's
+        // noPhysics branch adds the delta to the position and stops: no
+        // block collides, nothing is stood on, climbed or stepped up.
+        bool noPhysics = false;
 
         // True when THIS physics step fired a ground-jump impulse. Cleared at
         // the top of UpdatePlayerPhysics; ClientPlayer accumulates it into the
@@ -274,6 +328,7 @@ namespace Game {
         float GetWidth() const { return (morphed ? morphWidth : WIDTH) * scale; }
         float GetEyeHeight() const {
             if (morphed) return morphEyeHeight * scale;
+            if (isFallFlying || isAutoSpinAttack) return EYE_HEIGHT_FALL_FLYING * scale;
             return (isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING) * scale;
         }
 
@@ -294,6 +349,7 @@ namespace Game {
         // Get current height
         float GetCurrentHeight() const {
             if (morphed) return morphHeight * scale;
+            if (isFallFlying || isAutoSpinAttack) return HEIGHT_FALL_FLYING * scale;
             return (isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING) * scale;
         }
 
@@ -333,6 +389,8 @@ namespace Game {
     };
 
     // **NEW**: Physics context that holds the world reference
+    struct AABBd;   // below — PhysicsContext::entityColliders points at a list of them
+
     struct PhysicsContext {
         const IBlockAccess* blockAccess = nullptr;
         // Cross-portal collision for this mover; null = the global hooks.
@@ -367,6 +425,14 @@ namespace Game {
         bool  collisionEntity       = false;
         float collisionFallDistance = 0.0f;
         bool  collisionFallFlying   = false;
+
+        // MC EntityGetter.getEntityCollisions: the boxes of the ENTITIES this
+        // mover collides with (a boat's hull for anything; the pushable
+        // entities a boat or a minecart runs into), world space. Gathered by
+        // the mover's owner for its own swept region; CollectBlockColliders
+        // appends the ones that reach into the region it is asked about.
+        // Null = none.
+        const std::vector<AABBd>* entityColliders = nullptr;
     };
 
     // Function to check if a block is solid for collision

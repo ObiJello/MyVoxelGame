@@ -8,6 +8,7 @@
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/npc/Villager.hpp"
+#include "common/entity/npc/WanderingTrader.hpp"
 #include "common/world/level/DimensionId.hpp"
 
 #include <algorithm>
@@ -214,6 +215,35 @@ namespace Game::Anvil {
             { MemoryModule::LastWorkedAtPoi,        "minecraft:last_worked_at_poi",      MemoryCodec::Long },
         };
 
+        // AbstractVillager's "Inventory" (MC InventoryCarrier.writeInventory
+        // / readInventory — SimpleContainer.storeAsItemList, empties skipped).
+        void WriteInventory(Nbt::Writer& w, const SimpleContainer& inv) {
+            auto list = w.BeginList("Inventory", Nbt::TagType::Compound);
+            for (int i = 0; i < inv.GetContainerSize(); ++i) {
+                const ItemStack& stack = inv.GetItem(i);
+                if (stack.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, stack);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+
+        void ReadInventory(const CT& tag, SimpleContainer& inv) {
+            auto list = As<LT>(tag.GetTag("Inventory"));
+            if (!list) return;
+            for (int i = 0; i < inv.GetContainerSize(); ++i) inv.SetItem(i, ItemStack{});
+            int slot = 0;
+            for (const auto& elem : list->value) {
+                if (slot >= inv.GetContainerSize()) break;
+                auto c = As<CT>(elem);
+                if (!c) continue;
+                const ItemStack stack = ReadItemStack(*c);
+                if (stack.IsEmpty()) continue;
+                inv.SetItem(slot++, stack);
+            }
+        }
+
         DimensionId LevelDimension(const Villager& v) {
             const EntityLevel* level = v.Level();
             return level ? level->Dimension() : DimensionId::Overworld;
@@ -269,18 +299,7 @@ namespace Game::Anvil {
     void WriteVillagerNbt(Nbt::Writer& w, const Villager& villager) {
         // AbstractVillager: Offers (only once rolled), Inventory.
         if (const auto& offers = villager.PeekOffers()) WriteOffers(w, *offers);
-        {
-            auto list = w.BeginList("Inventory", Nbt::TagType::Compound);
-            const SimpleContainer& inv = villager.GetInventory();
-            for (int i = 0; i < inv.GetContainerSize(); ++i) {
-                const ItemStack& stack = inv.GetItem(i);
-                if (stack.IsEmpty()) continue;
-                w.ListCompoundBegin(list);
-                WriteItemStackBody(w, stack);
-                w.ListCompoundEnd(list);
-            }
-            w.EndList(list);
-        }
+        WriteInventory(w, villager.GetInventory());
         // Villager.
         WriteVillagerData(w, villager.GetVillagerData());
         w.Bool("VillagerDataFinalized", villager.GetVillagerDataFinalized());
@@ -346,19 +365,7 @@ namespace Game::Anvil {
 
         // AbstractVillager: Offers, Inventory.
         villager.SetOffers(ReadOffers(tag));
-        if (auto list = As<LT>(tag.GetTag("Inventory"))) {
-            SimpleContainer& inv = villager.GetInventory();
-            for (int i = 0; i < inv.GetContainerSize(); ++i) inv.SetItem(i, ItemStack{});
-            int slot = 0;
-            for (const auto& elem : list->value) {
-                if (slot >= inv.GetContainerSize()) break;
-                auto c = As<CT>(elem);
-                if (!c) continue;
-                const ItemStack stack = ReadItemStack(*c);
-                if (stack.IsEmpty()) continue;
-                inv.SetItem(slot++, stack);
-            }
-        }
+        ReadInventory(tag, villager.GetInventory());
 
         villager.SetFoodLevel(static_cast<int>(static_cast<int8_t>(ReadNumberOr(tag, "FoodLevel", 0))));
         ReadGossips(tag, villager.GetGossips());
@@ -375,6 +382,35 @@ namespace Game::Anvil {
             // first tick (the POI records are rebuilt from blocks).
             villager.MarkPoiTicketsForRestore();
         }
+    }
+
+    // ── WanderingTrader ──────────────────────────────────────────────────
+
+    void WriteWanderingTraderNbt(Nbt::Writer& w, const WanderingTrader& trader) {
+        // AbstractVillager: Offers (only once rolled), Inventory.
+        if (const auto& offers = trader.PeekOffers()) WriteOffers(w, *offers);
+        WriteInventory(w, trader.GetInventory());
+        // WanderingTrader: DespawnDelay, wander_target (BlockPos.CODEC — an
+        // int array — stored only when set).
+        w.Int("DespawnDelay", trader.GetDespawnDelay());
+        if (const auto& target = trader.GetWanderTarget()) {
+            const int32_t p[3] = { target->x, target->y, target->z };
+            w.IntArray("wander_target", p, 3);
+        }
+    }
+
+    void ReadWanderingTraderNbt(const CT& tag, WanderingTrader& trader) {
+        trader.SetOffers(ReadOffers(tag));
+        ReadInventory(tag, trader.GetInventory());
+        trader.SetDespawnDelay(static_cast<int>(ReadNumberOr(tag, "DespawnDelay", 0)));
+        std::optional<glm::ivec3> target;
+        if (auto pos = As<::World::NBTTagIntArray>(tag.GetTag("wander_target"));
+            pos && pos->value.size() == 3) {
+            target = glm::ivec3(pos->value[0], pos->value[1], pos->value[2]);
+        }
+        trader.SetWanderTarget(target);
+        // MC: setAge(max(0, getAge())) — a trader is never a baby for long.
+        if (trader.GetAge() < 0) trader.SetAge(0);
     }
 
     // ── ZombieVillager ───────────────────────────────────────────────────

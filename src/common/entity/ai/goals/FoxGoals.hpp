@@ -10,6 +10,8 @@
 #include "common/entity/ai/goals/AttackGoals.hpp"
 #include "common/entity/ai/goals/AnimalGoals.hpp"
 #include "common/entity/ai/goals/TargetGoals.hpp"
+#include "common/entity/ai/goals/MoveToBlockGoal.hpp"
+#include "common/world/block/BlockState.hpp"
 
 #include <memory>
 
@@ -89,9 +91,8 @@ namespace Game {
     };
 
     // MC Fox.FoxBreedGoal — clears both foxes' states on start. MC's breed()
-    // additionally trusts the love-cause players (the trust system rides the
-    // item/taming layer this port skips) and snaps the cub to the parent;
-    // the baby itself comes from the shared SpawnChildFromBreeding path.
+    // makes the cub trust the love-cause players — Fox::SpawnChildFromBreeding
+    // (the shared path BreedGoal calls) does that half.
     // Each partner's own FoxBreedGoal clears its own states, which covers
     // MC's clearing of both.
     class FoxBreedGoal : public BreedGoal {
@@ -243,38 +244,54 @@ namespace Game {
         Fox* m_fox;
     };
 
-    // MC Fox.FoxEatBerriesGoal — picking a bush reads and writes the
-    // SweetBerryBushBlock.AGE block-state property and puts a berry in the
-    // fox's mouth; neither per-block ages nor mob-held items exist in this
-    // engine yet, so without the AGE reset a fox would farm one bush
-    // forever. Inert until block-state properties reach the mob seam.
-    class FoxEatBerriesGoal : public Goal {
+    // MC Fox.FoxEatBerriesGoal — a MoveToBlockGoal (1.2, 12, 1) to a sweet
+    // berry bush of age >= 2 or a glow-berried cave vine; 40 ticks at the
+    // bush (sniffing on the way, 5% a tick), then — mobGriefing on — it
+    // picks: a berry bush drops to age 1 and yields 1 + nextInt(2) (+1 at
+    // age 3) sweet berries, one into an empty mouth and the rest popped; a
+    // vine loses its berries (CaveVines.use: one glow berry popped).
+    class FoxEatBerriesGoal : public MoveToBlockGoal {
     public:
         FoxEatBerriesGoal(Fox* fox, double speedModifier, int searchRange,
-                          int verticalSearchRange)
-            : m_fox(fox) {
-            (void)speedModifier; (void)searchRange; (void)verticalSearchRange;
-        }
-        bool CanUse() override { return false; }
+                          int verticalSearchRange);
+        bool CanUse() override;
+        void Start() override;
+        void Tick() override;
         const char* Name() const override { return "FoxEatBerriesGoal"; }
 
+    protected:
+        double AcceptedDistance() const override { return 2.0; }
+        bool ShouldRecalculatePath() const override { return m_tryTicks % 100 == 0; }
+        bool IsValidTarget(const IBlockAccess& blocks, const glm::ivec3& pos) const override;
+
     private:
+        void OnReachedTarget();
+        void PickSweetBerries(BlockState state);
+        void PickGlowBerry(BlockState state);
+
         Fox* m_fox;
+        int  m_ticksWaited = 0;
     };
 
-    // MC Fox.FoxSearchForItemsGoal — walks to dropped ItemEntities to pick
-    // them up in the mouth. Mob item pickup does not exist in this port
-    // (Mob::CanPickUpLoot is a stored flag nothing consumes), so the goal
-    // is inert until it does.
+    // MC Fox.FoxSearchForItemsGoal — an empty-mouthed, unthreatened fox that
+    // can move (1 in reducedTickDelay(10) per check) walks at 1.2 to the
+    // first pickup-ready item entity within 8 blocks; Mob's looting then
+    // takes it into the mouth.
     class FoxSearchForItemsGoal : public Goal {
     public:
         explicit FoxSearchForItemsGoal(Fox* fox) : m_fox(fox) {
             SetFlags(static_cast<uint8_t>(GoalFlag::Move));
         }
-        bool CanUse() override { return false; }
+        bool CanUse() override;
+        void Start() override;
+        void Tick() override;
         const char* Name() const override { return "FoxSearchForItemsGoal"; }
 
     private:
+        // The first item entity (ALLOWED_ITEMS: past its pickup delay) in
+        // the fox's box inflated by 8 — false when there is none.
+        bool FindItem(glm::dvec3& out) const;
+
         Fox* m_fox;
     };
 
@@ -291,27 +308,33 @@ namespace Game {
         Fox* m_fox;
     };
 
-    // MC Fox.DefendTrustedTargetGoal — retaliate for whatever last hurt a
-    // TRUSTED player. Trust is only ever granted through the item/taming
-    // layer (feeding berries to breeding foxes), which this port skips, so
-    // the trusted list is permanently empty and MC's own canUse loop over it
-    // returns false — exactly what this gate encodes.
-    class DefendTrustedTargetGoal : public Goal {
+    // MC Fox.DefendTrustedTargetGoal (a NearestAttackableTargetGoal, random
+    // interval 10, mustSee/mustReach false) — retaliate for whatever last
+    // hurt a TRUSTED entity: the first trusted identity that resolves in
+    // this level is checked; a new hurt-by timestamp on it, and an attacker
+    // passing the goal's selector (TRUSTED_TARGET_SELECTOR — it has hurt
+    // something within its last 600 ticks — and not itself trusted), makes
+    // the fox defend: aggro sound, DEFENDING flag, awake, targeting it.
+    class DefendTrustedTargetGoal : public TargetGoal {
     public:
-        explicit DefendTrustedTargetGoal(Fox* fox) : m_fox(fox) {
-            SetFlags(static_cast<uint8_t>(GoalFlag::Target));
-        }
-        bool CanUse() override { return false; }
+        explicit DefendTrustedTargetGoal(Fox* fox);
+        bool CanUse() override;
+        void Start() override;
+        void ClearReferenceTo(const Entity* entity) override;
         const char* Name() const override { return "DefendTrustedTargetGoal"; }
 
     private:
-        Fox* m_fox;
+        Fox*          m_fox;
+        LivingEntity* m_trustedLastHurtBy = nullptr;
+        LivingEntity* m_trustedLastHurt = nullptr;
+        int64_t       m_timestamp = 0;
     };
 
     // MC registers plain AvoidEntityGoals on the fox with per-goal lambda
-    // gates (!trusts && !isDefending for players; !isTame && !isDefending
-    // for wolves; !isDefending for polar bears). Trust and wolf taming do
-    // not exist, so the surviving gate is !isDefending on all three.
+    // gates: players — AVOID_PLAYERS (not sneaking, not creative/spectator)
+    // && !trusts && !isDefending; wolves — !isTame && !isDefending; polar
+    // bears — !isDefending. The per-candidate halves are AcceptsThreat;
+    // !isDefending gates the goal itself.
     class FoxAvoidEntityGoal : public AvoidEntityGoal {
     public:
         // Player form and type-list form, mirroring the base.
@@ -324,6 +347,9 @@ namespace Game {
         bool CanUse() override;
         bool CanContinueToUse() override;
         const char* Name() const override { return "FoxAvoidEntityGoal"; }
+
+    protected:
+        bool AcceptsThreat(const LivingEntity& candidate) const override;
 
     private:
         Fox* m_fox;

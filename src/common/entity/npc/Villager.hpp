@@ -92,6 +92,11 @@ namespace Game {
         int  GetVillagerXp() const override { return 0; }
         bool ShowProgressBar() const override { return true; }
         const char* GetNotifyTradeSound() const override { return "entity.villager.yes"; }
+        // MC getTradeUpdatedSound(validTrade) — the yes/no voice when the
+        // result square fills or empties (the wandering trader has its own).
+        virtual const char* GetTradeUpdatedSound(bool validTrade) const {
+            return validTrade ? "entity.villager.yes" : "entity.villager.no";
+        }
         bool IsClientSideMerchant() const override { return false; }
         void ClearTradingPlayer() override { StopTrading(); }
         // MC's merchant level for the screen title — 0 for a trader with no
@@ -115,8 +120,9 @@ namespace Game {
         int  CountInventoryItem(ItemID item) const;
         void RemoveInventoryItemType(ItemID item, int count);
 
-        // MC Mob.wantsToPickUp — per subclass.
-        virtual bool WantsToPickUp(const ItemStack& stack) const { (void)stack; return false; }
+        // MC Mob.wantsToPickUp — per subclass (Mob's virtual; a trader
+        // wants nothing).
+        bool WantsToPickUp(const ItemStack& stack) const override { (void)stack; return false; }
 
         // MC AbstractVillager: never leashable, never despawns far away is
         // the Villager's (the trader despawns on its own timer).
@@ -225,6 +231,10 @@ namespace Game {
         std::unique_ptr<Villager> MakeBreedOffspring(const Villager& partner);
 
         bool WantsToPickUp(const ItemStack& stack) const override;
+        // MC Villager.pickUpItem → InventoryCarrier.pickUpItem: the part that
+        // fits goes into the inventory (Mob::TickLooting drives it — the
+        // villager's canPickUpLoot is set at construction).
+        void PickUpItem(int32_t itemEntityId, const ItemStack& stack) override;
 
         // ── Sleeping (MC LivingEntity.startSleeping / stopSleeping) ──────
         bool IsSleeping() const;
@@ -268,6 +278,11 @@ namespace Game {
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
         void Die(MobDamageSource source, Entity* attacker) override;
+        // MC Villager.thunderHit: off Peaceful the villager becomes a WITCH
+        // (convertTo SINGLE, no equipment, no loot pickup carried over),
+        // finalized as a CONVERSION spawn, persistent, its POI claims
+        // released; on Peaceful the base burn-and-hurt.
+        void ThunderHit(Entity* bolt) override;
         void Tick() override;
         void AiStep() override;
         void HandleEntityEvent(uint8_t id) override;
@@ -315,7 +330,6 @@ namespace Game {
         bool GolemSpawnConditionsMet(int64_t gameTime) const;
         void TellWitnessesThatIWasMurdered(Entity& murderer);
         void RestorePoiTickets();
-        void PickUpNearbyItems();
         PoiManager* Poi() const;
 
         VillagerData m_data;

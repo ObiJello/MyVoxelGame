@@ -27,5 +27,19 @@ bool WeightedPlacedFeature::place(
 // Static instance of NoneFeatureConfiguration
 NoneFeatureConfiguration NoneFeatureConfiguration::INSTANCE;
 
+/**
+ * WorldGenLevel::destroyBlock default - WorldGenRegion.destroyBlock: nothing
+ * to destroy in air; otherwise the cell becomes air with flag 3 (a
+ * generating region has no entities to drop resources into).
+ */
+bool WorldGenLevel::destroyBlock(const core::BlockPos& pos, bool dropResources) {
+    (void)dropResources;
+    BlockState* state = getBlockState(pos);
+    if (!state || state->isAir()) {
+        return false;
+    }
+    return setBlock(pos, world::level::block::Blocks::AIR->defaultBlockState(), 3);
+}
+
 } // namespace levelgen
 } // namespace minecraft

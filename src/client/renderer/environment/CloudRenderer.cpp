@@ -88,7 +88,9 @@ void main() {
 #version 330 core
 in vec4 vColor;
 in float vDist;
+#ifndef OIT_ALPHA_ONLY
 out vec4 FragColor;
+#endif
 
 uniform vec4 uColor;     // CLOUD_COLOR attribute (rgba, alpha carries 0.8 base)
 uniform vec4 uFogEnv;    // (0, cloudsEnd, unused, unused)
@@ -99,11 +101,28 @@ float linearFog(float d, float s, float e) {
     return (d - s) / (e - s);
 }
 
+
+// Improved Transparency (MC 26.3 OIT): the OIT variants are this source with
+// #define OIT and a stage define; the GL backend splices shaders/oit_lib.glsl
+// in here. The engine's own compile never sees any of it.
+#ifdef OIT
+#pragma oit_library
+#endif
+
 void main() {
     vec4 color = vColor * uColor;
-    color.a *= 1.0 - linearFog(vDist, uFogEnv.x, uFogEnv.y);
+#ifndef OIT_DEPTH_BOUNDS
+    color.a *= 1.0 - linearFog(vDist, uFogEnv.x, uFogEnv.y);   // (MC: not in the depth bounds)
+#endif
     if (color.a <= 0.0) discard;
+#ifdef OIT_ALPHA_ONLY
+    executeAlphaOnlyPhase(gl_FragCoord.z, color.a);   // MC clouds.fsh
+#else
     FragColor = color;
+#ifdef OIT_ACCUMULATE
+    FragColor = sampleColorForAccumulation(FragColor);   // MC calculateFinalColor
+#endif
+#endif
 }
 )";
 

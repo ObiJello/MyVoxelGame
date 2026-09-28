@@ -109,6 +109,10 @@ namespace Game {
         // decides where they go (today: into the breaker's inventory, since
         // there are no item entities yet).
         std::vector<ItemStack> TakeAllContents() {
+            // Containers.dropContents reads every slot through getItem, which
+            // unpacks: a structure chest broken before anyone opened it
+            // spills its rolled loot, not nothing.
+            UnpackLootTable();
             std::vector<ItemStack> out;
             for (ItemStack& s : m_items) {
                 if (!s.IsEmpty()) out.push_back(s);
@@ -117,6 +121,23 @@ namespace Game {
             if (!out.empty()) SetChanged();
             return out;
         }
+
+        // MC BlockEntity.preRemoveSideEffects for a Container: the block is
+        // going (broken, blown up, replaced) — Containers.dropContents
+        // spills every slot, rolling a loot table still owed first. Shulker
+        // boxes (their contents leave in the dropped item) and ender chests
+        // (the player's, not the block's) spill nothing. Server only.
+        // BlockEntityTypes.cpp.
+        void PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos, BlockState oldState) override;
+
+        // MC BaseContainerBlockEntity.applyImplicitComponents /
+        // collectImplicitComponents: CONTAINER (the stacks by slot) and
+        // CUSTOM_NAME — a shulker box placed from an item with contents gets
+        // them back, and a broken one hands them to its drop.
+        void ApplyItemComponents(const DataComponentMap& components) override;
+        void CollectComponents(DataComponentMap& out) const override;
+        const std::string& GetCustomName() const { return m_customName; }
+        void SetCustomName(std::string name) { m_customName = std::move(name); }
 
         // ── Persistence / sync ────────────────────────────────────────────
         // Subclasses with extra state call these first, then write their own —
@@ -144,6 +165,7 @@ namespace Game {
         std::vector<ItemStack> m_items;
         std::string m_lootTable;          // "" = none (MC's null)
         int64_t     m_lootTableSeed = 0;  // 0 = use the level's random
+        std::string m_customName;         // CUSTOM_NAME from a named item ("" = none)
     };
 
 } // namespace Game

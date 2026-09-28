@@ -191,10 +191,10 @@ namespace Render {
         void SetAetherEternalDay(bool on) { m_aetherEternalDay = on; }
 
         // Weather strengths, MC Level.getRainLevel / getThunderLevel (0..1,
-        // thunder never above rain). The engine has no weather system yet
-        // (World::IsRainingAt is a constant false), so nothing sets these
-        // and they read 0; an OptiFine sky's `weather` rule is computed
-        // from them so it starts working the day weather does.
+        // thunder never above rain) — mirrored from Client::ClientWeather
+        // (the server's weather game events) every tick and frame
+        // (ApplyPendingSync). The sky, fog, clouds, lightmap and an OptiFine
+        // sky's `weather` rule read them.
         void SetWeather(float rainLevel, float thunderLevel) {
             m_rainLevel    = glm::clamp(rainLevel, 0.0f, 1.0f);
             m_thunderLevel = glm::clamp(thunderLevel, 0.0f, m_rainLevel);
@@ -264,6 +264,11 @@ namespace Render {
         // Fills the frame's lightmap inputs (skyLightFactor & co.) for the
         // vanilla composition; the mod atmospheres refine it.
         void ComposeLightAttributes(double dayTimeF);
+        // MC AtmosphericFogEnvironment.rainFogMultiplier: eased once a frame
+        // (StepRainFog), pulls the environmental fog in while it rains.
+        float StepRainFog();
+        float m_rainFogMultiplier = 0.0f;
+        std::chrono::steady_clock::time_point m_lastRainFogStep{};
         float m_rainLevel = 0.0f;
         float m_thunderLevel = 0.0f;
         int   m_cameraFluid = 0;

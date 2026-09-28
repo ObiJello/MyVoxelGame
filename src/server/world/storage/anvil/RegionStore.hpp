@@ -67,6 +67,11 @@ namespace Game::Anvil {
         AnvilRegion* Get(DimensionId dim, RegionKind kind, int regionX, int regionZ,
                          std::string& error, bool createIfMissing);
 
+        // An already-open region, or nullptr. No LRU touch and no open, so it
+        // mutates nothing: AnvilChunkIo's concurrent readers call it under a
+        // shared lock (Get, which may open and evict, takes the exclusive one).
+        AnvilRegion* Find(DimensionId dim, RegionKind kind, int regionX, int regionZ) const;
+
         // Convenience: resolve a chunk to its region and local coordinates.
         static int RegionCoord(int chunkCoord) { return chunkCoord >> 5; }      // floors for negatives
         static int LocalCoord (int chunkCoord) { return chunkCoord & 31; }

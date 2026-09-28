@@ -36,6 +36,12 @@ namespace Network {
                                       //   "use" semantics (only meaningful for items
                                       //   that overload left-click — currently just
                                       //   PortalGun: left=blue, right=orange).
+        // The hit came from the held item's own `use` clip, not from the
+        // crosshair: MC PlaceOnWaterBlockItem.use (lily pad, frogspawn) clips
+        // with Fluid.SOURCE_ONLY and hands BlockItem.useOn the cell ABOVE what
+        // it hit. The server runs that as a bare BlockItem placement — no
+        // block use, no item useOn. Trailing, optional.
+        bool     fromUse = false;
 
         UseItemOnC2SPacket() = default;
         UseItemOnC2SPacket(uint32_t h, int32_t x, int32_t y, int32_t z, uint32_t dir,
@@ -62,6 +68,7 @@ namespace Network {
             buffer.WriteVarInt(packet.sequence);
             buffer.WriteByte(packet.altInteract ? 0x01 : 0x00);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
+            buffer.WriteByte(packet.fromUse ? 0x01 : 0x00);
             return buffer.GetData();
         }
 
@@ -82,6 +89,7 @@ namespace Network {
             // (without this byte) cleanly default to false.
             packet.altInteract = reader.HasMore() ? (reader.ReadByte() != 0) : false;
             packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte()) : packet.kDimensionUnknown;
+            packet.fromUse = reader.HasMore() ? (reader.ReadByte() != 0) : false;
             return packet;
         }
 

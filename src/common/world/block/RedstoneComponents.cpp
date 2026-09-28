@@ -1,5 +1,6 @@
 // File: src/common/world/block/RedstoneComponents.cpp
 #include "common/world/block/RedstoneComponents.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/world/lighting/ChunkLight.hpp"
 
 #include "common/core/JavaRandom.hpp"
@@ -27,6 +28,7 @@
 #include "common/world/block/TntBlock.hpp"
 #include "common/world/block/Walls.hpp"
 #include "common/world/block/entity/ComparatorBlockEntity.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/block/entity/DaylightDetectorBlockEntity.hpp"
 #include "common/world/block/piston/PistonBaseBlock.hpp"
 #include "common/world/level/DimensionId.hpp"
@@ -663,6 +665,45 @@ namespace Game {
             }
         }
 
+        // ── LightningRodBlock ────────────────────────────────────────────
+        //
+        // A signal source only while POWERED: 15 weak power in every
+        // direction (ownSignal), 15 strong power into the block it is
+        // attached to (getDirectSignal: facing == direction). A strike
+        // (LightningRodOnLightningStrike) powers it for 8 ticks.
+
+        // updateNeighbours: the neighbours of the block behind the rod.
+        void LightningRodUpdateNeighbours(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+            const glm::ivec3 behind = Relative(pos, Opposite(FacingOf(state)));
+            level.UpdateNeighborsAt(behind, state.Block());
+        }
+
+        int LightningRodGetSignal(const IBlockAccess&, const glm::ivec3&, BlockState state, Direction) {
+            return PoweredOf(state) ? 15 : 0;
+        }
+
+        int LightningRodGetDirectSignal(const IBlockAccess&, const glm::ivec3&, BlockState state, Direction direction) {
+            return PoweredOf(state) && FacingOf(state) == direction ? 15 : 0;
+        }
+
+        void LightningRodTick(ILevelWrite& level, const glm::ivec3& pos, BlockState state, JavaRandom&) {
+            const BlockState unpowered = WithPowered(state, false);
+            SetBlockAndUpdate(level, pos, unpowered);
+            LightningRodUpdateNeighbours(level, pos, unpowered);
+        }
+
+        void LightningRodOnPlace(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                                 BlockState oldState, bool) {
+            if (state.Block() == oldState.Block()) return;
+            if (PoweredOf(state) && !HasScheduledTick(level, pos, state.Block())) {
+                ScheduleTick(level, pos, state.Block(), 8);
+            }
+        }
+
+        void LightningRodAfterRemoval(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool) {
+            if (PoweredOf(state)) LightningRodUpdateNeighbours(level, pos, state);
+        }
+
         // ── RedstoneLampBlock ────────────────────────────────────────────
 
         void LampCheck(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
@@ -885,7 +926,7 @@ namespace Game {
         }
 
         // LeverBlock.pull.
-        void LeverPull(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        void LeverPull(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Entity* player = nullptr) {
             state = WithPowered(state, !PoweredOf(state));
             SetBlockAndUpdate(level, pos, state);
             FaceAttachedUpdateNeighbours(level, pos, state);
@@ -893,14 +934,44 @@ namespace Game {
             // useWithoutItem, so every client hears it from the server.
             level.PlaySound(nullptr, pos, SoundEvents::LEVER_CLICK, SoundSource::Blocks, 0.3f,
                             PoweredOf(state) ? 0.6f : 0.5f);
+            // MC LeverBlock.pull: gameEvent(player, powered ? BLOCK_ACTIVATE
+            // : BLOCK_DEACTIVATE, pos).
+            level.GameEvent(player, PoweredOf(state) ? GameEventId::BlockActivate : GameEventId::BlockDeactivate, pos);
+        }
+
+        // MC LeverBlock.makeParticle: a red DUST mote at the lever's tip.
+        void LeverMakeParticle(ILevelWrite& level, const glm::ivec3& pos, BlockState state, float scale) {
+            const auto dirOf = [](std::string_view name) {
+                if (name == "down")  return Direction::Down;
+                if (name == "up")    return Direction::Up;
+                if (name == "north") return Direction::North;
+                if (name == "south") return Direction::South;
+                if (name == "west")  return Direction::West;
+                return Direction::East;
+            };
+            const Direction facing = dirOf(state.GetValueByName("facing"));
+            const Direction opposite = Opposite(facing);
+            // FaceAttachedHorizontalDirectionalBlock.getConnectedDirection.
+            const std::string_view face = state.GetValueByName("face");
+            const Direction connected = face == "ceiling" ? Direction::Down : face == "floor" ? Direction::Up : facing;
+            const Direction oppositeConnect = Opposite(connected);
+            const double x = pos.x + 0.5 + 0.1 * StepX(opposite) + 0.2 * StepX(oppositeConnect);
+            const double y = pos.y + 0.5 + 0.1 * StepY(opposite) + 0.2 * StepY(oppositeConnect);
+            const double z = pos.z + 0.5 + 0.1 * StepZ(opposite) + 0.2 * StepZ(oppositeConnect);
+            level.AddParticle(ParticleOptions::Dust(16711680u, scale), x, y, z, 0.0, 0.0, 0.0);
         }
 
         UseResult LeverUse(ILevelWrite* level, const glm::ivec3& pos, IUsePlayer* player, const BlockHitResult&) {
             if (!level || !player) return UseResult::Pass;
             const BlockState state = StateAt(*level, pos);
             if (!state.Is(BlockID::Lever)) return UseResult::Pass;
-            // MC: the client only spawns the particle; the server pulls.
-            if (!level->IsClientSide()) LeverPull(*level, pos, state);
+            // MC: the client only spawns the particle (switching ON); the
+            // server pulls.
+            if (!level->IsClientSide()) {
+                LeverPull(*level, pos, state, player->GameEventSource());
+            } else if (state.GetValueByName("powered") != "true") {
+                LeverMakeParticle(*level, pos, state, 1.0f);
+            }
             return UseResult::Success;
         }
 
@@ -920,6 +991,8 @@ namespace Game {
             FaceAttachedUpdateNeighbours(level, pos, state);
             ScheduleTick(level, pos, state.Block(), ButtonTicksToStayPressed(state.Block()));
             ButtonPlaySound(level, player, state.Block(), pos, true);
+            // MC ButtonBlock.press: gameEvent(player, BLOCK_ACTIVATE, pos).
+            level.GameEvent(player ? player->GameEventSource() : nullptr, GameEventId::BlockActivate, pos);
         }
 
         UseResult ButtonUse(ILevelWrite* level, const glm::ivec3& pos, IUsePlayer* player, const BlockHitResult&) {
@@ -933,7 +1006,10 @@ namespace Game {
 
         // ButtonBlock.checkPressed: an arrow resting in the button keeps it
         // down; the scheduled tick releases it otherwise.
-        void ButtonCheckPressed(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        // `arrow` is the arrow that reached it (entityInside), standing in for
+        // MC's firstArrow; null from the tick.
+        void ButtonCheckPressed(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                                Entity* arrow = nullptr) {
             bool shouldBePressed = false;
             if (IsWoodenButton(state.Block())) {
                 const auto shapes = BlockRegistry::GetBlockShapeSet(state);
@@ -949,6 +1025,10 @@ namespace Game {
                 SetBlockAndUpdate(level, pos, WithPowered(state, shouldBePressed));
                 FaceAttachedUpdateNeighbours(level, pos, state);
                 ButtonPlaySound(level, nullptr, state.Block(), pos, shouldBePressed);
+                // MC checkPressed: gameEvent(firstArrow, pressed ? BLOCK_ACTIVATE
+                // : BLOCK_DEACTIVATE, pos).
+                level.GameEvent(shouldBePressed ? arrow : nullptr,
+                                shouldBePressed ? GameEventId::BlockActivate : GameEventId::BlockDeactivate, pos);
             }
             if (shouldBePressed) {
                 ScheduleTick(level, pos, state.Block(), ButtonTicksToStayPressed(state.Block()));
@@ -963,7 +1043,7 @@ namespace Game {
             if (level.IsClientSide() || !IsWoodenButton(state.Block()) || PoweredOf(state)) return;
             const EntityTypeId t = entity.GetType();
             if (t != EntityTypeId::Arrow && t != EntityTypeId::Trident) return;
-            ButtonCheckPressed(level, pos, state);
+            ButtonCheckPressed(level, pos, state, &entity);
         }
 
         // ── Pressure plates (BasePressurePlateBlock and the two subclasses)
@@ -1009,7 +1089,8 @@ namespace Game {
             level.UpdateNeighborsAt(Below(pos), id);
         }
 
-        void PlateCheckPressed(ILevelWrite& level, const glm::ivec3& pos, BlockState state, int oldSignal) {
+        void PlateCheckPressed(ILevelWrite& level, const glm::ivec3& pos, BlockState state, int oldSignal,
+                               Entity* sourceEntity = nullptr) {
             const int signal = PlateGetSignalStrength(level, pos, state.Block());
             const bool wasPressed = oldSignal > 0;
             const bool isPressed  = signal > 0;
@@ -1017,8 +1098,15 @@ namespace Game {
                 SetBlockClients(level, pos, PlateSetSignalForState(state, signal));
                 PlateUpdateNeighbours(level, pos, state.Block());
             }
-            if (!isPressed && wasPressed)      PlatePlaySound(level, state.Block(), pos, false);
-            else if (isPressed && !wasPressed) PlatePlaySound(level, state.Block(), pos, true);
+            // MC checkPressed: the click and gameEvent(sourceEntity,
+            // BLOCK_DEACTIVATE / BLOCK_ACTIVATE, pos).
+            if (!isPressed && wasPressed) {
+                PlatePlaySound(level, state.Block(), pos, false);
+                level.GameEvent(sourceEntity, GameEventId::BlockDeactivate, pos);
+            } else if (isPressed && !wasPressed) {
+                PlatePlaySound(level, state.Block(), pos, true);
+                level.GameEvent(sourceEntity, GameEventId::BlockActivate, pos);
+            }
             if (isPressed) ScheduleTick(level, pos, state.Block(), PlatePressedTime(state.Block()));
         }
 
@@ -1032,8 +1120,12 @@ namespace Game {
             const int signal = PlateSignalForState(state);
             if (signal == 0) PlateCheckPressed(level, pos, state, signal);
         }
-        void PlateEntityInside(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Entity&) {
-            PlateAnyInside(level, pos, state);
+        void PlateEntityInside(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Entity& entity) {
+            // MC entityInside → checkPressed(entity, …): the entity is the
+            // event's source.
+            if (level.IsClientSide()) return;
+            const int signal = PlateSignalForState(state);
+            if (signal == 0) PlateCheckPressed(level, pos, state, signal, &entity);
         }
 
         void PlateAfterRemoval(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool movedByPiston) {
@@ -1081,10 +1173,15 @@ namespace Game {
                 ? state.SetName(PropertyId::INSTRUMENT, "harp") : next;
         }
 
-        void NoteBlockPlayNote(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        void NoteBlockPlayNote(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                               Entity* source = nullptr) {
             if (InstrumentWorksAbove(state.GetName(PropertyId::INSTRUMENT)) ||
                 level.GetBlock(pos.x, pos.y + 1, pos.z) == BlockID::Air) {
                 level.BlockEvent(pos, BlockID::NoteBlock, 0, 0);
+                // MC NoteBlock.playNote: level.gameEvent(source, NOTE_BLOCK_PLAY, pos)
+                // — sculk sensors, wardens and allays (their vibration
+                // listeners) hear it.
+                level.GameEvent(source, GameEventId::NoteBlockPlay, pos);
             }
         }
 
@@ -1112,7 +1209,7 @@ namespace Game {
             if (!level->IsClientSide()) {
                 state = state.SetIndex(PropertyId::NOTE, (state.GetIndex(PropertyId::NOTE) + 1) % 25);
                 SetBlockAndUpdate(*level, pos, state);
-                NoteBlockPlayNote(*level, pos, state);
+                NoteBlockPlayNote(*level, pos, state, player->GameEventSource());
             }
             return UseResult::Success;
         }
@@ -1148,6 +1245,14 @@ namespace Game {
             // component (SkullBlockEntity.getNoteBlockSound); skulls carry no
             // such component here, which MC answers the same way — silence.
             if (instrument == "custom_head") return false;
+            // MC NoteBlock.triggerEvent: a tunable instrument puffs a NOTE
+            // coloured by its pitch (xd = note / 24) — addParticle, so only
+            // the client's run of the event (the block-event packet) draws it.
+            if (InstrumentIsTunable(instrument)) {
+                const int note = state.GetIndex(PropertyId::NOTE);
+                level.AddParticle(ParticleOptions(ParticleKind::Note), pos.x + 0.5, pos.y + 1.2, pos.z + 0.5,
+                                  static_cast<double>(note) / 24.0, 0.0, 0.0);
+            }
             // MC NoteBlock.triggerEvent:137 — playSeededSound(null, centre,
             // instrument, RECORDS, 3.0F, pitch, seed): the Jukebox/Note Blocks
             // slider, and a 48-block reach at volume 3.
@@ -1207,6 +1312,9 @@ namespace Game {
             if (!level->IsClientSide()) {
                 const BlockState newState = WithBool(state, PropertyId::INVERTED, !BoolOf(state, PropertyId::INVERTED));
                 SetBlockClients(*level, pos, newState);
+                // MC: gameEvent(BLOCK_CHANGE, pos, Context.of(player, newState)).
+                level->GameEvent(GameEventId::BlockChange, pos,
+                                 GameEventContext::Of(player->GameEventSource(), newState));
                 DaylightDetectorUpdateSignalStrength(*level, pos, newState);
             }
             return UseResult::Success;
@@ -1295,6 +1403,7 @@ namespace Game {
                     // MC DoorBlock.neighborChanged:185 → playSound(null, ...).
                     level.PlaySound(nullptr, pos, DoorSound(state.Block(), signal), SoundSource::Blocks,
                                     1.0f, RandomFloat(level) * 0.1f + 0.9f);
+                    level.GameEvent(nullptr, signal ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
                 }
                 SetBlockClients(level, pos, WithOpen(WithPowered(state, signal), signal));
             }
@@ -1309,6 +1418,8 @@ namespace Game {
                     // MC TrapDoorBlock.neighborChanged:108 → playSound(null, ...).
                     level.PlaySound(nullptr, pos, TrapdoorSound(state.Block(), signal), SoundSource::Blocks,
                                     1.0f, RandomFloat(level) * 0.1f + 0.9f);
+                    // TrapDoorBlock.playSound's gameEvent(null, OPEN / CLOSE).
+                    level.GameEvent(nullptr, signal ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
                 }
                 SetBlockClients(level, pos, WithPowered(state, signal));
             }
@@ -1325,6 +1436,7 @@ namespace Game {
                         level.PlaySound(nullptr, pos, hasPower ? wood->fenceGateOpen : wood->fenceGateClose,
                                         SoundSource::Blocks, 1.0f, RandomFloat(level) * 0.1f + 0.9f);
                     }
+                    level.GameEvent(nullptr, hasPower ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
                 }
             }
         }
@@ -1357,13 +1469,24 @@ namespace Game {
 
         void HookEmitState(ILevelWrite& level, const glm::ivec3& pos, bool attached, bool powered,
                            bool wasAttached, bool wasPowered) {
-            // MC TripWireHookBlock.emitState:176, every one except = null.
+            // MC TripWireHookBlock.emitState:176, every one except = null,
+            // each with its gameEvent(null, ACTIVATE / DEACTIVATE / ATTACH /
+            // DETACH, pos).
             constexpr SoundSource kBlocks = SoundSource::Blocks;
-            if (powered && !wasPowered)        level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_CLICK_ON, kBlocks, 0.4f, 0.6f);
-            else if (!powered && wasPowered)   level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_CLICK_OFF, kBlocks, 0.4f, 0.5f);
-            else if (attached && !wasAttached) level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_ATTACH, kBlocks, 0.4f, 0.7f);
-            else if (!attached && wasAttached) level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_DETACH, kBlocks, 0.4f,
-                                                               1.2f / (RandomFloat(level) * 0.2f + 0.9f));
+            if (powered && !wasPowered) {
+                level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_CLICK_ON, kBlocks, 0.4f, 0.6f);
+                level.GameEvent(nullptr, GameEventId::BlockActivate, pos);
+            } else if (!powered && wasPowered) {
+                level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_CLICK_OFF, kBlocks, 0.4f, 0.5f);
+                level.GameEvent(nullptr, GameEventId::BlockDeactivate, pos);
+            } else if (attached && !wasAttached) {
+                level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_ATTACH, kBlocks, 0.4f, 0.7f);
+                level.GameEvent(nullptr, GameEventId::BlockAttach, pos);
+            } else if (!attached && wasAttached) {
+                level.PlaySound(nullptr, pos, SoundEvents::TRIPWIRE_DETACH, kBlocks, 0.4f,
+                                1.2f / (RandomFloat(level) * 0.2f + 0.9f));
+                level.GameEvent(nullptr, GameEventId::BlockDetach, pos);
+            }
         }
 
         void HookOnRemoved(ILevelWrite& level, const glm::ivec3& pos, BlockState state);
@@ -1575,6 +1698,24 @@ namespace Game {
         return WithBool(state, PropertyId::LOCKED, RepeaterIsLocked(level, pos, state));
     }
 
+    bool RedstoneComponentOnExplosionHit(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        // MC ButtonBlock.onExplosionHit: `if (canTriggerBlocks && !POWERED)
+        // press(state, level, pos, null)` — the same press a click makes,
+        // attached block and all.
+        if (IsButtonBlock(state.Block())) {
+            if (PoweredOf(state)) return false;
+            ButtonPress(level, pos, state, nullptr);
+            return true;
+        }
+        // MC LeverBlock.onExplosionHit: `if (canTriggerBlocks) pull(state,
+        // level, pos, null)`.
+        if (state.Is(BlockID::Lever)) {
+            LeverPull(level, pos, state);
+            return true;
+        }
+        return false;
+    }
+
     void RedstoneComponentPlacedBy(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
         if (state.Is(BlockID::TripwireHook)) {
             HookCalculateState(level, pos, state, false, false, -1, nullptr);
@@ -1661,6 +1802,29 @@ namespace Game {
         }
     }
 
+    bool IsLightningRodBlock(BlockID id) {
+        switch (id) {
+            case BlockID::LightningRod:         case BlockID::ExposedLightningRod:
+            case BlockID::WeatheredLightningRod: case BlockID::OxidizedLightningRod:
+            case BlockID::WaxedLightningRod:     case BlockID::WaxedExposedLightningRod:
+            case BlockID::WaxedWeatheredLightningRod: case BlockID::WaxedOxidizedLightningRod:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    void LightningRodOnLightningStrike(ILevelWrite& level, const glm::ivec3& pos, BlockState state) {
+        // MC LightningRodBlock.onLightningStrike.
+        const BlockState powered = WithPowered(state, true);
+        SetBlockAndUpdate(level, pos, powered);
+        LightningRodUpdateNeighbours(level, pos, powered);
+        ScheduleTick(level, pos, state.Block(), 8);
+        // The electric sparks along the rod's axis (data = axis ordinal).
+        level.PlayLevelEvent(SoundExcept(nullptr), LevelEvent::PARTICLES_ELECTRIC_SPARK, pos,
+                             static_cast<int>(AxisOf(FacingOf(state))));
+    }
+
     bool HasRedstoneSurvivalRule(BlockID id) {
         return id == BlockID::RedstoneTorch || id == BlockID::RedstoneWallTorch ||
                id == BlockID::BlueRedstoneTorch || id == BlockID::BlueRedstoneWallTorch ||
@@ -1740,6 +1904,19 @@ namespace Game {
             b.getDirectSignal             = &ObserverGetSignal;
             b.onPlace                     = &ObserverOnPlace;
             b.affectNeighborsAfterRemoval = &ObserverAfterRemoval;
+        }
+
+        // Lightning rods, all eight copper stages (waxed and not).
+        for (size_t i = 0; i < BlockRegistry::Size; ++i) {
+            const BlockID id = static_cast<BlockID>(i);
+            if (!IsLightningRodBlock(id)) continue;
+            Block& b = at(id);
+            b.isSignalSource              = true;
+            b.getSignal                   = &LightningRodGetSignal;
+            b.getDirectSignal             = &LightningRodGetDirectSignal;
+            b.tick                        = &LightningRodTick;
+            b.onPlace                     = &LightningRodOnPlace;
+            b.affectNeighborsAfterRemoval = &LightningRodAfterRemoval;
         }
 
         // Lamp and block of redstone.

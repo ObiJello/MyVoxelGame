@@ -1,4 +1,7 @@
 // File: src/client/renderer/viewmodel/HeldItemRenderer.cpp
+#include "client/entity/ClientFishing.hpp"
+#include "common/entity/FireworkItems.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "HeldItemRenderer.hpp"
 #include "HeldItemSpriteMesh.hpp"
 
@@ -19,12 +22,24 @@
 #include "../blockentity/BlockEntityRenderDispatcher.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "client/map/ClientMaps.hpp"
+#include "../entity/model/ModelPart.hpp"
+#include "../entity/ItemDisplayTransforms.hpp"
+#include "common/core/Ease.hpp"
+#include "common/entity/SpearItem.hpp"
+
+#include "stb_image.h"
+
+#include <filesystem>
+#include <string>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <vector>
 #include <cmath>
+
+namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
 
 namespace Render {
 
@@ -64,6 +79,28 @@ namespace Render {
             { 1.13f / 16.0f, 3.2f / 16.0f, 1.13f / 16.0f },
             0.68f
         };
+        // item/handheld_rod's firstperson_righthand — the fishing rod and
+        // the two on-a-stick items: rotation [0, 90, 25], translation
+        // [0, 1.6, 0.8], scale 0.68. It turns the rod the other way round from
+        // item/handheld, so the tip leads — where the fishing line leaves it
+        // (FishingHookRenderer's first-person origin assumes this pose).
+        constexpr DisplayXf kRodXf {
+            { 0.0f, 90.0f, 25.0f },
+            { 0.0f, 1.6f / 16.0f, 0.8f / 16.0f },
+            0.68f
+        };
+        // item/crossbow's own firstperson_righthand: rotation [-90, 0, -55],
+        // translation [1.13, 3.2, 1.13], scale 0.68 (every crossbow model —
+        // standby, pulling, loaded — takes it from this parent).
+        constexpr DisplayXf kCrossbowXf {
+            { -90.0f, 0.0f, -55.0f },
+            { 1.13f / 16.0f, 3.2f / 16.0f, 1.13f / 16.0f },
+            0.68f
+        };
+        bool IsHandheldRod(Game::ItemID id) {
+            return id == Game::Items::FishingRod || id == Game::Items::CarrotOnAStick ||
+                   id == Game::Items::WarpedFungusOnAStick;
+        }
         // block/block parent firstperson_righthand:
         //   rotation [0, 45, 0], translation [0, 0, 0], scale [0.4, 0.4, 0.4].
         //
@@ -92,6 +129,14 @@ namespace Render {
             { 0.0f, 315.0f, 0.0f },
             { 0.0f, 0.0f, 0.0f },
             0.40f
+        };
+
+        // models/item/decorated_pot.json firstperson_righthand: rotation
+        // [0, 90, 0], translation [0, 0, 0], scale 0.375.
+        constexpr DisplayXf kDecoratedPotXf {
+            { 0.0f, 90.0f, 0.0f },
+            { 0.0f, 0.0f, 0.0f },
+            0.375f
         };
 
         // Build the 4×4 model matrix for a display transform.
@@ -252,6 +297,15 @@ namespace Render {
         BufferHandle s_cubeVB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
         BufferHandle s_cubeIB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
         MeshHandle   s_cubeMesh[2] = { INVALID_MESH,   INVALID_MESH };
+
+        // The map poses' geometry, per hand for the same reason: the arms,
+        // the paper, the map and its decorations, one upload per hand and a
+        // draw per texture. Room for both arms (with sleeves) and the
+        // map's full 256-marker decoration budget with margin.
+        constexpr size_t kMapMaxQuads = 320;
+        BufferHandle s_mapVB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
+        BufferHandle s_mapIB[2]   = { INVALID_BUFFER, INVALID_BUFFER };
+        MeshHandle   s_mapMesh[2] = { INVALID_MESH,   INVALID_MESH };
     } // namespace
 
     // ──────────────────────────────────────────────────────────────
@@ -300,6 +354,14 @@ namespace Render {
                 nullptr, BufferAccess::Streaming);
             s_cubeMesh[h] = g_renderBackend->CreateMesh(
                 s_cubeVB[h], s_cubeIB[h], GetBlockVertexLayout());
+            s_mapVB[h] = g_renderBackend->CreateBuffer(
+                BufferUsage::Vertex, kMapMaxQuads * 4 * sizeof(ItemCubeVert),
+                nullptr, BufferAccess::Streaming);
+            s_mapIB[h] = g_renderBackend->CreateBuffer(
+                BufferUsage::Index, kMapMaxQuads * 6 * sizeof(uint32_t),
+                nullptr, BufferAccess::Streaming);
+            s_mapMesh[h] = g_renderBackend->CreateMesh(
+                s_mapVB[h], s_mapIB[h], GetBlockVertexLayout());
         }
 
         m_initialized = true;
@@ -314,7 +376,20 @@ namespace Render {
             if (s_cubeMesh[h] != INVALID_MESH)  { g_renderBackend->DestroyMesh(s_cubeMesh[h]); s_cubeMesh[h] = INVALID_MESH; }
             if (s_cubeVB[h]   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeVB[h]); s_cubeVB[h] = INVALID_BUFFER; }
             if (s_cubeIB[h]   != INVALID_BUFFER){ g_renderBackend->DestroyBuffer(s_cubeIB[h]); s_cubeIB[h] = INVALID_BUFFER; }
+            if (s_mapMesh[h] != INVALID_MESH)   { g_renderBackend->DestroyMesh(s_mapMesh[h]); s_mapMesh[h] = INVALID_MESH; }
+            if (s_mapVB[h]   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(s_mapVB[h]); s_mapVB[h] = INVALID_BUFFER; }
+            if (s_mapIB[h]   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(s_mapIB[h]); s_mapIB[h] = INVALID_BUFFER; }
         }
+        if (m_skinTexture != INVALID_TEXTURE) {
+            g_renderBackend->DestroyTexture(m_skinTexture);
+            m_skinTexture = INVALID_TEXTURE;
+        }
+        m_skinTried = false;
+        if (m_tridentTexture != INVALID_TEXTURE) {
+            g_renderBackend->DestroyTexture(m_tridentTexture);
+            m_tridentTexture = INVALID_TEXTURE;
+        }
+        m_tridentTextureTried = false;
         if (m_dummyTexture != INVALID_TEXTURE) {
             g_renderBackend->DestroyTexture(m_dummyTexture);
             m_dummyTexture = INVALID_TEXTURE;
@@ -365,6 +440,8 @@ namespace Render {
                 const Game::ItemID it = (h == 0) ? mainItem : offhandItem;
                 m_hands[h].displayed = it;
                 m_hands[h].pending   = it;
+                m_hands[h].mapId     = m_hands[h].pendingMapId;
+                m_hands[h].stack     = m_hands[h].pendingStack;
                 m_hands[h].equipProgress = m_hands[h].equipProgressPrev = 0.0f;
             }
             m_swingProgress = m_swingProgressPrev = 0.0f;
@@ -402,16 +479,19 @@ namespace Render {
 
             const float swap = std::clamp(mainHandSwapScale, 0.0f, 1.0f);
             const float restHeight = (h == 0) ? swap * swap * swap : 1.0f;
-            const float target = (hand.displayed != hand.pending)
-                               ? 1.0f
-                               : 1.0f - restHeight;
+            const bool differs = hand.displayed != hand.pending || hand.mapId != hand.pendingMapId;
+            const float target = differs ? 1.0f : 1.0f - restHeight;
 
             const float delta  = std::clamp(target - hand.equipProgress,
                                             -kEquipStep, kEquipStep);
             hand.equipProgress = std::clamp(hand.equipProgress + delta, 0.0f, 1.0f);
             if (hand.equipProgress > 0.9f) {
                 hand.displayed = hand.pending;
+                hand.mapId     = hand.pendingMapId;
             }
+            // The same item: the live stack replaces the visible one at once
+            // (its components — a crossbow's load — with no swap).
+            if (hand.pendingStack.itemId == hand.displayed) hand.stack = hand.pendingStack;
         }
 
         // Swing animation. Mirrors MC's LivingEntity.swing() retrigger
@@ -428,9 +508,14 @@ namespace Render {
             m_swingActive = true;
             m_swingProgress = 0.0f;
             m_swingProgressPrev = 0.0f;
+            // ItemStack.getAttackAnimation of the main hand: a spear's STAB
+            // for its attack duration, SwingAnimation.DEFAULT's 6-tick
+            // WHACK for everything else.
+            m_swingStab = Game::Spear::IsSpear(mainItem);
+            m_swingDuration = std::max(1, Game::Spear::AttackAnimationDuration(mainItem));
         }
         if (m_swingActive) {
-            m_swingProgress += kSwingStep;
+            m_swingProgress += m_swingStab ? 1.0f / static_cast<float>(m_swingDuration) : kSwingStep;
             if (m_swingProgress >= 1.0f) {
                 m_swingActive = false;
                 m_swingProgress = 0.0f;
@@ -484,6 +569,7 @@ namespace Render {
         // `RenderSystem.clear(GL_DEPTH_BUFFER_BIT, ...)`. The viewmodel
         // then z-sorts only against itself.
         g_renderBackend->Clear(/*color=*/false, /*depth=*/true, /*stencil=*/false);
+        m_viewPitchDeg = viewPitchDeg;
 
         // MC renderHandsWithItems: off hand first, then main hand on top.
         if (drawOff)  RenderHand(1, aspect, partialTick, walkDistance);
@@ -494,6 +580,11 @@ namespace Render {
                                       float walkDistance) {
         PROFILE_ZONE_N("HeldItemRender.Hand");
         const HandState& hs = m_hands[hand];
+        // itemStack.has(DataComponents.MAP_ID): the map poses.
+        if (hs.mapId) {
+            RenderMapHand(hand, aspect, partialTick, walkDistance);
+            return;
+        }
         const float invert = (hand == 0) ? 1.0f : -1.0f;   // right / left arm
         const bool leftHand = (hand == 1);
         // Whether THIS hand carries the hold-to-use pose (MC keys the
@@ -570,7 +661,9 @@ namespace Render {
             } else {
                 applyItemArmTransform(modelBE, invert, equipBE);
             }
-            modelBE *= buildDisplayMatrix(kChestLikeXf, leftHand);
+            modelBE *= buildDisplayMatrix(item.blockId == Game::BlockID::DecoratedPot ? kDecoratedPotXf
+                                                                                    : kChestLikeXf,
+                                          leftHand);
             // Chest mesh lives in MC pixel-space [0,16]³. Scale to [0,1]
             // block space, then translate to centre the mesh on origin so
             // the display transform's rotation pivots around the chest's
@@ -594,11 +687,24 @@ namespace Render {
             BEWLRLight light;
             light.world = false;
             light.light = HandLight();
-            beRenderer->RenderBEWLR(item.blockId, projBE * m_viewTilt * modelBE, light);
+            beRenderer->RenderBEWLRStack(item.blockId, hs.stack, projBE * m_viewTilt * modelBE, light);
             return;
         }
 
-        if (item.renderType == Game::ItemRenderType::Block) {
+        // The trident and the spears draw their in-hand models, placed by
+        // those models' own first-person display transforms
+        // (items/trident.json → trident_in_hand / trident_throwing, the
+        // TridentModel special; items/<x>_spear.json → <x>_spear_in_hand).
+        const bool tridentHand = hs.displayed == Game::Items::Trident;
+        const Game::Spear::SpearDefinition* spearDef = Game::Spear::Find(hs.displayed);
+        std::string displayModel;
+        if (tridentHand) {
+            displayModel = usingThisHand ? "item/trident_throwing" : "item/trident_in_hand";
+        }
+
+        if (tridentHand) {
+            // No mesh here: RenderTridentModel draws it once the pose is built.
+        } else if (item.renderType == Game::ItemRenderType::Block) {
             // Build a 1×1 textured-cube mesh, atlas UVs sampled from
             // the block's representative texture.
             std::vector<ItemCubeVert> verts;
@@ -635,22 +741,46 @@ namespace Render {
             // icon draws (GuiGraphics). The hand carries only the item id, so
             // per-stack tints (a potion's contents) read as the JSON default.
             Game::ItemStack shown;
-            shown.itemId = hs.displayed;
+            if (hs.stack.itemId == hs.displayed && !hs.stack.IsEmpty()) {
+                shown = hs.stack;   // its components pick the sprite / tint
+            } else {
+                shown.itemId = hs.displayed;
+            }
             shown.count  = 1;
-            const auto* entry = HeldItemSpriteMesh::GetOrBuildForStack(shown);
+            // MC FishingRodCast (items/fishing_rod.json's condition): the rod
+            // in the hand whose line is out draws item/fishing_rod_cast.
+            const HeldItemSpriteMesh::Entry* entry = nullptr;
+            if (hs.displayed == Game::Items::FishingRod &&
+                Client::Fishing::LocalCastHand() == static_cast<int>(hand)) {
+                entry = HeldItemSpriteMesh::GetOrBuild("fishing_rod_cast");
+            }
+            if (!entry && spearDef) {
+                // The long in-hand sprite (item/<x>_spear_in_hand).
+                const std::string slug(Game::ItemRegistry::Slug(hs.displayed));
+                entry = HeldItemSpriteMesh::GetOrBuild(slug + "_in_hand");
+                if (entry) displayModel = "item/" + slug + "_in_hand";
+            }
+            if (!entry) {
+                // Drawn as the hand's own slot: a per-stack model property
+                // (using_item) answers only for the hand in use.
+                const Game::ScopedItemRenderSlot renderSlot(m_handSlots[hand]);
+                entry = HeldItemSpriteMesh::GetOrBuildForStack(shown);
+            }
             if (!entry) return;
             mesh       = entry->mesh;
             indexCount = entry->indexCount;
             tex        = entry->texture != INVALID_TEXTURE ? entry->texture
                                                            : m_dummyTexture;
-            xf = kSpriteXf;
+            xf = IsHandheldRod(hs.displayed) ? kRodXf
+               : hs.displayed == Game::Items::Crossbow ? kCrossbowXf
+               : kSpriteXf;
             // Sprite mesh lives in 0..16 local space; the display
             // transform's translation is in 0..1 block units, so we
             // need to pre-scale the mesh to fit in the same unit cube
             // as the block path. Done by composing an extra 1/16 scale
             // BEFORE the display transform below.
         }
-        if (mesh == INVALID_MESH) return;
+        if (mesh == INVALID_MESH && !tridentHand) return;
 
         // ── Build the model matrix ─────────────────────────────────
         // Chain mirrors MC ItemInHandRenderer.renderArmWithItem exactly
@@ -678,7 +808,43 @@ namespace Render {
         glm::mat4 model(1.0f);
         applyBobTransform(model, walkDistance);
         applySwayTransform(model, m_swayPitchDeg, m_swayYawDeg);
-        if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
+        if (hs.displayed == Game::Items::Crossbow) {
+            // MC FirstPersonHandsAndItemsRenderer's crossbow branch: the arm
+            // transform first; drawing (not yet loaded) turns it across the
+            // body, shaking and pulling back with the charge; otherwise the
+            // swing, and a loaded crossbow at rest is held out to the side.
+            applyItemArmTransform(model, invert, equip);
+            const Game::ItemStack& shownStack = hs.stack.itemId == hs.displayed ? hs.stack
+                                                                               : Game::ItemStack{};
+            const bool charged = Game::FireworkItems::IsCrossbowCharged(shownStack);
+            if (usingThisHand && !charged) {
+                model = glm::translate(model, glm::vec3(invert * -0.4785682f, -0.094387f, 0.05731531f));
+                model = glm::rotate(model, glm::radians(-11.935f),         {1, 0, 0});
+                model = glm::rotate(model, glm::radians(invert * 65.3f),   {0, 1, 0});
+                model = glm::rotate(model, glm::radians(invert * -9.785f), {0, 0, 1});
+                const float timeHeld = static_cast<float>(m_useDuration) -
+                    (static_cast<float>(m_useRemaining) - partialTick + 1.0f);
+                const int chargeDuration = std::max(1, Game::FireworkItems::CrossbowChargeDuration(
+                    shownStack.IsEmpty() ? Game::ItemStack(Game::Items::Crossbow, 1) : shownStack));
+                const float power = std::min(timeHeld / static_cast<float>(chargeDuration), 1.0f);
+                if (power > 0.1f) {
+                    const float shake = std::sin((timeHeld - 0.1f) * 1.3f) * (power - 0.1f);
+                    model = glm::translate(model, glm::vec3(0.0f, shake * 0.004f, 0.0f));
+                }
+                model = glm::translate(model, glm::vec3(0.0f, 0.0f, power * 0.04f));
+                model = glm::scale(model, glm::vec3(1.0f, 1.0f, 1.0f + power * 0.2f));
+                model = glm::rotate(model, glm::radians(-invert * 45.0f), {0, 1, 0});   // Axis.YN
+            } else {
+                // swingArm: the swing offsets and the attack rotations (an
+                // identity at rest).
+                applySwingOffsets(model, invert, swingP);
+                applySwingRotations(model, invert, swingP);
+                if (charged && swingP < 0.001f && hand == 0) {
+                    model = glm::translate(model, glm::vec3(invert * -0.641864f, 0.0f, 0.0f));
+                    model = glm::rotate(model, glm::radians(invert * 10.0f), {0, 1, 0});
+                }
+            }
+        } else if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::EAT ||
                               m_useAnim == Game::ItemUseAnimation::DRINK)) {
             applyEatTransform(model, invert,
                               (float)m_useRemaining, (float)m_useDuration,
@@ -687,6 +853,106 @@ namespace Render {
         } else if (usingThisHand && m_useAnim == Game::ItemUseAnimation::BLOCK) {
             applyItemArmTransform(model, invert, equip);
             applyBlockPose(model, invert);
+        } else if (usingThisHand && (m_useAnim == Game::ItemUseAnimation::BOW ||
+                                     m_useAnim == Game::ItemUseAnimation::TRIDENT)) {
+            // renderArmWithItem's BOW / TRIDENT cases: the arm transform,
+            // the draw pose, then the pull — its shake past 10%, the lean
+            // back and the stretch — and the turn back.
+            applyItemArmTransform(model, invert, equip);
+            const bool trident = m_useAnim == Game::ItemUseAnimation::TRIDENT;
+            if (trident) {
+                model = glm::translate(model, glm::vec3(invert * -0.5f, 0.7f, 0.1f));
+                model = glm::rotate(model, glm::radians(-55.0f), {1, 0, 0});
+            } else {
+                model = glm::translate(model, glm::vec3(invert * -0.2785682f, 0.18344387f, 0.15731531f));
+                model = glm::rotate(model, glm::radians(-13.935f), {1, 0, 0});
+            }
+            model = glm::rotate(model, glm::radians(invert * 35.3f), {0, 1, 0});
+            model = glm::rotate(model, glm::radians(invert * -9.785f), {0, 0, 1});
+            const float timeHeld = static_cast<float>(m_useDuration) -
+                                   (static_cast<float>(m_useRemaining) - partialTick + 1.0f);
+            float power;
+            if (trident) {
+                power = std::min(timeHeld / 10.0f, 1.0f);
+            } else {
+                power = timeHeld / 20.0f;
+                power = std::min((power * power + power * 2.0f) / 3.0f, 1.0f);
+            }
+            if (power > 0.1f) {
+                const float shake = std::sin((timeHeld - 0.1f) * 1.3f) * (power - 0.1f);
+                model = glm::translate(model, glm::vec3(0.0f, shake * 0.004f, 0.0f));
+            }
+            model = glm::translate(model, glm::vec3(0.0f, 0.0f, power * (trident ? 0.2f : 0.04f)));
+            model = glm::scale(model, glm::vec3(1.0f, 1.0f, 1.0f + power * 0.2f));
+            model = glm::rotate(model, glm::radians(-invert * 45.0f), {0, 1, 0});   // Axis.YN
+        } else if (usingThisHand && m_useAnim == Game::ItemUseAnimation::BRUSH) {
+            // renderArmWithItem's BRUSH case (no custom arm transform): the
+            // arm transform, then applyBrushTransform — a swipe of
+            // -15 + 75 cos(2π t) degrees about X every 10 ticks of the hold.
+            applyItemArmTransform(model, invert, equip);
+            const float brushRemaining = std::fmod(static_cast<float>(m_useRemaining), 10.0f);
+            const float deltaSinceLastUpdate = brushRemaining - partialTick + 1.0f;
+            const float scaledUsageTime = 1.0f - deltaSinceLastUpdate / 10.0f;
+            const float swipe = -15.0f + 75.0f * std::cos(scaledUsageTime * 2.0f * 3.1415927f);
+            if (invert < 0) {
+                model = glm::translate(model, glm::vec3(0.1f, 0.83f, 0.35f));
+                model = glm::rotate(model, glm::radians(-80.0f), {1, 0, 0});
+                model = glm::rotate(model, glm::radians(-90.0f), {0, 1, 0});
+                model = glm::rotate(model, glm::radians(swipe), {1, 0, 0});
+                model = glm::translate(model, glm::vec3(-0.3f, 0.22f, 0.35f));
+            } else {
+                model = glm::translate(model, glm::vec3(-0.25f, 0.22f, 0.35f));
+                model = glm::rotate(model, glm::radians(-80.0f), {1, 0, 0});
+                model = glm::rotate(model, glm::radians(90.0f), {0, 1, 0});
+                model = glm::rotate(model, glm::radians(swipe), {1, 0, 0});
+            }
+        } else if (usingThisHand && m_useAnim == Game::ItemUseAnimation::SPEAR) {
+            // SPEAR (a custom arm transform): the arm's rest spot without
+            // the equip slide, then SpearAnimations.firstPersonUse — the
+            // raise, the sway, the lowering and the recoil of a hit.
+            model = glm::translate(model, glm::vec3(invert * 0.56f, -0.52f, -0.72f));
+            const float timeHeld = static_cast<float>(m_useDuration) -
+                                   (static_cast<float>(m_useRemaining) - partialTick + 1.0f);
+            if (spearDef) {
+                const Game::Spear::UseParams u = Game::Spear::UseParams::FromKineticWeapon(spearDef->kinetic, timeHeld);
+                model = glm::translate(model, glm::vec3(
+                    invert * (u.raiseProgress * 0.15f + u.raiseProgressEnd * -0.05f + u.swayProgress * -0.1f +
+                              u.swayScaleSlow * 0.005f),
+                    u.raiseProgress * -0.075f + u.raiseProgressMiddle * 0.075f + u.swayScaleFast * 0.01f,
+                    u.raiseProgressStart * 0.05f + u.raiseProgressEnd * -0.05f + u.swayScaleSlow * 0.005f));
+                // rotateAround(XP(...), 0, 0.1, 0).
+                const float xAngle = -65.0f * Game::Ease::InOutBack(u.raiseProgress) - 35.0f * u.lowerProgress +
+                                     100.0f * u.raiseBackProgress + -0.5f * u.swayScaleFast;
+                model = glm::translate(model, glm::vec3(0.0f, 0.1f, 0.0f));
+                model = glm::rotate(model, glm::radians(xAngle), {1, 0, 0});
+                model = glm::translate(model, glm::vec3(0.0f, -0.1f, 0.0f));
+                // rotateAround(YN(invert * (...)), invert * 0.15, 0, 0).
+                const float yAngle = invert * (-90.0f * Game::Ease::Progress(u.raiseProgress, 0.5f, 0.55f) +
+                                               90.0f * u.swayProgress + 2.0f * u.swayScaleSlow);
+                model = glm::translate(model, glm::vec3(invert * 0.15f, 0.0f, 0.0f));
+                model = glm::rotate(model, glm::radians(-yAngle), {0, 1, 0});
+                model = glm::translate(model, glm::vec3(invert * -0.15f, 0.0f, 0.0f));
+                model = glm::translate(model, glm::vec3(0.0f,
+                    -Game::Spear::HitFeedbackAmount(m_ticksSinceKineticHitFeedback), 0.0f));
+            }
+        } else if (!usingThisHand && m_autoSpinAttack) {
+            // A riptide in flight: the item held out ahead, both hands.
+            applyItemArmTransform(model, invert, equip);
+            model = glm::translate(model, glm::vec3(invert * -0.4f, 0.8f, 0.3f));
+            model = glm::rotate(model, glm::radians(invert * 65.0f), {0, 1, 0});
+            model = glm::rotate(model, glm::radians(invert * -85.0f), {0, 0, 1});
+        } else if (swingP > 0.0f && m_swingStab) {
+            // SwingAnimationType.STAB: SpearAnimations.firstPersonAttack —
+            // the thrust out, the pull back.
+            applyItemArmTransform(model, invert, equip);
+            const float starting = Game::Ease::InOutSine(Game::Ease::Progress(swingP, 0.0f, 0.05f));
+            const float middle   = Game::Ease::OutBack(Game::Ease::Progress(swingP, 0.05f, 0.2f));
+            const float ending   = Game::Ease::InOutExpo(Game::Ease::Progress(swingP, 0.4f, 1.0f));
+            model = glm::translate(model, glm::vec3(invert * 0.1f * (starting - middle),
+                                                    -0.075f * (starting - ending),
+                                                    0.65f * (starting - middle)));
+            model = glm::rotate(model, glm::radians(-70.0f * (starting - ending)), {1, 0, 0});
+            model = glm::translate(model, glm::vec3(0.0f, 0.0f, -0.25f * (ending - middle)));
         } else if (swingP > 0.0f) {
             applySwingOffsets(model, invert, swingP);
             applyItemArmTransform(model, invert, equip);
@@ -694,8 +960,24 @@ namespace Render {
         } else {
             applyItemArmTransform(model, invert, equip);
         }
+
+        // The in-hand models placed by their own display transforms.
+        if (!displayModel.empty()) {
+            const ItemDisplay::Context ctx = leftHand ? ItemDisplay::Context::FirstPersonLeftHand
+                                                      : ItemDisplay::Context::FirstPersonRightHand;
+            model = ItemDisplay::Apply(model, ItemDisplay::Get(displayModel, ctx), leftHand);
+            if (tridentHand) {
+                RenderTridentModel(hand, model, aspect);
+                return;
+            }
+            // The extruded sprite's cell: [0,16]² pixels, depth centred on 0
+            // (ItemModelGenerator's layer sits at z 7.5..8.5).
+            model = glm::translate(model, glm::vec3(0.0f, 0.0f, 0.5f));
+            model = glm::scale(model, glm::vec3(1.0f / 16.0f));
+            xf = DisplayXf{ glm::vec3(0.0f), glm::vec3(0.0f), 1.0f };
+        }
         // Display transform
-        model *= buildDisplayMatrix(xf, leftHand);
+        if (displayModel.empty()) model *= buildDisplayMatrix(xf, leftHand);
         // 6) Convert mesh-local space into the same coordinate frame
         //    vanilla's display transform expects, and apply vanilla's
         //    pre-display recentre.
@@ -722,7 +1004,9 @@ namespace Render {
         //      • Z component of recentre is 0 because the mesh's Z is
         //        already centred on origin — applying -0.5 there would
         //        push the slab half a block forward (wrong direction).
-        if (item.renderType != Game::ItemRenderType::Block) {
+        if (!displayModel.empty()) {
+            // Already in the model cell (ItemDisplay::Apply's centring).
+        } else if (item.renderType != Game::ItemRenderType::Block) {
             model = glm::scale(model, glm::vec3(1.0f / 16.0f));
             model = glm::translate(model, glm::vec3(-8.0f, -8.0f, 0.0f));
         } else {
@@ -805,6 +1089,356 @@ namespace Render {
         g_renderBackend->SetUniformVec3 (m_shader, "uCameraPos", glm::vec3(0.0f));
 
         g_renderBackend->DrawIndexed(mesh, indexCount);
+        g_renderBackend->UnbindMesh();
+    }
+
+    // ── Maps (MC FirstPersonHandsAndItemsRenderer) ──────────────────────
+
+    namespace {
+
+        constexpr float kPi = 3.14159265358979323846f;
+
+        glm::mat4 RotX(const glm::mat4& m, float deg) { return glm::rotate(m, glm::radians(deg), {1, 0, 0}); }
+        glm::mat4 RotY(const glm::mat4& m, float deg) { return glm::rotate(m, glm::radians(deg), {0, 1, 0}); }
+        glm::mat4 RotZ(const glm::mat4& m, float deg) { return glm::rotate(m, glm::radians(deg), {0, 0, 1}); }
+        glm::mat4 Move(const glm::mat4& m, float x, float y, float z) { return glm::translate(m, {x, y, z}); }
+
+        // PlayerModel (wide): the arm and its sleeve, as renderHand leaves
+        // them — resetPose, then zRot ±0.1.
+        ModelPart& PlayerArm(bool right) {
+            static ModelPart arms[2];
+            static bool built = false;
+            if (!built) {
+                built = true;
+                for (int i = 0; i < 2; ++i) {
+                    const bool r = i == 0;
+                    ModelPart& arm = arms[i];
+                    arm.name = r ? "right_arm" : "left_arm";
+                    arm.pose = PartPose::Offset(r ? -5.0f : 5.0f, 2.0f, 0.0f);
+                    CubeDefinition cube{};
+                    cube.originX = r ? -3.0f : -1.0f; cube.originY = -2.0f; cube.originZ = -2.0f;
+                    cube.sizeX = 4.0f; cube.sizeY = 12.0f; cube.sizeZ = 4.0f;
+                    cube.texOffsX = r ? 40.0f : 32.0f; cube.texOffsY = r ? 16.0f : 48.0f;
+                    arm.cubes.push_back(cube);
+                    ModelPart* sleeve = arm.AddChild(r ? "right_sleeve" : "left_sleeve", PartPose::Zero());
+                    CubeDefinition layer = cube;
+                    layer.texOffsX = r ? 40.0f : 48.0f; layer.texOffsY = r ? 32.0f : 48.0f;
+                    layer.growX = layer.growY = layer.growZ = 0.25f;
+                    sleeve->cubes.push_back(layer);
+                    arm.ResetPose();
+                    arm.zRot = r ? 0.1f : -0.1f;
+                }
+            }
+            return arms[right ? 0 : 1];
+        }
+
+        // MC calculateMapTilt.
+        float MapTilt(float xRot) {
+            float tilt = 1.0f - xRot / 45.0f + 0.1f;
+            tilt = std::clamp(tilt, 0.0f, 1.0f);
+            return -std::cos(tilt * kPi) * 0.5f + 0.5f;
+        }
+
+        struct MapDraw {
+            TextureHandle texture;
+            uint32_t first, count;
+            float alphaTest;
+        };
+
+        struct MapBatch {
+            std::vector<ItemCubeVert> verts;
+            std::vector<uint32_t> idx;
+            std::vector<MapDraw> draws;
+
+            void Quad(const std::array<glm::vec3, 4>& p, const std::array<glm::vec2, 4>& uv) {
+                const auto base = static_cast<uint32_t>(verts.size());
+                for (int c = 0; c < 4; ++c) {
+                    verts.push_back({ p[c].x, p[c].y, p[c].z, uv[c].x, uv[c].y, 255, 255, 255, 255 });
+                }
+                for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) idx.push_back(base + i);
+            }
+            void Begin(TextureHandle texture, float alphaTest) {
+                draws.push_back({ texture, static_cast<uint32_t>(idx.size()), 0, alphaTest });
+            }
+            void End() { draws.back().count = static_cast<uint32_t>(idx.size()) - draws.back().first; }
+        };
+    }
+
+    void HeldItemRenderer::RenderMapHand(int hand, float aspect, float partialTick, float walkDistance) {
+        PROFILE_ZONE_N("HeldItemRender.Map");
+        const HandState& hs = m_hands[hand];
+        if (!hs.mapId || s_mapMesh[hand] == INVALID_MESH) return;
+
+        if (!m_skinTried) {
+            // The default skin (DefaultPlayerSkin: the wide Steve) — this
+            // engine has no skins of its own.
+            m_skinTried = true;
+            const std::string full = PlatformMain::GetAssetPath("assets/textures/entity/player/wide/steve.png");
+            int w = 0, h = 0, ch = 0;
+            stbi_set_flip_vertically_on_load(0);
+            if (unsigned char* pixels = std::filesystem::exists(full)
+                    ? stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha) : nullptr) {
+                m_skinTexture = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+                g_renderBackend->SetTextureFilter(m_skinTexture, TextureFilter::Nearest, TextureFilter::Nearest);
+                g_renderBackend->SetTextureWrap(m_skinTexture, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+                stbi_image_free(pixels);
+            }
+        }
+
+        const float inverseArmHeight = hs.equipProgressPrev +
+            (hs.equipProgress - hs.equipProgressPrev) * partialTick;
+        const float attack = (hand == 0 && m_swingActive)
+            ? m_swingProgressPrev + (m_swingProgress - m_swingProgressPrev) * partialTick
+            : 0.0f;
+
+        // GameRenderer.bobView, then renderHandsWithItems' sway.
+        glm::mat4 root(1.0f);
+        applyBobTransform(root, walkDistance);
+        applySwayTransform(root, m_swayPitchDeg, m_swayYawDeg);
+
+        MapBatch batch;
+
+        // renderPlayerHand: the arm's ModelPart through `pose` (ModelPart
+        // units are pixels; a sixteenth of a block each).
+        const auto playerHand = [&](const glm::mat4& pose, bool right) {
+            if (m_skinTexture == INVALID_TEXTURE) return;
+            std::vector<ModelVertex> mv;
+            std::vector<uint32_t> mi;
+            PlayerArm(right).Build(glm::scale(pose, glm::vec3(1.0f / 16.0f)), 64.0f, 64.0f, mv, mi);
+            const auto base = static_cast<uint32_t>(batch.verts.size());
+            batch.Begin(m_skinTexture, 0.1f);
+            for (const ModelVertex& v : mv) batch.verts.push_back({ v.x, v.y, v.z, v.u, v.v, v.r, v.g, v.b, v.a });
+            for (uint32_t i : mi) batch.idx.push_back(base + i);
+            batch.End();
+        };
+
+        // renderMapHand.
+        const auto mapHand = [&](glm::mat4 pose, bool right) {
+            const float invert = right ? 1.0f : -1.0f;
+            pose = RotY(pose, 92.0f);
+            pose = RotX(pose, 45.0f);
+            pose = RotZ(pose, invert * -41.0f);
+            pose = Move(pose, invert * 0.3f, -1.1f, 0.45f);
+            playerHand(pose, right);
+        };
+
+        // renderPlayerArm.
+        const auto playerArm = [&](glm::mat4 pose, bool right) {
+            const float invert = right ? 1.0f : -1.0f;
+            const float sqrtAttack = std::sqrt(attack);
+            const float xSwingPosition = -0.3f * std::sin(sqrtAttack * kPi);
+            const float ySwingPosition = 0.4f * std::sin(sqrtAttack * 2.0f * kPi);
+            const float zSwingPosition = -0.4f * std::sin(attack * kPi);
+            pose = Move(pose, invert * (xSwingPosition + 0.64000005f),
+                        ySwingPosition - 0.6f + inverseArmHeight * -0.6f, zSwingPosition - 0.71999997f);
+            pose = RotY(pose, invert * 45.0f);
+            const float zSwingRotation = std::sin(attack * attack * kPi);
+            const float ySwingRotation = std::sin(sqrtAttack * kPi);
+            pose = RotY(pose, invert * ySwingRotation * 70.0f);
+            pose = RotZ(pose, invert * zSwingRotation * -20.0f);
+            pose = Move(pose, invert * -1.0f, 3.6f, 3.5f);
+            pose = RotZ(pose, invert * 120.0f);
+            pose = RotX(pose, 200.0f);
+            pose = RotY(pose, invert * -135.0f);
+            pose = Move(pose, invert * 5.6f, 0.0f, 0.0f);
+            playerHand(pose, right);
+        };
+
+        // renderMap: the paper (the checkerboard when there is data), then
+        // MapRenderer.render.
+        const auto renderMap = [&](glm::mat4 pose, int32_t mapId) {
+            pose = RotY(pose, 180.0f);
+            pose = RotZ(pose, 180.0f);
+            pose = glm::scale(pose, glm::vec3(0.38f));
+            pose = Move(pose, -0.5f, -0.5f, 0.0f);
+            pose = glm::scale(pose, glm::vec3(0.0078125f));
+            Client::Maps::MapGeometry geometry;
+            const bool hasMapData = Client::Maps::BuildMapGeometry(mapId, pose, /*showOnlyFrame=*/false, geometry);
+            const TextureHandle paper = Client::Maps::MapBackgroundTexture(hasMapData);
+            if (paper != INVALID_TEXTURE) {
+                const auto at = [&pose](float x, float y) { return glm::vec3(pose * glm::vec4(x, y, 0.0f, 1.0f)); };
+                batch.Begin(paper, 0.01f);
+                batch.Quad({ at(-7.0f, 135.0f), at(135.0f, 135.0f), at(135.0f, -7.0f), at(-7.0f, -7.0f) },
+                           { glm::vec2(0.0f, 1.0f), glm::vec2(1.0f, 1.0f), glm::vec2(1.0f, 0.0f), glm::vec2(0.0f, 0.0f) });
+                batch.End();
+            }
+            if (!hasMapData) return;
+            if (geometry.mapTexture != INVALID_TEXTURE) {
+                batch.Begin(geometry.mapTexture, 0.01f);
+                batch.Quad(geometry.mapQuad.pos, geometry.mapQuad.uv);
+                batch.End();
+            }
+            if (geometry.decorationTexture != INVALID_TEXTURE && !geometry.decorations.empty()) {
+                batch.Begin(geometry.decorationTexture, 0.1f);
+                for (const auto& q : geometry.decorations) {
+                    if (batch.verts.size() + 4 > kMapMaxQuads * 4) break;
+                    batch.Quad(q.pos, q.uv);
+                }
+                batch.End();
+            }
+        };
+
+        const bool right = hand == 0;   // the main arm is the right arm
+        if (hand == 0 && m_hands[1].displayed == 0) {
+            // renderTwoHandedMap.
+            const float sqrtAttack = std::sqrt(attack);
+            const float ySwingPosition = -0.2f * std::sin(attack * kPi);
+            const float zSwingPosition = -0.4f * std::sin(sqrtAttack * kPi);
+            glm::mat4 pose = Move(root, 0.0f, -ySwingPosition / 2.0f, zSwingPosition);
+            const float mapTilt = MapTilt(m_viewPitchDeg);
+            pose = Move(pose, 0.0f, 0.04f + inverseArmHeight * -1.2f + mapTilt * -0.5f, -0.72f);
+            pose = RotX(pose, mapTilt * -85.0f);
+            {
+                const glm::mat4 hands = RotY(pose, 90.0f);
+                mapHand(hands, true);
+                mapHand(hands, false);
+            }
+            const float xzSwingRotation = std::sin(sqrtAttack * kPi);
+            pose = RotX(pose, xzSwingRotation * 20.0f);
+            pose = glm::scale(pose, glm::vec3(2.0f));
+            renderMap(pose, *hs.mapId);
+        } else {
+            // renderOneHandedMap.
+            const float invert = right ? 1.0f : -1.0f;
+            const glm::mat4 base = Move(root, invert * 0.125f, -0.125f, 0.0f);
+            playerArm(RotZ(base, invert * 10.0f), right);
+            glm::mat4 pose = Move(base, invert * 0.51f, -0.08f + inverseArmHeight * -1.2f, -0.75f);
+            const float sqrtAttack = std::sqrt(attack);
+            const float xSwing = std::sin(sqrtAttack * kPi);
+            const float xSwingPosition = -0.5f * xSwing;
+            const float ySwingPosition = 0.4f * std::sin(sqrtAttack * 2.0f * kPi);
+            const float zSwingPosition = -0.3f * std::sin(attack * kPi);
+            pose = Move(pose, invert * xSwingPosition, ySwingPosition - 0.3f * xSwing, zSwingPosition);
+            pose = RotX(pose, xSwing * -45.0f);
+            pose = RotY(pose, invert * xSwing * -30.0f);
+            renderMap(pose, *hs.mapId);
+        }
+
+        if (batch.draws.empty() || batch.verts.empty()) return;
+        if (batch.verts.size() > kMapMaxQuads * 4 || batch.idx.size() > kMapMaxQuads * 6) return;
+        g_renderBackend->UpdateBuffer(s_mapVB[hand], 0, batch.verts.size() * sizeof(ItemCubeVert), batch.verts.data());
+        g_renderBackend->UpdateBuffer(s_mapIB[hand], 0, batch.idx.size() * sizeof(uint32_t), batch.idx.data());
+
+        const glm::mat4 proj = glm::perspective(glm::radians(70.0f), aspect, 0.05f, 8.0f);
+        const glm::mat4 mvp = proj * m_viewTilt;
+
+        PipelineState state;
+        state.depthTestEnabled  = true;
+        state.depthWriteEnabled = true;
+        state.colorWriteEnabled = true;
+        state.depthCompareOp    = CompareOp::LessEqual;   // the paper, the map and its markers stack
+        state.blendEnabled      = true;
+        state.srcBlendFactor    = BlendFactor::SrcAlpha;
+        state.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
+        state.cullMode          = CullMode::None;         // the map is seen from whichever side faces
+        state.frontFace         = FrontFace::CounterClockwise;
+        state.primitiveType     = PrimitiveType::Triangles;
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->SetUniformMat4(m_shader, "uMVP", mvp);
+        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
+        g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", glm::vec4(0.0f));
+        // The map's RenderTypes.text and the arm's entityTranslucent are
+        // both lightmap-lit at the player's light (renderHandsWithItems).
+        EntityEnvironment::SetDrawLight(m_shader, HandLight());
+        g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(0.0f));
+        g_renderBackend->SetUniformVec4(m_shader, "uFogEnv", glm::vec4(1e9f, 1e9f, 1e9f, 1e9f));
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", glm::vec3(0.0f));
+        for (const MapDraw& draw : batch.draws) {
+            if (draw.count == 0 || draw.texture == INVALID_TEXTURE) continue;
+            g_renderBackend->BindTexture(draw.texture, 0);
+            g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", draw.alphaTest);
+            g_renderBackend->DrawIndexed(s_mapMesh[hand], draw.count, draw.first);
+        }
+        g_renderBackend->UnbindMesh();
+    }
+
+    // ── The trident in the hand (TridentSpecialRenderer) ─────────────────
+
+    namespace {
+        // MC TridentModel.createLayer: the pole and its four children, all at
+        // PartPose.ZERO (the flying trident's wrappers belong to its entity
+        // renderer, not here). 32x32 sheet.
+        const ModelPart& TridentGeometry() {
+            static ModelPart pole;
+            static bool built = false;
+            if (!built) {
+                built = true;
+                pole.name = "pole";
+                pole.pose = PartPose::Zero();
+                const auto cube = [](float tx, float ty, float x, float y, float z,
+                                     float sx, float sy, float sz, bool mirror) {
+                    CubeDefinition c{};
+                    c.originX = x; c.originY = y; c.originZ = z;
+                    c.sizeX = sx; c.sizeY = sy; c.sizeZ = sz;
+                    c.texOffsX = tx; c.texOffsY = ty;
+                    c.mirror = mirror;
+                    return c;
+                };
+                pole.cubes.push_back(cube(0.0f, 6.0f, -0.5f, 2.0f, -0.5f, 1.0f, 25.0f, 1.0f, false));
+                pole.cubes.push_back(cube(4.0f, 0.0f, -1.5f, 0.0f, -0.5f, 3.0f, 2.0f, 1.0f, false));   // base
+                pole.cubes.push_back(cube(4.0f, 3.0f, -2.5f, -3.0f, -0.5f, 1.0f, 4.0f, 1.0f, false));  // left_spike
+                pole.cubes.push_back(cube(0.0f, 0.0f, -0.5f, -4.0f, -0.5f, 1.0f, 4.0f, 1.0f, false));  // middle_spike
+                pole.cubes.push_back(cube(4.0f, 3.0f, 1.5f, -3.0f, -0.5f, 1.0f, 4.0f, 1.0f, true));    // right_spike
+                pole.ResetPose();
+            }
+            return pole;
+        }
+    }
+
+    void HeldItemRenderer::RenderTridentModel(int hand, const glm::mat4& pose, float aspect) {
+        if (hand < 0 || hand > 1 || s_mapMesh[hand] == INVALID_MESH) return;
+        if (!m_tridentTextureTried) {
+            m_tridentTextureTried = true;
+            const std::string full = PlatformMain::GetAssetPath("assets/textures/entity/trident.png");
+            int w = 0, h = 0, ch = 0;
+            stbi_set_flip_vertically_on_load(0);
+            if (unsigned char* pixels = std::filesystem::exists(full)
+                    ? stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha) : nullptr) {
+                m_tridentTexture = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+                g_renderBackend->SetTextureFilter(m_tridentTexture, TextureFilter::Nearest, TextureFilter::Nearest);
+                g_renderBackend->SetTextureWrap(m_tridentTexture, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+                stbi_image_free(pixels);
+            }
+        }
+        if (m_tridentTexture == INVALID_TEXTURE) return;
+
+        // TridentSpecialRenderer.DEFAULT_TRANSFORMATION: scale(1, -1, -1),
+        // then the model in pixels.
+        glm::mat4 m = glm::scale(pose, glm::vec3(1.0f, -1.0f, -1.0f));
+        m = glm::scale(m, glm::vec3(1.0f / 16.0f));
+        std::vector<ModelVertex> mv;
+        std::vector<uint32_t> mi;
+        TridentGeometry().Build(m, 32.0f, 32.0f, mv, mi);
+        if (mv.empty() || mv.size() > kMapMaxQuads * 4 || mi.size() > kMapMaxQuads * 6) return;
+        std::vector<ItemCubeVert> verts;
+        verts.reserve(mv.size());
+        for (const ModelVertex& v : mv) verts.push_back({ v.x, v.y, v.z, v.u, v.v, v.r, v.g, v.b, v.a });
+        g_renderBackend->UpdateBuffer(s_mapVB[hand], 0, verts.size() * sizeof(ItemCubeVert), verts.data());
+        g_renderBackend->UpdateBuffer(s_mapIB[hand], 0, mi.size() * sizeof(uint32_t), mi.data());
+
+        const glm::mat4 proj = glm::perspective(glm::radians(70.0f), aspect, 0.05f, 8.0f);
+        PipelineState state;
+        state.depthTestEnabled  = true;
+        state.depthWriteEnabled = true;
+        state.colorWriteEnabled = true;
+        state.depthCompareOp    = CompareOp::LessEqual;
+        state.blendEnabled      = false;   // RenderTypes.entitySolid
+        state.cullMode          = CullMode::None;
+        state.frontFace         = FrontFace::CounterClockwise;
+        state.primitiveType     = PrimitiveType::Triangles;
+        g_renderBackend->SetPipelineState(state);
+        g_renderBackend->BindShader(m_shader);
+        g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * m_viewTilt);
+        g_renderBackend->SetUniformMat4(m_shader, "uModel", glm::mat4(1.0f));
+        g_renderBackend->SetUniformVec4(m_shader, "uPortalClipPlane", glm::vec4(0.0f));
+        EntityEnvironment::SetDrawLight(m_shader, HandLight());
+        g_renderBackend->SetUniformVec4(m_shader, "uFogColor", glm::vec4(0.0f));
+        g_renderBackend->SetUniformVec4(m_shader, "uFogEnv", glm::vec4(1e9f, 1e9f, 1e9f, 1e9f));
+        g_renderBackend->SetUniformVec3(m_shader, "uCameraPos", glm::vec3(0.0f));
+        g_renderBackend->BindTexture(m_tridentTexture, 0);
+        g_renderBackend->SetUniformFloat(m_shader, "uAlphaTest", 0.1f);
+        g_renderBackend->DrawIndexed(s_mapMesh[hand], static_cast<uint32_t>(mi.size()), 0);
         g_renderBackend->UnbindMesh();
     }
 

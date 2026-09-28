@@ -110,20 +110,22 @@ namespace Game {
           m_drowned(drowned) {}
 
     bool DrownedTridentAttackGoal::CanUse() {
-        // MC gates on getMainHandItem().is(TRIDENT) — the FinalizeSpawn roll
-        // here (see Drowned).
+        // MC gates on getMainHandItem().is(TRIDENT) (Drowned::HasTrident).
         return RangedAttackGoal::CanUse() && m_drowned->HasTrident();
     }
 
     void DrownedTridentAttackGoal::Start() {
         RangedAttackGoal::Start();
-        // MC also startUsingItem (the raised-trident pose rides item use);
-        // the aggressive flag is the wire bit the renderer keys on here.
+        // MC: setAggressive(true), startUsingItem(MAIN_HAND) — the raised
+        // trident (DrownedRenderer's THROW_TRIDENT keys on the aggression).
         m_drowned->SetAggressive(true);
+        m_drowned->StartUsingItem(EquipmentSlot::MAINHAND);
     }
 
     void DrownedTridentAttackGoal::Stop() {
         RangedAttackGoal::Stop();
+        // MC: stopUsingItem, setAggressive(false).
+        m_drowned->StopUsingItem();
         m_drowned->SetAggressive(false);
     }
 

@@ -58,7 +58,12 @@ namespace Game {
     //            PotionContents.getColorOr(default), made opaque.
     //   Dye    — MC "minecraft:dye" (Dye.calculate): the stack's DYED_COLOR
     //            made opaque, else the default (LEATHER_COLOR on leather).
-    enum class ItemTintKind : uint8_t { Fixed = 0, Potion = 1, Dye = 2 };
+    //   MapColor — MC "minecraft:map_color": the stack's MAP_COLOR
+    //            (MapItemColor.rgb) made opaque, else the default.
+    //   Firework — MC "minecraft:firework" (client/color/item/Firework): the
+    //            stack's FIREWORK_EXPLOSION colours — one made opaque, several
+    //            averaged per channel — else the default (a firework star).
+    enum class ItemTintKind : uint8_t { Fixed = 0, Potion = 1, Dye = 2, MapColor = 3, Firework = 4 };
 
     struct ClientItemDesc {
         ClientItemKind kind = ClientItemKind::Missing;

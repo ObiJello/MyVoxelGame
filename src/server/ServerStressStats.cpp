@@ -45,12 +45,20 @@ namespace Server {
     }
 
     void ServerStressStats::BeginTick() {
+        m_watchdogPhase.store(static_cast<int>(Phase::Packets), std::memory_order_relaxed);
+        m_watchdogTickStartMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        Clock::now().time_since_epoch()).count(),
+                                    std::memory_order_relaxed);
         if (!m_enabled) return;
         m_phaseStart = Clock::now();
         m_inTick = true;
     }
 
     void ServerStressStats::Mark(Phase phase) {
+        // The watchdog's "now in": the phase after the one that just ended.
+        const int next = static_cast<int>(phase) + 1;
+        m_watchdogPhase.store(next < static_cast<int>(Phase::Count) ? next : static_cast<int>(Phase::Maintenance),
+                              std::memory_order_relaxed);
         if (!m_enabled || !m_inTick) return;
         const Clock::time_point now = Clock::now();
         const int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - m_phaseStart).count();
@@ -61,6 +69,7 @@ namespace Server {
     }
 
     void ServerStressStats::EndTick(int64_t tickNanos) {
+        m_watchdogPhase.store(-1, std::memory_order_relaxed);
         if (!m_enabled) return;
         // Whatever ran after the last mark (the tick's tail) is maintenance.
         if (m_inTick) Mark(Phase::Maintenance);

@@ -65,6 +65,9 @@ namespace Render {
         void AddMessage(std::vector<ChatSegment> segments);
 
         void Render(GuiGraphics& graphics, float gameTime, bool chatOpen);
+        // While chat is open, raise the history this many px (ChatScreen::
+        // HistoryLift: room for a multi-line command usage hint).
+        void SetOpenLift(int px) { m_openLift = px > 0 ? px : 0; }
         void Clear();
         void Update(float deltaTime);
 
@@ -86,6 +89,7 @@ namespace Render {
         float GetGameTime() const { return m_gameTime; }
 
     private:
+        int m_openLift = 0;
         struct ClickRegion {
             int x0, y0, x1, y1;
             ChatClickAction action;

@@ -9,6 +9,17 @@
 
 namespace Client {
 
+    namespace {
+        // Process-wide, so a store rebuilt at a freed store's address never
+        // repeats a revision a cache saw on the old one. Main thread only
+        // (every writer is), like the stores themselves.
+        uint64_t s_revisionCounter = 0;
+    }
+
+    void ClientImmersivePortals::Touch() {
+        m_revision = ++s_revisionCounter;
+    }
+
     bool ClientImmersivePortals::OnSync(const Portal& portal) {
         if (portal.id == Game::Immersive::kInvalidPortalId) {
             Log::Warning("[ImmersivePortals] Ignoring sync of a portal with no id");
@@ -18,6 +29,7 @@ namespace Client {
         if (it == m_portals.end()) {
             auto [inserted, ok] = m_portals.emplace(portal.id, portal);
             Index(inserted->second);
+            Touch();
             Log::Info("[ImmersivePortals] + %s", portal.Describe().c_str());
             return true;
         }
@@ -26,6 +38,7 @@ namespace Client {
         Unindex(it->second);
         it->second = portal;
         Index(it->second);
+        Touch();
         Log::Debug("[ImmersivePortals] ~ %s", portal.Describe().c_str());
         return true;
     }
@@ -36,6 +49,7 @@ namespace Client {
         Log::Info("[ImmersivePortals] - %s", it->second.Describe().c_str());
         Unindex(it->second);
         m_portals.erase(it);
+        Touch();
     }
 
     void ClientImmersivePortals::OnChunkUnloaded(Game::Math::ChunkPos chunk) {
@@ -46,11 +60,13 @@ namespace Client {
         std::vector<PortalId> ids = std::move(it->second);
         m_byChunk.erase(it);
         for (PortalId id : ids) m_portals.erase(id);
+        Touch();
     }
 
     void ClientImmersivePortals::Clear() {
         m_portals.clear();
         m_byChunk.clear();
+        Touch();
     }
 
     const ClientImmersivePortals::Portal* ClientImmersivePortals::Get(PortalId id) const {

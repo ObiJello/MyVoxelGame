@@ -1,7 +1,10 @@
 // File: src/client/input/PlayerController.cpp
+#include "common/world/tags/DataTags.hpp"
 #include "PlayerController.hpp"
+#include "common/entity/FireworkItems.hpp"
 #include "common/entity/Morph.hpp"
 #include "common/world/block/BedBlock.hpp"
+#include "client/entity/ClientFireworks.hpp"
 #include "client/entity/RemotePlayerManager.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -15,14 +18,19 @@
 #include "../world/ClientChunkManager.hpp"
 #include "../world/ClientBlockAccess.hpp"
 #include "../world/ClientLevel.hpp"
+#include "../world/ClientLevelEvents.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "../portal/ClientImmersivePortals.hpp"
 #endif
 #include <limits>
 #include "../world/ClientUsePlayer.hpp"
 #include "../entity/ClientMobManager.hpp"
+#include "../entity/LocalItemCooldowns.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include "common/world/block/SnowLayerBlock.hpp"
+#include "common/world/block/CandleBlocks.hpp"
+#include "common/physics/Physics.hpp"
 #include "common/world/fluid/FluidState.hpp"
 #include "common/core/Features.hpp"
 #include "common/core/Log.hpp"
@@ -32,6 +40,10 @@
 #include "common/data/DataComponents.hpp"
 #include "common/sound/SoundType.hpp"
 #include "client/sound/ClientSounds.hpp"
+#include "client/world/ClientWeather.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
+#include "common/entity/WeaponItems.hpp"
+#include "common/entity/SpearItem.hpp"
 #include "common/entity/ConsumableBehavior.hpp"
 #include "common/core/JavaRandom.hpp"
 #include <chrono>
@@ -158,6 +170,26 @@ namespace Game {
         blockAccess = access;
         Log::Debug("ClientPlayerController block access set");
     }
+
+    namespace {
+        // MC Entity.isInWaterOrRain for the local player: in water, or rain
+        // falling on the feet or on the top of the box (isRainingAt, the
+        // client level's precipitation).
+        bool LocalInWaterOrRain(const Game::ClientPlayer& p) {
+            if (p.physics.isInWater) return true;
+            if (!Client::g_clientBlockAccess) return false;
+            const glm::ivec3 feet(static_cast<int>(std::floor(p.physics.position.x)),
+                                  static_cast<int>(std::floor(p.physics.position.y)),
+                                  static_cast<int>(std::floor(p.physics.position.z)));
+            const glm::ivec3 top(feet.x,
+                                 static_cast<int>(std::floor(p.physics.position.y +
+                                                             static_cast<double>(p.physics.GetCurrentHeight()))),
+                                 feet.z);
+            constexpr int kRain = 1;   // BiomeRegistry precipitation RAIN
+            return Client::ClientWeather::PrecipitationAt(*Client::g_clientBlockAccess, feet) == kRain ||
+                   Client::ClientWeather::PrecipitationAt(*Client::g_clientBlockAccess, top) == kRain;
+        }
+    } // namespace
 
     void ClientPlayerController::LookAngles(float& yawDeg, float& pitchDeg) const {
         // player->yaw / player->pitch are STALE — mouse-look writes the camera
@@ -360,7 +392,8 @@ namespace Game {
     }
 
     uint32_t ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract,
-                                                   std::optional<Game::DimensionId> dimension) {
+                                                   std::optional<Game::DimensionId> dimension,
+                                                   bool fromUse) {
         // Build and send BlockPlaceC2S packet (Minecraft-compatible)
         Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d alt=%d",
                   hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand, altInteract ? 1 : 0);
@@ -397,6 +430,7 @@ namespace Game {
         packet.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(
             dimension ? *dimension
                       : (player ? player->lastBlockHitDimension : Game::DimensionId::Overworld)));
+        packet.fromUse = fromUse;
         
         // Serialize and send
         auto data = Network::Serialization::Serialize(packet);
@@ -586,7 +620,8 @@ namespace Game {
     bool ClientPlayerController::ComputePredictedPlacement(const RaycastHit& hit,
                                                            glm::ivec3& outPos,
                                                            BlockID& outBlock,
-                                                           BlockState& outState) const {
+                                                           BlockState& outState,
+                                                           bool fromUse) const {
         if (!player) return false;
 
         // --- Only plain block items are predictable ---------------------
@@ -599,15 +634,27 @@ namespace Game {
         const BlockID toPlace = player->GetSelectedBlock();
         if (toPlace == BlockID::Air) return false;
 
+        // PlaceOnWaterBlockItem: its useOn is PASS, so a lily pad or frogspawn
+        // places only through its own `use` clip (the `fromUse` placement),
+        // and that placement is the only thing `fromUse` may predict — the
+        // server holds both sides to the same rule.
+        if (Game::IsPlaceOnWaterBlock(toPlace) != fromUse) return false;
+
         // --- Would the clicked block swallow the click? ------------------
         // Mirrors HandleUseItemOn's suppressBlockUse + block-use dispatch:
         // a door/lever/chest consumes the interaction and nothing is placed.
-        // `somethingInHands` is implied — held != Air was checked above.
+        // `somethingInHands` is implied — held != Air was checked above. A
+        // `fromUse` placement is BlockItem.useOn alone: no block reacts.
         const BlockID clickedId = ReadBlock(hit.blockPos);
-        const bool suppressBlockUse = player->physics.isSneaking;
+        const bool suppressBlockUse = player->physics.isSneaking || fromUse;
         if (!suppressBlockUse) {
             const Block& clicked = BlockRegistry::Get(clickedId);
-            if (clicked.useItemOn || clicked.useWithoutItem) return false;
+            // CandleBlock.useItemOn acts on an EMPTY hand only (it puts the
+            // candle out); with a block in hand it hands the click on, which
+            // is how a candle grows the clump it is clicked onto. Predicting
+            // through it is exact, where the other useItemOn hooks are not.
+            const bool declinesHeldItem = Game::Candles::IsCandle(clickedId);
+            if ((clicked.useItemOn && !declinesHeldItem) || clicked.useWithoutItem) return false;
         }
 
         // --- Resolve the target cell (server: step 6a) -------------------
@@ -660,8 +707,15 @@ namespace Game {
         }
         bool grewInPlace = false;
         BlockState grownState;
-        if (Game::IsSegmentedBlock(targetId) && targetId == toPlace) {
-            const BlockState grown = Game::SegmentGrownState(targetState);
+        // The segmented clumps, candles, sea pickles and turtle eggs — the
+        // server's StackedPlacementState, verbatim.
+        if (Game::StackedPlacementState(targetState, toPlace, grownState)) {
+            grewInPlace = true;
+        }
+        // MC SnowLayerBlock.getStateForPlacement — the server's step 6b twin:
+        // a snow layer in the resolved cell grows by one layer.
+        if (targetId == BlockID::SnowLayer && toPlace == BlockID::SnowLayer) {
+            const BlockState grown = Game::SnowLayer::GrownState(targetState);
             if (grown != targetState) {
                 grownState  = grown;
                 grewInPlace = true;
@@ -705,21 +759,10 @@ namespace Game {
             if (!Game::CanSurviveAt(*blockAccess, target, resolved)) return false;
         }
 
-        // --- Would the block land inside the player? ---------------------
-        // The server rejects this (and resyncs); predicting it would place a
-        // block, trap the player for a round trip, then yank it away.
-        // Skipped for `.noCollision()` blocks, matching the server — MC's
-        // isUnobstructed tests the collision shape, which is empty for flowers
-        // and ground cover, so those place even inside the player.
-        const glm::vec3 playerPos = player->physics.position;
-        const glm::vec3 blockCenter = glm::vec3(target) + glm::vec3(0.5f);
-        if (BlockRegistry::HasCollision(resolved) &&
-            std::abs(playerPos.x - blockCenter.x) < 0.8f &&
-            std::abs(playerPos.z - blockCenter.z) < 0.8f &&
-            playerPos.y < target.y + 1.0f &&
-            playerPos.y + 1.8f > target.y) {
-            return false;
-        }
+        // --- Would the block land inside an entity? ----------------------
+        // Asked at the very end, once the final state is known (its collision
+        // shape is what counts — a grown clump, a slab half, a snow pile one
+        // layer below its top): see PlacementUnobstructedLocally below.
 
         // --- Orientation (server: Block.getStateForPlacement mirror) -----
         // Same shared table the server calls, fed the same inputs, so a
@@ -798,6 +841,226 @@ namespace Game {
                                                 player->physics.isSneaking, headClick)) {
                 return false;
             }
+        }
+        // --- Would the block land inside an entity? (server: step 8) -----
+        // MC BlockItem.canPlace's isUnobstructed: the server refuses a block
+        // whose collision shape overlaps this player, another player or a
+        // mob, and predicting it anyway would trap the body for a round trip
+        // and then yank the block away. No-collision blocks (flowers, ground
+        // cover) have an empty shape and always pass.
+        if (!PlacementUnobstructedLocally(outState, target)) return false;
+        return true;
+    }
+
+    bool ClientPlayerController::PlacementUnobstructedLocally(BlockState state,
+                                                              const glm::ivec3& pos) const {
+        const BlockRegistry::BlockShapeSet shape = Game::PlacementCollisionShape(state);
+        if (shape.count == 0) return true;
+
+        // A player's box by pose, as the server builds it from its live
+        // ServerPlayer (PlayerSession.cpp LivePlayerBox): a morph wears its
+        // mob's box, a sleeper is 0.2 x 0.2, a crouch is PlayerPhysics'
+        // sneaking height; all at the body's scale.
+        auto playerBox = [](const glm::dvec3& feet, uint32_t morph, bool sleeping, bool crouching,
+                            float scale) {
+            float width  = Game::PlayerPhysics::WIDTH;
+            float height = Game::PlayerPhysics::HEIGHT_STANDING;
+            if (!Game::Morph::IsNone(morph)) {
+                const Game::Morph::Dims dims = Game::Morph::DimsOf(morph);
+                width  = dims.width;
+                height = dims.height;
+            } else if (sleeping) {
+                width = height = 0.2f;
+            } else if (crouching) {
+                height = Game::PlayerPhysics::HEIGHT_SNEAKING;
+            }
+            const double hw = 0.5 * static_cast<double>(width * scale);
+            const double h  = static_cast<double>(height * scale);
+            return Game::AABBd::FromMinMax(feet - glm::dvec3(hw, 0.0, hw), feet + glm::dvec3(hw, h, hw));
+        };
+
+        // This player — CollisionGetter.isUnobstructed passes no entity to
+        // skip, so the placer's own body counts. A spectator has none.
+        if (player && !player->IsSpectator()) {
+            // A morphed body's box is the physics' own (SetMorph carried the
+            // mob's size across), so it is read from there.
+            const Game::AABBd box = player->physics.morphed
+                ? Game::ToAABBd(player->physics.GetAABB())
+                : playerBox(player->physics.position, Game::Morph::kNone, player->IsSleeping(),
+                            player->physics.isSneaking, player->physics.scale);
+            if (Game::PlacementShapeOverlaps(shape, pos, box)) return false;
+        }
+
+        // The other players this client draws, in the level being edited.
+        if (Client::g_remotePlayerManager) {
+            for (const auto& [pid, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                (void)pid;
+                if (!rp.positionInitialized) continue;
+                if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                const Game::AABBd box = playerBox(rp.position, rp.morph, rp.sleepingPos.has_value(),
+                                                  rp.isCrouching, rp.scale);
+                if (Game::PlacementShapeOverlaps(shape, pos, box)) return false;
+            }
+        }
+
+        // The mob mirror: armor stands, primed TNT, falling blocks, animals,
+        // monsters — whatever blocksBuilding.
+        if (Client::g_clientMobManager) {
+            if (Game::EntitiesObstructPlacement(Client::g_clientMobManager->Level(), shape, pos,
+                                                /*skipPlayers=*/false)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool ClientPlayerController::HoldsPlaceOnWaterItem() const {
+        if (!player) return false;
+        const Game::ItemID held = player->inventory.GetSelectedItem();
+        return Game::ItemRegistry::IsBlockItem(held) &&
+               Game::IsPlaceOnWaterBlock(Game::ItemRegistry::ToBlock(held));
+    }
+
+    std::optional<RaycastHit> ClientPlayerController::ClipPlaceOnWater() const {
+        if (!player || !blockAccess) return std::nullopt;
+
+        // Item.getPlayerPOVHitResult(level, player, Fluid.SOURCE_ONLY): from
+        // the eye along the view, out to the block interaction range,
+        // against every block's OUTLINE and every fluid SOURCE's shape.
+        const glm::dvec3 eye = player->GetEyePosition();
+        const glm::dvec3 dir = glm::dvec3(glm::normalize(player->lookDir));
+        const double reach = static_cast<double>((player->IsCreative() ? 5.0f : 4.5f) * player->physics.scale);
+
+        // Entry distance of the ray into one box, and the axis it entered
+        // through; nullopt when it misses or starts inside (AABB.clip only
+        // reports an entry).
+        struct Entry { double t; int axis; };
+        auto clipBox = [&](const glm::dvec3& lo, const glm::dvec3& hi) -> std::optional<Entry> {
+            double tNear = -std::numeric_limits<double>::infinity();
+            double tFar  = std::numeric_limits<double>::infinity();
+            int axis = -1;
+            for (int a = 0; a < 3; ++a) {
+                if (std::abs(dir[a]) < 1e-12) {
+                    if (eye[a] < lo[a] || eye[a] > hi[a]) return std::nullopt;
+                    continue;
+                }
+                double t1 = (lo[a] - eye[a]) / dir[a];
+                double t2 = (hi[a] - eye[a]) / dir[a];
+                if (t1 > t2) std::swap(t1, t2);
+                if (t1 > tNear) { tNear = t1; axis = a; }
+                tFar = std::min(tFar, t2);
+                if (tNear > tFar) return std::nullopt;
+            }
+            if (axis < 0 || tNear <= 0.0 || tNear > reach) return std::nullopt;
+            return Entry{tNear, axis};
+        };
+
+        auto isFluidOnlyBlock = [](BlockID id) {
+            return id == BlockID::Air || id == BlockID::Water || id == BlockID::Lava ||
+                   id == BlockID::BubbleColumn || id == BlockID::ResonantWater;
+        };
+
+        // BlockGetter.traverseBlocks: the cells along the ray in order; the
+        // first cell with a hit ends the walk, the nearer of its block and
+        // fluid hits winning (ClipContext's `blockDistance <= fluidDistance`).
+        glm::ivec3 cell(static_cast<int>(std::floor(eye.x)),
+                        static_cast<int>(std::floor(eye.y)),
+                        static_cast<int>(std::floor(eye.z)));
+        const glm::ivec3 step(dir.x > 0.0 ? 1 : -1, dir.y > 0.0 ? 1 : -1, dir.z > 0.0 ? 1 : -1);
+        glm::dvec3 tMax, tDelta;
+        for (int a = 0; a < 3; ++a) {
+            if (std::abs(dir[a]) < 1e-12) {
+                tMax[a] = tDelta[a] = std::numeric_limits<double>::infinity();
+            } else {
+                const double bound = dir[a] > 0.0 ? std::floor(eye[a]) + 1.0 : std::floor(eye[a]);
+                tMax[a]   = (bound - eye[a]) / dir[a];
+                tDelta[a] = 1.0 / std::abs(dir[a]);
+            }
+        }
+
+        double travelled = 0.0;
+        while (travelled <= reach) {
+            // A cell outside the world (above the build limit, an unloaded
+            // column) holds nothing to hit; the walk goes on to the reach.
+            if (blockAccess->IsValidPosition(cell.x, cell.y, cell.z)) {
+                std::optional<Entry> best;
+                const BlockState state = ReadBlockState(cell);
+                if (!isFluidOnlyBlock(state.Block())) {
+                    for (const auto& b : BlockRegistry::GetBlockShapeSet(state)) {
+                        const auto e = clipBox(glm::dvec3(cell) + glm::dvec3(b.min),
+                                               glm::dvec3(cell) + glm::dvec3(b.max));
+                        if (e && (!best || e->t < best->t)) best = e;
+                    }
+                }
+                // ClipContext.Fluid.SOURCE_ONLY: FluidState::isSource, any fluid.
+                const Game::FluidState fluid = Game::GetFluidState(*blockAccess, cell);
+                if (!fluid.IsEmpty() && fluid.IsSource()) {
+                    // FluidState.getShape: the full cell under the same fluid,
+                    // else the fluid's own height (8/9 for a source).
+                    const Game::FluidState above =
+                        Game::GetFluidState(*blockAccess, cell + glm::ivec3(0, 1, 0));
+                    const double height = above.IsSame(fluid.type) ? 1.0 : fluid.OwnHeight();
+                    const auto e = clipBox(glm::dvec3(cell),
+                                           glm::dvec3(cell) + glm::dvec3(1.0, height, 1.0));
+                    // blockDistance <= fluidDistance ? block : fluid
+                    if (e && (!best || e->t < best->t)) best = e;
+                }
+                if (best) {
+                    const int a = best->axis;
+                    // Our face numbering: 0=+X 1=-X 2=+Y 3=-Y 4=+Z 5=-Z; the
+                    // face entered is the one facing back along the ray.
+                    const int face = a * 2 + (dir[a] > 0.0 ? 1 : 0);
+                    glm::ivec3 normal(0);
+                    normal[a] = dir[a] > 0.0 ? -1 : 1;
+
+                    // hitResult.withPosition(hitResult.getBlockPos().above()):
+                    // the same face and location, the cell above.
+                    RaycastHit hit{};
+                    hit.blockPos    = cell + glm::ivec3(0, 1, 0);
+                    hit.adjacentPos = hit.blockPos + normal;
+                    hit.hitPoint    = eye + dir * best->t;
+                    hit.normal      = glm::vec3(normal);
+                    hit.cursorPos   = glm::vec3(hit.hitPoint - glm::dvec3(hit.blockPos));
+                    hit.state       = ReadBlockState(hit.blockPos);
+                    hit.blockId     = hit.state.Block();
+                    hit.distance    = static_cast<float>(best->t);
+                    hit.hitFace     = face;
+                    hit.insideBlock = false;
+                    return hit;
+                }
+            }
+            if (tMax.x < tMax.y && tMax.x < tMax.z) {
+                cell.x += step.x; travelled = tMax.x; tMax.x += tDelta.x;
+            } else if (tMax.y < tMax.z) {
+                cell.y += step.y; travelled = tMax.y; tMax.y += tDelta.y;
+            } else {
+                cell.z += step.z; travelled = tMax.z; tMax.z += tDelta.z;
+            }
+        }
+        return std::nullopt;   // a MISS: BlockItem.useOn places nothing there
+    }
+
+    bool ClientPlayerController::UsePlaceOnWaterItem() {
+        if (!HoldsPlaceOnWaterItem()) return false;
+        const std::optional<RaycastHit> hit = ClipPlaceOnWater();
+        if (!hit) return true;
+
+        OnHotbarChanged(player->inventory.GetSelectedSlot());
+        // Resolve the prediction before sending, as every placement does —
+        // once predicted, the cell is no longer free.
+        glm::ivec3 predictPos{};
+        BlockID    predictBlock = BlockID::Air;
+        Game::BlockState predictState;
+        const bool predictable = ComputePredictedPlacement(*hit, predictPos, predictBlock, predictState,
+                                                           /*fromUse=*/true);
+        const uint32_t sequence = SendUseItemOn(*hit, /*hand=*/0, /*altInteract=*/false,
+                                                Client::ClientLevels::ActiveDimension(),
+                                                /*fromUse=*/true);
+        if (predictable) {
+            PredictBlock(predictPos, predictBlock, sequence, predictState);
+            PlayBlockPlaceSound(predictPos, predictState);
+            if (!player->IsCreative()) player->inventory.ConsumeSelectedBlock();
+            armSwingPending = true;
         }
         return true;
     }
@@ -912,6 +1175,11 @@ namespace Game {
         Game::ItemStack& heldStack =
             player->inventory.MutableSlot(usePlayer.handSlotIndex(hand));
 
+        // MC MultiPlayerGameMode.useItem: an item whose cooldown group is
+        // resting is not used on the client (the packet still goes; the
+        // server refuses it on its own table).
+        if (Client::LocalItemCooldowns::IsOnCooldown(heldStack)) return;
+
         Client::g_clientBlockAccess->BeginPrediction(sequence);
         // Same whole-stack restore as the useOn path above: an emptied stack
         // has had its item id cleared, so putting the count back is not enough.
@@ -983,13 +1251,28 @@ namespace Game {
             return 0;
         }
         const ItemStack& off = player->inventory.GetSlot(Inventory::OFFHAND_BEGIN);
-        if (!off.IsEmpty() && GetUseDuration(off) > 0) {
+        // (A firework rocket too: its use boosts a glider from either hand.)
+        if (!off.IsEmpty() && (GetUseDuration(off) > 0 || off.itemId == Game::Items::FireworkRocket)) {
+            return 1;
+        }
+        // A fishing rod in the off hand casts when the main hand has nothing
+        // to use (FishingRodItem.use answers for either hand).
+        if (!off.IsEmpty() && off.itemId == Items::FishingRod) {
             return 1;
         }
         return 0;
     }
 
-    void ClientPlayerController::StartPredictedUse(uint32_t hand) {
+    void ClientPlayerController::SwingForRodUse(uint32_t hand) {
+        // MC Minecraft.startUseItem swings the arm for an item use that
+        // answers SUCCESS client-side, which FishingRodItem.use always does:
+        // the cast and the reel-in flick. (Only the main arm swings in the
+        // first-person hand.)
+        if (!player || hand != 0) return;
+        if (player->inventory.GetSelectedStack().itemId == Items::FishingRod) armSwingPending = true;
+    }
+
+    void ClientPlayerController::StartPredictedUse(uint32_t hand, bool fromUseOn) {
         // Client-side mirror of LivingEntity.startUsingItem — only fires when
         // the held stack actually has a use duration (food, shield, …).
         // Components are known client-side (item defaults + synced per-stack
@@ -1002,6 +1285,32 @@ namespace Game {
         if (stack.IsEmpty()) return;
         const int duration = GetUseDuration(stack);
         if (duration <= 0) return;
+
+        // BrushItem: only useOn starts the hold (Item.use's default passes).
+        if (stack.itemId == Game::Items::Brush && !fromUseOn) return;
+        // MultiPlayerGameMode.useItem: an item whose cooldown group is
+        // resting is not used (a goat horn inside its 7 s, a shield an axe
+        // just disabled) — so no hold starts either.
+        if (Client::LocalItemCooldowns::IsOnCooldown(stack)) return;
+
+        // CrossbowItem.use: a loaded crossbow shoots (no hold), and one with
+        // nothing to load fails — only an empty crossbow with ammunition in
+        // reach (or infinite materials) starts the draw.
+        if (stack.itemId == Game::Items::Crossbow) {
+            if (Game::FireworkItems::IsCrossbowCharged(stack)) return;
+            if (!Game::FireworkItems::CanDrawCrossbow(player->inventory, player->IsCreative())) return;
+        }
+
+        // TridentItem.use (it runs on the client too): no draw when the next
+        // point of wear would break it, nor for Riptide out of water and
+        // rain.
+        if (stack.itemId == Game::Items::Trident) {
+            if (Game::NextDamageWillBreak(stack)) return;
+            if (Game::EnchantmentHelper::GetTridentSpinAttackStrength(stack) > 0.0f &&
+                !LocalInWaterOrRain(*player)) {
+                return;
+            }
+        }
 
         // Food gate — MC's client runs the same Consumable.startConsuming
         // canEat check (Player.canEat = canAlwaysEat || foodData.needsFood),
@@ -1022,6 +1331,15 @@ namespace Game {
         player->useItemRemaining = duration;
         player->useItemDuration  = duration;
         player->useAnim          = GetUseAnimation(stack);
+        player->useItemId        = stack.itemId;
+
+        // Item.use for a KINETIC_WEAPON: kineticWeapon.makeSound(player) —
+        // level.playSound(player, …), which on the client is the player's
+        // own copy (the server sends it to everyone else).
+        if (const Game::Spear::KineticWeapon* kinetic = Game::Spear::Kinetic(stack); kinetic && kinetic->sound) {
+            Client::Sounds::PlayLocal(player->physics.position, kinetic->sound, Game::SoundSource::Players,
+                                      1.0f, 1.0f);
+        }
     }
 
     void ClientPlayerController::StopPredictedUse() {
@@ -1059,20 +1377,39 @@ namespace Game {
         const int slot = (player->usingHand == 0)
             ? Inventory::HotbarToIndex(player->inventory.GetSelectedSlot())
             : Inventory::OFFHAND_BEGIN;
-        const auto consumable = player->inventory.GetSlot(slot).get(DataComponents::CONSUMABLE);
+        const auto& usedStack = player->inventory.GetSlot(slot);
+        const auto consumable = usedStack.get(DataComponents::CONSUMABLE);
+        // emitParticlesAndSounds' particle half: LivingEntity.spawnItemParticles
+        // (5 crumbs per bite, 16 on the last) when the item has them.
+        const auto consumeParticles = [this, &usedStack](const Game::Consumable& consumable, int count) {
+            if (!consumable.hasConsumeParticles || usedStack.IsEmpty()) return;
+            float yRot = 0.0f, xRot = 0.0f;
+            LookAngles(yRot, xRot);
+            Client::LevelEvents::SpawnItemParticles(player->GetEyePosition(), yRot, xRot, usedStack.itemId, count);
+        };
         if (consumable &&
             Game::ConsumableBehavior::ShouldEmitParticlesAndSounds(*consumable, player->useItemRemaining)) {
+            consumeParticles(*consumable, 5);
             consumeSound(*consumable);
         }
 
         if (--player->useItemRemaining <= 0) {
-            if (consumable) consumeSound(*consumable);
+            if (consumable) {
+                consumeParticles(*consumable, 16);
+                consumeSound(*consumable);
+            }
             StopPredictedUse();
         }
     }
 
     void ClientPlayerController::UpdateBreakingTick() {
         if (!player) return;
+        // MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock:
+        // Player.blockActionRestricted — a spectator never digs.
+        if (player->IsSpectator()) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
 
         // Post-break delay (MC: 5 ticks after a successful break before the
         // next click can re-arm a dig).
@@ -1087,6 +1424,12 @@ namespace Game {
         }
         // The press already hit an entity — see pressHitEntity.
         if (pressHitEntity) {
+            if (digState.isDestroying) AbortDig();
+            return;
+        }
+        // MC Minecraft.continueAttack: `if (!heldItem.has(PIERCING_WEAPON))`
+        // — a spear never mines.
+        if (Game::Spear::Piercing(player->inventory.GetSelectedStack())) {
             if (digState.isDestroying) AbortDig();
             return;
         }
@@ -1193,6 +1536,17 @@ namespace Game {
         if (digState.destroyTicks % 4 == 0) {
             PlayBlockHitSound(hitPos, ReadBlockState(hitPos));
         }
+        // The crack particle on the face being mined, every tick of the dig
+        // (MC's levelEvent 2019 / 2020 → ClientLevel.addBreakingBlockEffects;
+        // the server sends it to everyone else, this client shows its own).
+        {
+            // RaycastHit::hitFace (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) as a
+            // Direction ordinal (DOWN, UP, NORTH, SOUTH, WEST, EAST).
+            static constexpr int kDirection[6] = {5, 4, 1, 0, 3, 2};
+            const int face = digState.destroyFace >= 0 && digState.destroyFace < 6
+                ? kDirection[digState.destroyFace] : 1;
+            Client::LevelEvents::AddBreakingBlockEffects(hitPos, face, /*playSound=*/false);
+        }
         digState.destroyTicks    += 1;
 
         // Continuous-mine arm swing (MC: every 4 ticks while mining).
@@ -1208,6 +1562,8 @@ namespace Game {
 
     void ClientPlayerController::UpdatePlacingTick() {
         if (!player) return;
+        // A spectator's use is one packet per press (StartUseItem).
+        if (player->IsSpectator()) return;
 
         // MC handleKeybinds:1996 —
         //   if (keyUse.isDown() && rightClickDelay == 0 && !player.isUsingItem())
@@ -1224,6 +1580,24 @@ namespace Game {
         if (rightClickDelay > 0) return;
 
         const auto& currentHit = player->lastBlockHit;
+
+        // A lily pad / frogspawn repeat is startUseItem again: the crosshair
+        // block's use first (if the crosshair is on one), then the item's own
+        // SOURCE_ONLY clip — which finds the open water the crosshair ray
+        // passes straight through, so a held right-click lays pads across a
+        // pond with nothing under the crosshair at all.
+        if (HoldsPlaceOnWaterItem()) {
+            bool usedOn = false;
+            if (currentHit.has_value()) {
+                OnHotbarChanged(player->inventory.GetSelectedSlot());
+                const uint32_t sequence = SendUseItemOn(*currentHit, 0);
+                usedOn = PredictUseItemOn(*currentHit, 0, sequence);
+            }
+            if (!usedOn) UsePlaceOnWaterItem();
+            rightClickDelay = PLACE_REFIRE_TICKS;
+            return;
+        }
+
         if (!currentHit.has_value()) return;
 
         // Only re-fire for items that actually place blocks; for tools we
@@ -1236,6 +1610,16 @@ namespace Game {
         // inconsistency nobody reports and everybody feels.
         const Game::ItemID held = player->inventory.GetSelectedItem();
         if (held == Game::Items::Air) return;
+        // A brush whose 200-tick hold ran out while RMB stayed down: MC's
+        // startUseItem repeat runs BrushItem.useOn again and the brushing
+        // goes on.
+        if (held == Game::Items::Brush) {
+            OnHotbarChanged(player->inventory.GetSelectedSlot());
+            const uint32_t sequence = SendUseItemOn(*currentHit, 0);
+            if (PredictUseItemOn(*currentHit, 0, sequence)) StartPredictedUse(0, /*fromUseOn=*/true);
+            rightClickDelay = PLACE_REFIRE_TICKS;
+            return;
+        }
         if (!ItemRegistry::IsBlockItem(held) &&
             ItemRegistry::Get(held).placesBlock == BlockID::Air) {
             return;
@@ -1386,6 +1770,10 @@ namespace Game {
             for (const auto& [pid, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                 if (!rp.positionInitialized) continue;
                 if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                // MC Player.isPickable: never a spectator. Nor the entity the
+                // view is coming from (getEntityHitResult excludes the camera).
+                if (rp.IsSpectator()) continue;
+                if (static_cast<int32_t>(pid) == player->cameraEntityId) continue;
 
                 // MC's player box (0.6 wide, 1.8 tall, feet at the position),
                 // or the morph's — a snow golem's pumpkin sits above 1.8 and
@@ -1413,8 +1801,20 @@ namespace Game {
         for (const int32_t id : Client::g_clientMobManager->PickCandidates()) {
             const Client::ClientMob* centry = Client::g_clientMobManager->GetMob(id);
             if (!centry || !centry->mob) continue;
+            if (id == player->cameraEntityId) continue;   // the spectated entity
             const Game::Mob& mob = *centry->mob;
             if (!mob.IsAlive()) continue;
+            // MC ProjectileUtil.getEntityHitResult: nothing that shares the
+            // player's root vehicle — the boat they sit in, the mob sitting
+            // behind them — is picked from the seat.
+            if (player->vehicleId != 0) {
+                const Game::Entity* root = &mob;
+                while (root->GetVehicle()) root = root->GetVehicle();
+                const Client::ClientMob* own = Client::g_clientMobManager->GetMob(player->vehicleId);
+                const Game::Entity* ownRoot = own && own->mob ? own->mob.get() : nullptr;
+                while (ownRoot && ownRoot->GetVehicle()) ownRoot = ownRoot->GetVehicle();
+                if (root->GetId() == player->vehicleId || (ownRoot && root == ownRoot)) continue;
+            }
             // ── Ender dragon: pick the PART boxes, never the whole box ──
             //
             // MC's dragon body is not pickable; its eight EnderDragonPart
@@ -1565,6 +1965,27 @@ namespace Game {
         // enough that this click can't be trusted; swallow it.
         if (missTime > 0) return;
 
+        // MC startAttack's `gameMode.isSpectator()` branch: no swing, no dig —
+        // an entity under the crosshair is spectated (MultiPlayerGameMode
+        // .spectate), anything else is the empty spectatorNoAction.
+        if (player->IsSpectator()) {
+            breakButtonHeld = true;
+            pressHitEntity  = false;
+            Network::SpectatorActionC2SPacket packet;
+            if (const int32_t target = PickEntity(); target != 0) {
+                packet.hasEntity = true;
+                packet.entityId  = target;
+            }
+            if (networkClient) {
+                if (auto connection = networkClient->GetConnection()) {
+                    FlushMovement();
+                    connection->SendPacket(static_cast<uint8_t>(Network::PacketId::SpectatorActionC2S),
+                                           Network::Serialization::Serialize(packet));
+                }
+            }
+            return;
+        }
+
         {
             breakButtonHeld = true;
             pressHitEntity = false;   // a fresh press decides for itself
@@ -1577,6 +1998,30 @@ namespace Game {
                 return;  // skip the normal block-break path
             }
 #endif
+
+            // MC Minecraft.startAttack: a PIERCING_WEAPON (a spear) jabs —
+            // whatever lies along its reach, entity or not, and never digs —
+            // once its attack charge is full (cannotAttackWithItem(held, 0)).
+            // MultiPlayerGameMode.piercingAttack: STAB to the server, then
+            // onAttack, the STAB swing and the jab sound (makeSound — the
+            // player's own copy).
+            {
+                const ItemStack& heldStack = player->inventory.GetSelectedStack();
+                if (const Game::Spear::PiercingWeapon* piercing = Game::Spear::Piercing(heldStack)) {
+                    pressHitEntity = true;   // the press never digs
+                    if (player->usingItem) return;
+                    if (player->GetAttackStrengthScale(0.0f) < Game::Spear::kMinimumAttackCharge) return;
+                    FlushMovement();
+                    SendPlayerAction(Network::PlayerAction::STAB);
+                    player->attackStrengthTicker = 0;
+                    armSwingPending = true;
+                    if (piercing->sound) {
+                        Client::Sounds::PlayLocal(player->physics.position, piercing->sound,
+                                                  Game::SoundSource::Players, 1.0f, 1.0f);
+                    }
+                    return;
+                }
+            }
 
             // MC Minecraft.startAttack picks an ENTITY before a block: the
             // crosshair target is whichever is nearer, and an entity in front
@@ -1667,6 +2112,35 @@ namespace Game {
         // MC Minecraft.startUseItem:1656-1658 sets rightClickDelay = 4, which
         // is what paces a held-RMB strip of blocks.
         rightClickDelay = PLACE_REFIRE_TICKS;
+
+        // Spectator: nothing is predicted and nothing swings.
+        //   entity → MultiPlayerGameMode.interact sends the packet and
+        //            answers PASS (the server opens a MenuProvider entity's
+        //            menu, and nothing else);
+        //   block  → useItemOn sends the packet, performUseItemOn is CONSUME
+        //            (the server opens the block's menu or uses its portal);
+        //   air    → useItem is PASS before any packet.
+        if (player->IsSpectator()) {
+            placeButtonHeld = true;
+            if (const int32_t picked = PickEntity(); picked != 0) {
+                if (networkClient) {
+                    Network::InteractC2SPacket packet;
+                    packet.entityId = picked;
+                    packet.action   = Network::InteractC2SPacket::Action::Interact;
+                    packet.sneaking = player->sneakPressed;
+                    if (auto connection = networkClient->GetConnection()) {
+                        FlushMovement();
+                        connection->SendPacket(static_cast<uint8_t>(Network::PacketId::InteractC2S),
+                                               Network::Serialization::Serialize(packet));
+                    }
+                }
+                return;
+            }
+            if (player->lastBlockHit.has_value()) {
+                SendUseItemOn(*player->lastBlockHit, /*hand=*/0);
+            }
+            return;
+        }
 
         // RMB EDGE — fire one placement / use immediately. While-held re-fires
         // are handled by UpdatePlacingTick at MC's 4-tick cadence (no
@@ -1767,7 +2241,18 @@ namespace Game {
                                 Network::Serialization::Serialize(packet));
                         }
                     }
-                    armSwingPending = true;
+                    // MC Cushion.interact answers CONSUME on the client —
+                    // Success with no swing source — so sitting down (or
+                    // clicking a taken seat) does not swing the arm.
+                    bool swing = true;
+                    if (Client::g_clientMobManager) {
+                        if (const Client::ClientMob* picked = Client::g_clientMobManager->GetMob(pickedEntity);
+                            picked && picked->mob && picked->mob->GetType() == Game::EntityTypeId::Cushion &&
+                            !player->sneakPressed) {
+                            swing = false;
+                        }
+                    }
+                    if (swing) armSwingPending = true;
                     rightClickDelay = PLACE_REFIRE_TICKS;
                     placeButtonHeld = true;
                     return;
@@ -1814,6 +2299,12 @@ namespace Game {
                     // we — predicting a placement on top would put a phantom
                     // block down for a round trip.
                     const bool usedOn = PredictUseItemOn(*currentHit, 0, sequence);
+                    // BrushItem.useOn → player.startUsingItem(hand), on the
+                    // client too: the brushing pose and the hold whose
+                    // release the server waits for.
+                    if (usedOn && player->inventory.GetSelectedStack().itemId == Game::Items::Brush) {
+                        StartPredictedUse(0, /*fromUseOn=*/true);
+                    }
 
                     // The block appears this frame instead of a round trip
                     // later; the server's ack confirms it or rolls it back.
@@ -1857,7 +2348,13 @@ namespace Game {
                     // instead, so the old "holding a block → consume, else eat"
                     // split would have ticked the stack down and never played
                     // the eat.
-                    if (!usedOn) {
+                    if (!usedOn && HoldsPlaceOnWaterItem()) {
+                        // PlaceOnWaterBlockItem: useOn was PASS (nothing was
+                        // placed at the crosshair), so the client falls
+                        // through to useItem — the item's own SOURCE_ONLY
+                        // clip, placed on the cell above what it hits.
+                        UsePlaceOnWaterItem();
+                    } else if (!usedOn) {
                         if (predictable) {
                             if (!player->IsCreative()) {
                                 player->inventory.ConsumeSelectedBlock();
@@ -1884,6 +2381,7 @@ namespace Game {
                                 if (held.itemId == Game::Items::WritableBook) usePlayer.OpenItemGui(held, useHand);
                             }
                             StartPredictedUse(PickUseHand());
+                            SwingForRodUse(PickUseHand());
                         }
                     }
                     rightClickDelay = PLACE_REFIRE_TICKS;
@@ -1894,12 +2392,30 @@ namespace Game {
                     // use for the viewmodel pose. Hand picked like MC's
                     // MAIN_HAND→OFF_HAND loop (offhand shield raises even
                     // with a pickaxe in the main hand).
+                    //
+                    // A lily pad or frogspawn is the air use that places a
+                    // block: the crosshair ray passes through water, so open
+                    // water reads as "nothing" here, and the item's own
+                    // SOURCE_ONLY clip is what finds the surface.
+                    if (UsePlaceOnWaterItem()) {
+                        rightClickDelay = PLACE_REFIRE_TICKS;
+                        placeButtonHeld = true;
+                        return;
+                    }
                     const uint32_t useHand = PickUseHand();
                     const uint32_t useSeq = SendUseItem(static_cast<int>(useHand));
                     // Buckets are the air-use case that edits the world; run
                     // it locally so the water appears/disappears immediately.
                     PredictUseItem(useHand, useSeq);
+                    // Diagnostics: a gliding rocket use should attach one.
+                    if (player->physics.isFallFlying &&
+                        player->inventory.GetSlot(useHand == 0
+                            ? Inventory::HotbarToIndex(player->inventory.GetSelectedSlot())
+                            : Inventory::OFFHAND_BEGIN).itemId == Game::Items::FireworkRocket) {
+                        Client::Fireworks::NoteBoostUse();
+                    }
                     StartPredictedUse(useHand);
+                    SwingForRodUse(useHand);
                     rightClickDelay = PLACE_REFIRE_TICKS;
                 }
             }
@@ -1917,6 +2433,26 @@ namespace Game {
         // using an item (button release, UI opening) funnels through here.
         if (player->usingItem) {
             SendPlayerAction(Network::PlayerAction::RELEASE_USE_ITEM);
+            // LocalPlayer.releaseUsingItem → TridentItem.releaseUsing: a
+            // Riptide trident launches its thrower here — the push, the hop
+            // and the spin are this client's own movement.
+            {
+                const int slot = (player->usingHand == 0)
+                    ? Inventory::HotbarToIndex(player->inventory.GetSelectedSlot())
+                    : Inventory::OFFHAND_BEGIN;
+                const ItemStack& stack = player->inventory.GetSlot(slot);
+                if (stack.itemId == Game::Items::Trident) {
+                    const float strength = Game::EnchantmentHelper::GetTridentSpinAttackStrength(stack);
+                    const int ticksHeld = player->useItemDuration - player->useItemRemaining;
+                    if (strength > 0.0f &&
+                        Game::WeaponItems::CanReleaseTrident(stack, ticksHeld, LocalInWaterOrRain(*player),
+                                                             player->IsPassenger())) {
+                        float yRot = 0.0f, xRot = 0.0f;
+                        LookAngles(yRot, xRot);
+                        player->StartRiptide(strength, yRot, xRot, Client::g_clientBlockAccess);
+                    }
+                }
+            }
             StopPredictedUse();
         }
     }
@@ -1942,7 +2478,23 @@ namespace Game {
             return;
         }
 
-        PlayBlockBreakSound(pos, digState.destroyingBlockState);
+        // DecoratedPotBlock.playerWillDestroy runs here too: a pot broken
+        // with a #breaks_decorated_pots tool without Silk Touch cracks first,
+        // so its break is the shatter (the cracked pot's sound type).
+        Game::BlockState brokenState = digState.destroyingBlockState;
+        if (brokenBlock == BlockID::DecoratedPot) {
+            const ItemStack& tool = player->inventory.GetSelectedStack();
+            if (!tool.IsEmpty() &&
+                Game::DataTags::HasTag(Game::DataTags::Registry::Item, Game::ItemRegistry::Slug(tool.itemId),
+                                       "minecraft:breaks_decorated_pots") &&
+                Game::EnchantmentHelper::GetItemEnchantmentLevel(Game::Enchantments::SilkTouch, tool) <= 0) {
+                brokenState = brokenState.SetName(Game::PropertyId::CRACKED, "true");
+            }
+        }
+        PlayBlockBreakSound(pos, brokenState);
+        // ... and its debris (the particle half of levelEvent 2001, which the
+        // server sends to everyone but this player).
+        Client::LevelEvents::AddDestroyBlockEffect(pos, brokenState);
 
         // MC Level.destroyBlock:266 — the cell becomes the FLUID that was in
         // it, not air. Breaking a waterlogged fence or a kelp stalk under an

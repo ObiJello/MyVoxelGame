@@ -4,6 +4,7 @@
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/ai/Sensing.hpp"
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
@@ -325,9 +326,23 @@ namespace Game {
                     return;
                 }
 
-                // MC fires the beam from the WARDEN_CHEST attachment and draws
-                // SONIC_BOOM particles along it — no particle system here, the
-                // damage line is the whole of the effect.
+                // MC SonicBoom.tick: the beam leaves the WARDEN_CHEST
+                // attachment (0, 1.6, 0) for the target's eye, one SONIC_BOOM
+                // ring per block along it and 7 beyond (sendParticles, 1 each).
+                {
+                    const glm::dvec3 from = warden->position + glm::dvec3(0.0, 1.6 * warden->scale, 0.0);
+                    const glm::dvec3 toEye = target->GetEyePosition() - from;
+                    const double beamLen = glm::length(toEye);
+                    if (beamLen > 1.0e-8) {
+                        const glm::dvec3 dir = toEye / beamLen;
+                        const int steps = static_cast<int>(std::floor(beamLen)) + 7;
+                        for (int i = 1; i < steps; ++i) {
+                            const glm::dvec3 p = from + dir * static_cast<double>(i);
+                            level.SendParticles(ParticleOptions(ParticleKind::SonicBoom), p.x, p.y, p.z, 1,
+                                                0.0, 0.0, 0.0, 0.0);
+                        }
+                    }
+                }
                 const glm::dvec3 source = warden->GetEyePosition();
                 glm::dvec3 delta = target->GetEyePosition() - source;
                 warden->PlaySound(SoundEvents::WARDEN_SONIC_BOOM, 3.0f, 1.0f);

@@ -24,8 +24,15 @@
 // and a class below that decodes the synched state into clip starts.
 #pragma once
 
+#include "common/world/level/gameevent/VibrationSystem.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
 #include "common/entity/NeutralMob.hpp"
+#include "common/core/Uuid.hpp"
+#include "common/inventory/SimpleContainer.hpp"
+#include "common/entity/MobCrossbow.hpp"
+#include "common/entity/PlayerRideableJumping.hpp"
+#include "common/entity/MountInventory.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <glm/glm.hpp>
 
@@ -33,6 +40,8 @@
 #include <vector>
 
 namespace Game {
+
+    struct BucketEntityData;
 
     // ── Frog ───────────────────────────────────────────────────────────────
 
@@ -67,7 +76,11 @@ namespace Game {
 
     // ── Camel ──────────────────────────────────────────────────────────────
 
-    class Camel : public GenericAnimal {
+    // MC Camel extends AbstractHorse; the engine's AbstractHorse is the
+    // horse family's own class, so the equine half a camel uses lives here:
+    // the saddle rule for steering, the ridden input/rotation, the dash as
+    // its PlayerRideableJumping, grazing, the fall rule, the two seats.
+    class Camel : public GenericAnimal, public PlayerRideableJumping {
     public:
         // MC's two pose-transition lengths, in ticks. A camel is "in
         // transition" until the relevant one has elapsed, and the sit-down and
@@ -86,6 +99,157 @@ namespace Game {
         // MC Camel.playEatingSound (via Animal feeding).
         void PlayEatingSound() override;
         bool IsHusk() const { return GetType() == EntityTypeId::CamelHusk; }
+
+        // ── Dimensions (MC Camel.getDefaultDimensions) ─────────────────────
+        // SITTING: the adult box less SITTING_HEIGHT_DIFFERENCE (1.43), eye
+        // 0.845; the baby's BABY_SITTING_DIMENSIONS 0.95 x 0.425, eye 0.41.
+        // Standing keeps the type's box.
+        static constexpr float kSittingHeightDifference = 1.43f;
+        float BaseBbWidth() const override;
+        float BaseBbHeight() const override;
+        float BaseEyeHeight() const override;
+        // MC Camel.getAgeScale: 0.6 for a calf.
+        float GetCamelAgeScale() const { return IsBaby() ? 0.6f : 1.0f; }
+        // MC Camel.getBodyAnchorAnimationYOffset — the body's height through
+        // the sit / stand clips, which the seats and the lead follow.
+        // `dimensionsHeight` is getDimensions(getPose()).height(), `scale`
+        // the age scale (times the SCALE attribute).
+        double GetBodyAnchorAnimationYOffset(bool isFront, float partialTicks, float dimensionsHeight,
+                                             float scale) const;
+
+        // ── The camel husk (MC CamelHusk) ─────────────────────────────────
+        // canBeABaby false: never a calf, no age saved, no love.
+        bool IsBaby() const override { return !IsHusk() && GenericAnimal::IsBaby(); }
+        void SetBaby(bool baby) override { if (!IsHusk()) GenericAnimal::SetBaby(baby); }
+        bool CanFallInLove() const override { return !IsHusk() && GenericAnimal::CanFallInLove(); }
+        // MC AbstractHorse.isMobControlled (false) / CamelHusk's: a mob (the
+        // husk jockey) in the first seat.
+        bool IsMobControlled() const;
+
+        // ── Breeding / feeding (MC Camel.canMate, handleEating) ───────────
+        // Both parents canParent: not ridden, not riding, adult, at full
+        // health and in love (a camel is always tamed). The husk never mates.
+        bool CanMate(const Animal& other) const override;
+        bool CanParent() const;
+        // MC Camel.mobInteract: sneak → the mount inventory; the held item's
+        // own interaction (a saddle); food; else climb on (two seats).
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC AbstractHorse.fedFood with Camel.handleEating: heal 2, love (an
+        // adult at age 0), a calf ages 10 s — the eat sound when any took.
+        UseResult FedFood(LivingEntity& player, ItemStack& held);
+        bool HandleEating(LivingEntity& player, const ItemStack& held);
+
+        // ── Equipment and inventory (MC AbstractHorse as a camel inherits
+        //    it — isTamed is always true; the system is MountInventory's) ────
+        // canUseSlot: the saddle on a live, grown camel.
+        bool CanUseSlot(EquipmentSlot slot) const override {
+            if (slot != EquipmentSlot::SADDLE) return GenericAnimal::CanUseSlot(slot);
+            return IsAlive() && !IsBaby();
+        }
+        // canDispenserEquipIntoSlot: the body or saddle of a (tamed) camel.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return slot == EquipmentSlot::BODY || slot == EquipmentSlot::SADDLE ||
+                   GenericAnimal::CanDispenserEquipIntoSlot(slot);
+        }
+        // MC Camel.getEquipSound: getSaddleSound() — CAMEL_SADDLE, the husk's
+        // CAMEL_HUSK_SADDLE.
+        std::string GetEquipSound(EquipmentSlot slot, const ItemStack& stack,
+                                  const Equippable& equippable) const override {
+            if (slot != EquipmentSlot::SADDLE) return GenericAnimal::GetEquipSound(slot, stack, equippable);
+            return IsHusk() ? SoundEvents::CAMEL_HUSK_SADDLE : SoundEvents::CAMEL_SADDLE;
+        }
+        MountInventory*       GetMountInventory() override       { return &m_mountInventory; }
+        const MountInventory* GetMountInventory() const override { return &m_mountInventory; }
+        bool HasCustomInventoryScreen() const override { return true; }
+        // MC Camel.openCustomInventoryScreen: server side, always (a camel is
+        // tamed, and its second seat does not close the screen).
+        void OpenCustomInventoryScreen(LivingEntity& player) override;
+        // MC AbstractHorse.finalizeSpawn → AgeableMob's with
+        // AgeableMobGroupData(0.2): later herd members are calves 20 % of the
+        // time; Camel.finalizeSpawn stands it up fully first.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC AbstractHorse.getMaxSpawnClusterSize.
+        int GetMaxSpawnClusterSize() const override { return 6; }
+
+        // ── MC AbstractHorse, as the camel inherits it ────────────────────
+        // isPushable: not while carrying anyone.
+        bool IsPushable() const override { return !IsVehicle(); }
+        // isImmobile: (dead && ridden && saddled) || eating (a camel cannot
+        // rear, so never standing).
+        bool IsImmobile() const override {
+            return (GenericAnimal::IsImmobile() && IsVehicle() && IsSaddled()) || m_eating;
+        }
+        // The EATING flag — canEatGrass is true for a camel too: on a grass
+        // block an unridden camel grazes, planted, for 50 ticks.
+        bool IsEating() const { return m_eating; }
+        void SetEating(bool v) { m_eating = v; }
+        // aiStep: the 1-in-900 self-heal and the grazing roll (server).
+        void AiStep() override;
+        // causeFallDamage: HORSE_LAND past one block, then hurt + the block
+        // fall sound.
+        bool CauseFallDamage(double fallDist, float damageMultiplier) override;
+        // MC Camel.getMaxHeadYRot: 30.
+        int GetMaxHeadYRot() const override { return 30; }
+        // MC Camel.canCamelChangePose — the box of the other pose is free.
+        bool CanCamelChangePose() const;
+        // MC PathfinderMob.isPanicking for a brain mob: IS_PANICKING.
+        bool IsCamelPanicking() const;
+        // MC Mob.hasControllingPassenger (the steering player; server).
+        bool HasControllingPassenger() const { return GetControllingPassenger() != nullptr; }
+
+        // ── Riding (MC Camel / AbstractHorse riding half) ─────────────────
+        // getControllingPassenger: a player in the first seat of a saddled
+        // camel.
+        bool CanBeSteeredBy(const RiderControl& rider) const override;
+        glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) override;
+        void  TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) override;
+        float GetRiddenSpeed(const RiderControl& rider) const override;
+        // A sitting camel's feet are planted (Camel.travel).
+        void Travel(const glm::dvec3& input) override;
+        // MC Camel.getPassengerAttachmentPoint: the driver 0.5 forward, the
+        // second rider 0.7 back (an animal rider 0.2 further forward), at
+        // the body's animated height.
+        glm::dvec3 GetPassengerAttachmentPoint(const Entity& passenger) const override;
+        glm::dvec3 GetPassengerAttachmentForSlot(int slot, int total) const override;
+        // MC Camel.canAddPassenger: `getPassengers().size() <= 2`.
+        bool CanAddPassenger(const Entity& passenger) const override {
+            (void)passenger;
+            return GetPassengers().size() <= 2;
+        }
+        // MC AbstractHorse.positionRider: a living rider's body turns with
+        // the camel.
+        void PositionRider(Entity& passenger) override;
+        // MC AbstractHorse.getDismountLocationForPassenger.
+        glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const override;
+
+        // ── PlayerRideableJumping — the dash ──────────────────────────────
+        // canJump: saddled and willing to move.
+        bool CanJump() const override;
+        // onPlayerJump: saddled, off cooldown, on the ground → the charge
+        // (getPlayerJumpPendingScale), spent by the next tickRidden.
+        void OnPlayerJump(int jumpAmount) override;
+        // handleStartJump (server): the dash sound, ENTITY_ACTION, DASH on.
+        void HandleStartJump(int jumpScale) override;
+        void HandleStopJump() override {}
+
+        // ── Sounds (MC Camel / CamelHusk) ─────────────────────────────────
+        const char* GetDashingSound() const { return IsHusk() ? SoundEvents::CAMEL_HUSK_DASH : SoundEvents::CAMEL_DASH; }
+        const char* GetDashReadySound() const {
+            return IsHusk() ? SoundEvents::CAMEL_HUSK_DASH_READY : SoundEvents::CAMEL_DASH_READY;
+        }
+        const char* GetSitDownSound() const { return IsHusk() ? SoundEvents::CAMEL_HUSK_SIT : SoundEvents::CAMEL_SIT; }
+        const char* GetStandUpSound() const { return IsHusk() ? SoundEvents::CAMEL_HUSK_STAND : SoundEvents::CAMEL_STAND; }
+        const char* GetEatingSound() const { return IsHusk() ? SoundEvents::CAMEL_HUSK_EAT : SoundEvents::CAMEL_EAT; }
+        // MC Camel.getSaddleSound — the SADDLE slot's equip sound.
+        const char* GetSaddleSound() const { return IsHusk() ? SoundEvents::CAMEL_HUSK_SADDLE : SoundEvents::CAMEL_SADDLE; }
+
+        // MC Camel.isTamed: always true — a camel needs no taming (it is
+        // ridden as found; its AbstractHorse temper is never used), so it is
+        // a tamed pet for Mob::IsTamedPet. The camel husk (a CamelHusk is a
+        // Camel in MC too) is the husk's despawning mount — its explicit
+        // removeWhenFarAway true wins, so it is left out.
+        bool IsTamedPet() const override { return !IsHusk(); }
 
         // MC CamelHusk.removeWhenFarAway (CamelHusk.java:28-30) — the husk
         // despawns like the monster it is; the living camel keeps Animal's
@@ -123,25 +287,40 @@ namespace Game {
         void StandUp();
         void StandUpInstantly();
 
-        // MC Camel.DASH — a synched boolean. The ONLY thing that sets it in MC
-        // is executeRidersJump (a saddled camel's rider charging the jump bar),
-        // so until riding exists the server never raises it — but the whole
-        // wire-and-clip path is live: setDashing → anim byte → dash clip, and
-        // the 55-tick cooldown / auto-clear in tick are MC's verbatim.
+        // MC Camel.DASH — a synched boolean, raised by executeRidersJump on
+        // the steering client and by handleStartJump on the server; it rides
+        // the anim byte. MC's onSyncedDataUpdated arms the 55-tick cooldown
+        // on every change of the flag, on both sides (SetDashing does).
         static constexpr int kDashCooldownTicks = 55;
 
         bool IsDashing() const { return m_dashing; }
-        void SetDashing(bool v) { m_dashing = v; }
+        void SetDashing(bool v);
 
-        // MC Camel.getJumpCooldown — the dash cooldown, read by
-        // CamelRenderer.extractRenderState as state.jumpCooldown.
-        int GetJumpCooldown() const { return m_dashCooldown; }
+        // MC Camel.getJumpCooldown — the dash cooldown, read by the HUD's
+        // jump bar and CamelRenderer.extractRenderState.
+        int GetJumpCooldown() const override { return m_dashCooldown; }
 
         uint8_t GetAnimStateByte() const override { return m_dashing ? 1 : 0; }
         void    SetAnimStateByte(uint8_t v) override;
 
+    protected:
+        // MC Camel.updateWalkAnimation: the walk cycle only while standing
+        // and not dashing.
+        void UpdateWalkAnimation(float distance) override;
+        // MC Camel.actuallyHurt: a hurt camel is on its feet at once.
+        void ActuallyHurt(MobDamageSource source, float amount, Entity* attacker) override;
+
     private:
         void ResetLastPoseChangeTick(int64_t syncedPoseTickTime);
+        // MC Camel.executeRidersJump — the dash itself (steering side).
+        void ExecuteRidersJump(float amount);
+        // MC LivingEntity.getBlockSpeedFactor.
+        float GetBlockSpeedFactor() const;
+
+        // MC AbstractHorse.playerJumpPendingScale / eating / eatingCounter.
+        float m_playerJumpPendingScale = 0.0f;
+        bool  m_eating = false;
+        int   m_eatingCounter = 0;
 
         // MC Camel.dashCooldown — local on both sides; the client rebuilds it
         // from the synched dash flag in onSyncedDataUpdated.
@@ -159,6 +338,9 @@ namespace Game {
         // the pose arrives within 3, so the skew is invisible — where sending
         // a 64-bit game tick for one mob would not be.
         int64_t m_lastPoseChangeTick = 0;
+
+        // MC AbstractHorse.inventory (no chest: getInventoryColumns 0).
+        MountInventory m_mountInventory;
 
     public:
         // MC's "LastPoseTick". The value carries the sitting state in its
@@ -221,6 +403,51 @@ namespace Game {
         // MC Tadpole is an AbstractFish (WaterAnimal): out of water its air
         // drains and it suffocates — see HandleWaterAnimalAirSupply.
         void BaseTick() override;
+
+        // ── Growing up (MC Tadpole.age / AGE_LOCKED) ──────────────────────
+        // MC Tadpole.ticksToBeFrog: 24000 ticks of age make a frog.
+        static constexpr int kTicksToBeFrog = 24000;
+        // MC aiStep: the server counts age up unless locked; the age-lock
+        // burst draws on the client.
+        void AiStep() override;
+        int  GetAge() const { return m_age; }
+        // MC setAge: at kTicksToBeFrog the tadpole becomes a frog.
+        void SetAge(int age);
+        // MC AGE_LOCKED (synched, saved "AgeLocked"): a golden dandelion
+        // stops the growth for good.
+        bool IsAgeLocked() const override { return m_ageLocked; }
+        void SetAgeLocked(bool locked) override { m_ageLocked = locked; }
+        // The client's lock/unlock burst when the synched flag flips (the
+        // engine's form of MC's server-sent PAUSE/RESET_MOB_GROWTH).
+        void ArmAgeLockParticles() { m_ageLockParticleTimer = 40; }
+
+        // MC Tadpole.mobInteract: slime ball (#frog_food) feeds, a golden
+        // dandelion toggles the lock, a water bucket scoops it.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // ── MC Bucketable (Tadpole extends AbstractFish) ───────────────────
+        // fromBucket() is always true — every tadpole is kept:
+        // requiresCustomPersistence = super || fromBucket = true, and
+        // removeWhenFarAway = !fromBucket && … = false.
+        bool FromBucket() const { return true; }
+        bool RequiresCustomPersistence() const override { return true; }
+        bool RemoveWhenFarAway(double) const override { return false; }
+        // MC saveToBucketTag: the default keys + Age + AgeLocked.
+        void SaveToBucket(ItemStack& bucket) const;
+        // MC loadFromBucketTag.
+        void LoadFromBucket(const BucketEntityData& data);
+
+        // MC Tadpole.shouldDropExperience: false.
+        int GetXpReward() const override { return 0; }
+
+    private:
+        // MC ageUp(): become a frog (convertTo FROG, finalizeSpawn
+        // CONVERSION, persistent, the grow-up sound). Server only.
+        void BecomeFrog();
+
+        int  m_age = 0;
+        bool m_ageLocked = false;
+        int  m_ageLockParticleTimer = 0;   // MC ageLockParticleTimer
     };
 
     class Goat : public GenericAnimal {
@@ -239,7 +466,8 @@ namespace Game {
         explicit Hoglin(EntityLevel* level);
         void UpdateBrainActivity() override;
         // MC Hoglin.getAmbientSound → HoglinAi.getSoundForCurrentActivity
-        // (server only): ANGRY while fighting, RETREAT while avoiding.
+        // (server only): RETREAT while avoiding or converting, ANGRY while
+        // fighting, RETREAT near a repellent, else AMBIENT.
         const char* GetAmbientSound() const override;
 
         // MC Hoglin.removeWhenFarAway (Hoglin.java:182-184) — true: hoglins
@@ -267,8 +495,59 @@ namespace Game {
             return m_attackAnimationRemainingTicks;
         }
 
+        // ── Zombification (MC Hoglin) ──────────────────────────────────────
+        // DATA_IMMUNE_TO_ZOMBIFICATION (synced — bit 0 of the anim byte, so
+        // the client's conversion shake leaves an immune hoglin still),
+        // timeInOverworld and the CONVERSION_TIME of 300 ticks: outside the
+        // Nether (PIGLINS_ZOMBIFY) a hoglin shakes for 15 seconds and turns
+        // into a zoglin with 10 s of nausea.
+        static constexpr int kConversionTime = 300;   // MC CONVERSION_TIME
+        bool IsImmuneToZombification() const { return m_immuneToZombification; }
+        void SetImmuneToZombification(bool v) { m_immuneToZombification = v; }
+        int  GetTimeInOverworld() const { return m_timeInOverworld; }
+        void SetTimeInOverworld(int ticks) { m_timeInOverworld = ticks; }
+        // MC isConverting: not immune, AI on, and PIGLINS_ZOMBIFY (every
+        // dimension but the Nether). Both sides — the renderer shakes it.
+        bool IsConverting() const;
+        uint8_t GetAnimStateByte() const override { return m_immuneToZombification ? 1 : 0; }
+        void    SetAnimStateByte(uint8_t v) override { m_immuneToZombification = (v & 1) != 0; }
+
+        // MC cannotBeHunted ("CannotBeHunted", NBT-only) and canBeHunted: an
+        // adult piglins may hunt.
+        bool CannotBeHunted() const { return m_cannotBeHunted; }
+        void SetCannotBeHunted(bool v) { m_cannotBeHunted = v; }
+        bool CanBeHunted() const { return !IsBaby() && !m_cannotBeHunted; }
+
+        // MC Hoglin.finalizeSpawn: 20% a baby (PROBABILITY_OF_SPAWNING_AS_BABY).
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC Hoglin.hurtServer → HoglinAi.wasHurtBy.
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+        // MC Hoglin.getWalkTargetValue: -1 near the remembered repellent, 10
+        // over crimson nylium, else 0.
+        float GetWalkTargetValue(const glm::ivec3& pos) const override;
+        // MC Hoglin.canFallInLove: not while pacified.
+        bool CanFallInLove() const override;
+        // MC Hoglin.getBreedOffspring: the piglet is persistent.
+        std::unique_ptr<Animal> CreateBaby() override;
+        // MC Hoglin.mobInteract: an interaction that consumed the action
+        // (feeding) makes the hoglin persistent.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+    protected:
+        // MC Hoglin.customServerAiStep: the zombification clock.
+        void CustomServerAiStep() override;
+
     private:
-        int m_attackAnimationRemainingTicks = 0;
+        // MC Hoglin.ageBoundaryReached: ATTACK_DAMAGE 0.5 as a baby, 6 grown.
+        void SyncAgeBoundary();
+        void FinishConversion();
+
+        int  m_attackAnimationRemainingTicks = 0;
+        bool m_immuneToZombification = false;
+        bool m_cannotBeHunted = false;
+        int  m_timeInOverworld = 0;
+        int  m_lastBabyState = -1;   // the age boundary last applied (-1 none)
     };
 
     // MC monster/Zoglin — the zombified hoglin, on MC's own small Brain
@@ -320,15 +599,18 @@ namespace Game {
 
     // ── Piglin / PiglinBrute ───────────────────────────────────────────────
 
-    // MC monster/piglin/Piglin on the ported PiglinAi brain. The inventory,
-    // admiring/bartering, equipment and crossbow halves of the class are
-    // SKIPPED (no item or equipment systems); what remains is the brain, the
-    // baby flag, the dancing flag, and MC's overworld zombification clock —
-    // this engine's one dimension IS the overworld, where PIGLINS_ZOMBIFY is
-    // true, so an unprotected piglin converts after 300 ticks exactly as a
-    // vanilla piglin brought through a portal does.
-    class Piglin : public GenericMonster {
+    // MC monster/piglin/Piglin on the ported PiglinAi brain, with the item
+    // half: the spawn weapon (crossbow or golden sword / 1-in-10 golden
+    // spear) and the 10%-a-piece gold armour, the 8-slot pocket inventory
+    // ("Inventory"), loot pickup through PiglinAi (admire a loved item in the
+    // off hand, barter a gold ingot for piglin_bartering loot, eat, equip
+    // better gear, pocket the rest), the crossbow (CrossbowAttackMob — the
+    // brain's CrossbowAttack), and the overworld zombification clock (the
+    // Nether does not zombify — PIGLINS_ZOMBIFY).
+    class Piglin : public GenericMonster, public CrossbowAttackMob {
     public:
+        static constexpr int kInventorySize = 8;   // MC Piglin.INVENTORY_SIZE
+
         explicit Piglin(EntityLevel* level);
         // MC Piglin.getAmbientSound → PiglinAi.getSoundForCurrentActivity.
         const char* GetAmbientSound() const override;
@@ -361,36 +643,124 @@ namespace Game {
         // fresh 15 seconds on each reload.
         int  GetTimeInOverworld() const { return m_timeInOverworld; }
         void SetTimeInOverworld(int ticks) { m_timeInOverworld = ticks; }
+        // MC AbstractPiglin.isConverting: not immune, AI on, and the level's
+        // PIGLINS_ZOMBIFY (every dimension but the Nether).
+        bool IsConverting() const;
 
+        // Bit 0 DATA_IS_DANCING, bit 1 DATA_IS_CHARGING_CROSSBOW, bit 2
+        // AbstractPiglin's DATA_IMMUNE_TO_ZOMBIFICATION (the client's
+        // isConverting — the conversion shake).
         uint8_t GetAnimStateByte() const override {
-            return static_cast<uint8_t>(m_dancing ? 1 : 0);
+            return static_cast<uint8_t>((m_dancing ? 1 : 0) | (m_chargingCrossbow ? 2 : 0) |
+                                        (m_immuneToZombification ? 4 : 0));
         }
-        void SetAnimStateByte(uint8_t v) override { m_dancing = (v & 1) != 0; }
+        void SetAnimStateByte(uint8_t v) override {
+            m_dancing = (v & 1) != 0;
+            m_chargingCrossbow = (v & 2) != 0;
+            m_immuneToZombification = (v & 4) != 0;
+        }
 
-        // MC Piglin.finalizeSpawn — 20% baby, initMemories (the spawn-weapon
-        // and armor rolls are skipped: no equipment system).
+        // MC AbstractPiglin.playAmbientSound: only while IDLE.
+        void PlayAmbientSound() override;
+
+        // MC Piglin.finalizeSpawn — outside a structure 20% baby, else an
+        // adult gets its spawn weapon; initMemories, the gold armour, the
+        // spawn enchantments, then Mob's.
         std::shared_ptr<SpawnGroupData>
         FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         // MC Piglin.hurtServer → PiglinAi.wasHurtBy.
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
 
+        // MC Piglin.mobInteract → PiglinAi.mobInteract: an adult that is not
+        // admiring takes one gold ingot into its off hand to admire.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // ── CrossbowAttackMob ──────────────────────────────────────────────
+        void SetChargingCrossbow(bool charging) override { m_chargingCrossbow = charging; }
+        bool IsChargingCrossbow() const override { return m_chargingCrossbow; }
+        void OnCrossbowAttackPerformed() override { ResetNoActionTime(); }
+        // MC performRangedAttack → performCrossbowAttack(this, 1.6), aimed at
+        // the brain's ATTACK_TARGET (AbstractPiglin.getTarget).
+        void PerformRangedAttack(LivingEntity& target, float power) override;
+        // MC Piglin.canUseNonMeleeWeapon: the crossbow and a KINETIC_WEAPON
+        // spear.
+        bool CanUseNonMeleeWeapon(const ItemStack& stack) const override;
+        // The client's crossbow-draw clock (see Pillager).
+        int GetClientChargeTicks() const override { return m_clientChargeTicks; }
+
+        // ── Items (MC Piglin / PiglinAi) ───────────────────────────────────
+        // MC Piglin.getPreferredWeaponType: piglin_preferred_weapons for an
+        // adult, none for a baby.
+        const char* GetPreferredWeaponType() const override {
+            return IsBaby() ? nullptr : "minecraft:piglin_preferred_weapons";
+        }
+        // MC Piglin.wantsToPickUp: mobGriefing, canPickUpLoot and
+        // PiglinAi.wantsToPickup.
+        bool WantsToPickUp(const ItemStack& stack) const override;
+        // MC Piglin.canReplaceCurrentItem: Curse of Binding pins the piece; a
+        // loved or preferred item beats one that is neither, and loses to
+        // one; otherwise Mob's comparison.
+        bool CanReplaceCurrentItem(const ItemStack& newStack, const ItemStack& current,
+                                   EquipmentSlot slot) const override;
+        // MC Piglin.canReplaceCurrentItem(newItem) — against the slot the
+        // item would go in.
+        bool CanReplaceCurrentItem(const ItemStack& newStack) const;
+        // MC Piglin.pickUpItem → onItemPickup + PiglinAi.pickUpItem.
+        void PickUpItem(int32_t itemEntityId, const ItemStack& stack) override;
+        // MC Piglin.holdInMainHand / holdInOffHand.
+        void HoldInMainHand(const ItemStack& stack);
+        void HoldInOffHand(const ItemStack& stack);
+        // MC Piglin.addToInventory / canAddToInventory.
+        ItemStack AddToInventory(const ItemStack& stack);
+        bool CanAddToInventory(const ItemStack& stack) const;
+        SimpleContainer&       GetInventory()       { return m_inventory; }
+        const SimpleContainer& GetInventory() const { return m_inventory; }
+        // MC Piglin.dropCustomDeathLoot: the pockets empty onto the ground
+        // (after Mob's equipment drop, which the loot pass runs).
+        void DropCustomDeathLoot(EntityLevel& level) override;
+
+        // MC NEAREST_VISIBLE_WANTED_ITEM — item entities are not Entities in
+        // this engine, so the NEAREST_ITEMS sensor's answer is the item
+        // entity's id, kept here (the Allay pattern).
+        std::optional<int32_t> GetWantedItemId() const { return m_wantedItemId; }
+        void SetWantedItemId(std::optional<int32_t> id) { m_wantedItemId = id; }
+
+        // MC Piglin.getArmPose (PiglinArmPose ordinals): DANCING, ADMIRING_ITEM
+        // (a loved item in the off hand), ATTACKING_WITH_MELEE_WEAPON
+        // (aggressive, a WEAPON in hand), CROSSBOW_CHARGE, CROSSBOW_HOLD (a
+        // loaded crossbow), else DEFAULT. Both sides.
+        int GetPiglinArmPose() const;
+
+        void Tick() override;
+
     protected:
         // MC AbstractPiglin.customServerAiStep — the zombification clock.
         void CustomServerAiStep() override;
+        // MC Piglin.populateDefaultEquipmentSlots: an adult's four 10% gold
+        // armour rolls.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
 
     private:
+        // MC Piglin.finishConversion: cancelAdmiring, the pockets dropped,
+        // then AbstractPiglin's conversion (equipment kept).
+        void FinishPiglinConversion();
+
         bool m_baby = false;
         bool m_cannotHunt = false;
         bool m_dancing = false;
+        bool m_chargingCrossbow = false;
         bool m_immuneToZombification = false;
         int  m_timeInOverworld = 0;   // MC AbstractPiglin.timeInOverworld
+        int  m_clientChargeTicks = -1;
+        SimpleContainer m_inventory{ kInventorySize };
+        std::optional<int32_t> m_wantedItemId;
     };
 
     // MC monster/piglin/PiglinBrute on the ported PiglinBruteAi brain — the
     // simpler always-hostile cousin: no baby form, no bartering, never flees,
-    // and it patrols the HOME position it spawned at. The golden-axe spawn
-    // equipment is skipped (no equipment system).
+    // and it patrols the HOME position it spawned at. Spawns with a golden
+    // axe and only ever picks up another.
     class PiglinBrute : public GenericMonster {
     public:
         explicit PiglinBrute(EntityLevel* level);
@@ -399,20 +769,36 @@ namespace Game {
 
         bool IsImmuneToZombification() const { return m_immuneToZombification; }
         void SetImmuneToZombification(bool v) { m_immuneToZombification = v; }
+        // Bit 0: AbstractPiglin's DATA_IMMUNE_TO_ZOMBIFICATION (see Piglin).
+        uint8_t GetAnimStateByte() const override { return m_immuneToZombification ? 1 : 0; }
+        void    SetAnimStateByte(uint8_t v) override { m_immuneToZombification = (v & 1) != 0; }
+        // MC AbstractPiglin.playAmbientSound: only while IDLE.
+        void PlayAmbientSound() override;
 
         // MC AbstractPiglin.timeInOverworld — see the note on Piglin's copy.
         int  GetTimeInOverworld() const { return m_timeInOverworld; }
         void SetTimeInOverworld(int ticks) { m_timeInOverworld = ticks; }
+        bool IsConverting() const;
 
-        // MC PiglinBrute.finalizeSpawn — PiglinBruteAi.initMemories (HOME).
+        // MC PiglinBrute.finalizeSpawn — PiglinBruteAi.initMemories (HOME),
+        // the golden axe, then Mob's.
         std::shared_ptr<SpawnGroupData>
         FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         // MC PiglinBrute.hurtServer → PiglinBruteAi.wasHurtBy.
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
 
+        // MC PiglinBrute.wantsToPickUp: a golden axe only.
+        bool WantsToPickUp(const ItemStack& stack) const override;
+
+        // MC PiglinBrute.getArmPose: ATTACKING_WITH_MELEE_WEAPON while
+        // aggressive holding a melee weapon, else DEFAULT.
+        int GetPiglinArmPose() const;
+
     protected:
         void CustomServerAiStep() override;
+        // MC PiglinBrute.populateDefaultEquipmentSlots: the golden axe.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
 
     private:
         bool m_immuneToZombification = false;
@@ -421,9 +807,10 @@ namespace Game {
 
     // ── Axolotl ────────────────────────────────────────────────────────────
 
-    // MC animal/axolotl/Axolotl on the ported AxolotlAi brain. The bucketing
-    // half of the class (Bucketable, fromBucket persistence, mobInteract,
-    // saveToBucketTag) is SKIPPED — no bucket-item system; leashing likewise.
+    // MC animal/axolotl/Axolotl on the ported AxolotlAi brain, Bucketable
+    // included: a water bucket scoops it (variant, age, age lock, hunting
+    // cooldown and the default keys ride the bucket), and one released from
+    // a bucket is kept (fromBucket persistence).
     class Axolotl : public GenericAnimal {
     public:
         // MC Axolotl.isPushedByFluid: false.
@@ -487,9 +874,26 @@ namespace Game {
         float GetWalkTargetValue(const glm::ivec3&) const override { return 0.0f; }
 
         // MC Axolotl.removeWhenFarAway: !fromBucket && !hasCustomName — an
-        // axolotl despawns despite being an Animal, unless named. No bucket
-        // system, so the name is the only arm here.
-        bool RemoveWhenFarAway(double) const override { return !HasCustomName(); }
+        // axolotl despawns despite being an Animal, unless named or bucketed.
+        bool RemoveWhenFarAway(double) const override { return !FromBucket() && !HasCustomName(); }
+        // MC Axolotl.requiresCustomPersistence: super || fromBucket.
+        bool RequiresCustomPersistence() const override {
+            return GenericAnimal::RequiresCustomPersistence() || FromBucket();
+        }
+
+        // ── MC Bucketable ─────────────────────────────────────────────────
+        // FROM_BUCKET / "FromBucket".
+        bool FromBucket() const { return m_fromBucket; }
+        void SetFromBucket(bool fromBucket) { m_fromBucket = fromBucket; }
+        // MC Axolotl.mobInteract: bucketMobPickup, else Animal's (feeding —
+        // with Axolotl.usePlayerItem's tropical-fish-bucket refund).
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC saveToBucketTag: the default keys, AXOLOTL_VARIANT, and Age /
+        // AgeLocked / HuntingCooldown.
+        void SaveToBucket(ItemStack& bucket) const;
+        // MC loadFromBucketTag (the variant arrives separately, as the
+        // bucket's AXOLOTL_VARIANT component — applyImplicitComponents).
+        void LoadFromBucket(const BucketEntityData& data);
 
         // MC Axolotl.finalizeSpawn — the two-variant pack token; the third
         // member onward of a pack spawns as a baby.
@@ -544,6 +948,7 @@ namespace Game {
 
         Variant m_variant = Variant::Lucy;
         bool    m_playingDead = false;
+        bool    m_fromBucket = false;   // MC Axolotl.FROM_BUCKET
 
         // The partner AnimalMakeLove is breeding this axolotl with, stashed
         // for the variant coin flip — CreateBaby has no partner parameter.
@@ -704,17 +1109,25 @@ namespace Game {
         void ResetAnimations();
         // MC Breeze.soundTick — the whirl's 1..80-tick timer.
         int m_soundTick = 0;
+        // MC jumpTrailStartedTick: the long jump's first 5 ticks trail dust.
+        int m_jumpTrailStartedTick = 0;
+        // MC emitGroundParticles / emitJumpTrailParticles (client copy).
+        void EmitGroundParticles(int amount);
+        void EmitJumpTrailParticles();
+        BlockState GroundStateForParticles() const;
     };
 
     // ── Warden ─────────────────────────────────────────────────────────────
 
-    // MC monster/warden/Warden minus the vibration system: there are no game
-    // events or sculk sensors in this engine, so the warden cannot HEAR — it
-    // angers by sniffing you out (WardenEntitySensor feeds NEAREST_ATTACKABLE,
-    // TryToSniff/Sniffing raise anger on proximity), by touch, and by being
-    // hit. The anger ladder, roar, sonic boom and the emerge/dig lifecycle are
-    // the real MC structure on the ported brain.
-    class Warden : public GenericMonster {
+    // MC monster/warden/Warden. It HEARS through MC's vibration system (a
+    // VibrationSystem user on an entity position source at its eyes, radius
+    // 16, #warden_can_listen, registered through a DynamicGameEventListener
+    // that follows it between sections), and angers by sniffing you out
+    // (WardenEntitySensor feeds NEAREST_ATTACKABLE, TryToSniff/Sniffing raise
+    // anger on proximity), by touch, and by being hit. The anger ladder,
+    // roar, sonic boom and the emerge/dig lifecycle are the real MC structure
+    // on the ported brain.
+    class Warden : public GenericMonster, public VibrationSystem {
     public:
         // `type` lets a subclass register under its own id (SilentWarden,
         // HushMobs.hpp) — the CamelHusk-on-Camel precedent.
@@ -778,9 +1191,42 @@ namespace Game {
         // MC Warden.getAmbientSound — the AngerLevel's voice.
         const char* GetAmbientSound() const override;
 
+        // MC Warden.dampensVibrations: its own steps are never heard.
+        bool DampensVibrations() const override { return true; }
+
+        // MC Warden implements VibrationSystem.
+        VibrationData& GetVibrationData() override { return m_vibrationData; }
+        VibrationUser& GetVibrationUser() override;
+        void SetVibrationData(VibrationData data) { m_vibrationData = std::move(data); }
+        const VibrationData& SavedVibrationData() const { return m_vibrationData; }
+
     private:
         void TickAngerManagement();
         void SortAnger();
+
+        // MC Warden.VibrationUser.
+        class WardenVibrationUser : public VibrationUser {
+        public:
+            explicit WardenVibrationUser(Warden& warden);
+            int GetListenerRadius() const override { return 16; }
+            const PositionSource& GetPositionSource() const override { return m_source; }
+            GameEvents::Tag GetListenableEvents() const override { return GameEvents::Tag::WardenCanListen; }
+            bool CanTriggerAvoidVibration() const override { return true; }
+            bool CanReceiveVibration(World& level, const glm::ivec3& pos, GameEventId event,
+                                     const GameEventContext& context) override;
+            void OnReceiveVibration(World& level, const glm::ivec3& pos, GameEventId event, Entity* sourceEntity,
+                                    Entity* projectileOwner, float receivingDistance) override;
+
+        private:
+            Warden&        m_warden;
+            PositionSource m_source;
+        };
+        WardenVibrationUser      m_vibrationUser;
+        VibrationData            m_vibrationData;
+        VibrationListener        m_vibrationListener;
+        // Last, so it is destroyed first: its destructor unregisters the
+        // listener above from the level's dispatcher.
+        DynamicGameEventListener m_dynamicGameEventListener;
 
         struct AngerEntry {
             Entity* entity;
@@ -965,9 +1411,10 @@ namespace Game {
                 && m_inStateTicks > AnimationDuration(State::Rolling);
         }
 
-        // MC Armadillo.canStayRolledUp. Leashes, riding and being ridden do not
-        // exist here, so this is the two conditions that do.
-        bool CanStayRolledUp() const { return !IsPanicking() && !IsInLiquid(); }
+        // MC Armadillo.canStayRolledUp.
+        bool CanStayRolledUp() const {
+            return !IsPanicking() && !IsInLiquid() && !IsLeashed() && !IsPassenger() && !IsVehicle();
+        }
 
         // MC Armadillo.isScaredBy — what makes an armadillo curl up.
         bool IsScaredBy(const LivingEntity& other) const;
@@ -1109,25 +1556,190 @@ namespace Game {
 
     // ── Allay ──────────────────────────────────────────────────────────────
 
-    // MC animal/allay/Allay on the ported AllayAi brain — the float/panic/
-    // flying-wander core. The rest of MC's class is the item courier
-    // (pick up a matching item, ferry stacks to the liked player or liked
-    // noteblock), the jukebox dance + duplication ritual, and the vibration
-    // listener — all riding the item, jukebox-event and vibration systems,
-    // all skipped and named in AllayAi.cpp.
-    class Allay : public GenericPathfinderMob {
+    // MC animal/allay/Allay (implemented in Allay.cpp) on the AllayAi brain:
+    // the item courier — hand it an item and it becomes that player's
+    // (LIKED_PLAYER), picks up matching stacks into its one-slot inventory
+    // and throws them to the player, or to the note block it last heard
+    // (LIKED_NOTEBLOCK_POSITION, a 600-tick memory refreshed by each note);
+    // the jukebox dance and the amethyst-shard duplication; the vibration
+    // listener for note blocks — MC's VibrationSystem user (#allay_can_listen,
+    // radius 16, at its eyes) on the level's game-event dispatcher, moved
+    // between sections by a DynamicGameEventListener. The JukeboxListener
+    // half (JUKEBOX_PLAY / _STOP_PLAY) polls the server's JukeboxSongRegistry
+    // on MC's 20-tick play-event cadence instead.
+    //
+    // Wire: the anim byte carries hasItemInHand (bit 0), DATA_DANCING
+    // (bit 1) and DATA_CAN_DUPLICATE (bit 2); the held stack itself rides
+    // BodyArmorS2C with slot MAINHAND (MC ClientboundSetEquipmentPacket).
+    class Allay : public GenericPathfinderMob, public VibrationSystem {
     public:
+        // MC Allay constants.
+        static constexpr int   kDuplicationCooldownTicks = 6000;  // DUPLICATION_COOLDOWN_TICKS
+        static constexpr int   kMaxNoteblockDistance = 1024;      // MAX_NOTEBLOCK_DISTANCE
+        static constexpr float kLiftingItemAnimationDuration = 5.0f;
+        static constexpr float kDancingLoopDuration = 55.0f;
+        static constexpr float kSpinningAnimationDuration = 15.0f;
+        // VibrationUser.getListenerRadius (VIBRATION_EVENT_LISTENER_RANGE).
+        static constexpr int   kVibrationListenerRange = 16;
+        // GameEvent.JUKEBOX_PLAY / JUKEBOX_STOP_PLAY notification radius —
+        // the JukeboxListener's radius too.
+        static constexpr int   kJukeboxNotificationRadius = 10;
+
         explicit Allay(EntityLevel* level);
 
-        // MC Allay.getAmbientSound: with or without an item in hand — no
-        // allay here carries one (the item-delivery loop is not ported).
-        const char* GetAmbientSound() const override { return "entity.allay.ambient_without_item"; }
+        // MC Allay.getAmbientSound: ALLAY_AMBIENT_WITH_ITEM while it holds
+        // something in its main hand.
+        const char* GetAmbientSound() const override;
         void UpdateBrainActivity() override;
 
         // MC Allay.removeWhenFarAway (Allay.java:384-386) — false: an allay
         // never distance-despawns. Mob's base default is true, which was
         // silently despawning them.
         bool RemoveWhenFarAway(double) const override { return false; }
+
+        void Tick() override;
+        void AiStep() override;
+        // MC Allay.hurtServer: its liked player cannot hurt it.
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+        // MC Allay.mobInteract: duplication, give, take back.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC Allay.canDispenserEquipIntoSlot: never.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot) const override { return false; }
+        // MC Allay.dropEquipment: the inventory and the held stack.
+        void DropEquipment(EntityLevel& level) override;
+        // MC Allay.handleEntityEvent(18): three hearts (duplication).
+        void HandleEntityEvent(uint8_t id) override;
+
+        uint8_t GetAnimStateByte() const override;
+        void    SetAnimStateByte(uint8_t v) override;
+
+        // MC's MAINHAND slot (the only one the allay fills).
+        ItemStack* EquipmentInSlot(EquipmentSlot slot) override;
+        bool HasEquipmentSlots() const override { return true; }
+
+        // ── The held item (MAINHAND) ───────────────────────────────────────
+        const ItemStack& GetMainHandItem() const { return m_handItem; }
+        // Server: sets the slot and marks it for the tracker. Client: the
+        // synched copy (BodyArmorS2C, slot MAINHAND).
+        void SetMainHandItem(const ItemStack& stack);
+        // MC hasItemInHand. Server: the slot; client: the synched bit.
+        bool HasItemInHand() const;
+        // The tracker's send-on-change latch for the held stack.
+        bool ConsumeHandItemDirty() {
+            const bool d = m_handItemDirty;
+            m_handItemDirty = false;
+            return d;
+        }
+
+        // ── InventoryCarrier (MC SimpleContainer(1)) ──────────────────────
+        SimpleContainer&       GetInventory()       { return m_inventory; }
+        const SimpleContainer& GetInventory() const { return m_inventory; }
+        // MC SimpleContainer.canAddItem / addItem / removeItem(0, 1).
+        bool      InventoryCanAddItem(const ItemStack& stack) const;
+        ItemStack InventoryAddItem(const ItemStack& stack);
+
+        // MC Allay.canPickUpLoot — not on pickup cooldown and holding
+        // something. (Mob's CanPickUpLoot flag is not what the allay reads.)
+        bool CanPickUpLootNow() const;
+        // MC Allay.wantsToPickUp: the same item as the one in hand (potion
+        // contents included), room for it, mobGriefing on.
+        bool WantsToPickUp(const ItemStack& stack) const override;
+        // MC Allay.canPickUpLoot (Mob.aiStep's looting gate, TickLooting):
+        // CanPickUpLootNow.
+        bool CanPickUpLoot() const override { return CanPickUpLootNow(); }
+        // MC Allay.getPickupReach: ITEM_PICKUP_REACH (1, 1, 1).
+        glm::ivec3 GetPickupReach() const override { return glm::ivec3(1, 1, 1); }
+        // MC Allay.pickUpItem → InventoryCarrier.pickUpItem: room or nothing,
+        // then the part that fits goes into the one-slot inventory.
+        void PickUpItem(int32_t itemEntityId, const ItemStack& stack) override;
+        // MC NEAREST_VISIBLE_WANTED_ITEM — item entities are not Entities in
+        // this engine, so the sensor's answer is the item entity's id.
+        std::optional<int32_t> GetWantedItemId() const { return m_wantedItemId; }
+        void SetWantedItemId(std::optional<int32_t> id) { m_wantedItemId = id; }
+
+        // ── LIKED_PLAYER ───────────────────────────────────────────────────
+        // MC keeps the UUID in the brain; the brain's memory variant has no
+        // UUID kind, so the value lives here and the LIKED_PLAYER memory
+        // mirrors its presence.
+        const std::optional<Uuid>& GetLikedPlayerUuid() const { return m_likedPlayer; }
+        void SetLikedPlayerUuid(std::optional<Uuid> uuid);
+        bool IsLikedPlayer(const Entity* other) const;
+        // MC AllayAi.getLikedPlayer: the liked player when it is in this
+        // level, not a spectator, and within 64 blocks.
+        LivingEntity* GetLikedPlayer() const;
+
+        // ── Dancing / duplication ──────────────────────────────────────────
+        bool IsDancing() const { return m_dancing; }
+        // MC setDancing: server, effective AI, and never INTO a dance while
+        // panicking.
+        void SetDancing(bool dancing);
+        // MC setJukeboxPlaying (the JukeboxListener's two events).
+        void SetJukeboxPlaying(const glm::ivec3& jukebox, bool playing);
+        bool CanDuplicate() const { return m_canDuplicate; }
+        int64_t GetDuplicationCooldown() const { return m_duplicationCooldown; }
+        void SetDuplicationCooldown(int64_t ticks);
+
+        // ── Client animation (MC Allay.tick's client half) ────────────────
+        float GetHoldingItemAnimationProgress(float partialTick) const;
+        bool  IsSpinning() const;
+        float GetSpinningProgress(float partialTick) const;
+
+        // ── The vibration listener (MC Allay implements VibrationSystem) ──
+        VibrationData& GetVibrationData() override { return m_vibrationData; }
+        VibrationUser& GetVibrationUser() override;
+        void SetVibrationData(VibrationData data) { m_vibrationData = std::move(data); }
+        const VibrationData& SavedVibrationData() const { return m_vibrationData; }
+
+    private:
+        bool IsBrainPanicking() const;
+        bool ShouldStopDancing() const;
+        void DuplicateAllay();
+        void TickJukeboxListener();
+        void TickVibrations();
+
+        // MC Allay.VibrationUser.
+        class AllayVibrationUser : public VibrationUser {
+        public:
+            explicit AllayVibrationUser(Allay& allay);
+            int GetListenerRadius() const override { return 16; }
+            const PositionSource& GetPositionSource() const override { return m_source; }
+            GameEvents::Tag GetListenableEvents() const override { return GameEvents::Tag::AllayCanListen; }
+            bool CanReceiveVibration(World& level, const glm::ivec3& pos, GameEventId event,
+                                     const GameEventContext& context) override;
+            void OnReceiveVibration(World& level, const glm::ivec3& pos, GameEventId event, Entity* sourceEntity,
+                                    Entity* projectileOwner, float receivingDistance) override;
+
+        private:
+            Allay&         m_allay;
+            PositionSource m_source;
+        };
+
+        ItemStack       m_handItem;
+        bool            m_handItemDirty = false;
+        bool            m_clientHoldingItem = false;
+        SimpleContainer m_inventory{ 1 };
+        std::optional<int32_t> m_wantedItemId;
+        std::optional<Uuid>    m_likedPlayer;
+
+        bool m_dancing = false;          // DATA_DANCING
+        bool m_canDuplicate = true;      // DATA_CAN_DUPLICATE
+        std::optional<glm::ivec3> m_jukeboxPos;
+        int64_t m_duplicationCooldown = 0;
+        // The jukeboxes within earshot at the last listener pass — a song
+        // that leaves the registry from this set is MC's JUKEBOX_STOP_PLAY.
+        std::vector<glm::ivec3> m_heardJukeboxes;
+
+        AllayVibrationUser       m_vibrationUser;
+        VibrationData            m_vibrationData;
+        VibrationListener        m_vibrationListener;
+        // After the listener it registers, so it unregisters first.
+        DynamicGameEventListener m_dynamicGameEventListener;
+
+        float m_holdingItemAnimationTicks = 0.0f;
+        float m_holdingItemAnimationTicks0 = 0.0f;
+        float m_dancingAnimationTicks = 0.0f;
+        float m_spinningAnimationTicks = 0.0f;
+        float m_spinningAnimationTicks0 = 0.0f;
     };
 
     // ── HappyGhast ─────────────────────────────────────────────────────────
@@ -1138,19 +1750,114 @@ namespace Game {
     // BABY ghastling runs HappyGhastAi's brain (tempt-follow, trailing
     // players and followable adults, flying wander, panic). The class swaps
     // setups at the age boundary as MC's adultGhastSetup/babyGhastSetup do.
-    // Harness riding, the still timeout and body armor ride the riding/
-    // equipment systems and are named skipped here.
+    //
+    // Riding (MC 26.3): a harness in the BODY slot makes an adult rideable
+    // by up to four players (mobInteract → startRiding, four seats at the
+    // harness corners); the first player steers it (getControllingPassenger)
+    // unless it is on its still timeout, flying where the rider looks —
+    // forward along the view pitch, backwards at half, jump to rise
+    // (getRiddenInput), the body easing toward the rider's yaw at 8% a tick
+    // (tickRidden). The still timeout (STAYS_STILL / serverStillTimeout)
+    // freezes it in place while a player stands on it or boards it, and is
+    // what makes its top a platform (canBeCollidedWith).
     class HappyGhast : public GenericAnimal {
     public:
         explicit HappyGhast(EntityLevel* level);
 
         void UpdateBrainActivity() override;
 
+        // MC HappyGhast.MAX_PASSANGERS / BABY_SCALE / MAX_STILL_TIMEOUT /
+        // STILL_TIMEOUT_ON_LOAD_GRACE_PERIOD / the restriction radii.
+        static constexpr int   kMaxPassengers = 4;
+        static constexpr float kBabyScale = 0.2375f;
+        static constexpr int   kMaxStillTimeout = 10;
+        static constexpr int   kStillTimeoutOnLoadGracePeriod = 60;
+        static constexpr int   kSmallRestrictionRadius = 32;
+        static constexpr int   kLargeRestrictionRadius = 64;
+        static constexpr int   kRestrictionRadiusBuffer = 16;
+
         // MC HappyGhast.getMaxSpawnClusterSize (HappyGhast.java:201-203).
         int GetMaxSpawnClusterSize() const override { return 1; }
 
-        // MC HappyGhast.isOnStillTimeout — only the riding system sets it.
-        bool IsOnStillTimeout() const { return false; }
+        // MC HappyGhast.isOnStillTimeout: the synched STAYS_STILL flag, or
+        // (server) a still timeout still counting.
+        bool IsOnStillTimeout() const { return m_staysStill || m_serverStillTimeout > 0; }
+        // MC HappyGhast.staysStill (DATA STAYS_STILL).
+        bool StaysStill() const { return m_staysStill; }
+        // MC HappyGhast.isLeashHolder (DATA IS_LEASH_HOLDER) — it holds a
+        // quad-leashed mob now (the RopesLayer's input).
+        bool IsLeashHolder() const { return m_isLeashHolder; }
+        // The still timeout MC saves as "still_timeout" (server).
+        int  GetServerStillTimeout() const { return m_serverStillTimeout; }
+        void SetServerStillTimeout(int ticks);
+
+        // MC isWearingBodyArmor — for the happy ghast, the harness.
+        bool IsWearingHarness() const;
+        // ── The harness slot (MC HappyGhast.canUseSlot /
+        //    canDispenserEquipIntoSlot) ─────────────────────────────────────
+        // A harness (BODY) only on a live, grown ghast.
+        bool CanUseSlot(EquipmentSlot slot) const override {
+            if (slot != EquipmentSlot::BODY) return GenericAnimal::CanUseSlot(slot);
+            return IsAlive() && !IsBaby();
+        }
+        // A dispenser only ever harnesses it.
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override { return slot == EquipmentSlot::BODY; }
+        // Any passenger aboard, on either side (MC isVehicle(): the server's
+        // list holds the riders' views; a client knows players only by the
+        // synched seat order) — the harness goggles are down while it holds
+        // (HappyGhastRenderer: state.isRidden = isVehicle()).
+        bool IsRidden() const;
+        bool AreGogglesDown() const { return IsRidden(); }
+
+        // ── Riding ────────────────────────────────────────────────────────
+        // MC HappyGhast.mobInteract: a foal is Animal's; otherwise the held
+        // item's interactLivingEntity first (the harness, a lead), then a
+        // harnessed ghast seats a player who is not sneaking.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // MC getControllingPassenger: harnessed, not on the still timeout,
+        // the first passenger a player.
+        bool CanBeSteeredBy(const RiderControl& rider) const override;
+        glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) override;
+        void TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) override;
+        // MC canAddPassenger: four seats.
+        bool CanAddPassenger(const Entity& passenger) const override;
+        // MC's four passengerAttachments (EntityTypes HAPPY_GHAST), picked by
+        // seat (EntityAttachments.getClamped), turned by the yaw.
+        glm::dvec3 GetPassengerAttachmentPoint(const Entity& passenger) const override;
+        glm::dvec3 GetPassengerAttachmentForSlot(int slot, int total) const override;
+        // MC getDismountLocationForPassenger: on top, at the centre.
+        glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const override;
+        // MC addPassenger / removePassenger: the goggles sounds, the still
+        // timeout, the home dropped when the last rider leaves.
+        void OnPassengerAdded(Entity& passenger, bool wasVehicle) override;
+        void OnPassengerRemoved(Entity& passenger) override;
+
+        // MC canBeCollidedWith(other) for a player `otherFeetY` tall at the
+        // feet (client side: the local player's collision): an adult alive
+        // ghast is solid to a player at or above its top, and wholly while
+        // on its still timeout.
+        bool CanBeCollidedWithPlayer(double otherFeetY) const;
+
+        // MC HappyGhast.travel: travelFlying at FLYING_SPEED * 5/3 in every
+        // medium — no gravity at all.
+        void Travel(const glm::dvec3& input) override;
+
+        // MC getAmbientSoundInterval: six times as long while ridden.
+        int GetAmbientSoundInterval() const override;
+
+        // MC notifyLeashHolder: a quad-leashed mob keeps the flag up 5 ticks.
+        void NotifyLeashHolder(Mob& leashee) override;
+
+        void Tick() override;
+
+        // Anim byte: bit 0 STAYS_STILL, bit 1 IS_LEASH_HOLDER.
+        uint8_t GetAnimStateByte() const override {
+            return static_cast<uint8_t>((m_staysStill ? 1 : 0) | (m_isLeashHolder ? 2 : 0));
+        }
+        void SetAnimStateByte(uint8_t v) override {
+            m_staysStill = (v & 1) != 0;
+            m_isLeashHolder = (v & 2) != 0;
+        }
 
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<HappyGhast>(m_level);
@@ -1158,15 +1865,27 @@ namespace Game {
 
     protected:
         // MC HappyGhast.ageBoundaryReached, detected by polling — the port's
-        // AgeableMob has no boundary hook.
+        // AgeableMob has no boundary hook — then MC customServerAiStep's
+        // checkRestriction and GhastMoveControl's shouldBeStopped.
         void CustomServerAiStep() override;
+        // MC HappyGhastBodyRotationControl.clientTick: while ridden the head
+        // and body follow the yaw.
+        void TickHeadTurn(float yBodyRotTarget) override;
 
     private:
         void AdultSetup();
         void BabySetup();
         void RegisterAdultGoals();
+        // MC checkRestriction / scanPlayerAboveGhast / syncStayStillFlag.
+        void CheckRestriction();
+        bool ScanPlayerAboveGhast() const;
+        glm::dvec3 SeatAttachment(int slot) const;
 
         bool m_wasBaby = false;
+        int  m_serverStillTimeout = 0;
+        int  m_leashHolderTime = 0;
+        bool m_staysStill = false;
+        bool m_isLeashHolder = false;
     };
 
 } // namespace Game

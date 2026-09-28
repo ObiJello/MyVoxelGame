@@ -76,7 +76,7 @@ namespace Render {
         bool m_initialJoinable = true,  m_wantedJoinable = true;
         int  m_initialPort = 25565,     m_port = 25565;
         bool m_portValid = true;
-        bool m_initialGuestAccess = false, m_wantedGuestAccess = false;
+        bool m_initialGuestAccess = true, m_wantedGuestAccess = true;
         bool m_initialForceMode = true,    m_wantedForceMode = true;
 
         // ── Widgets (owned by the list / screen) ───────────────────────────

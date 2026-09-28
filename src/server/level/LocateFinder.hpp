@@ -37,6 +37,7 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -51,12 +52,37 @@ namespace Server {
         std::string id;   // "minecraft:village_plains" / "minecraft:plains"
     };
 
+    // A structure start's identity — which structure, begun in which
+    // chunk. MC's StructureStart.references (the explorer-map claim count)
+    // hangs off exactly this.
+    struct StructureStartKey {
+        std::string structure;
+        int32_t chunkX = 0;
+        int32_t chunkZ = 0;
+    };
+
+    // StructureManager.addReference guarded by StructureStart.canBeReferenced:
+    // true when the start took the reference now (it had none), false when
+    // it is already claimed.
+    using StructureReferenceFn = std::function<bool(const StructureStartKey&)>;
+
     // Structure ids as registered ("minecraft:village_plains"); unknown ids
     // are skipped. Empty when nothing generates within the radius.
+    // `tryAddReference` set = MC's skipKnownStructures: a start only counts
+    // when it accepts the new reference (the explorer maps' "each map finds
+    // an unclaimed one").
     std::optional<LocateResult> FindNearestStructure(ServerLevel& level,
                                                      const std::vector<std::string>& structureIds,
                                                      const glm::ivec3& from,
-                                                     int maxSearchRadius = 100);
+                                                     int maxSearchRadius = 100,
+                                                     const StructureReferenceFn* tryAddReference = nullptr);
+
+    // StructureManager.getStructureAt(pos, structures): the start of one of
+    // `structureIds` with a piece whose box contains `pos`, found by
+    // regenerating the starts the placements put near it.
+    std::optional<StructureStartKey> FindStructureStartAt(ServerLevel& level,
+                                                          const std::vector<std::string>& structureIds,
+                                                          const glm::ivec3& pos);
 
     // Biome ids as the biome source names them ("minecraft:plains").
     std::optional<LocateResult> FindClosestBiome(ServerLevel& level,
@@ -79,6 +105,11 @@ namespace Server {
     // The generator's biome at a block position ("minecraft:plains"), the
     // way FindClosestBiome samples it. Empty when the level cannot answer.
     std::string BiomeAt(ServerLevel& level, const glm::ivec3& pos);
+
+    // MC LevelReader.getBiome for a column no chunk answers: the fuzzy zoom
+    // (BiomeManager.getBiome, seeded with the obfuscated world seed) over
+    // the generator's biome source. Empty when the level cannot answer.
+    std::string ZoomedBiomeAt(ServerLevel& level, const glm::ivec3& pos);
 
     // Is this name a tag? "#..." always; a bare name when a tag file of that
     // name exists (data/<ns>/tags/worldgen/<kind>/<path>.json) — this game

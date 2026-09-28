@@ -12,6 +12,8 @@
 namespace Game {
 
     class AbstractHorse;
+    class HorseTaming;
+    class PathfinderMob;
 
     // MC AbstractHorse.MountPanicGoal — PanicGoal that stands its ground
     // while a MOB is steering it (a jockey's ride does not bolt).
@@ -29,22 +31,25 @@ namespace Game {
         AbstractHorse* m_horse;
     };
 
-    // MC ai/goal/RunAroundLikeCrazyGoal — an untamed horse bucks under a
-    // PLAYER rider. Player riding does not exist in this port, so a horse's
-    // only riders are mobs (jockeys) and MC's own !isMobControlled gate
-    // keeps the goal idle — but every term is live, so it works the day a
-    // player can climb on. The tick-side taming/dismount rolls need the
-    // taming layer and are named skipped in the .cpp.
+    // MC ai/goal/RunAroundLikeCrazyGoal — an untamed equine carrying a
+    // player (not steered by a mob) bolts to random spots 5 out, and on a
+    // 1-in-adjustedTickDelay(50) tick either takes to the rider
+    // (nextInt(maxTemper) < temper → tameWithName) or throws them (temper
+    // + 5, ejectPassengers, makeMad, entity event 6). Registered by the
+    // horse family and the llama (MC: every AbstractHorse).
     class RunAroundLikeCrazyGoal : public Goal {
     public:
         RunAroundLikeCrazyGoal(AbstractHorse* horse, double speedModifier);
+        RunAroundLikeCrazyGoal(PathfinderMob* mob, HorseTaming* taming, double speedModifier);
         bool CanUse() override;
         bool CanContinueToUse() override;
         void Start() override;
+        void Tick() override;
         const char* Name() const override { return "RunAroundLikeCrazyGoal"; }
 
     private:
-        AbstractHorse* m_horse;
+        PathfinderMob* m_horse;
+        HorseTaming*   m_taming;
         double m_speedModifier;
         double m_posX = 0.0, m_posY = 0.0, m_posZ = 0.0;
     };

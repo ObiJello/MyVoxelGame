@@ -21,6 +21,7 @@ namespace Game {
     BlockModel BlockModelRegistry::s_defaultModel;
 
     bool BlockModelRegistry::LoadModels(const std::string& modelsPath) {
+        NoteChanged();
         Log::Info("Loading block models from: %s", modelsPath.c_str());
 
         #ifdef __APPLE__
@@ -528,6 +529,7 @@ namespace Game {
     }
 
     void BlockModelRegistry::Clear() {
+        NoteChanged();
         s_models.clear();
         s_rawJsons.clear();
         CreateDefaultModel();
@@ -536,6 +538,7 @@ namespace Game {
     void BlockModelRegistry::RegisterModel(const std::string& name, BlockModel model) {
         AnnotateFaceLayers(model);
         s_models[name] = std::move(model);
+        NoteChanged();
     }
 
     void BlockModelRegistry::AnnotateFaceLayers(BlockModel& model) {

@@ -35,13 +35,14 @@ PROP_FORM = re.compile(
     r'\.(sword|pickaxe)\(\s*ToolMaterial\.([A-Z]+)\s*,\s*([-\d.]+)F?\s*,\s*([-\d.]+)F?\s*\)')
 
 # Armour: `.humanoidArmor(ArmorMaterials.IRON, ArmorType.HELMET)`,
-# `.wolfArmor(ArmorMaterials.ARMADILLO_SCUTE)`, `.horseArmor(ArmorMaterials.IRON)`
-# (the last two are ArmorType.BODY in Item.Properties). The registration key is
+# `.wolfArmor(ArmorMaterials.ARMADILLO_SCUTE)`, `.horseArmor(ArmorMaterials.IRON)`,
+# `.nautilusArmor(ArmorMaterials.IRON)` (the last three are ArmorType.BODY in
+# Item.Properties). The registration key is
 # a string slug in 26.1's Items.java and `ItemIds.NAME` in 26.3's; both forms
 # are read.
 ARMOR_FORM = re.compile(
     r'registerItem\(\s*(?:"([a-z_0-9]+)"|ItemIds\.([A-Z_0-9]+))\s*,\s*\(new Item\.Properties\(\)\)'
-    r'\.(humanoidArmor|wolfArmor|horseArmor)\(\s*ArmorMaterials\.([A-Z_]+)\s*(?:,\s*ArmorType\.([A-Z]+))?\s*\)')
+    r'\.(humanoidArmor|wolfArmor|horseArmor|nautilusArmor)\(\s*ArmorMaterials\.([A-Z_]+)\s*(?:,\s*ArmorType\.([A-Z]+))?\s*\)')
 ARMOR_MATERIALS = os.path.join(MC, "world/item/equipment/ArmorMaterials.java")
 # `ArmorMaterial IRON = new ArmorMaterial(15, makeDefense(2, 5, 6, 2, 5), 9,
 #  SoundEvents.ARMOR_EQUIP_IRON, 0.0F, 0.0F, ...)`: makeDefense(boots, legs,

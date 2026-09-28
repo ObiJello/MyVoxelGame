@@ -95,10 +95,16 @@ namespace Client {
         });
     }
 
-    void SoundBufferLibrary::GetStream(const std::string& path, bool looping, StreamCallback callback) {
-        Submit([path, looping, callback = std::move(callback)] {
+    void SoundBufferLibrary::GetStream(const std::string& path, bool looping, StreamCallback callback,
+                                       double startSeconds) {
+        Submit([path, looping, startSeconds, callback = std::move(callback)] {
             std::string error;
-            std::shared_ptr<Audio::AudioStream> stream = Audio::OggAudioStream::Open(path, looping, error);
+            std::unique_ptr<Audio::OggAudioStream> ogg = Audio::OggAudioStream::Open(path, looping, error);
+            if (ogg && startSeconds > 0.0 && !ogg->SeekToSeconds(startSeconds)) {
+                Log::Warning("[Sound] Could not start %s %.1f s in; playing from the start",
+                             path.c_str(), startSeconds);
+            }
+            std::shared_ptr<Audio::AudioStream> stream = std::move(ogg);
             if (!stream) Log::Warning("[Sound] Failed to open stream %s", error.c_str());
             if (callback) callback(std::move(stream));
         });

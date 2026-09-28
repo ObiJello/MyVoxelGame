@@ -4,7 +4,10 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/loot/ChestLootTables.hpp"
+#include "common/world/level/WorldDrops.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/core/Log.hpp"
+#include <initializer_list>
 #include <string_view>
 #include <tuple>
 #include "BaseContainerBlockEntity.hpp"
@@ -19,8 +22,18 @@
 #include "HopperBlockEntity.hpp"
 #include "DispenserBlockEntity.hpp"
 #include "LecternBlockEntity.hpp"
+#include "JukeboxBlockEntity.hpp"
 #include "SpawnerBlockEntity.hpp"
+#include "TrialSpawnerBlockEntity.hpp"
+#include "VaultBlockEntity.hpp"
+#include "BrushableBlockEntity.hpp"
+#include "DecoratedPotBlockEntity.hpp"
+#include "BannerBlockEntity.hpp"
+#include "BellBlockEntity.hpp"
+#include "CopperGolemStatueBlockEntity.hpp"
+#include "ChiseledBookShelfBlockEntity.hpp"
 #include "PotentSulfurBlockEntity.hpp"
+#include "SculkBlockEntities.hpp"
 #include "AurelithBlockEntities.hpp"
 #include "HushLighthouseLampBlockEntity.hpp"
 #include "common/world/level/ILevelWrite.hpp"
@@ -72,8 +85,9 @@ namespace Game {
         // so a trapped chest saved as `minecraft:chest` is rejected outright
         // and the chest — contents and all — is DROPPED on load.
         {
-            auto registerChest = [](uint16_t typeId, const char* stringId, BlockID block) {
-                std::unordered_set<BlockID> blocks = { block };
+            auto registerChest = [](uint16_t typeId, const char* stringId,
+                                    std::initializer_list<BlockID> validBlocks) {
+                std::unordered_set<BlockID> blocks(validBlocks);
                 const auto* type = RegisterType(
                     typeId, stringId,
                     [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
@@ -82,16 +96,26 @@ namespace Game {
                     blocks);
                 s_byId[typeId] = type;
                 g_byStringId[type->StringId()] = type;
-                const auto idx = static_cast<size_t>(block);
-                if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+                for (BlockID block : validBlocks) {
+                    const auto idx = static_cast<size_t>(block);
+                    if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+                }
             };
-            registerChest(BlockEntityTypeIds::CHEST,         "chest",         BlockID::Chest);
-            registerChest(BlockEntityTypeIds::TRAPPED_CHEST, "trapped_chest", BlockID::TrappedChest);
+            // MC BlockEntityTypes.CHEST's valid blocks are the chest AND every
+            // copper chest (CopperChestBlock hands ChestBlock BlockEntityTypes
+            // .CHEST), so a copper chest saves as `minecraft:chest`.
+            registerChest(BlockEntityTypeIds::CHEST, "chest",
+                          { BlockID::Chest,
+                            BlockID::CopperChest, BlockID::ExposedCopperChest,
+                            BlockID::WeatheredCopperChest, BlockID::OxidizedCopperChest,
+                            BlockID::WaxedCopperChest, BlockID::WaxedExposedCopperChest,
+                            BlockID::WaxedWeatheredCopperChest, BlockID::WaxedOxidizedCopperChest });
+            registerChest(BlockEntityTypeIds::TRAPPED_CHEST, "trapped_chest", { BlockID::TrappedChest });
             // An ender chest's block entity carries NO Items in vanilla — the
             // contents live in the player's EnderItems. Ours still holds slots
             // so the UI works; the serialiser deliberately omits them rather
             // than writing an Items list vanilla would discard.
-            registerChest(BlockEntityTypeIds::ENDER_CHEST,   "ender_chest",   BlockID::EnderChest);
+            registerChest(BlockEntityTypeIds::ENDER_CHEST,   "ender_chest",   { BlockID::EnderChest });
         }
 
         // ── Plain storage containers ──────────────────────────────────────
@@ -351,6 +375,13 @@ namespace Game {
                 return std::make_unique<LecternBlockEntity>(t, pos, id);
             });
 
+        // ── Jukebox ───────────────────────────────────────────────────────
+        // MC BlockEntityTypes.JUKEBOX: the disc and the song it is playing.
+        registerSimple(BlockEntityTypeIds::JUKEBOX, "jukebox", BlockID::Jukebox,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<JukeboxBlockEntity>(t, pos, id);
+            });
+
         // ── Monster spawner ───────────────────────────────────────────────
         // MC BlockEntityTypes.MOB_SPAWNER ("minecraft:mob_spawner", the id
         // every generated spawner's payload carries): BaseSpawner's state
@@ -360,6 +391,98 @@ namespace Game {
                 return std::make_unique<SpawnerBlockEntity>(t, pos, id);
             });
 
+        // ── Trial chambers ────────────────────────────────────────────────
+        // MC BlockEntityTypes.TRIAL_SPAWNER ("minecraft:trial_spawner") and
+        // VAULT ("minecraft:vault"): the wave spawner with its normal and
+        // ominous configs (TrialSpawnerBlockEntity) and the key-locked reward
+        // vault (VaultBlockEntity). Generated ones come from the trial
+        // chambers' template nbt (AttachGeneratedBlockEntities).
+        registerSimple(BlockEntityTypeIds::TRIAL_SPAWNER, "trial_spawner", BlockID::TrialSpawner,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<TrialSpawnerBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::VAULT, "vault", BlockID::Vault,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<VaultBlockEntity>(t, pos, id);
+            });
+
+        // ── Archaeology ───────────────────────────────────────────────────
+        // MC BlockEntityTypes.BRUSHABLE_BLOCK ("minecraft:brushable_block"),
+        // valid for both suspicious blocks: the buried find
+        // (BrushableBlockEntity). Generated ones carry the structure's
+        // archaeology loot table (AttachGeneratedBlockEntities).
+        {
+            std::unordered_set<BlockID> blocks = { BlockID::SuspiciousSand, BlockID::SuspiciousGravel };
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::BRUSHABLE_BLOCK, "brushable_block",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<BrushableBlockEntity>(t, pos, id);
+                },
+                blocks);
+            s_byId[BlockEntityTypeIds::BRUSHABLE_BLOCK] = type;
+            g_byStringId[type->StringId()] = type;
+            for (BlockID b : blocks) {
+                const auto idx = static_cast<size_t>(b);
+                if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+            }
+        }
+        // MC BlockEntityTypes.DECORATED_POT ("minecraft:decorated_pot"): the
+        // pot's sherds and the one stack it holds, rolled from a loot table
+        // in the trial chambers (DecoratedPotBlockEntity).
+        registerSimple(BlockEntityTypeIds::DECORATED_POT, "decorated_pot", BlockID::DecoratedPot,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<DecoratedPotBlockEntity>(t, pos, id);
+            });
+
+        // MC BlockEntityTypes.BANNER ("minecraft:banner"): the pattern layers
+        // and name of every standing and wall banner (BannerBlockEntity).
+        // BELL ("minecraft:bell"): the swing and the raid alarm
+        // (BellBlockEntity). COPPER_GOLEM_STATUE: the statue's golem name.
+        auto registerMany = [](uint16_t typeId, const char* stringId,
+                               const std::unordered_set<BlockID>& blocks,
+                               BlockEntityType::Factory factory) {
+            if (blocks.empty()) return;
+            const auto* type = RegisterType(typeId, stringId, std::move(factory), blocks);
+            s_byId[typeId] = type;
+            g_byStringId[type->StringId()] = type;
+            for (BlockID b : blocks) {
+                const auto idx = static_cast<size_t>(b);
+                if (idx < s_byBlockId.size()) s_byBlockId[idx] = type;
+            }
+        };
+        {
+            std::unordered_set<BlockID> banners;
+            for (int i = 1; i < static_cast<int>(BlockID::Count); ++i) {
+                const std::string& slug = BlockRegistry::Get(static_cast<BlockID>(i)).registrySlug;
+                constexpr std::string_view kSuffix = "_banner";
+                if (slug.size() > kSuffix.size() &&
+                    std::string_view(slug).substr(slug.size() - kSuffix.size()) == kSuffix) {
+                    banners.insert(static_cast<BlockID>(i));
+                }
+            }
+            registerMany(BlockEntityTypeIds::BANNER, "banner", banners,
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<BannerBlockEntity>(t, pos, id);
+                });
+        }
+        registerMany(BlockEntityTypeIds::BELL, "bell", { BlockID::Bell },
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<BellBlockEntity>(t, pos, id);
+            });
+        registerMany(BlockEntityTypeIds::COPPER_GOLEM_STATUE, "copper_golem_statue",
+            { BlockID::CopperGolemStatue, BlockID::ExposedCopperGolemStatue,
+              BlockID::WeatheredCopperGolemStatue, BlockID::OxidizedCopperGolemStatue,
+              BlockID::WaxedCopperGolemStatue, BlockID::WaxedExposedCopperGolemStatue,
+              BlockID::WaxedWeatheredCopperGolemStatue, BlockID::WaxedOxidizedCopperGolemStatue },
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<CopperGolemStatueBlockEntity>(t, pos, id);
+            });
+
+        registerMany(BlockEntityTypeIds::CHISELED_BOOKSHELF, "chiseled_bookshelf", { BlockID::ChiseledBookshelf },
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<ChiseledBookShelfBlockEntity>(t, pos, id);
+            });
+
         // ── Potent sulfur ─────────────────────────────────────────────────
         // MC BlockEntityTypes.POTENT_SULFUR ("minecraft:potent_sulfur"): the
         // geyser (PotentSulfurBlockEntity) — nausea over the pool, the
@@ -367,6 +490,28 @@ namespace Game {
         registerSimple(BlockEntityTypeIds::POTENT_SULFUR, "potent_sulfur", BlockID::PotentSulfur,
             [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
                 return std::make_unique<PotentSulfurBlockEntity>(t, pos, id);
+            });
+
+        // ── The sculk family ──────────────────────────────────────────────
+        // MC BlockEntityTypes.SCULK_SENSOR / CALIBRATED_SCULK_SENSOR /
+        // SCULK_CATALYST / SCULK_SHRIEKER — the vibration listeners and the
+        // catalyst's spreader (SculkBlockEntities.hpp).
+        registerSimple(BlockEntityTypeIds::SCULK_SENSOR, "sculk_sensor", BlockID::SculkSensor,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<SculkSensorBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::CALIBRATED_SCULK_SENSOR, "calibrated_sculk_sensor",
+                       BlockID::CalibratedSculkSensor,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<CalibratedSculkSensorBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::SCULK_CATALYST, "sculk_catalyst", BlockID::SculkCatalyst,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<SculkCatalystBlockEntity>(t, pos, id);
+            });
+        registerSimple(BlockEntityTypeIds::SCULK_SHRIEKER, "sculk_shrieker", BlockID::SculkShrieker,
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<SculkShriekerBlockEntity>(t, pos, id);
             });
 
         // ── The Hush lighthouse lamp ──────────────────────────────────────
@@ -436,6 +581,44 @@ namespace Game {
         }
     }
 
+    void BaseContainerBlockEntity::PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos,
+                                                        BlockState /*oldState*/) {
+        if (level.IsClientSide()) return;
+        if (const BlockEntityType* type = GetType()) {
+            const std::string& id = type->StringId();
+            if (id == "shulker_box" || id == "ender_chest") return;
+        }
+        if (!GetLevel()) SetLevel(&level);
+        // Containers.dropContents reads each slot through getItem, which
+        // unpacks: an unopened structure chest spills its rolled loot.
+        for (ItemStack& stack : TakeAllContents()) {
+            DropContainerItemStack(level, glm::dvec3(pos), std::move(stack));
+        }
+    }
+
+    void BaseContainerBlockEntity::ApplyItemComponents(const DataComponentMap& components) {
+        if (auto name = components.get(DataComponents::CUSTOM_NAME)) m_customName = *name;
+        if (auto contents = components.get(DataComponents::CONTAINER)) {
+            // ItemContainerContents.copyInto: slot by slot, the rest emptied.
+            for (size_t i = 0; i < m_items.size(); ++i) {
+                m_items[i] = i < contents->items.size() ? contents->items[i] : ItemStack{};
+            }
+            SetChanged();
+        }
+    }
+
+    void BaseContainerBlockEntity::CollectComponents(DataComponentMap& out) const {
+        if (!m_customName.empty()) out.set(DataComponents::CUSTOM_NAME, m_customName);
+        // ItemContainerContents.fromItems: trailing empties dropped; nothing
+        // at all for an empty container (its patch would equal the default).
+        ItemContainerContents contents;
+        size_t last = 0;
+        for (size_t i = 0; i < m_items.size(); ++i) if (!m_items[i].IsEmpty()) last = i + 1;
+        if (last == 0) return;
+        contents.items.assign(m_items.begin(), m_items.begin() + static_cast<std::ptrdiff_t>(last));
+        out.set(DataComponents::CONTAINER, std::move(contents));
+    }
+
     // MC RandomizableContainer.unpackLootTable. MC bails without a level (it
     // needs the server's loot registry); here the table is read from the data
     // pack, so a container the chunk loader has not yet handed a level to
@@ -449,7 +632,15 @@ namespace Game {
         m_lootTable.clear();                            // re-entrancy guard, before fill
         const int64_t seed = m_lootTableSeed;
         m_lootTableSeed = 0;
-        if (!ChestLoot::Fill(*this, key, seed, level ? level->Random() : nullptr, luck)) {
+        // LootParams: ORIGIN = Vec3.atCenterOf(blockPos) in this level (what
+        // exploration_map and location_check read). No level, no origin.
+        ChestLoot::LootLevelContext lootLevel;
+        if (level) {
+            lootLevel.dimensionId = DimensionToRaw(level->GetDimension());
+            lootLevel.origin = glm::dvec3(GetWorldPos()) + glm::dvec3(0.5);
+        }
+        if (!ChestLoot::Fill(*this, key, seed, level ? level->Random() : nullptr, luck,
+                             level ? &lootLevel : nullptr)) {
             Log::Warning("[BlockEntity] %s at (%d,%d,%d) named loot table '%s', which does not exist",
                          GetType() ? std::string(GetType()->StringId()).c_str() : "container",
                          GetWorldPos().x, GetWorldPos().y, GetWorldPos().z, key.c_str());

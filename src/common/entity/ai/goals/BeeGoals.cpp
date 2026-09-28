@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/goals/BeeGoals.cpp
 #include "common/entity/ai/goals/BeeGoals.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -213,8 +214,8 @@ namespace Game {
     bool BeePollinateGoal::CanBeeUse() {
         if (m_state->remainingCooldownBeforeLocatingNewFlower > 0) return false;
         if (m_state->hasNectar) return false;
-        // MC: level().isRaining() vetoes — no rain state exists in this
-        // engine, so a bee pollinates in any weather (documented skip).
+        // MC: level().isRaining() vetoes — no pollinating in the rain.
+        if (m_bee->Level() && m_bee->Level()->IsRaining()) return false;
         std::optional<glm::ivec3> nearby = FindNearbyFlower();
         if (nearby) {
             m_state->hasSavedFlowerPos = true;
@@ -232,7 +233,8 @@ namespace Game {
     bool BeePollinateGoal::CanBeeContinueToUse() {
         if (!m_pollinating) return false;
         if (!m_state->hasSavedFlowerPos) return false;
-        // MC isRaining veto — no rain state (see CanBeeUse).
+        // MC isRaining veto: the rain breaks off a pollination.
+        if (m_bee->Level() && m_bee->Level()->IsRaining()) return false;
         if (HasPollinatedLongEnough()) {
             return m_bee->Level()->Random().NextFloat() < 0.2f;
         }
@@ -478,8 +480,9 @@ namespace Game {
             }
 
             if (!(growState == belowState)) {
-                // MC: level event 2011 (BEE_GROWING particles — no particle
-                // system), setBlockAndUpdate, incrementNumCropsGrown.
+                // MC: level event 2011 (the BEE_GROWING happy villagers, 15
+                // of them), setBlockAndUpdate, incrementNumCropsGrown.
+                level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_BEE_GROWTH, belowPos, 15);
                 level->SetBlockState(belowPos, growState);
                 ++m_state->numCropsGrownSincePollination;
             }

@@ -1,5 +1,6 @@
 // File: src/common/entity/mobs/Slime.cpp
 #include "common/entity/mobs/Slime.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/ai/goals/SlimeGoals.hpp"
 #include "common/entity/ai/goals/TargetGoals.hpp"
 #include "common/entity/ai/Sensing.hpp"
@@ -107,7 +108,7 @@ namespace Game {
             JavaRandom& rng = m_level->Random();
             int sizeScale = rng.NextInt(3);
             if (sizeScale < 2 &&
-                rng.NextFloat() < 0.5f * GetSpecialMultiplier(m_level->GetDifficulty())) {
+                rng.NextFloat() < 0.5f * CurrentDifficulty().GetSpecialMultiplier()) {
                 ++sizeScale;
             }
             SetSize(1 << sizeScale, true);
@@ -169,10 +170,23 @@ namespace Game {
         Mob::Tick();
 
         if (onGround && !m_wasOnGround) {
-            // Landing: the squish, then full squash. (MC also bursts slime
-            // particles here.)
+            // Landing: the splat ring (getParticleType — ITEM_SLIME, a magma
+            // cube's FLAME, a sulfur cube's goo; size·16 of them on the
+            // client copy), the squish, then full squash.
             if (m_level) {
                 JavaRandom& rng = m_level->Random();
+                const ParticleKind kind = GetType() == EntityTypeId::MagmaCube   ? ParticleKind::Flame
+                                        : GetType() == EntityTypeId::SulfurCube ? ParticleKind::SulfurCubeGoo
+                                                                                 : ParticleKind::ItemSlime;
+                const float size = GetBbWidth() * 2.0f;
+                const float radius = size / 2.0f;
+                for (int i = 0; static_cast<float>(i) < size * 16.0f; ++i) {
+                    const float dir = rng.NextFloat() * 6.2831855f;
+                    const float d = rng.NextFloat() * 0.5f + 0.5f;
+                    const float xd = std::sin(dir) * radius * d;
+                    const float zd = std::cos(dir) * radius * d;
+                    m_level->AddParticle(kind, position.x + xd, position.y, position.z + zd, 0.0, 0.0, 0.0);
+                }
                 PlaySound(GetSquishSound(), GetSoundVolume(),
                           ((rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f) / 0.8f);
             }

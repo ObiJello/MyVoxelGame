@@ -5,8 +5,9 @@
 // the comparator readings — AbstractContainerMenu.getRedstoneSignalFrom-
 // Container for every container block entity, plus the handful of
 // state-only readings (cake, cauldron, composter, end portal frame,
-// respawn anchor, jukebox).
+// respawn anchor). The jukebox reads its disc, in JukeboxBlock.cpp.
 #include "common/world/block/RedstoneContainers.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -88,6 +89,11 @@ namespace Game {
             if (slot < 0) {
                 // MC: level.levelEvent(1001, pos, 0) — DISPENSER_FAIL at pitch 1.2.
                 PlayLevelEventSound(level, nullptr, LevelEvent::SOUND_DISPENSER_FAIL, pos, 0, &random);
+                // DispenserBlock (not DropperBlock): gameEvent(BLOCK_ACTIVATE,
+                // pos, Context.of(state)) — an empty dispenser still clicks.
+                if (!state.Is(BlockID::Dropper)) {
+                    level.GameEvent(GameEventId::BlockActivate, pos, GameEventContext::Of(state));
+                }
                 return;
             }
             const ItemStack stack = blockEntity->GetItem(slot);
@@ -168,9 +174,6 @@ namespace Game {
             // RespawnAnchorBlock.getScaledChargeLevel(state, 15).
             return static_cast<int>(std::floor(static_cast<float>(state.GetIndex(PropertyId::CHARGES)) / 4.0f * 15.0f));
         }
-        int JukeboxAnalogOutput(ILevelWrite&, const glm::ivec3&, BlockState state, Direction) {
-            return BoolOf(state, PropertyId::HAS_RECORD) ? 15 : 0;
-        }
 
     } // namespace
 
@@ -200,7 +203,10 @@ namespace Game {
             const bool container =
                 tid == "chest" || tid == "trapped_chest" || tid == "barrel" || tid == "shulker_box" ||
                 tid == "dispenser" || tid == "dropper" || tid == "hopper" || tid == "furnace" ||
-                tid == "blast_furnace" || tid == "smoker" || tid == "brewing_stand" || tid == "crafter";
+                tid == "blast_furnace" || tid == "smoker" || tid == "brewing_stand" || tid == "crafter" ||
+                // DecoratedPotBlock.hasAnalogOutputSignal / getRedstoneSignal-
+                // FromBlockEntity and its Containers.updateNeighboursAfterDestroy.
+                tid == "decorated_pot";
             if (!container) continue;
             Block& b = blocks[i];
             b.hasAnalogOutputSignal       = true;
@@ -225,7 +231,7 @@ namespace Game {
         analog(BlockID::Composter, &ComposterAnalogOutput);
         analog(BlockID::EndPortalFrame, &EndPortalFrameAnalogOutput);
         analog(BlockID::RespawnAnchor, &RespawnAnchorAnalogOutput);
-        analog(BlockID::Jukebox, &JukeboxAnalogOutput);
+        // The jukebox's reading is its disc's song (JukeboxBlock.cpp).
 
         Log::Info("[Redstone] %d container blocks read on comparators", containers);
     }

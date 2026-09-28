@@ -1,6 +1,9 @@
 // File: src/client/renderer/entity/MobRenderer.cpp
 #include "client/resource/ResourcePacks.hpp"
+#include "common/entity/projectile/FireworkRocket.hpp"
 #include "common/entity/projectile/Arrow.hpp"
+#include "common/entity/projectile/ThrownTrident.hpp"
+#include "common/entity/SpearItem.hpp"
 #include "client/renderer/entity/MobRenderer.hpp"
 #include "client/renderer/entity/GeneratedBabyTextures.hpp"
 #include "client/renderer/entity/model/GeneratedSetupAnim.hpp"
@@ -16,19 +19,29 @@
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
 #include "common/entity/npc/Villager.hpp"
+#include "common/entity/npc/WanderingTrader.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/DyeColorUtil.hpp"
+#include "common/world/fluid/FluidState.hpp"
+#include "client/world/ClientBlockAccess.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
 #include "client/renderer/entity/ModMobRender.hpp"
 #include "client/renderer/entity/ModModelHelpers.hpp"
 #include "common/entity/TamableAnimal.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
+#include "common/entity/MobCrossbow.hpp"
+#include "common/entity/mobs/Pillager.hpp"
 #include "common/entity/decoration/Painting.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "common/entity/ElytraAnimationState.hpp"
+#include "common/entity/vehicle/Minecart.hpp"
 #include "common/world/block/BlockModel.hpp"
 #include "client/renderer/viewmodel/ItemMeshBuilder.hpp"
 #include "common/entity/decoration/PaintingVariants.hpp"
@@ -45,13 +58,17 @@
 #include "../mesh/ChunkRenderer.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
+#include "common/world/tags/DataTags.hpp"
 
 // Declaration only — STB_IMAGE_IMPLEMENTATION is defined in exactly one TU
 // elsewhere in the project, the same way ChestRenderer includes it.
+#include "client/map/ClientMaps.hpp"
 #include "stb_image.h"
 
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/constants.hpp>
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <utility>
 #include <cassert>
@@ -171,7 +188,10 @@ namespace Render {
                     BatchT& b = batches[i];
                     if (b.light == BatchLight::Inherit) b.light = light;
                     b.packedLight = packedLight;
-                    if (invisible && b.part != BatchPart::Layer) b.hidden = true;
+                    if (invisible && b.part != BatchPart::Layer) {
+                        b.hidden = true;
+                        b.invisibleBody = true;   // a spectator still sees it, translucent
+                    }
                     b.outline = glowing;
                 }
             }
@@ -254,6 +274,10 @@ namespace Render {
                 case Game::EntityTypeId::EndCrystal:
                     return "assets/textures/entity/end_crystal/end_crystal.png";
                 case Game::EntityTypeId::EvokerFangs:  return "assets/textures/entity/illager/evoker_fangs.png";
+                // MC TropicalFishRenderer.SMALL_TEXTURE — the model-A sheet;
+                // a model-B fish swaps to tropical_b.png per instance.
+                case Game::EntityTypeId::TropicalFish:
+                    return "assets/textures/entity/fish/tropical_a.png";
                 // The generated def row resolved this one to the zombie sheet
                 // (the renderer class picks per-variant); the real texture.
                 case Game::EntityTypeId::ZombieNautilus:
@@ -344,6 +368,73 @@ namespace Render {
             for (auto& child : part.children) InflateCubes(*child, by);
         }
 
+        // MC MeshTransformer.scaling(factor) over a built model: the mesh's
+        // ROOT pose is scaled (PartPose.scaled — offsets and scale) and then
+        // lifted 24.016 * (1 - factor) pixels, so the scaled body still
+        // stands on the ground. A generated mesh's MC root is the "root"
+        // part under the container.
+        void ApplyMeshScaling(EntityModel& model, float factor) {
+            ModelPart* root = model.Root().Find("root");
+            if (!root) root = &model.Root();
+            PartPose& pose = root->pose;
+            pose.x *= factor; pose.y *= factor; pose.z *= factor;
+            pose.xScale *= factor; pose.yScale *= factor; pose.zScale *= factor;
+            pose.y += 24.016f * (1.0f - factor);
+            model.Root().ResetPose();
+        }
+
+        // A vertex range multiplied by an 0xRRGGBB tint — MC's model tint /
+        // coloured layer colour as the VERTEX colour, so the per-face shade
+        // ModelPart::Build baked in survives.
+        void TintVertices(std::vector<ModelVertex>& verts, size_t first, size_t last, uint32_t rgb) {
+            const uint32_t tr = (rgb >> 16) & 0xFFu, tg = (rgb >> 8) & 0xFFu, tb = rgb & 0xFFu;
+            for (size_t i = first; i < last && i < verts.size(); ++i) {
+                ModelVertex& v = verts[i];
+                v.r = static_cast<uint8_t>((v.r * tr) / 255u);
+                v.g = static_cast<uint8_t>((v.g * tg) / 255u);
+                v.b = static_cast<uint8_t>((v.b * tb) / 255u);
+            }
+        }
+
+        // MC CodRenderer / SalmonRenderer / TropicalFishRenderer
+        // .setupRotations, onto the render state (EntityMatrix applies it):
+        // after the base rotations, a yaw wobble of 4.3° · sin(0.6 · age) —
+        // the salmon's scaled 1.3 in amplitude and 1.7 in frequency out of
+        // water — and, beached, the body laid on its side: translate (cod
+        // 0.1, 0.1, -0.1; salmon and tropical 0.2, 0.1, 0) then roll 90°
+        // about Z. Reads state.isInWater and state.ageInTicks.
+        void SetupFishRotations(EntityRenderState& state, Game::EntityTypeId type) {
+            if (type != Game::EntityTypeId::Cod && type != Game::EntityTypeId::Salmon &&
+                type != Game::EntityTypeId::TropicalFish) {
+                return;
+            }
+            float amplitude = 1.0f, angle = 1.0f;
+            if (type == Game::EntityTypeId::Salmon && !state.isInWater) {
+                amplitude = 1.3f;
+                angle = 1.7f;
+            }
+            state.fishYawDeg = amplitude * 4.3f * std::sin(angle * 0.6f * state.ageInTicks);
+            if (!state.isInWater) {
+                state.fishLandRoll = true;
+                state.fishLandOffset = type == Game::EntityTypeId::Cod
+                    ? glm::vec3(0.1f, 0.1f, -0.1f) : glm::vec3(0.2f, 0.1f, 0.0f);
+            }
+        }
+
+        // The model-space transform of the part named `name` — the chain of
+        // LocalMatrix from `part` down, depth-first like ModelPart::Find (MC
+        // translateAndRotate down the parents, e.g. VillagerModel.
+        // translateToArms: root, then arms). False when no part has the name.
+        bool PartChainMatrix(const ModelPart& part, std::string_view name,
+                             const glm::mat4& parent, glm::mat4& out) {
+            const glm::mat4 here = parent * part.LocalMatrix();
+            if (part.name == name) { out = here; return true; }
+            for (const auto& child : part.children) {
+                if (PartChainMatrix(*child, name, here, out)) return true;
+            }
+            return false;
+        }
+
         // The farm animals' variant meshes (MC ModelLayers.WARM_COW, COLD_COW,
         // COLD_PIG, COLD_CHICKEN). Null when the variant uses the normal mesh.
         std::unique_ptr<EntityModel> CreateVariantModelFor(Game::EntityTypeId type, uint8_t variant) {
@@ -385,6 +476,10 @@ namespace Render {
                     return std::make_unique<WitherSkullModel>();
                 case Game::EntityTypeId::EvokerFangs:
                     return std::make_unique<EvokerFangsModel>();
+                // MC TropicalFishRenderer's model (TROPICAL_FISH_SMALL); the
+                // large body and both pattern meshes hang off the entry.
+                case Game::EntityTypeId::TropicalFish:
+                    return std::make_unique<TropicalFishModel>(false, 0.0f);
                 // The dragon reuses its GENERATED mesh but replaces the
                 // compiled setupAnim wholesale — see DragonModel.
                 case Game::EntityTypeId::EnderDragon: return std::make_unique<DragonModel>();
@@ -407,6 +502,16 @@ namespace Render {
                     break;
                 case Game::EntityTypeId::SilentWarden:
                     if (FindGenModel("warden")) return std::make_unique<GeneratedModel>("warden");
+                    break;
+                // MC AdultWolfModel — the generated mesh plus the wet-shake
+                // roll its compiled setupAnim cannot carry (WolfModel).
+                case Game::EntityTypeId::Wolf:
+                    if (FindGenModel("wolf")) return std::make_unique<WolfModel>("wolf");
+                    break;
+                // MC HappyGhastModel — the generated mesh plus the harness
+                // body squeeze (MountEquipmentLayers.cpp).
+                case Game::EntityTypeId::HappyGhast:
+                    if (auto ghast = CreateHappyGhastModel("happy_ghast")) return ghast;
                     break;
                 default: break;
             }
@@ -433,6 +538,25 @@ namespace Render {
             // A mod renderer's own babyModel (ModMobRender.hpp); null falls
             // through to the generic paths below.
             if (auto mod = ModMobs::CreateBabyModel(type)) return mod;
+            // MC WolfRenderer's BabyWolfModel (26.x look) or the classic
+            // baby transform of the adult mesh — both through WolfModel for
+            // the wet shake.
+            if (type == Game::EntityTypeId::Wolf) {
+                if (NewBabies() && FindGenModel("wolf_baby_new")) {
+                    return FindAnimProgram("wolf_baby_new")
+                        ? std::make_unique<WolfModel>("wolf_baby_new")
+                        : std::make_unique<WolfModel>("wolf_baby_new", "wolf");
+                }
+                if (FindGenModel("wolf_baby")) return std::make_unique<WolfModel>("wolf_baby");
+            }
+            // The happy ghast's baby mesh through HappyGhastModel, as the
+            // adult's (the harness squeeze) — the same row pick as below.
+            if (type == Game::EntityTypeId::HappyGhast) {
+                if (NewBabies() && FindGenModel("happy_ghast_baby_new")) {
+                    return CreateHappyGhastModel("happy_ghast_baby_new");
+                }
+                if (auto baby = CreateHappyGhastModel("happy_ghast_baby")) return baby;
+            }
             const std::string_view slug = Game::GetEntityTypeInfo(type).slug;
             // MC 26.1's dedicated baby meshes (BabyCowModel and friends —
             // the generator's REMODEL_MESHES), New look only. Each row has
@@ -766,6 +890,10 @@ namespace Render {
         }
     }
 
+    namespace { MobRenderer* s_instance = nullptr; }
+
+    MobRenderer* MobRenderer::Instance() { return s_instance; }
+
     MobRenderer::~MobRenderer() { Shutdown(); }
 
     TextureHandle MobRenderer::BeamTexture() {
@@ -1077,12 +1205,21 @@ namespace Render {
         m_verts.reserve(65536);
         m_indices.reserve(98304);
 
+        if (!m_leashRenderer.Initialize()) {
+            Log::Warning("[MobRenderer] lead renderer failed to initialize — leads will be invisible");
+        }
+        if (!m_fishingHookRenderer.Initialize()) {
+            Log::Warning("[MobRenderer] fishing hook renderer failed to initialize — bobbers will be invisible");
+        }
+
         m_initialized = true;
+        s_instance = this;
         Log::Info("[MobRenderer] initialized");
         return true;
     }
 
     void MobRenderer::Shutdown() {
+        if (s_instance == this) s_instance = nullptr;
         if (!g_renderBackend) return;
 
         for (FrameBuffers& fb : m_frames) {
@@ -1102,6 +1239,9 @@ namespace Render {
         // only the CPU geometry caches are ours.
         m_spriteEntries.clear();
         m_heldTridentModel.reset();
+
+        m_leashRenderer.Shutdown();
+        m_fishingHookRenderer.Shutdown();
 
         m_initialized = false;
     }
@@ -1209,6 +1349,33 @@ namespace Render {
                         "bogged_clothes", "bogged");
                 }
                 break;
+            // MC WolfArmorLayer's adultModel — ModelLayers.WOLF_ARMOR, the
+            // adult wolf mesh at CubeDeformation(0.2).
+            case Game::EntityTypeId::Wolf:
+                if (FindGenModel("wolf")) {
+                    auto armor = std::make_unique<WolfModel>("wolf");
+                    InflateCubes(armor->Root(), 0.2f);
+                    entry.bodyArmorModel = std::move(armor);
+                }
+                break;
+            // MC TropicalFishRenderer's largeModel + TropicalFishPatternLayer's
+            // modelSmall / modelLarge (the *_PATTERN rows, inflated 0.008).
+            case Game::EntityTypeId::TropicalFish:
+                entry.tropicalLarge = std::make_unique<TropicalFishModel>(true, 0.0f);
+                entry.tropicalSmallPattern = std::make_unique<TropicalFishModel>(
+                    false, TropicalFishModel::kPatternDeformation);
+                entry.tropicalLargePattern = std::make_unique<TropicalFishModel>(
+                    true, TropicalFishModel::kPatternDeformation);
+                break;
+            // MC SalmonRenderer's smallSalmonModel / largeSalmonModel.
+            case Game::EntityTypeId::Salmon:
+                if (FindGenModel("salmon")) {
+                    entry.salmonSmall = std::make_unique<GeneratedModel>("salmon");
+                    ApplyMeshScaling(*entry.salmonSmall, 0.5f);    // SalmonModel.SMALL_TRANSFORMER
+                    entry.salmonLarge = std::make_unique<GeneratedModel>("salmon");
+                    ApplyMeshScaling(*entry.salmonLarge, 1.5f);    // SalmonModel.LARGE_TRANSFORMER
+                }
+                break;
             // MC PufferfishRenderer — the mid/big puff-stage meshes.
             case Game::EntityTypeId::Pufferfish:
                 if (FindGenModel("pufferfish_mid")) {
@@ -1227,6 +1394,66 @@ namespace Render {
         return &m_models.emplace(key, std::move(entry)).first->second;
     }
 
+    EntityModel* MobRenderer::TropicalFishBody(ModelEntry& entry, int32_t packedVariant) {
+        // MC TropicalFishRenderer.submit: SMALL → model A, LARGE → model B.
+        namespace TFV = Game::TropicalFishVariants;
+        if (TFV::BaseOf(TFV::Unpack(packedVariant).pattern) == TFV::Base::Large) {
+            return entry.tropicalLarge.get();
+        }
+        return entry.model.get();
+    }
+
+    TextureHandle MobRenderer::TropicalFishBodyTexture(int32_t packedVariant) {
+        // MC TropicalFishRenderer.getTextureLocation.
+        namespace TFV = Game::TropicalFishVariants;
+        return LoadTexture(TFV::BaseOf(TFV::Unpack(packedVariant).pattern) == TFV::Base::Large
+                               ? "assets/textures/entity/fish/tropical_b.png"
+                               : "assets/textures/entity/fish/tropical_a.png");
+    }
+
+    TextureHandle MobRenderer::AppendTropicalFishPattern(ModelEntry& entry, int32_t packedVariant,
+                                                         const EntityRenderState& state,
+                                                         const glm::dvec3& renderPos, float bodyRot,
+                                                         const glm::vec3& cameraPos,
+                                                         size_t& firstIndex, bool& cull) {
+        // MC TropicalFishPatternLayer.submit — coloredCutoutModelCopyLayer-
+        // Render: the *_PATTERN mesh of the body's base (inflated 0.008),
+        // posed by the same state, over the pattern's own sheet, tinted by
+        // the pattern colour's textureDiffuseColor.
+        namespace TFV = Game::TropicalFishVariants;
+        static constexpr const char* kSmallPatterns[6] = {
+            "assets/textures/entity/fish/tropical_a_pattern_1.png",   // kob
+            "assets/textures/entity/fish/tropical_a_pattern_2.png",   // sunstreak
+            "assets/textures/entity/fish/tropical_a_pattern_3.png",   // snooper
+            "assets/textures/entity/fish/tropical_a_pattern_4.png",   // dasher
+            "assets/textures/entity/fish/tropical_a_pattern_5.png",   // brinely
+            "assets/textures/entity/fish/tropical_a_pattern_6.png",   // spotty
+        };
+        static constexpr const char* kLargePatterns[6] = {
+            "assets/textures/entity/fish/tropical_b_pattern_1.png",   // flopper
+            "assets/textures/entity/fish/tropical_b_pattern_2.png",   // stripey
+            "assets/textures/entity/fish/tropical_b_pattern_3.png",   // glitter
+            "assets/textures/entity/fish/tropical_b_pattern_4.png",   // blockfish
+            "assets/textures/entity/fish/tropical_b_pattern_5.png",   // betty
+            "assets/textures/entity/fish/tropical_b_pattern_6.png",   // clayfish
+        };
+        const TFV::Variant variant = TFV::Unpack(packedVariant);
+        const bool large = TFV::BaseOf(variant.pattern) == TFV::Base::Large;
+        EntityModel* patternModel = large ? entry.tropicalLargePattern.get()
+                                          : entry.tropicalSmallPattern.get();
+        if (!patternModel) return INVALID_TEXTURE;
+        const int index = TFV::IndexOf(variant.pattern);
+        const TextureHandle tex = LoadTexture(large ? kLargePatterns[index] : kSmallPatterns[index]);
+        if (tex == INVALID_TEXTURE) return INVALID_TEXTURE;
+        firstIndex = m_indices.size();
+        const size_t firstVert = m_verts.size();
+        AppendMob(*patternModel, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+        if (m_indices.size() <= firstIndex) return INVALID_TEXTURE;
+        TintVertices(m_verts, firstVert, m_verts.size(), Game::DyeTextureDiffuseColor(variant.patternColor));
+        cull = patternModel->CullBackFaces();
+        return tex;
+    }
+
     glm::mat4 MobRenderer::EntityMatrix(const glm::dvec3& renderPos,
                                         const glm::vec3& cameraPos,
                                         float bodyRot, float scale,
@@ -1236,7 +1463,13 @@ namespace Render {
                                         float swimPivotY,
                                         const glm::vec3& modelOffset,
                                         bool upsideDown,
-                                        float boundingBoxHeight) {
+                                        float boundingBoxHeight,
+                                        bool autoSpinAttack,
+                                        float spinXRot,
+                                        float spinAgeInTicks,
+                                        float fishYawDeg,
+                                        bool fishLandRoll,
+                                        const glm::vec3& fishLandOffset) {
         // The MC transform chain — see the header. The translation is RENDER
         // space (RenderOrigin.hpp): the entity's double position minus the
         // view's INTEGER origin, subtracted in double. That keeps float
@@ -1256,6 +1489,11 @@ namespace Render {
         // continues to be animated underneath it.
         if (deathFlipDeg != 0.0f) {
             m = glm::rotate(m, glm::radians(deathFlipDeg), glm::vec3(0.0f, 0.0f, 1.0f));
+        } else if (autoSpinAttack) {
+            // MC setupRotations' isAutoSpinAttack arm: laid along the look,
+            // rotateX(-90 - xRot), and spun, rotateY(ageInTicks * -75).
+            m = glm::rotate(m, glm::radians(-90.0f - spinXRot), glm::vec3(1.0f, 0.0f, 0.0f));
+            m = glm::rotate(m, glm::radians(spinAgeInTicks * -75.0f), glm::vec3(0.0f, 1.0f, 0.0f));
         }
         // MC setupRotations' isUpsideDown arm: translate (boundingBoxHeight +
         // 0.1) / entityScale in the scaled frame — the same lift in blocks
@@ -1274,6 +1512,17 @@ namespace Render {
             m = glm::translate(m, glm::vec3(0.0f, swimPivotY, 0.0f));
             m = glm::rotate(m, glm::radians(swimPitchDeg), glm::vec3(1.0f, 0.0f, 0.0f));
             m = glm::translate(m, glm::vec3(0.0f, -swimPivotY, 0.0f));
+        }
+        // MC CodRenderer / SalmonRenderer / TropicalFishRenderer
+        // .setupRotations, after super.setupRotations: the wobble yaw, then
+        // the beached lay-down. MC's translate sits inside the SCALED frame
+        // (poseStack.scale(state.scale) comes first), so it is scaled here.
+        if (fishYawDeg != 0.0f) {
+            m = glm::rotate(m, glm::radians(fishYawDeg), glm::vec3(0.0f, 1.0f, 0.0f));
+        }
+        if (fishLandRoll) {
+            m = glm::translate(m, fishLandOffset * scale);
+            m = glm::rotate(m, glm::radians(90.0f), glm::vec3(0.0f, 0.0f, 1.0f));
         }
         // MC applies state.scale (the SCALE attribute) before setupRotations
         // and the -1,-1,1 flip after; a uniform scale commutes with the
@@ -1306,7 +1555,9 @@ namespace Render {
                                          state.deathFlipDeg, state.modelScale,
                                          state.swimPitchDeg, state.swimPivotY,
                                          state.modelOffset,
-                                         state.isUpsideDown, state.boundingBoxHeight);
+                                         state.isUpsideDown, state.boundingBoxHeight,
+                                         state.isAutoSpinAttack, state.xRot, state.ageInTicks,
+                                         state.fishYawDeg, state.fishLandRoll, state.fishLandOffset);
         model.Root().Build(m, model.TexWidth(), model.TexHeight(), verts, idx,
                            model.CullBackFaces());
         return m;
@@ -1428,90 +1679,11 @@ namespace Render {
         constexpr uint8_t kLeatherR = 0xA0, kLeatherG = 0x65, kLeatherB = 0x40;
     }
 
-    TextureHandle MobRenderer::AppendHeldBlockAt(const glm::mat4& entityMatrix,
-                                                 const glm::mat4& hand, bool leftHand,
-                                                 Game::BlockID block,
-                                                 std::vector<ModelVertex>& verts,
-                                                 std::vector<uint32_t>& idx) {
-        if (!g_atlasBuilder || block == Game::BlockID::Air) return INVALID_TEXTURE;
-        std::vector<ItemCubeVert> bv;
-        std::vector<uint32_t> bi;
-        BlockCubeEntityRenderer::BuildStateMesh(Game::BlockStates::Default(block), bv, bi);
-        if (bv.empty()) return INVALID_TEXTURE;
-        const float side = leftHand ? -1.0f : 1.0f;
-        // The grip, as AppendHeldSpriteAt; then models/block/block.json's
-        // thirdperson_righthand: rotation (75, 45, 0), translation (0, 2.5, 0),
-        // scale 0.375; then the block model centred (ItemRenderer's -0.5).
-        glm::mat4 m = entityMatrix * hand;
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        m = glm::translate(m, glm::vec3(1.0f * side, 2.0f, -10.0f));
-        m = glm::scale(m, glm::vec3(16.0f));
-        m = glm::translate(m, glm::vec3(0.0f, 2.5f, 0.0f) * 0.0625f);
-        m = glm::rotate(m, glm::radians(75.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::rotate(m, glm::radians(45.0f * side), glm::vec3(0.0f, 1.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.375f));
-        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
-        const auto base = static_cast<uint32_t>(verts.size());
-        for (const ItemCubeVert& v : bv) {
-            const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
-            verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
-        }
-        for (const uint32_t i : bi) idx.push_back(base + i);
-        return g_atlasBuilder->GetBackendTextureHandle();
-    }
-
-    TextureHandle MobRenderer::AppendHeadItem(const glm::mat4& entityMatrix,
-                                              const glm::mat4& headMatrix,
-                                              const Game::ItemStack& stack,
-                                              std::vector<ModelVertex>& verts,
-                                              std::vector<uint32_t>& idx) {
-        if (stack.IsEmpty()) return INVALID_TEXTURE;
-        // MC CustomHeadLayer.translateToHead: the head part, translate
-        // (0, -0.25, 0), a half turn, scale (0.625, -0.625, -0.625) — in
-        // block units, hence the ×16 out of model pixels.
-        glm::mat4 m = entityMatrix * headMatrix;
-        m = glm::scale(m, glm::vec3(16.0f));
-        m = glm::translate(m, glm::vec3(0.0f, -0.25f, 0.0f));
-        m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        m = glm::scale(m, glm::vec3(0.625f, -0.625f, -0.625f));
-
-        const Game::BlockID block = BlockShownBy(stack.itemId);
-        if (block != Game::BlockID::Air) {
-            if (!g_atlasBuilder) return INVALID_TEXTURE;
-            std::vector<ItemCubeVert> bv;
-            std::vector<uint32_t> bi;
-            BlockCubeEntityRenderer::BuildStateMesh(Game::BlockStates::Default(block), bv, bi);
-            if (bv.empty()) return INVALID_TEXTURE;
-            // ItemDisplayContext.HEAD for a block model: identity; the model
-            // centred on the head.
-            m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
-            const auto base = static_cast<uint32_t>(verts.size());
-            for (const ItemCubeVert& v : bv) {
-                const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
-                verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
-            }
-            for (const uint32_t i : bi) idx.push_back(base + i);
-            return g_atlasBuilder->GetBackendTextureHandle();
-        }
-
-        const std::string sprite = SpriteNameFor(stack.itemId);
-        if (sprite.empty()) return INVALID_TEXTURE;
-        SpriteEntry* entry = EnsureSpriteGeometry(sprite);
-        if (!entry) return INVALID_TEXTURE;
-        // models/item/generated.json's `head` display: translation (0, 13, 7)
-        // sixteenths, no rotation, scale 1; the flat sprite centred.
-        m = glm::translate(m, glm::vec3(0.0f, 13.0f, 7.0f) * 0.0625f);
-        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, 0.0f));
-        m = glm::scale(m, glm::vec3(1.0f / 16.0f));
-        const auto base = static_cast<uint32_t>(verts.size());
-        for (const ModelVertex& v : entry->verts) {
-            const glm::vec3 p = glm::vec3(m * glm::vec4(v.x, v.y, v.z, 1.0f));
-            verts.push_back({ p.x, p.y, p.z, v.u, v.v, v.r, v.g, v.b, v.a });
-        }
-        for (uint32_t i : entry->indices) idx.push_back(base + i);
-        return entry->texture;
-    }
+    // The three item lookups above, for the equipment layers
+    // (MobEquipmentLayers.cpp).
+    const char* MobRenderer::EquipmentAssetFor(Game::ItemID id) { return ArmorMaterialFor(id); }
+    std::string MobRenderer::ItemSpriteName(Game::ItemID id) { return SpriteNameFor(id); }
+    Game::BlockID MobRenderer::ItemBlockShown(Game::ItemID id) { return BlockShownBy(id); }
 
     MobRenderer::ItemFrameGeometry MobRenderer::AppendItemFrame(const Game::Mob& mob,
                                                                 const glm::dvec3& centerWorld,
@@ -1550,13 +1722,22 @@ namespace Render {
             for (const uint32_t i : bi) idx.push_back(base + i);
         };
 
+        // A framed map with data on this client (extractRenderState: mapId
+        // is set only when the level has the map's data) — the frame then
+        // uses its map model (updateForItemFrame(…, mapId != null)).
+        const Game::ItemStack& framed = frame->GetItem();
+        const std::optional<int32_t> framedMapId = framed.IsEmpty()
+            ? std::nullopt : framed.get(Game::DataComponents::MAP_ID);
+        const bool showsMap = framedMapId && Client::Maps::GetMapData(*framedMapId) != nullptr;
+
         // The frame: its block model centred on the cell (translate -0.5).
         // Not drawn for an invisible frame.
         if (!frame->IsInvisible() && g_atlasBuilder) {
             std::vector<ItemCubeVert> bv;
             std::vector<uint32_t> bi;
-            const Game::BlockModel& model = Game::BlockModelRegistry::GetModel(
-                frame->IsGlow() ? "glow_item_frame" : "item_frame");
+            std::string modelName = frame->IsGlow() ? "glow_item_frame" : "item_frame";
+            if (showsMap && Game::BlockModelRegistry::HasModel(modelName + "_map")) modelName += "_map";
+            const Game::BlockModel& model = Game::BlockModelRegistry::GetModel(modelName);
             if (BuildBlockModelMeshFrom(model, bv, bi) && !bv.empty()) {
                 out.frameTex = g_atlasBuilder->GetBackendTextureHandle();
                 out.frameFirst = idx.size();
@@ -1567,8 +1748,47 @@ namespace Render {
 
         // The item: against the back (deeper when the frame is invisible),
         // turned 45° per rotation step, at half size, then its FIXED display.
-        const Game::ItemStack& item = frame->GetItem();
+        const Game::ItemStack& item = framed;
         if (item.IsEmpty()) return out;
+
+        if (showsMap) {
+            // The map: a quarter turn per two rotation steps, flipped, at a
+            // 128th of a block per map pixel, centred, a pixel off the back
+            // (MapRenderer.render with showOnlyFrame).
+            glm::mat4 mm = glm::translate(pose, glm::vec3(0.0f, 0.0f, frame->IsInvisible() ? 0.5f : 0.4375f));
+            const int turn = frame->GetRotation() % 4 * 2;
+            mm = glm::rotate(mm, glm::radians(static_cast<float>(turn) * 360.0f / 8.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            mm = glm::rotate(mm, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            mm = glm::scale(mm, glm::vec3(0.0078125f));
+            mm = glm::translate(mm, glm::vec3(-64.0f, -64.0f, 0.0f));
+            mm = glm::translate(mm, glm::vec3(0.0f, 0.0f, -1.0f));
+            Client::Maps::MapGeometry geometry;
+            if (Client::Maps::BuildMapGeometry(*framedMapId, mm, /*showOnlyFrame=*/true, geometry)) {
+                // Both windings: the quad is seen from the front whatever
+                // the facing, and its back lies against the wall.
+                const auto appendQuad = [&](const Client::Maps::MapQuad& q) {
+                    const auto base = static_cast<uint32_t>(verts.size());
+                    for (int c = 0; c < 4; ++c) {
+                        verts.push_back({ q.pos[c].x, q.pos[c].y, q.pos[c].z, q.uv[c].x, q.uv[c].y,
+                                          255, 255, 255, 255 });
+                    }
+                    for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u, 0u, 2u, 1u, 0u, 3u, 2u}) idx.push_back(base + i);
+                };
+                if (geometry.mapTexture != INVALID_TEXTURE) {
+                    out.mapTex = geometry.mapTexture;
+                    out.mapFirst = idx.size();
+                    appendQuad(geometry.mapQuad);
+                    out.mapCount = idx.size() - out.mapFirst;
+                }
+                if (geometry.decorationTexture != INVALID_TEXTURE && !geometry.decorations.empty()) {
+                    out.decorationTex = geometry.decorationTexture;
+                    out.decorationFirst = idx.size();
+                    for (const auto& q : geometry.decorations) appendQuad(q);
+                    out.decorationCount = idx.size() - out.decorationFirst;
+                }
+            }
+            return out;
+        }
         glm::mat4 m = glm::translate(pose, glm::vec3(0.0f, 0.0f, frame->IsInvisible() ? 0.5f : 0.4375f));
         m = glm::rotate(m, glm::radians(static_cast<float>(frame->GetRotation()) * 360.0f / 8.0f),
                         glm::vec3(0.0f, 0.0f, 1.0f));
@@ -1662,91 +1882,27 @@ namespace Render {
             }
         }
 
-        // ── ItemInHandLayer: both hands ───────────────────────────────────
-        // models/item/generated.json's thirdperson_righthand (a flat item),
-        // handheld.json's for a sword (the mob pass's kHandheldSpec).
-        static constexpr DisplaySpec kGenericSpec{ {0.0f, 3.0f, 1.0f}, {0.0f, 0.0f, 0.0f}, 0.55f };
-        static constexpr DisplaySpec kHandheldSpec{ {0.0f, 4.0f, 0.5f}, {0.0f, -90.0f, 55.0f}, 0.85f };
-        const auto hand = [&](EquipmentSlot slot, bool left) {
-            const Game::ItemStack& held = stand.GetItemBySlot(slot);
-            if (held.IsEmpty()) return;
-            glm::mat4 handMatrix;
-            if (!(left ? model.LeftHandMatrix(handMatrix) : model.RightHandMatrix(handMatrix))) return;
-            const size_t first = m_indices.size();
-            TextureHandle tex = INVALID_TEXTURE;
-            if (const Game::BlockID block = BlockShownBy(held.itemId); block != Game::BlockID::Air) {
-                tex = AppendHeldBlockAt(entityMatrix, handMatrix, left, block, m_verts, m_indices);
-            } else if (const std::string sprite = SpriteNameFor(held.itemId); !sprite.empty()) {
-                tex = AppendHeldSpriteAt(entityMatrix, handMatrix, left, sprite,
-                                         Game::IsSwordItem(held.itemId) ? kHandheldSpec : kGenericSpec,
-                                         m_verts, m_indices);
-            }
-            emit(tex, first, false);
-        };
-        hand(EquipmentSlot::MAINHAND, false);
-        hand(EquipmentSlot::OFFHAND, true);
-
-        // ── CustomHeadLayer: a block or item on the head ─────────────────
-        // A helmet drew above as armor; anything else on the head is the
-        // item itself (MC: state.headItem is set only when the head slot's
-        // item is not armor).
+        // ── ItemInHandLayer: both hands (no baby grip for the stand —
+        //    ItemInHandLayer.useBabyOffset excludes ARMOR_STAND) ───────────
+        // An armor stand's main arm is RIGHT.
         {
-            const Game::ItemStack& head = stand.GetItemBySlot(EquipmentSlot::HEAD);
-            const auto equippable = head.get(Game::DataComponents::EQUIPPABLE);
-            const bool drawnAsArmor = equippable && equippable->slot == EquipmentSlot::HEAD &&
-                                      ArmorMaterialFor(head.itemId) != nullptr;
-            glm::mat4 headMatrix;
-            if (!head.IsEmpty() && !drawnAsArmor && model.HeadMatrix(headMatrix)) {
-                const size_t first = m_indices.size();
-                const TextureHandle tex = AppendHeadItem(entityMatrix, headMatrix, head, m_verts, m_indices);
-                emit(tex, first, false);
+            glm::mat4 pose;
+            const Game::ItemStack& right = stand.GetItemBySlot(EquipmentSlot::MAINHAND);
+            const Game::ItemStack& left  = stand.GetItemBySlot(EquipmentSlot::OFFHAND);
+            const auto noCull = [&](TextureHandle tex, size_t first, bool) { emit(tex, first, false); };
+            if (!right.IsEmpty() && ArmItemPose(model, Game::EntityTypeId::ArmorStand, entityMatrix, false, false, pose)) {
+                AppendItem(pose, right, ItemDisplay::Context::ThirdPersonRightHand, ItemUseState{}, noCull);
+            }
+            if (!left.IsEmpty() && ArmItemPose(model, Game::EntityTypeId::ArmorStand, entityMatrix, true, false, pose)) {
+                AppendItem(pose, left, ItemDisplay::Context::ThirdPersonLeftHand, ItemUseState{}, noCull);
             }
         }
-    }
 
-    TextureHandle MobRenderer::AppendHeldTrident(const EntityModel& model,
-                                                 const glm::mat4& entityMatrix,
-                                                 std::vector<ModelVertex>& verts,
-                                                 std::vector<uint32_t>& idx) {
-        glm::mat4 hand;
-        if (!model.RightHandMatrix(hand)) return INVALID_TEXTURE;
-        if (!m_heldTridentModel) {
-            m_heldTridentModel = std::make_unique<TridentModel>();
-        }
-        // The geometry beneath the projectile wrappers (pivot/yaw/orient) is
-        // MC's raw vertical trident; the wrappers only exist to point the
-        // FLYING trident along +X, so they are bypassed here.
-        ModelPart* orient = m_heldTridentModel->Root().Find("orient");
-        if (!orient) return INVALID_TEXTURE;
-
-        // MC path: ItemInHandLayer grip, then trident_in_hand.json's
-        // thirdperson_righthand block, then the special-model renderer's
-        // scale(1, -1, -1) around the centred [0,1] cell, and finally the
-        // model's own pixel space. VERIFY IN GAME: the special-renderer flip
-        // and cell centring were derived from the code, not observed — if
-        // the trident sits mirrored or offset, this is the block to adjust.
-        glm::mat4 m = entityMatrix * hand;
-        m = glm::rotate(m, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
-        m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-        m = glm::translate(m, glm::vec3(1.0f, 2.0f, -10.0f));
-        m = glm::scale(m, glm::vec3(16.0f));
-
-        // trident_in_hand.json display.thirdperson_righthand.
-        m = glm::translate(m, glm::vec3(11.0f, 17.0f, -2.0f) * 0.0625f);
-        m = glm::rotate(m, glm::radians(60.0f), glm::vec3(0.0f, 1.0f, 0.0f));
-
-        // MC ItemRenderer centres the unit cell, then the trident special
-        // renderer flips Y/Z before drawing the entity-space model.
-        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
-        m = glm::scale(m, glm::vec3(1.0f, -1.0f, -1.0f));
-        m = glm::scale(m, glm::vec3(1.0f / 16.0f));
-
-        for (const auto& child : orient->children) {
-            child->Build(m, m_heldTridentModel->TexWidth(),
-                         m_heldTridentModel->TexHeight(), verts, idx,
-                         m_heldTridentModel->CullBackFaces());
-        }
-        return LoadTexture("assets/textures/entity/trident.png");
+        // ── CustomHeadLayer: a mob head, block or item on the head ───────
+        // (a helmet drew above as armour). The stand's head never animates
+        // a piglin head's ears (no walk).
+        AppendCustomHead(model, entityMatrix, stand.GetItemBySlot(EquipmentSlot::HEAD), HeadTransforms{},
+                         0.0f, emit);
     }
 
     MobRenderer::SpriteEntry* MobRenderer::EnsureSpriteGeometry(const std::string& itemName) {
@@ -1761,7 +1917,13 @@ namespace Render {
         std::vector<HeldItemSpriteMesh::Vertex> sprite;
         std::vector<uint32_t> idx;
         if (HeldItemSpriteMesh::BuildGeometry(itemName, 0, sprite, idx)) {
-            entry.texture = LoadTexture("assets/textures/item/" + itemName + ".png");
+            // The sprite's own sheet, where HeldItemSpriteMesh found it:
+            // textures/item, else textures/block (a torch, a sapling).
+            std::string texPath = "assets/textures/item/" + itemName + ".png";
+            if (!std::filesystem::exists(PlatformMain::GetAssetPath(texPath))) {
+                texPath = "assets/textures/block/" + itemName + ".png";
+            }
+            entry.texture = LoadTexture(texPath);
             if (entry.texture != INVALID_TEXTURE) {
                 entry.verts.reserve(sprite.size());
                 for (const auto& v : sprite) {
@@ -1782,7 +1944,8 @@ namespace Render {
                                                       float halfHeight,
                                                       const glm::vec3& cameraPos,
                                                       std::vector<ModelVertex>& verts,
-                                                      std::vector<uint32_t>& idx) {
+                                                      std::vector<uint32_t>& idx,
+                                                      bool edgeOn) {
         SpriteEntry* entry = EnsureSpriteGeometry(itemName);
         if (!entry) return INVALID_TEXTURE;
 
@@ -1809,6 +1972,8 @@ namespace Render {
         glm::mat4 m = glm::translate(glm::mat4(1.0f), rel);
         m = glm::rotate(m, yaw, glm::vec3(0.0f, 1.0f, 0.0f));
         m = glm::rotate(m, pitch, glm::vec3(1.0f, 0.0f, 0.0f));
+        // Z 180 then Y 180 is X 180; with X 90 after it, X 270.
+        if (edgeOn) m = glm::rotate(m, -glm::half_pi<float>(), glm::vec3(1.0f, 0.0f, 0.0f));
         m = glm::scale(m, glm::vec3(0.5f));
         m = glm::translate(m, glm::vec3(-0.5f, -0.5f, 0.0f));
         m = glm::scale(m, glm::vec3(1.0f / 16.0f));
@@ -1820,6 +1985,28 @@ namespace Render {
         }
         for (uint32_t i : entry->indices) idx.push_back(base + i);
         return entry->texture;
+    }
+
+    bool MobRenderer::CaptureForGui(const Client::ClientMobManager& mobs, int32_t entityId,
+                                    const GuiEntityPose& pose, std::vector<GuiEntityBatch>& out) {
+        out.clear();
+        if (!m_initialized || !g_renderBackend) return false;
+        m_guiPose = &pose;
+        m_guiEntityId = entityId;
+        m_guiOut = &out;
+        // MC createRenderState(entity, 1.0F). The frustum and view are not
+        // read on a capture (no culling, no draw).
+        const Frustum frustum{};
+        EntityLighting::LightOverride& lights = EntityLighting::UiLightOverride();
+        const EntityLighting::LightOverride savedLights = lights;
+        lights.active = true;
+        lights.light0 = pose.light0;
+        lights.light1 = pose.light1;
+        Render(glm::mat4(1.0f), glm::mat4(1.0f), glm::vec3(0.0f), frustum, mobs, 1.0f);
+        lights = savedLights;
+        m_guiPose = nullptr;
+        m_guiOut = nullptr;
+        return !out.empty();
     }
 
     void MobRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
@@ -1848,22 +2035,35 @@ namespace Render {
             m_models.clear();
         }
         if (mobs.All().empty()) return;
+        // CaptureForGui: one mob, posed for a GUI box, handed back on the
+        // CPU — nothing below touches the frame's buffers or draws.
+        const bool guiCapture = m_guiOut != nullptr && m_guiPose != nullptr;
+
+        if (!guiCapture) {
+            // Leads and fence knots, with this pass's frustum and clip plane.
+            m_leashRenderer.Render(projection, view, cameraPos, frustum, mobs, partialTick);
+            // Bobbers and fishing lines, the same way.
+            m_fishingHookRenderer.Render(projection, view, cameraPos, frustum, mobs, partialTick);
+        }
 
         // Which streaming set this call writes, and where in it. A new frame
         // flips the set and starts it over; a later call in the same frame
         // (the portal pass) appends after the main pass's geometry so both
         // survive to submit. See EntityCulling.hpp.
-        if (m_frameCursor.Advance()) {
+        if (!guiCapture && m_frameCursor.Advance()) {
             m_vertCursor = 0;
             m_idxCursor  = 0;
         }
         FrameBuffers& fb = m_frames[m_frameCursor.parity];
-        if (fb.mesh == INVALID_MESH) return;
-        // Room left in this frame's set. Nothing to do when a previous call
-        // filled it — the guard inside the loop stops before overrunning.
-        if (m_vertCursor + 4096 >= kMaxVertices || m_idxCursor + 8192 >= kMaxIndices) return;
-        const size_t vertRoom = kMaxVertices - m_vertCursor;
-        const size_t idxRoom  = kMaxIndices  - m_idxCursor;
+        if (!guiCapture) {
+            if (fb.mesh == INVALID_MESH) return;
+            // Room left in this frame's set. Nothing to do when a previous
+            // call filled it — the guard inside the loop stops before
+            // overrunning.
+            if (m_vertCursor + 4096 >= kMaxVertices || m_idxCursor + 8192 >= kMaxIndices) return;
+        }
+        const size_t vertRoom = guiCapture ? kMaxVertices : kMaxVertices - m_vertCursor;
+        const size_t idxRoom  = guiCapture ? kMaxIndices  : kMaxIndices  - m_idxCursor;
 
         const float maxDistSq = kMaxRenderDistance * kMaxRenderDistance;
         int culledCount = 0;
@@ -1887,12 +2087,33 @@ namespace Render {
             BatchPart     part = BatchPart::Layer;
             bool          hidden = false;
             bool          outline = false;
+            // The body of an INVISIBLE mob (MobBatchScope): hidden, unless
+            // the viewer is a spectator (see the upload below).
+            bool          invisibleBody = false;
             int           packedLight = Game::Lighting::LightCoords::kFullSky;
+            // Depth only, no colour (MC RenderTypes.waterMask — a boat's
+            // water patch, VehicleRenderer.cpp).
+            bool          depthOnly = false;
+            // The enchantment glint over the geometry just drawn (MC's
+            // *_GLINT pipelines): additive SRC_COLOR / ONE, depth EQUAL, no
+            // depth write, no lightmap — a foil thrown trident.
+            bool          glint = false;
         };
         std::vector<Batch> batches;
 
         m_verts.clear();
         m_indices.clear();
+
+        // The glint's scroll (TextureTransform.setupGlintTexturing), once for
+        // the frame: the default glint speed (0.5) × 8.
+        float glintL0 = 0.0f, glintL1 = 0.0f;
+        {
+            const double ms = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch()).count());
+            const long long millis = static_cast<long long>(ms * 0.5 * 8.0);
+            glintL0 = static_cast<float>(millis % 110000LL) / 110000.0f;
+            glintL1 = static_cast<float>(millis % 30000LL) / 30000.0f;
+        }
 
         // MC submitFlame billboards a burning mob's fire by the camera's Y
         // rotation alone (Mth.rotationAroundAxis(Y_AXIS, camera.orientation)).
@@ -1909,20 +2130,25 @@ namespace Render {
         for (const Client::ClientMob* entryPtr : mobs.ModelMobList()) {
             const Client::ClientMob& entry = *entryPtr;
             const int32_t id = entry.selfId;
-            (void)id;
+            // MC LevelRenderer: the camera entity is not drawn while the
+            // camera sits in its head (a spectator looking through a mob).
+            if (guiCapture ? id != m_guiEntityId : id == m_hiddenEntityId) continue;
             const Game::Mob& mob = *entry.mob;
             const Game::EntityTypeId type = mob.GetType();
 
             // MC LivingEntityRenderer.submit: an INVISIBLE body (the synched
             // invisible flag the INVISIBILITY effect sets) is not drawn, but
             // its layers are (held items, armor, eyes) and a glowing one is
-            // still outlined — see BatchPart / MobBatchScope. (The
-            // translucent spectator view of it is not ported.)
+            // still outlined — see BatchPart / MobBatchScope. A spectator
+            // sees the body translucent (m_viewerSeesInvisible).
             const bool effectInvisible = mob.IsEffectInvisible();
 
             // Sub-tick interpolation, the same scheme PlayerRenderer uses.
             glm::dvec3 renderPos = glm::mix(entry.renderPrevPosition, mob.position,
                                             static_cast<double>(partialTick));
+            // A GUI capture draws the entity at the render origin: its
+            // vertices come out relative to its own feet.
+            if (guiCapture) renderPos = Render::RenderOrigin();
 
             // MC EndermanRenderer.getRenderOffset: the creepy ±0.02-block
             // gaussian x/z jitter every frame — the signature vibration of a
@@ -2031,6 +2257,131 @@ namespace Render {
                     batches.back().light = BatchLight::Lit;
                     batches.back().packedLight = glow ? LC::kFullBright : packedLight;
                 }
+                // A framed map: a glow frame lights it at 15728850 (sky 15,
+                // block 240 - BRIGHT_MAP_LIGHT_ADJUSTMENT 30).
+                constexpr int kBrightMapLight = 15728850;
+                if (geo.mapCount > 0) {
+                    batches.push_back({ geo.mapTex, glm::vec4(0.0f), geo.mapFirst, geo.mapCount });
+                    batches.back().light = BatchLight::Lit;
+                    batches.back().packedLight = glow ? kBrightMapLight : packedLight;
+                }
+                if (geo.decorationCount > 0) {
+                    batches.push_back({ geo.decorationTex, glm::vec4(0.0f), geo.decorationFirst, geo.decorationCount });
+                    batches.back().light = BatchLight::Lit;
+                    batches.back().packedLight = glow ? kBrightMapLight : packedLight;
+                }
+                // The loop's buffer guard, which these early exits skip.
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
+
+            // MC AbstractBoatRenderer / AbstractMinecartRenderer — not living
+            // renderers: the boat or cart model, its paddles or its block
+            // (VehicleRenderer.cpp), culled on its own box (a cart's grown up
+            // by its displayed block, getBoundingBoxForCulling).
+            if (Game::IsVehicleEntityType(type)) {
+                const Game::AABBd box = mob.GetAABBd();
+                const glm::dvec3 size = box.max - box.min;
+                double cullHeight = size.y;
+                if (Game::IsMinecartEntityType(type)) {
+                    if (const auto* cart = dynamic_cast<const Game::AbstractMinecart*>(&mob);
+                        cart && cart->GetDisplayBlockState().Block() != Game::BlockID::Air) {
+                        cullHeight += std::max(0.0, static_cast<double>(cart->GetDisplayOffset()) * 0.75 / 16.0);
+                    }
+                }
+                const glm::vec3 delta(renderPos.x - cameraPos.x, renderPos.y - cameraPos.y,
+                                      renderPos.z - cameraPos.z);
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > maxDistSq) continue;
+                if (EntityCulling::g_crossingFilter &&
+                    !EntityCulling::PassesCrossingFilter(glm::vec3(box.min), glm::vec3(box.max))) {
+                    continue;
+                }
+                const float footprint = static_cast<float>(std::max(size.x, size.z));
+                if (!EntityCulling::ShouldRenderAtSqrDistance(distSq, footprint, static_cast<float>(cullHeight)) ||
+                    !EntityCulling::ShouldRender(frustum, glm::vec3(renderPos), footprint,
+                                                 static_cast<float>(cullHeight))) {
+                    ++culledCount;
+                    continue;
+                }
+                ++EntityCulling::g_renderedThisFrame;
+                static std::vector<VehiclePiece> s_vehiclePieces;
+                AppendVehicle(entry, renderPos, partialTick, s_vehiclePieces);
+                for (const VehiclePiece& piece : s_vehiclePieces) {
+                    batches.push_back({ piece.texture,
+                                        piece.whiteFlash ? glm::vec4(1.0f, 1.0f, 1.0f, 0.753f) : glm::vec4(0.0f),
+                                        piece.first, piece.count });
+                    batches.back().light = BatchLight::Lit;
+                    batches.back().packedLight = piece.packedLight;
+                    batches.back().depthOnly = piece.depthOnly;
+                }
+                // The loop's buffer guard, which these early exits skip.
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
+
+            // MC CushionRenderer — not a living renderer: the one-box
+            // CushionModel on its colour's sheet, turned to its facing,
+            // flipped (rotate X 180) and dropped a quarter block so the box
+            // sits on the position; lit by the light at its eye.
+            if (type == Game::EntityTypeId::Cushion) {
+                const auto* cushion = dynamic_cast<const Game::Cushion*>(&mob);
+                if (!cushion) continue;
+                const Game::AABBd box = mob.GetAABBd();
+                const glm::dvec3 size = box.max - box.min;
+                const glm::vec3 delta(renderPos.x - cameraPos.x, renderPos.y - cameraPos.y,
+                                      renderPos.z - cameraPos.z);
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > maxDistSq) continue;
+                if (EntityCulling::g_crossingFilter &&
+                    !EntityCulling::PassesCrossingFilter(glm::vec3(box.min), glm::vec3(box.max))) {
+                    continue;
+                }
+                const float footprint = static_cast<float>(std::max(size.x, size.z));
+                if (!EntityCulling::ShouldRenderAtSqrDistance(distSq, footprint, static_cast<float>(size.y)) ||
+                    !EntityCulling::ShouldRender(frustum, glm::vec3(renderPos), footprint,
+                                                 static_cast<float>(size.y))) {
+                    ++culledCount;
+                    continue;
+                }
+                ++EntityCulling::g_renderedThisFrame;
+
+                // CushionRenderer.TEXTURES_BY_COLOR.
+                static const char* const kColorNames[16] = {
+                    "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                    "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black" };
+                const size_t colorIndex = std::min<size_t>(static_cast<size_t>(cushion->GetColor()), 15);
+                const TextureHandle tex = LoadTexture(std::string("assets/textures/entity/cushion/") +
+                                                      kColorNames[colorIndex] + "_cushion.png");
+                if (tex == INVALID_TEXTURE) continue;
+
+                // CushionModel.createBodyLayer (64 × 64).
+                static const std::unique_ptr<ModelPart> kCushionRoot = [] {
+                    auto root = std::make_unique<ModelPart>();
+                    ModelPart* part = root->AddChild("cushion", PartPose::Offset(23.0f, 4.0f, -7.0f));
+                    part->cubes.push_back(CubeDefinition{ -31.0f, -4.0f, -1.0f, 16.0f, 4.0f, 16.0f,
+                                                          0.0f, 0.0f, -0.005f, -0.005f, -0.005f, false });
+                    root->ResetPose();
+                    return root;
+                }();
+
+                // submit: rotateDegrees(Y, 180 - direction.toYRot()),
+                // rotateDegrees(X, 180), translate(0, -0.25, 0); the model in
+                // pixels (ModelPart's /16).
+                const float facingYaw = Game::ToYRot(Game::FromYRot(mob.yRot));
+                glm::mat4 m = glm::translate(glm::mat4(1.0f), Render::ToRender(renderPos));
+                m = glm::rotate(m, glm::radians(180.0f - facingYaw), glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::rotate(m, glm::radians(180.0f), glm::vec3(1.0f, 0.0f, 0.0f));
+                m = glm::translate(m, glm::vec3(0.0f, -0.25f, 0.0f));
+                m = glm::scale(m, glm::vec3(1.0f / 16.0f));
+                const size_t first = m_indices.size();
+                kCushionRoot->Build(m, 64.0f, 64.0f, m_verts, m_indices);
+                batches.push_back({ tex, glm::vec4(0.0f), first, m_indices.size() - first });
+                batches.back().light = BatchLight::Lit;
+                // EntityRenderer.getPackedLightCoords: at the light probe —
+                // the eye.
+                batches.back().packedLight = EntityEnvironment::PackedLightAt(
+                    renderPos + glm::dvec3(0.0, static_cast<double>(mob.TypeInfo().eyeHeight), 0.0));
                 // The loop's buffer guard, which these early exits skip.
                 if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
                 continue;
@@ -2052,7 +2403,7 @@ namespace Render {
             // distance half as well as its frustum half, and a far-ring
             // pillar crystal (up to ~190 blocks out during the ritual) would
             // otherwise drop its beam at 160.
-            if (!beamExempt) {
+            if (!beamExempt && !guiCapture) {
                 const glm::vec3 delta(renderPos.x - cameraPos.x,
                                       renderPos.y - cameraPos.y,
                                       renderPos.z - cameraPos.z);
@@ -2072,6 +2423,14 @@ namespace Render {
                     ++culledCount;
                     continue;
                 }
+                // MC WindCharge.shouldRenderAtSqrDistance: a charge younger
+                // than 2 ticks within 3.5 blocks is not drawn — the one just
+                // thrown would otherwise fill the thrower's view.
+                if (mob.GetType() == Game::EntityTypeId::WindCharge && mob.tickCount < 2 &&
+                    distSq < 3.5f * 3.5f) {
+                    ++culledCount;
+                    continue;
+                }
 
                 if (!EntityCulling::ShouldRender(frustum, glm::vec3(renderPos),
                                                  mob.GetBbWidth(),
@@ -2080,7 +2439,7 @@ namespace Render {
                     continue;
                 }
             }
-            ++EntityCulling::g_renderedThisFrame;
+            if (!guiCapture) ++EntityCulling::g_renderedThisFrame;
 
             // Everything this mob pushes from here on closes with its light,
             // visibility and outline (MC Minecraft.shouldEntityAppearGlowing).
@@ -2091,6 +2450,23 @@ namespace Render {
                                                  EntityOutline::Get().Collecting(),
                                              EntityEnvironment::PackedLightAt(
                                                  renderPos + glm::dvec3(0.0, mob.GetEyeHeight(), 0.0)) };
+
+            // MC FireworkEntityRenderer: the rocket's item, facing the
+            // camera — edge-on when shot at an angle — and nothing at all
+            // while it rides a glider's hand.
+            if (type == Game::EntityTypeId::FireworkRocket) {
+                const auto& rocket = static_cast<const Game::FireworkRocket&>(mob);
+                if (!rocket.ShouldRender()) continue;
+                const size_t firstIndex = m_indices.size();
+                const TextureHandle tex = AppendSpriteProjectile(
+                    "firework_rocket", renderPos, mob.GetBbHeight() * 0.5f, cameraPos,
+                    m_verts, m_indices, rocket.IsShotAtAngle());
+                if (tex != INVALID_TEXTURE && m_indices.size() > firstIndex) {
+                    batches.push_back({ tex, glm::vec4(0.0f), firstIndex,
+                                        m_indices.size() - firstIndex });
+                }
+                continue;
+            }
 
             // Sprite projectiles (MC ThrownItemRenderer) — a camera-facing
             // item sprite, no entity model at all.
@@ -2111,8 +2487,13 @@ namespace Render {
 
             float bodyRot = Game::Mth::RotLerp(partialTick, entry.renderPrevYBodyRot,
                                                mob.yBodyRot);
-            const float headRot = Game::Mth::RotLerp(partialTick, entry.renderPrevYHeadRot,
-                                                     mob.GetYHeadRot());
+            float headRot = Game::Mth::RotLerp(partialTick, entry.renderPrevYHeadRot,
+                                               mob.GetYHeadRot());
+            // extractEntityInInventoryFollowsMouse's rotations.
+            if (guiCapture) {
+                bodyRot = m_guiPose->bodyRot;
+                headRot = bodyRot + m_guiPose->headYawRel;
+            }
 
             // MC EnderDragonRenderer.submit poses the body from the FLIGHT
             // HISTORY, not yBodyRot: yaw is sample 7's yRot (rotated by -yr
@@ -2141,7 +2522,8 @@ namespace Render {
             // has to rotate the head part by the difference. Passing the
             // absolute yaw makes every mob look permanently over its shoulder.
             state.yRot = Game::Mth::WrapDegrees(headRot - bodyRot);
-            state.xRot = Game::Mth::Lerp(partialTick, entry.renderPrevXRot, mob.xRot);
+            state.xRot = guiCapture ? m_guiPose->xRot
+                                    : Game::Mth::Lerp(partialTick, entry.renderPrevXRot, mob.xRot);
             // MC LivingEntityRenderer.extractRenderState: a Dinnerbone mob's
             // head angles are mirrored so it still looks where it looks once
             // the body is rolled over. The dragon, the crystal and the arrow
@@ -2160,6 +2542,25 @@ namespace Render {
             state.walkAnimationPos = mob.walkAnimation.PositionAt(partialTick);
             state.walkAnimationSpeed = mob.walkAnimation.SpeedAt(partialTick);
             state.ageInTicks = static_cast<float>(mob.tickCount) + partialTick;
+            // MC LivingEntityRenderer.setupRotations: a shaking mob's body
+            // yaw jitters by cos(floor(ageInTicks) * 3.25) * PI * 0.4 (after
+            // the head yaw was taken relative to the steady body). Shaking is
+            // PiglinRenderer / HoglinRenderer's isConverting — a piglin,
+            // brute or hoglin counting down to zombification.
+            {
+                bool converting = false;
+                if (const auto* piglin = MobAs<Game::Piglin>(mob, type, Game::EntityTypeId::Piglin)) {
+                    converting = piglin->IsConverting();
+                } else if (const auto* brute = MobAs<Game::PiglinBrute>(mob, type, Game::EntityTypeId::PiglinBrute)) {
+                    converting = brute->IsConverting();
+                } else if (const auto* hoglin = MobAs<Game::Hoglin>(mob, type, Game::EntityTypeId::Hoglin)) {
+                    converting = hoglin->IsConverting();
+                }
+                if (converting) {
+                    bodyRot += static_cast<float>(
+                        std::cos(static_cast<double>(std::floor(state.ageInTicks) * 3.25f)) * Game::Mth::kPi * 0.4000000059604645);
+                }
+            }
             // MC EndCrystalRenderState.ageInTicks reads the crystal's own
             // random-seeded clock — a ring of crystals must not bob in step.
             if (crystalMob) {
@@ -2223,6 +2624,9 @@ namespace Render {
             // The entity's own size (scaled portals, /scale) on top of the
             // type's — the box follows it too (Entity::GetBbWidth).
             state.scale *= mob.scale;
+            // The GUI box draws the entity at its unscaled size
+            // (extractEntityInInventoryFollowsMouse: scale = 1).
+            if (guiCapture && mob.scale > 0.0f) state.scale /= mob.scale;
             // MC ArmorStandRenderer.extractRenderState / setupRotations: the
             // six poses, the yaw the plate squares itself against, the two
             // visibility flags, and the hit wobble — a ±3° yaw sway for the
@@ -2262,7 +2666,26 @@ namespace Render {
                         break;
                 }
             }
+            // MC TropicalFishRenderer.submit — the body by the pattern's base
+            // (SMALL → model A, LARGE → model B); SalmonRenderer.submit — the
+            // mesh by the size.
+            const Game::TropicalFish* tropicalFish =
+                MobAs<Game::TropicalFish>(mob, type, Game::EntityTypeId::TropicalFish);
+            if (tropicalFish) {
+                if (EntityModel* body = TropicalFishBody(*modelEntry, tropicalFish->GetPackedVariant())) {
+                    model = body;
+                }
+            }
+            if (type == Game::EntityTypeId::Salmon) {
+                const uint8_t size = mob.GetVariantByte();
+                if (size == Game::Salmon::kSmall && modelEntry->salmonSmall) {
+                    model = modelEntry->salmonSmall.get();
+                } else if (size == Game::Salmon::kLarge && modelEntry->salmonLarge) {
+                    model = modelEntry->salmonLarge.get();
+                }
+            }
             state.isInWater = mob.IsInWater();
+            SetupFishRotations(state, type);
             // The topple. mob.deathTime is already synced (SetEntityDataS2C
             // carries it) and counts 1..20 over the second between the death
             // event and the removal packet — the animation and the body's life
@@ -2321,45 +2744,89 @@ namespace Render {
                 }
             }
 
-            // MC AbstractSkeleton.populateDefaultEquipmentSlots always puts a
-            // bow in the main hand, so this is a constant rather than a synched
-            // field — there is no skeleton in vanilla that spawns without one.
+            // ── Arm poses from the held items (the synced equipment) ──────
             //
-            // The pose is AbstractSkeletonRenderer.getArmPose: BOW_AND_ARROW
-            // only while aggressive, otherwise EMPTY and the arm just swings
-            // with the walk. That is the whole reason a wandering skeleton
-            // carries its bow at its side and a hunting one raises it.
-            const bool isSkeleton = (type == Game::EntityTypeId::Skeleton);
-            // The bow-armed skeleton family shares the pose: stray, bogged and
-            // parched also spawn with bows in MC. The wither skeleton carries a
-            // stone SWORD, so it stays out — its aggressive arm-raise is the
-            // melee branch, keyed on isHoldingBow being false. Only the plain
-            // skeleton also renders the bow ITEM below (the held-item transform
-            // needs SkeletonModel::RightHandMatrix, which GeneratedModel does
-            // not provide yet).
-            const bool holdsBow = isSkeleton
-                || type == Game::EntityTypeId::Stray
-                || type == Game::EntityTypeId::Bogged
-                || type == Game::EntityTypeId::Parched;
-            if (holdsBow) {
-                state.isHoldingBow = true;
-                state.rightArmPose = state.isAggressive ? ArmPose::BowAndArrow
-                                                        : ArmPose::Empty;
-            }
-            // MC HumanoidMobRenderer sets the ITEM arm pose from a non-empty
-            // main hand: the wither skeleton carries its stone sword. Its
-            // aggressive melee raise still comes from SkeletonModel's own
-            // branch (keyed on isHoldingBow being false).
-            if (type == Game::EntityTypeId::WitherSkeleton) {
-                state.rightArmPose = ArmPose::Item;
-            }
-            // MC DrownedRenderer.getArmPose: THROW_TRIDENT while aggressive
-            // with the trident, ITEM otherwise (the 6.25% spawn roll).
-            if (const auto* drowned = MobAs<Game::Drowned>(mob, type, Game::EntityTypeId::Drowned)) {
-                if (drowned->HasTrident()) {
-                    state.rightArmPose = state.isAggressive
-                        ? ArmPose::ThrowTrident : ArmPose::Item;
+            // MC ArmedEntityRenderState: mainArm = Mob.getMainArm (LEFT for a
+            // left-handed mob), each arm holding getItemHeldByArm. The
+            // poses are HumanoidMobRenderer.getArmPose — SPEAR for a spear,
+            // else EMPTY (a mob's arm just swings with the walk; the item
+            // rides the arm) — with AbstractSkeletonRenderer's BOW_AND_ARROW
+            // on the main arm while an aggressive skeleton holds a bow
+            // (isHoldingBow = the main hand is a bow; without one its
+            // aggressive melee raise is SkeletonModel's own branch) and
+            // DrownedRenderer's THROW_TRIDENT below. The piglins pose from
+            // their PiglinArmPose (mobArmPose) and the illagers from their
+            // IllagerArmPose instead.
+            {
+                const Game::ItemStack& mainItem = mob.GetEquipment(Game::EquipmentSlot::MAINHAND);
+                const Game::ItemStack& offItem  = mob.GetEquipment(Game::EquipmentSlot::OFFHAND);
+                const bool leftHanded = mob.IsLeftHanded();
+                state.mainArm = leftHanded ? 0.0f : 1.0f;
+                const Game::ItemStack& rightItem = leftHanded ? offItem : mainItem;
+                const Game::ItemStack& leftItem  = leftHanded ? mainItem : offItem;
+                const auto spearPose = [](const Game::ItemStack& s) {
+                    return !s.IsEmpty() &&
+                           Game::DataTags::HasTag(Game::DataTags::Registry::Item,
+                                                  Game::ItemRegistry::Slug(s.itemId), "minecraft:spears")
+                        ? ArmPose::Spear : ArmPose::Empty;
+                };
+                switch (type) {
+                    case Game::EntityTypeId::Zombie: case Game::EntityTypeId::Husk:
+                    case Game::EntityTypeId::Drowned: case Game::EntityTypeId::ZombieVillager:
+                    case Game::EntityTypeId::Giant:
+                    case Game::EntityTypeId::Skeleton: case Game::EntityTypeId::Stray:
+                    case Game::EntityTypeId::Bogged: case Game::EntityTypeId::Parched:
+                    case Game::EntityTypeId::WitherSkeleton:
+                        state.rightArmPose = spearPose(rightItem);
+                        state.leftArmPose  = spearPose(leftItem);
+                        break;
+                    default:
+                        break;
                 }
+                // HumanoidRenderState's use clock, the held items the SPEAR
+                // pose sways by, the kinetic hit clock, and the swing's type
+                // (a spear in the main hand STABs).
+                state.rightArmItem = rightItem.IsEmpty() ? 0u : static_cast<uint32_t>(rightItem.itemId);
+                state.leftArmItem  = leftItem.IsEmpty() ? 0u : static_cast<uint32_t>(leftItem.itemId);
+                state.isUsingItem  = mob.IsUsingItem();
+                if (state.isUsingItem) {
+                    state.useItemHand = mob.GetUsedItemHand() == Game::EquipmentSlot::OFFHAND ? 1 : 0;
+                    state.ticksUsingItem = static_cast<float>(mob.GetTicksUsingItem()) + partialTick;
+                }
+                state.ticksSinceKineticHitFeedback = mob.GetTicksSinceLastKineticHitFeedback(partialTick);
+                if (Game::Spear::IsSpear(mainItem.itemId)) state.swingAnimType = 2.0f;
+                const bool skeletonFamily = type == Game::EntityTypeId::Skeleton ||
+                                            type == Game::EntityTypeId::Stray ||
+                                            type == Game::EntityTypeId::Bogged ||
+                                            type == Game::EntityTypeId::Parched ||
+                                            type == Game::EntityTypeId::WitherSkeleton;
+                if (skeletonFamily) {
+                    state.isHoldingBow = mainItem.itemId == Game::Items::Bow && !mainItem.IsEmpty();
+                    if (state.isAggressive && state.isHoldingBow) {
+                        (leftHanded ? state.leftArmPose : state.rightArmPose) = ArmPose::BowAndArrow;
+                    }
+                }
+                // DrownedRenderer.getArmPose: the main arm throws while an
+                // aggressive drowned holds a trident in it.
+                if (type == Game::EntityTypeId::Drowned && state.isAggressive) {
+                    const Game::ItemStack& inMainArm = leftHanded ? leftItem : rightItem;
+                    if (!inMainArm.IsEmpty() && inMainArm.itemId == Game::Items::Trident) {
+                        (leftHanded ? state.leftArmPose : state.rightArmPose) = ArmPose::ThrowTrident;
+                    }
+                }
+                // IllagerRenderer.extractRenderState: hasMainHandItem — an
+                // armed vindicator swings its weapon down instead of the
+                // empty-handed zombie arms.
+                switch (type) {
+                    case Game::EntityTypeId::Vindicator: case Game::EntityTypeId::Pillager:
+                    case Game::EntityTypeId::Evoker: case Game::EntityTypeId::Illusioner:
+                        state.hasMainHandItem = !mainItem.IsEmpty();
+                        break;
+                    default:
+                        break;
+                }
+            }
+            if (MobAs<Game::Drowned>(mob, type, Game::EntityTypeId::Drowned)) {
                 // MC LivingEntityRenderer.extractRenderState: swimAmount =
                 // getSwimAmount(partialTick). The ramp itself is client-side
                 // (ClientMob::swimAmount — see ClientMobManager::Tick).
@@ -2376,12 +2843,6 @@ namespace Render {
                         state.swimAmount, 0.0f, -10.0f - state.xRot);
                     state.swimPivotY = mob.GetBbHeight() * 0.5f;
                 }
-            }
-            // The vindicator's iron axe: hasMainHandItem flips IllagerModel's
-            // ATTACKING branch from the empty-hand zombie arms to MC's
-            // swingWeaponDown.
-            if (type == Game::EntityTypeId::Vindicator) {
-                state.hasMainHandItem = true;
             }
 
             // MC's per-mob extractRenderState, for the clip guards. Each is
@@ -2484,7 +2945,11 @@ namespace Render {
                 state.eatAnimation = horse->GetEatAnim(partialTick);
                 state.standAnimation = horse->GetStandAnim(partialTick);
                 state.animateTail = horse->IsAnimatingTail();
+                state.feedingAnimation = horse->GetMouthAnim(partialTick);
             }
+            // The mount renderers' isRidden / body-item inputs
+            // (MountEquipmentLayers.cpp).
+            FillMountRenderState(mob, type, state);
             // MC TamableAnimal — isInSittingPose drives the sit pose the
             // cat/wolf/parrot setupAnim programs key on (state.isSitting).
             // The flag arrives on the anim state byte (bit 0), so a tamed
@@ -2502,13 +2967,35 @@ namespace Render {
                 state.onGroundFactor    = axolotl->GetOnGroundFactor(partialTick);
                 state.movingFactor      = axolotl->GetMovingFactor(partialTick);
             }
-            // MC PiglinRenderer: the DANCING arm pose while dancing (after a
-            // hoglin hunt celebration).
+            // MC AllayRenderer.extractRenderState: the dance, its spin and
+            // the lift-the-item ramp the model's arms read.
+            if (const auto* allay = MobAs<Game::Allay>(mob, type, Game::EntityTypeId::Allay)) {
+                state.isDancing = allay->IsDancing();
+                state.isSpinning = allay->IsSpinning();
+                state.spinningProgress = allay->GetSpinningProgress(partialTick);
+                state.holdingAnimationProgress = allay->GetHoldingItemAnimationProgress(partialTick);
+            }
+            // MC PiglinRenderer: isDancing (after a hoglin hunt
+            // celebration); the arm pose itself is set in the per-type
+            // switch below from Piglin::GetPiglinArmPose.
             if (const auto* piglin = MobAs<Game::Piglin>(mob, type, Game::EntityTypeId::Piglin)) {
-                if (piglin->IsDancing()) {
-                    state.isDancing = true;
-                    state.mobArmPose = 4.0f;  // PiglinArmPose.DANCING
+                state.isDancing = piglin->IsDancing();
+            }
+            // MC HumanoidRenderState's crossbow clock for a crossbow shooter
+            // (IllagerRenderer / PiglinRenderer extract it through
+            // ArmedEntityRenderState): ticksUsingItem while drawing, the
+            // held crossbow's charge duration, and the hand it is drawn in.
+            if (const auto* shooter = dynamic_cast<const Game::CrossbowAttackMob*>(&mob)) {
+                const int ticks = shooter->GetClientChargeTicks();
+                state.ticksUsingItem = ticks >= 0 ? static_cast<float>(ticks) + partialTick : 0.0f;
+                const Game::EquipmentSlot hand = Game::MobCrossbow::WeaponHoldingHand(mob, Game::Items::Crossbow);
+                const Game::ItemStack& crossbow = mob.GetEquipment(hand);
+                if (crossbow.itemId == Game::Items::Crossbow) {
+                    state.maxCrossbowChargeDuration =
+                        static_cast<float>(Game::MobCrossbow::ChargeDuration(crossbow));
                 }
+                state.useItemHand = hand == Game::EquipmentSlot::OFFHAND ? 1 : 0;
+                state.isUsingItem = ticks >= 0;
             }
             if (const auto* bat = MobAs<Game::Bat>(mob, type, Game::EntityTypeId::Bat)) {
                 state.isResting = bat->IsResting();
@@ -2570,9 +3057,21 @@ namespace Render {
                             .GetAnimationProgress(partialTick);
                     break;
                 case Game::EntityTypeId::Parrot:
-                    // ParrotModel.getPose without perching/sitting/party:
-                    // FLYING(0) off the ground, STANDING(1) on it.
-                    state.mobPose = mob.onGround ? 1.0f : 0.0f;
+                    // MC ParrotModel.getPose: PARTY(3) while a jukebox plays
+                    // nearby (client-side, Parrot.UpdatePartyState),
+                    // SITTING(2) in the sitting pose, FLYING(0) off the
+                    // ground, else STANDING(1).
+                    if (const auto* parrot = MobAs<Game::Parrot>(mob, type, Game::EntityTypeId::Parrot)) {
+                        // (The dance shows on a perched parrot: airborne
+                        // it flies, and it takes the dance up again on
+                        // landing while the song plays.)
+                        state.mobPose = (parrot->IsPartyParrot() && !parrot->IsFlying()) ? 3.0f
+                                      : parrot->IsInSittingPose()   ? 2.0f
+                                      : parrot->IsFlying()          ? 0.0f
+                                                                    : 1.0f;
+                    } else {
+                        state.mobPose = mob.onGround ? 1.0f : 0.0f;
+                    }
                     break;
                 case Game::EntityTypeId::Vindicator:
                     // Vindicator.getArmPose: ATTACKING while aggressive,
@@ -2580,9 +3079,12 @@ namespace Render {
                     state.mobArmPose = state.isAggressive ? 1.0f : 0.0f;
                     break;
                 case Game::EntityTypeId::Pillager:
-                    // Pillager.getArmPose: a pillager always holds its
-                    // crossbow -> CROSSBOW_HOLD.
-                    state.mobArmPose = 4.0f;
+                    // Pillager.getArmPose: CROSSBOW_CHARGE(5) drawing,
+                    // CROSSBOW_HOLD(4) holding one, ATTACKING(1) while
+                    // aggressive, else NEUTRAL(7).
+                    if (const auto* pillager = MobAs<Game::Pillager>(mob, type, Game::EntityTypeId::Pillager)) {
+                        state.mobArmPose = static_cast<float>(pillager->GetIllagerArmPose());
+                    }
                     break;
                 case Game::EntityTypeId::Evoker:
                     // SpellcasterIllager.getArmPose: CROSSED(0); the
@@ -2598,13 +3100,20 @@ namespace Render {
                     state.mobArmPose = state.isAggressive ? 3.0f : 0.0f;
                     break;
                 case Game::EntityTypeId::Piglin:
-                    // Piglin.getArmPose: DEFAULT (no items/crossbows here).
-                    state.mobArmPose = 5.0f;
+                    // Piglin.getArmPose: DANCING(4), ADMIRING_ITEM(3),
+                    // ATTACKING_WITH_MELEE_WEAPON(0), CROSSBOW_CHARGE(2),
+                    // CROSSBOW_HOLD(1) with a loaded crossbow, else DEFAULT(5).
+                    if (const auto* piglin = MobAs<Game::Piglin>(mob, type, Game::EntityTypeId::Piglin)) {
+                        state.mobArmPose = static_cast<float>(piglin->GetPiglinArmPose());
+                    }
                     break;
                 case Game::EntityTypeId::PiglinBrute:
-                    // PiglinBrute.getArmPose: melee-armed and aggressive ->
-                    // ATTACKING_WITH_MELEE_WEAPON(0), else DEFAULT(5).
-                    state.mobArmPose = state.isAggressive ? 0.0f : 5.0f;
+                    // PiglinBrute.getArmPose: aggressive with a TOOL in the
+                    // main hand -> ATTACKING_WITH_MELEE_WEAPON(0), else
+                    // DEFAULT(5).
+                    if (const auto* brute = MobAs<Game::PiglinBrute>(mob, type, Game::EntityTypeId::PiglinBrute)) {
+                        state.mobArmPose = static_cast<float>(brute->GetPiglinArmPose());
+                    }
                     break;
                 case Game::EntityTypeId::Dolphin: {
                     // DolphinRenderer: horizontal speed² > 1e-7.
@@ -2617,14 +3126,17 @@ namespace Render {
                     state.isOnLand = !state.isInWater && mob.onGround;
                     break;
                 case Game::EntityTypeId::Wolf:
-                    // WolfRenderer.extractRenderState: real getTailAngle (the
-                    // tame health wag included) and the beg head tilt.
-                    state.isAngry = state.isAggressive;
+                    // WolfRenderer.extractRenderState: isAngry (the synched
+                    // anger window, not the melee goal's aggressive flag),
+                    // the real getTailAngle (the tame health wag included),
+                    // the beg head tilt and the wet shake.
                     if (const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf)) {
+                        state.isAngry = wolf->IsAngryState();
                         state.tailAngle = wolf->GetTailAngle();
                         state.headRollAngle = wolf->GetHeadRollAngle(partialTick);
-                    } else if (state.isAggressive) {
-                        state.tailAngle = 1.5393804f;
+                        state.shakeAnim = wolf->GetShakeAnim(partialTick);
+                    } else {
+                        state.tailAngle = 0.62831855f;   // WolfRenderState's default
                     }
                     break;
                 case Game::EntityTypeId::Enderman:
@@ -3029,18 +3541,37 @@ namespace Render {
             // order.
             switch (type) {
                 case Game::EntityTypeId::Wolf: {
-                    // WolfRenderer.getTextureLocation: tame > angry > wild
-                    // (the pale/default variant — biome wolf variants keep
-                    // their assets on disk for when variant rolls land).
+                    // WolfRenderer.getTextureLocation → Wolf.getTexture: the
+                    // coat's tame sheet, else its angry sheet while angry,
+                    // else its wild sheet (the `_baby` twins for a pup under
+                    // the 26.x look, through MobTex).
                     if (const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf)) {
-                        if (wolf->IsTame()) {
-                            batchTexture = MobTex(
-                                "assets/textures/entity/wolf/wolf_tame.png");
-                        } else if (state.isAggressive) {
-                            batchTexture = MobTex(
-                                "assets/textures/entity/wolf/wolf_angry.png");
-                        }
+                        batchTexture = MobTex(wolf->GetTexturePath());
                     }
+                    break;
+                }
+                case Game::EntityTypeId::Llama:
+                case Game::EntityTypeId::TraderLlama: {
+                    // LlamaRenderer.getTextureLocation: the coat's sheet
+                    // (Llama.Variant ids — creamy, white, brown, gray; the
+                    // `_baby` twins for a cria under the 26.x look, through
+                    // MobTex).
+                    static constexpr const char* kLlamaTextures[4] = {
+                        "assets/textures/entity/llama/creamy.png",
+                        "assets/textures/entity/llama/white.png",
+                        "assets/textures/entity/llama/brown.png",
+                        "assets/textures/entity/llama/gray.png",
+                    };
+                    const uint8_t v = mob.GetVariantByte();
+                    if (v < 4) batchTexture = MobTex(kLlamaTextures[v]);
+                    break;
+                }
+                case Game::EntityTypeId::Horse: {
+                    // HorseRenderer.getTextureLocation: the coat's sheet
+                    // (Horse.Variant ids, the variant byte's low nibble; the
+                    // `_baby` twins for a foal under the 26.x look, through
+                    // MobTex).
+                    batchTexture = MobTex(Game::Horse::VariantTexture(mob.GetVariantByte() & 0x0F));
                     break;
                 }
                 case Game::EntityTypeId::Cow: {
@@ -3051,6 +3582,15 @@ namespace Render {
                         "assets/textures/entity/cow/warm_cow.png",
                         "assets/textures/entity/cow/cold_cow.png"};
                     batchTexture = MobTex(kCow[std::min<uint8_t>(mob.GetVariantByte(), 2)]);
+                    break;
+                }
+                case Game::EntityTypeId::Mooshroom: {
+                    // MushroomCowRenderer.getTextureLocation: the variant's
+                    // sheet (MushroomCow.Variant RED 0 / BROWN 1 on the
+                    // variant byte — a lightning strike swaps it).
+                    batchTexture = MobTex(mob.GetVariantByte() == 1
+                                              ? "assets/textures/entity/cow/brown_mooshroom.png"
+                                              : "assets/textures/entity/cow/red_mooshroom.png");
                     break;
                 }
                 case Game::EntityTypeId::Pig: {
@@ -3113,6 +3653,13 @@ namespace Render {
                     if (v < 5) batchTexture = MobTex(kAxolotlTextures[v]);
                     break;
                 }
+                case Game::EntityTypeId::Parrot: {
+                    // ParrotRenderer.getTextureLocation: the variant's sheet
+                    // (Parrot.Variant ids, the wire's variant byte).
+                    batchTexture = MobTex(Game::Parrot::VariantTexture(
+                        Game::Parrot::VariantById(mob.GetVariantByte())));
+                    break;
+                }
                 case Game::EntityTypeId::Cat: {
                     // CatVariants declaration order (tabby..all_black); the
                     // spawn roll is uniform 0-10 (no witch huts / moon phase).
@@ -3131,6 +3678,12 @@ namespace Render {
                     };
                     const uint8_t v = mob.GetVariantByte();
                     if (v < 11) batchTexture = MobTex(kCatTextures[v]);
+                    break;
+                }
+                case Game::EntityTypeId::TropicalFish: {
+                    // MC TropicalFishRenderer.getTextureLocation: by the
+                    // pattern's base — tropical_a (SMALL) / tropical_b (LARGE).
+                    if (tropicalFish) batchTexture = TropicalFishBodyTexture(tropicalFish->GetPackedVariant());
                     break;
                 }
                 default:
@@ -3214,7 +3767,9 @@ namespace Render {
                                             state.deathFlipDeg, state.modelScale,
                                             state.swimPitchDeg, state.swimPivotY,
                                             state.modelOffset,
-                                            state.isUpsideDown, state.boundingBoxHeight);
+                                            state.isUpsideDown, state.boundingBoxHeight,
+                                            state.isAutoSpinAttack, state.xRot, state.ageInTicks,
+                                            state.fishYawDeg, state.fishLandRoll, state.fishLandOffset);
             } else {
                 entityMatrix =
                     AppendMob(*model, state, renderPos, bodyRot,
@@ -3230,6 +3785,68 @@ namespace Render {
                                     bodyIndexCount, ModMobs::BodyTranslucent(type),
                                     model->CullBackFaces() });
                 batches.back().part = BatchPart::Body;
+
+                // MC ThrownTridentRenderer: a foil trident (ID_FOIL) draws
+                // with entitySolidGlint — ENCHANTED_GLINT_ITEM scrolled by
+                // ENTITY_GLINT_TEXTURING (scale 0.5) over its body.
+                if (type == Game::EntityTypeId::Trident) {
+                    const auto* trident = MobAs<Game::ThrownTrident>(mob, type, Game::EntityTypeId::Trident);
+                    const TextureHandle glintTex = trident && trident->IsFoil()
+                        ? LoadTexture("assets/textures/misc/enchanted_glint_item.png", /*repeatWrap=*/true)
+                        : INVALID_TEXTURE;
+                    if (glintTex != INVALID_TEXTURE) {
+                        constexpr float kGlintScale = 0.5f;
+                        constexpr float kGlintRot = 0.17453292f;
+                        const float c = std::cos(kGlintRot), sn = std::sin(kGlintRot);
+                        const auto base = static_cast<uint32_t>(m_verts.size());
+                        for (size_t i = firstVert; i < firstVert + bodyVertCount; ++i) {
+                            ModelVertex v = m_verts[i];
+                            const float x = v.u * kGlintScale, y = v.v * kGlintScale;
+                            v.u = x * c - y * sn - glintL0;
+                            v.v = x * sn + y * c + glintL1;
+                            v.r = v.g = v.b = v.a = 255;
+                            m_verts.push_back(v);
+                        }
+                        const size_t glintFirst = m_indices.size();
+                        for (size_t i = firstIndex; i < firstIndex + bodyIndexCount; ++i) {
+                            m_indices.push_back(base + (m_indices[i] - static_cast<uint32_t>(firstVert)));
+                        }
+                        Batch glintBatch;
+                        glintBatch.texture = glintTex;
+                        glintBatch.firstIndex = glintFirst;
+                        glintBatch.indexCount = m_indices.size() - glintFirst;
+                        glintBatch.cull = model->CullBackFaces();
+                        glintBatch.part = BatchPart::Layer;
+                        glintBatch.glint = true;
+                        batches.push_back(glintBatch);
+                    }
+                }
+
+                // MC TropicalFishRenderer.getModelTint: the body sheet is
+                // multiplied by the base colour's DyeColor
+                // textureDiffuseColor — the model's vertex colour, so the
+                // per-face shade ModelPart::Build baked in survives.
+                if (tropicalFish) {
+                    TintVertices(m_verts, firstVert, firstVert + bodyVertCount,
+                                 Game::DyeTextureDiffuseColor(tropicalFish->GetVariant().baseColor));
+                }
+
+                // MC WolfRenderer.getModelTint: a wet wolf's coat is shaded
+                // (0.75, brightening back to 1 as the shake runs out) — the
+                // body model only; the collar and armour keep their colours.
+                if (type == Game::EntityTypeId::Wolf) {
+                    if (const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf)) {
+                        const float shade = wolf->GetWetShade(partialTick);
+                        if (shade != 1.0f) {
+                            for (size_t i = firstVert; i < firstVert + bodyVertCount; ++i) {
+                                ModelVertex& v = m_verts[i];
+                                v.r = static_cast<uint8_t>(static_cast<float>(v.r) * shade);
+                                v.g = static_cast<uint8_t>(static_cast<float>(v.g) * shade);
+                                v.b = static_cast<uint8_t>(static_cast<float>(v.b) * shade);
+                            }
+                        }
+                    }
+                }
             }
 
             // ── Sulfur cube shell + inner cube — MC SulfurCubeRenderer /
@@ -3652,6 +4269,21 @@ namespace Render {
                 }
             }
 
+            // ── Horse markings — MC HorseMarkingLayer ─────────────────────
+            // The markings sheet over the same horse mesh (order 1, after
+            // the coat), not while invisible; NONE draws nothing. The foal's
+            // `_baby` sheet comes through MobTex under the 26.x look.
+            if (type == Game::EntityTypeId::Horse && bodyIndexCount > 0) {
+                const char* markingsTex = Game::Horse::MarkingsTexture((mob.GetVariantByte() >> 4) & 0x0F);
+                if (markingsTex[0] != '\0') {
+                    const TextureHandle tex = MobTex(markingsTex);
+                    if (tex != INVALID_TEXTURE) {
+                        batches.push_back({ tex, overlay, firstIndex, bodyIndexCount });
+                        batches.back().part = BatchPart::BodyCopy;   // `!state.isInvisible`
+                    }
+                }
+            }
+
             // ── Iron golem cracks + flower — MC IronGolem*Layer ───────────
             if (type == Game::EntityTypeId::IronGolem) {
                 // IronGolemCrackinessLayer: the PARENT model again with the
@@ -3710,14 +4342,13 @@ namespace Render {
             //
             // The mushroom BLOCK model (cross.json) three times: twice on
             // the back, once on the head, at MC's exact pose offsets, adults
-            // only. The port has no mooshroom variant sync, so the RED
-            // mushroom stands for every mooshroom (the def texture is the
-            // red sheet too); a brown variant would swap to
-            // brown_mushroom.png.
+            // only. The variant's own mushroom block (Variant.getBlockState):
+            // red, or brown on a brown mooshroom (variant byte 1).
             if (type == Game::EntityTypeId::Mooshroom &&
                 !state.isBaby) {
                 const TextureHandle tex =
-                    LoadTexture("assets/textures/block/red_mushroom.png");
+                    LoadTexture(mob.GetVariantByte() == 1 ? "assets/textures/block/brown_mushroom.png"
+                                                          : "assets/textures/block/red_mushroom.png");
                 if (tex != INVALID_TEXTURE) {
                     const glm::mat4 block =
                         glm::scale(entityMatrix, glm::vec3(16.0f));
@@ -3841,86 +4472,41 @@ namespace Render {
                 }
             }
 
-            // ── Held items — MC ItemInHandLayer ───────────────────────────
+            // ── Tropical fish pattern — MC TropicalFishPatternLayer ───────
             //
-            // Each is its own texture, so its own batch. MC draws the held
-            // item with NO_OVERLAY — a skeleton flashing red does not take
-            // its bow with it — so the overlay is deliberately zero. Display
-            // blocks are the item JSONs' thirdperson_righthand, verbatim.
-            {
-                // models/item/bow.json.
-                static constexpr DisplaySpec kBowSpec{
-                    {-1.0f, -2.0f, 2.5f}, {-80.0f, 260.0f, -40.0f}, 0.9f};
-                // models/item/handheld.json — swords, axes.
-                static constexpr DisplaySpec kHandheldSpec{
-                    {0.0f, 4.0f, 0.5f}, {0.0f, -90.0f, 55.0f}, 0.85f};
-                // models/item/crossbow.json.
-                static constexpr DisplaySpec kCrossbowSpec{
-                    {2.0f, 0.1f, -3.0f}, {-90.0f, 0.0f, -60.0f}, 0.9f};
-
-                const char* heldSprite = nullptr;
-                const DisplaySpec* heldSpec = nullptr;
-                bool heldTrident = false;
-                switch (type) {
-                    // The bow-armed skeleton family plus the illusioner.
-                    case Game::EntityTypeId::Skeleton:
-                    case Game::EntityTypeId::Stray:
-                    case Game::EntityTypeId::Bogged:
-                    case Game::EntityTypeId::Parched:
-                    case Game::EntityTypeId::Illusioner:
-                        heldSprite = "bow";
-                        heldSpec = &kBowSpec;
-                        break;
-                    case Game::EntityTypeId::WitherSkeleton:
-                        heldSprite = "stone_sword";
-                        heldSpec = &kHandheldSpec;
-                        break;
-                    case Game::EntityTypeId::Pillager:
-                        // The uncharged crossbow sprite — charge states wait
-                        // on a mob item-use clock.
-                        heldSprite = "crossbow_standby";
-                        heldSpec = &kCrossbowSpec;
-                        break;
-                    case Game::EntityTypeId::Vindicator:
-                        // MC hides the axe while the arms are crossed; it
-                        // shows the moment the pose turns ATTACKING.
-                        if (state.isAggressive) {
-                            heldSprite = "iron_axe";
-                            heldSpec = &kHandheldSpec;
-                        }
-                        break;
-                    case Game::EntityTypeId::Drowned:
-                        heldTrident =
-                            static_cast<const Game::Drowned&>(mob).HasTrident();
-                        break;
-                    default:
-                        // The mod mobs' populateDefaultEquipmentSlots items
-                        // (ModMobRender.hpp HeldItem) — handheld tools.
-                        if (const char* mod = ModMobs::HeldItem(mob, type, state)) {
-                            heldSprite = mod;
-                            heldSpec = &kHandheldSpec;
-                        }
-                        break;
+            // coloredCutoutModelCopyLayerRender: the *_PATTERN mesh of the
+            // body's base (the body inflated 0.008), posed by the same
+            // state, over the pattern's own sheet tinted by the pattern
+            // colour's textureDiffuseColor. Skipped on an invisible body
+            // (BodyCopy), with the body's hurt overlay.
+            if (tropicalFish && bodyIndexCount > 0) {
+                size_t layerFirst = 0;
+                bool layerCull = false;
+                const TextureHandle tex = AppendTropicalFishPattern(
+                    *modelEntry, tropicalFish->GetPackedVariant(), state, renderPos, bodyRot,
+                    cameraPos, layerFirst, layerCull);
+                if (tex != INVALID_TEXTURE) {
+                    batches.push_back({ tex, overlay, layerFirst, m_indices.size() - layerFirst,
+                                        false, layerCull });
+                    batches.back().part = BatchPart::BodyCopy;
                 }
+            }
 
-                if (heldSprite) {
-                    const size_t itemFirst = m_indices.size();
-                    const TextureHandle tex = AppendHeldSprite(
-                        *model, entityMatrix, heldSprite,
-                        *heldSpec, m_verts, m_indices);
-                    if (tex != INVALID_TEXTURE && m_indices.size() > itemFirst) {
-                        batches.push_back({ tex, glm::vec4(0.0f), itemFirst,
-                                            m_indices.size() - itemFirst });
-                    }
-                } else if (heldTrident) {
-                    const size_t itemFirst = m_indices.size();
-                    const TextureHandle tex = AppendHeldTrident(
-                        *model, entityMatrix, m_verts, m_indices);
-                    if (tex != INVALID_TEXTURE && m_indices.size() > itemFirst) {
-                        batches.push_back({ tex, glm::vec4(0.0f), itemFirst,
-                                            m_indices.size() - itemFirst });
-                    }
-                }
+            // ── Item layers — MC ItemInHandLayer (both hands), CustomHead-
+            //    Layer, and the per-renderer holders (fox, dolphin, panda,
+            //    witch, villager / trader, allay) — MobEquipmentLayers.cpp.
+            //
+            // Each item is its own texture, so its own batch. MC draws them
+            // with NO_OVERLAY — a skeleton flashing red does not take its bow
+            // with it — so the overlay is deliberately zero; as layers they
+            // stay on an invisible body.
+            if (!armorStand) {
+                AppendMobItemLayers(mob, type, *model, state, entityMatrix,
+                                    [&](TextureHandle tex, size_t first, bool cull) {
+                                        if (tex == INVALID_TEXTURE || m_indices.size() <= first) return;
+                                        batches.push_back({ tex, glm::vec4(0.0f), first,
+                                                            m_indices.size() - first, false, cull });
+                                    });
             }
 
             // ── Second-model overlays over the same skeleton ──────────────
@@ -4056,41 +4642,147 @@ namespace Render {
                 }
             }
 
-            // Tamed collar — MC Wolf/CatCollarLayer: the SAME model drawn
-            // again with the collar sheet, tinted by the dye (default RED —
-            // no collar dyeing yet, so every collar is the default). The
-            // collar textures only paint the neck band; the rest of the
-            // sheet is transparent, so re-drawing the whole skeleton is
-            // exactly MC's renderColoredCutoutModel. `model` is the baby
-            // instance for a pup/kitten, which is MC's WOLF_BABY_ARMOR /
-            // CAT_BABY_COLLAR — the same mesh through the baby transform.
+            // ── HumanoidArmorLayer — a mob's worn armour (Mob::GetEquipment) ─
+            // EquipmentLayerRenderer submits every armour layer with
+            // OverlayTexture.NO_OVERLAY: the armour does not flash red with
+            // the body.
+            if (!armorStand && mob.HasAnyEquipment()) {
+                AppendMobArmorLayer(mob, *model, state, renderPos, bodyRot, cameraPos,
+                                    [&](TextureHandle tex, size_t first, bool cull) {
+                                        if (tex == INVALID_TEXTURE || m_indices.size() <= first) return;
+                                        batches.push_back({ tex, glm::vec4(0.0f), first,
+                                                            m_indices.size() - first, false, cull });
+                                    });
+            }
+
+            // ── Wolf armour — MC WolfArmorLayer ────────────────────────────
+            //
+            // Registered BEFORE the collar layer in WolfRenderer, so it draws
+            // first. Adults only; the BODY slot's EQUIPPABLE asset
+            // (armadillo_scute) under EquipmentClientInfo.LayerType.WOLF_BODY
+            // is two layers — the scute sheet, always (an undyeable layer's
+            // colour is -1), and the overlay only when the piece is dyed
+            // (Layer.onlyIfDyed, colorWhenUndyed empty → 0 → skipped), tinted
+            // by DYED_COLOR — then the Crackiness.WOLF_ARMOR crack sheet.
+            // armorCutoutNoCull with NO_OVERLAY: the armour never flashes
+            // red, and it stays on an invisible wolf (the layer has no
+            // isInvisible gate). The armour's enchantment glint is not drawn
+            // (no glint pass for entity layers here).
+            if (type == Game::EntityTypeId::Wolf && !state.isBaby && modelEntry->bodyArmorModel) {
+                const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf);
+                const Game::ItemStack* armor = wolf ? &wolf->GetBodyArmorItem() : nullptr;
+                if (armor && armor->itemId == Game::Items::WolfArmor && !armor->IsEmpty()) {
+                    EntityModel& armorModel = *modelEntry->bodyArmorModel;
+                    const std::optional<int32_t> dyed = armor->get(Game::DataComponents::DYED_COLOR);
+                    const auto pushArmorLayer = [&](const char* texPath, bool tinted, uint32_t rgb) {
+                        const size_t first = m_indices.size();
+                        const size_t vertFirst = m_verts.size();
+                        AppendMob(armorModel, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+                        if (m_indices.size() <= first) return;
+                        if (tinted) {
+                            const uint8_t tr = static_cast<uint8_t>((rgb >> 16) & 0xFF);
+                            const uint8_t tg = static_cast<uint8_t>((rgb >> 8) & 0xFF);
+                            const uint8_t tb = static_cast<uint8_t>(rgb & 0xFF);
+                            for (size_t i = vertFirst; i < m_verts.size(); ++i) {
+                                ModelVertex& v = m_verts[i];
+                                v.r = static_cast<uint8_t>((v.r * tr) / 255);
+                                v.g = static_cast<uint8_t>((v.g * tg) / 255);
+                                v.b = static_cast<uint8_t>((v.b * tb) / 255);
+                            }
+                        }
+                        batches.push_back({ LoadTexture(texPath), glm::vec4(0.0f), first,
+                                            m_indices.size() - first, false, /*cull=*/false });
+                        batches.back().part = BatchPart::Layer;
+                    };
+                    pushArmorLayer("assets/textures/entity/equipment/wolf_body/armadillo_scute.png",
+                                   false, 0xFFFFFFu);
+                    if (dyed && (*dyed & 0xFFFFFF) != 0) {
+                        pushArmorLayer("assets/textures/entity/equipment/wolf_body/armadillo_scute_overlay.png",
+                                       true, static_cast<uint32_t>(*dyed) & 0xFFFFFFu);
+                    }
+                    // WolfArmorLayer.maybeRenderCracks.
+                    const Game::WolfArmorCrackiness crack = Game::IsDamageableItem(*armor)
+                        ? Game::WolfArmorCrackinessByDamage(Game::GetDamageValue(*armor),
+                                                            Game::GetMaxDamage(*armor))
+                        : Game::WolfArmorCrackiness::None;
+                    const char* crackTex = nullptr;
+                    switch (crack) {
+                        case Game::WolfArmorCrackiness::Low:
+                            crackTex = "assets/textures/entity/wolf/wolf_armor_crackiness_low.png"; break;
+                        case Game::WolfArmorCrackiness::Medium:
+                            crackTex = "assets/textures/entity/wolf/wolf_armor_crackiness_medium.png"; break;
+                        case Game::WolfArmorCrackiness::High:
+                            crackTex = "assets/textures/entity/wolf/wolf_armor_crackiness_high.png"; break;
+                        default: break;
+                    }
+                    if (crackTex) pushArmorLayer(crackTex, false, 0xFFFFFFu);
+                }
+            }
+
+            // ── Mount equipment — MC SimpleEquipmentLayer on the mount
+            //    renderers (saddles, horse / nautilus armour, the happy
+            //    ghast's harness), LlamaDecorLayer (carpets, the trader
+            //    llama's decor) and RopesLayer — MountEquipmentLayers.cpp.
+            //
+            // EquipmentLayerRenderer submits with NO_OVERLAY and no
+            // invisibility gate, back faces unculled.
+            if (!armorStand) {
+                AppendMountEquipmentLayers(mob, type, state, renderPos, bodyRot, cameraPos,
+                                           [&](TextureHandle tex, size_t first, bool cull) {
+                                               if (tex == INVALID_TEXTURE || m_indices.size() <= first) return;
+                                               batches.push_back({ tex, glm::vec4(0.0f), first,
+                                                                   m_indices.size() - first, false, cull });
+                                           });
+            }
+
+            // Tamed collar — MC WolfCollarLayer / CatCollarLayer: the SAME
+            // skeleton drawn again with the collar sheet (the `_baby` sheet
+            // for a pup/kitten through MobTex), tinted by the collar's
+            // DyeColor.getTextureDiffuseColor — NOT the sheep's wool table,
+            // which is those colours at 0.75. The collar textures only paint
+            // the neck band; the rest of the sheet is transparent, so
+            // re-drawing the whole skeleton is exactly MC's cutout model
+            // copy. The wolf's layer submits with NO_OVERLAY (it never
+            // flashes red); the cat's goes through coloredCutoutModelCopy-
+            // LayerRender, which carries the hurt overlay. Both skip an
+            // invisible body.
             if (type == Game::EntityTypeId::Wolf ||
                 type == Game::EntityTypeId::Cat) {
                 const Game::TamableAnimal* tamable = TamableOf(mob, type);
                 if (tamable && tamable->IsTame()) {
+                    uint8_t collarColor = Game::kDyeColorRed;
+                    if (type == Game::EntityTypeId::Wolf) {
+                        if (const auto* wolf = MobAs<Game::Wolf>(mob, type, Game::EntityTypeId::Wolf)) {
+                            collarColor = wolf->GetCollarColor();
+                        }
+                    } else if (const auto* cat = MobAs<Game::Cat>(mob, type, Game::EntityTypeId::Cat)) {
+                        collarColor = cat->GetCollarColor();
+                    }
                     const size_t collarFirst = m_indices.size();
                     const size_t collarVertFirst = m_verts.size();
                     AppendMob(*model, state, renderPos,
                               bodyRot, cameraPos, m_verts, m_indices);
                     if (m_indices.size() > collarFirst) {
-                        // DyeColor.RED — the same floored row the sheep table
-                        // carries.
-                        const SheepWoolColor tint = kSheepWoolColors[14];
+                        const uint32_t rgb = Game::DyeTextureDiffuseColor(collarColor);
+                        const uint8_t tr = static_cast<uint8_t>((rgb >> 16) & 0xFF);
+                        const uint8_t tg = static_cast<uint8_t>((rgb >> 8) & 0xFF);
+                        const uint8_t tb = static_cast<uint8_t>(rgb & 0xFF);
                         for (size_t i = collarVertFirst; i < m_verts.size(); ++i) {
                             ModelVertex& v = m_verts[i];
-                            v.r = static_cast<uint8_t>((v.r * tint.r) / 255);
-                            v.g = static_cast<uint8_t>((v.g * tint.g) / 255);
-                            v.b = static_cast<uint8_t>((v.b * tint.b) / 255);
+                            v.r = static_cast<uint8_t>((v.r * tr) / 255);
+                            v.g = static_cast<uint8_t>((v.g * tg) / 255);
+                            v.b = static_cast<uint8_t>((v.b * tb) / 255);
                         }
                         const char* collarTex =
                             type == Game::EntityTypeId::Wolf
                                 ? "assets/textures/entity/wolf/wolf_collar.png"
                                 : "assets/textures/entity/cat/cat_collar.png";
-                        batches.push_back({ MobTex(collarTex), overlay,
+                        batches.push_back({ MobTex(collarTex),
+                                            type == Game::EntityTypeId::Wolf ? glm::vec4(0.0f) : overlay,
                                             collarFirst,
                                             m_indices.size() - collarFirst,
                                             false, model->CullBackFaces() });
-                        batches.back().part = BatchPart::BodyCopy;   // `isTame && !isInvisible`
+                        batches.back().part = BatchPart::BodyCopy;   // `!isInvisible`
                     }
                 }
             }
@@ -4141,6 +4833,26 @@ namespace Render {
             if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
         }
 
+        if (guiCapture) {
+            // CaptureForGui: the drawn batches as triangle lists.
+            for (const Batch& batch : batches) {
+                if (batch.hidden || batch.depthOnly || batch.glint || batch.texture == INVALID_TEXTURE ||
+                    batch.indexCount == 0) continue;
+                GuiEntityBatch out;
+                out.texture = batch.texture;
+                out.blend = batch.blend;
+                out.triangles.reserve(batch.indexCount);
+                for (size_t i = 0; i < batch.indexCount; ++i) {
+                    const uint32_t v = m_indices[batch.firstIndex + i];
+                    if (v < m_verts.size()) out.triangles.push_back(m_verts[v]);
+                }
+                if (out.triangles.size() >= 3) m_guiOut->push_back(std::move(out));
+            }
+            m_verts.clear();
+            m_indices.clear();
+            return;
+        }
+
         PROFILE_PLOT("Mobs/Culled", static_cast<int64_t>(culledCount));
         PROFILE_PLOT("Mobs/Rendered",
                      static_cast<int64_t>(mobs.ModelMobList().size()) - culledCount);
@@ -4156,6 +4868,39 @@ namespace Render {
         if (m_vertCursor > 0) {
             const auto base = static_cast<uint32_t>(m_vertCursor);
             for (uint32_t& i : m_indices) i += base;
+        }
+        // MC LivingEntityRenderer.submit: `forceTransparent = !bodyVisible &&
+        // !isInvisibleToPlayer` — a spectator sees an INVISIBLE body anyway,
+        // at 0x26 alpha (654311423) through a translucent render type. Every
+        // vertex a hidden body's batches reference is faded once (batches
+        // can share a range), and those batches draw blended.
+        if (m_viewerSeesInvisible) {
+            std::vector<std::pair<uint32_t, uint32_t>> ranges;
+            for (Batch& batch : batches) {
+                if (!batch.invisibleBody) continue;
+                batch.hidden = false;
+                batch.blend  = true;
+                if (batch.indexCount == 0) continue;
+                uint32_t lo = UINT32_MAX, hi = 0;
+                for (size_t i = 0; i < batch.indexCount; ++i) {
+                    const uint32_t v = m_indices[batch.firstIndex + i];
+                    lo = std::min(lo, v);
+                    hi = std::max(hi, v);
+                }
+                ranges.emplace_back(lo, hi);
+            }
+            std::sort(ranges.begin(), ranges.end());
+            uint64_t fadedUpTo = 0;   // one past the last vertex already faded
+            for (const auto& [lo, hi] : ranges) {
+                for (uint64_t v = std::max<uint64_t>(lo, fadedUpTo); v <= hi; ++v) {
+                    // Indices are absolute in the set (rebased above).
+                    if (v < m_vertCursor) continue;
+                    const size_t local = static_cast<size_t>(v - m_vertCursor);
+                    if (local >= m_verts.size()) break;
+                    m_verts[local].a = static_cast<uint8_t>((m_verts[local].a * 38u) / 255u);
+                }
+                fadedUpTo = std::max<uint64_t>(fadedUpTo, static_cast<uint64_t>(hi) + 1);
+            }
         }
         g_renderBackend->UpdateBuffer(fb.vb, m_vertCursor * sizeof(ModelVertex),
                                       m_verts.size() * sizeof(ModelVertex), m_verts.data());
@@ -4209,10 +4954,12 @@ namespace Render {
         const glm::mat4 viewProj = projection * view;
         bool blendOn = false;
         bool cullOn = false;
+        bool depthOnlyOn = false;
+        bool glintOn = false;
         for (const Batch& batch : batches) {
             // A glowing mob's geometry goes to the outline pass whether or
             // not it is drawn (an invisible glowing body is outline only).
-            if (batch.outline) {
+            if (batch.outline && !batch.glint) {
                 EntityOutline::Get().SubmitIndexed(fb.mesh,
                     static_cast<uint32_t>(firstIndexThisCall + batch.firstIndex),
                     static_cast<uint32_t>(batch.indexCount), batch.texture, viewProj);
@@ -4224,16 +4971,33 @@ namespace Render {
             // stays cutout. Depth write stays on either way — the layers sit
             // ON the body surface and batches draw in mob order.
             // Culling follows the model's MC render type the same way.
-            if (batch.blend != blendOn || batch.cull != cullOn) {
+            if (batch.blend != blendOn || batch.cull != cullOn || batch.depthOnly != depthOnlyOn ||
+                batch.glint != glintOn) {
                 blendOn = batch.blend;
                 cullOn = batch.cull;
-                pipeline.blendEnabled = blendOn;
-                pipeline.cullMode = cullOn ? CullMode::Back : CullMode::None;
-                g_renderBackend->SetPipelineState(pipeline);
+                depthOnlyOn = batch.depthOnly;
+                glintOn = batch.glint;
+                PipelineState state = pipeline;
+                state.blendEnabled = blendOn;
+                state.cullMode = cullOn ? CullMode::Back : CullMode::None;
+                state.colorWriteEnabled = !depthOnlyOn;
+                if (glintOn) {
+                    // RenderPipelines.GLINT.
+                    state.blendEnabled = true;
+                    state.srcBlendFactor = BlendFactor::SrcColor;
+                    state.dstBlendFactor = BlendFactor::One;
+                    state.depthWriteEnabled = false;
+                    state.depthCompareOp = CompareOp::Equal;
+                }
+                g_renderBackend->SetPipelineState(state);
             }
             g_renderBackend->BindTexture(batch.texture, 0);
             g_renderBackend->SetUniformVec4(m_shader, "uColor", batch.overlay);
-            EntityEnvironment::SetEntityLight(m_shader, LightValue(batch.light, batch.packedLight));
+            if (batch.glint) {
+                EntityEnvironment::SetEntityLight(m_shader, glm::vec3(EntityEnvironment::kEmissive));
+            } else {
+                EntityEnvironment::SetEntityLight(m_shader, LightValue(batch.light, batch.packedLight));
+            }
             // indexOffset is in INDICES, not bytes — see DrawIndexed's
             // signature. Passing a byte offset draws from the wrong place with
             // no error, which is the classic way to get one mob's geometry
@@ -4274,15 +5038,114 @@ namespace Render {
             BatchPart     part = BatchPart::Body;
             bool          hidden = false;
             bool          outline = false;
+            bool          invisibleBody = false;   // MobBatchScope's; a morph stays hidden
             int           packedLight = Game::Lighting::LightCoords::kFullSky;
         };
         std::vector<Batch> batches;
         m_verts.clear();
         m_indices.clear();
 
+        // The humanoid bodies' WingsLayer (ElytraLayer.cpp), drawn once this
+        // call's own batches are — whichever way it returns.
+        struct ElytraFlush {
+            MobRenderer* self;
+            const glm::mat4& projection;
+            const glm::mat4& view;
+            const glm::vec3& cameraPos;
+            std::vector<ElytraDraw> draws;
+            ~ElytraFlush() { if (!draws.empty()) self->DrawElytras(projection, view, cameraPos, draws); }
+        } elytras{ this, projection, view, cameraPos, {} };
+        // The player-model bodies' SpinAttackEffectLayer (RiptideLayer.cpp),
+        // flushed the same way.
+        struct SwirlFlush {
+            MobRenderer* self;
+            const glm::mat4& projection;
+            const glm::mat4& view;
+            const glm::vec3& cameraPos;
+            std::vector<RiptideDraw> draws;
+            ~SwirlFlush() { if (!draws.empty()) self->DrawRiptideSwirls(projection, view, cameraPos, draws); }
+        } swirls{ this, projection, view, cameraPos, {} };
+
         const float maxDistSq = kMaxRenderDistance * kMaxRenderDistance;
 
         for (const MorphPose& pose : poses) {
+            if (pose.shoulderParrot >= 0) {
+                // MC ParrotOnShoulderLayer.submitOnShoulder, in the player's
+                // LivingEntityRenderer pose stack — AvatarRenderer's crouch
+                // render offset (scale * -2/16), the body yaw, the death
+                // topple, the 0.9375 player scale and the -1.501 model
+                // offset — then
+                //   translate(left ? 0.4 : -0.4, crouching ? -1.3 : -1.5, 0)
+                // and the parrot model in the ON_SHOULDER pose with the
+                // player's age, walk and head angles, the player's light and
+                // outline, and no hurt tint (OverlayTexture.NO_OVERLAY). A
+                // layer: drawn on an INVISIBLE player too.
+                ModelEntry* parrotEntry = GetModelFor(Game::EntityTypeId::Parrot);
+                if (!parrotEntry || !parrotEntry->model) continue;
+                // Culled with the body it sits on (the player's 0.6 x 1.8).
+                const float width  = 0.6f * pose.scale;
+                const float height = 1.8f * pose.scale;
+                const glm::vec3 delta(pose.position.x - cameraPos.x,
+                                      pose.position.y - cameraPos.y,
+                                      pose.position.z - cameraPos.z);
+                const float distSq = glm::dot(delta, delta);
+                if (distSq > maxDistSq) continue;
+                if (EntityCulling::g_crossingFilter) {
+                    const glm::vec3 half(width * 0.5f, 0.0f, width * 0.5f);
+                    const glm::vec3 lo = glm::vec3(pose.position) - half;
+                    const glm::vec3 hi = glm::vec3(pose.position) + half + glm::vec3(0.0f, height, 0.0f);
+                    if (!EntityCulling::PassesCrossingFilter(lo, hi)) continue;
+                }
+                if (!EntityCulling::ShouldRenderAtSqrDistance(distSq, width, height)) continue;
+                if (!EntityCulling::ShouldRender(frustum, glm::vec3(pose.position), width, height)) continue;
+
+                const TextureHandle parrotTex = LoadTexture(Game::Parrot::VariantTexture(
+                    Game::Parrot::VariantById(pose.shoulderParrot)));
+                if (parrotTex == INVALID_TEXTURE) continue;
+                ++EntityCulling::g_renderedThisFrame;
+
+                // The player's eye (MC getLightProbePosition), standing or
+                // crouching.
+                const double eye = (pose.crouching ? 1.27 : 1.62) * pose.scale;
+                MobBatchScope<Batch> parrotScope{
+                    batches, batches.size(),
+                    pose.onFire ? BatchLight::FullBlock : BatchLight::Lit,
+                    /*invisible=*/false, pose.glowing && EntityOutline::Get().Collecting(),
+                    EntityEnvironment::PackedLightAt(pose.position + glm::dvec3(0.0, eye, 0.0)) };
+
+                glm::dvec3 feet = pose.position;
+                if (pose.crouching) feet.y += static_cast<double>(pose.scale * -2.0f) / 16.0;
+                const glm::mat4 playerMatrix = EntityMatrix(
+                    feet, cameraPos, pose.bodyYaw, pose.scale * 0.9375f,
+                    DeathFlipDegrees(pose.deathTime, partialTick, 90.0f));
+                const glm::mat4 parrotMatrix = glm::translate(
+                    playerMatrix,
+                    glm::vec3(pose.shoulderLeft ? 0.4f : -0.4f,
+                              pose.crouching ? -1.3f : -1.5f, 0.0f) * 16.0f);
+
+                EntityRenderState parrotState;
+                // ParrotModel.Pose.ON_SHOULDER — or PARTY near a playing
+                // jukebox (an engine addition; MC's layer never dances).
+                parrotState.mobPose            = pose.shoulderParty ? 3.0f : 4.0f;
+                parrotState.ageInTicks         = pose.ageTicks;
+                parrotState.walkAnimationPos   = pose.walkPos;
+                parrotState.walkAnimationSpeed = pose.walkSpeed;
+                parrotState.yRot = Game::Mth::WrapDegrees(pose.headYaw - pose.bodyYaw);
+                parrotState.xRot = pose.pitch;
+                parrotState.flap = 0.0f;                 // ParrotRenderState.flapAngle default
+                EntityModel& parrotModel = *parrotEntry->model;
+                parrotModel.SetupAnim(parrotState);
+                const size_t f = m_indices.size();
+                parrotModel.Root().Build(parrotMatrix, parrotModel.TexWidth(), parrotModel.TexHeight(),
+                                         m_verts, m_indices, parrotModel.CullBackFaces());
+                if (m_indices.size() > f) {
+                    batches.push_back({ parrotTex, glm::vec4(0.0f), f, m_indices.size() - f,
+                                        parrotModel.CullBackFaces() });
+                    batches.back().part = BatchPart::Layer;
+                }
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
             if (!Game::Morph::IsValid(pose.code)) continue;
             const Game::Morph::Kind kind = Game::Morph::KindOf(pose.code);
             if (kind != Game::Morph::Kind::Mob && kind != Game::Morph::Kind::Block &&
@@ -4384,13 +5247,57 @@ namespace Render {
                 // MC AvatarRenderer.scale: the player model is drawn at
                 // 0.9375 (15/16) of the humanoid model's size.
                 state.scale      = pose.scale * 0.9375f;
-                state.isCrouching = pose.crouching;
+                state.isCrouching = pose.crouching && !pose.passenger;
+                state.isPassenger = pose.passenger;
+                state.attackTime  = pose.attackTime;
+                state.rightArmPose = static_cast<ArmPose>(std::min<uint8_t>(pose.rightArmPose, 10));
+                state.leftArmPose  = static_cast<ArmPose>(std::min<uint8_t>(pose.leftArmPose, 10));
+                state.isUsingItem  = pose.usingItem;
+                state.useItemHand  = pose.useItemHand;
+                state.ticksUsingItem = pose.ticksUsingItem;
+                state.maxCrossbowChargeDuration = pose.maxCrossbowCharge;
+                // A spear swings STAB (its SWING_ANIMATION); a spear in the
+                // main hand is what the SPEAR arm pose says.
+                state.swingAnimType = pose.rightArmPose == 10 ? 2.0f : 1.0f;
+                state.rightArmItem = pose.equipment[static_cast<int>(Game::EquipmentSlot::MAINHAND)].itemId;
+                state.leftArmItem  = pose.equipment[static_cast<int>(Game::EquipmentSlot::OFFHAND)].itemId;
+                state.ticksSinceKineticHitFeedback = pose.ticksSinceKineticHitFeedback;
+                state.isAutoSpinAttack = pose.autoSpinAttack && pose.deathTime <= 0;
                 state.deathFlipDeg = DeathFlipDegrees(pose.deathTime, partialTick, 90.0f);
+                // MC AvatarRenderer.getRenderOffset: a crouching player is
+                // drawn scale · 2/16 lower.
+                glm::dvec3 feet = pose.position;
+                if (state.isCrouching) feet.y += static_cast<double>(pose.scale * -2.0f) / 16.0;
                 const size_t f = m_indices.size();
-                AppendMob(*m_playerMorphModel, state, pose.position, pose.bodyYaw, cameraPos, m_verts, m_indices);
+                const glm::mat4 playerMatrix =
+                    AppendMob(*m_playerMorphModel, state, feet, pose.bodyYaw, cameraPos, m_verts, m_indices);
+                // SpinAttackEffectLayer on the spinning player model.
+                if (state.isAutoSpinAttack) {
+                    RiptideDraw d;
+                    d.rootPx = playerMatrix;
+                    d.ageInTicks = pose.ageTicks;
+                    d.packedLight = EntityEnvironment::PackedLightAt(pose.position +
+                                                                     glm::dvec3(0.0, 0.4 * pose.scale, 0.0));
+                    d.glowing = pose.glowing && EntityOutline::Get().Collecting();
+                    swirls.draws.push_back(d);
+                }
                 if (m_indices.size() > f) {
                     batches.push_back({ skin, overlay, f, m_indices.size() - f,
                                         m_playerMorphModel->CullBackFaces() });
+                    // AvatarRenderer's ItemInHandLayer: what the player holds
+                    // (no armour on this body). NO_OVERLAY, a layer. (The type
+                    // only picks a grip: the humanoid's plain translateToHand,
+                    // as the zombie's.)
+                    AppendMorphEquipment(pose, Game::EntityTypeId::Zombie, /*playerModel=*/true,
+                                         *m_playerMorphModel, state, playerMatrix, feet, false,
+                                         pose.equipment[static_cast<int>(Game::EquipmentSlot::MAINHAND)],
+                                         cameraPos,
+                                         [&](TextureHandle tex, size_t first, bool cull) {
+                                             if (tex == INVALID_TEXTURE || m_indices.size() <= first) return;
+                                             batches.push_back({ tex, glm::vec4(0.0f), first,
+                                                                 m_indices.size() - first, cull });
+                                             batches.back().part = BatchPart::Layer;
+                                         });
                 }
                 if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
                 continue;
@@ -4413,6 +5320,28 @@ namespace Render {
             // shrunk otherwise, the `_baby` sheet under the New look.
             state.isBaby   = Game::Morph::IsBaby(pose.code);
             state.ageScale = state.isBaby ? Game::kBabyScale : 1.0f;
+            // The player's sneak, seat, swing and held-item poses, as the
+            // mob's HumanoidMobRenderer would extract them (isCrouching,
+            // isPassenger, attackTime, getArmPose) — read by every humanoid
+            // model (zombie, skeleton, piglin, drowned…) and ignored by the
+            // rest. The per-type branches below still override (a
+            // skeleton's bow).
+            state.isCrouching  = pose.crouching && !pose.passenger;
+            state.isPassenger  = pose.passenger;
+            state.attackTime   = pose.attackTime;
+            state.rightArmPose = static_cast<ArmPose>(std::min<uint8_t>(pose.rightArmPose, 10));
+            state.leftArmPose  = static_cast<ArmPose>(std::min<uint8_t>(pose.leftArmPose, 10));
+            state.isUsingItem  = pose.usingItem;
+            state.useItemHand  = pose.useItemHand;
+            state.ticksUsingItem = pose.ticksUsingItem;
+            state.maxCrossbowChargeDuration = pose.maxCrossbowCharge;
+            state.swingAnimType = pose.rightArmPose == 10 ? 2.0f : 1.0f;   // a spear stabs
+            state.rightArmItem = pose.equipment[static_cast<int>(Game::EquipmentSlot::MAINHAND)].itemId;
+            state.leftArmItem  = pose.equipment[static_cast<int>(Game::EquipmentSlot::OFFHAND)].itemId;
+            state.ticksSinceKineticHitFeedback = pose.ticksSinceKineticHitFeedback;
+            // LivingEntityRenderer.setupRotations spins any living body with
+            // isAutoSpinAttack — a riptiding morph turns with its trident.
+            state.isAutoSpinAttack = pose.autoSpinAttack && pose.deathTime <= 0;
             EntityModel* bodyModel    = modelEntry->model.get();
             EntityModel* overlayModel = modelEntry->overlayModel.get();
             if (state.isBaby) {
@@ -4429,8 +5358,8 @@ namespace Render {
                 return LoadTexture(remodelTex ? RemodelTexturePath(path, state.isBaby)
                                               : std::string(path));
             };
-            const TextureHandle bodyTexture = remodelTex ? MorphTex(TexturePathFor(type))
-                                                         : modelEntry->texture;
+            TextureHandle bodyTexture = remodelTex ? MorphTex(TexturePathFor(type))
+                                                   : modelEntry->texture;
             if (bodyTexture == INVALID_TEXTURE) continue;
             float flipDegrees = 90.0f;
             switch (type) {
@@ -4483,14 +5412,22 @@ namespace Render {
                 state.headEatPositionScale = posScale;
                 state.headEatAngleScale    = angle;
             }
-            // The skeleton family: bow in hand always, drawn while the shot's
-            // aim ticks run (MC: the aggressive pose is BowAndArrow).
-            const bool holdsBow = type == Game::EntityTypeId::Skeleton || type == Game::EntityTypeId::Stray ||
-                                  type == Game::EntityTypeId::Bogged;
-            if (holdsBow) {
+            // What the morph holds in its right (main) arm: the player's
+            // selected stack — or, for the skeleton family with an empty
+            // hand, the skeleton's own bow, raised while the shot's aim
+            // ticks run (MC: the aggressive pose is BowAndArrow).
+            Game::ItemStack morphMainHand = pose.equipment[static_cast<int>(Game::EquipmentSlot::MAINHAND)];
+            const bool skeletonMorph = type == Game::EntityTypeId::Skeleton || type == Game::EntityTypeId::Stray ||
+                                       type == Game::EntityTypeId::Bogged || type == Game::EntityTypeId::Parched;
+            if (skeletonMorph && morphMainHand.IsEmpty()) {
+                morphMainHand = Game::ItemStack(Game::Items::Bow, 1);
                 state.isHoldingBow = true;
                 state.isAggressive = pose.animTick > 0.0f;
                 state.rightArmPose = state.isAggressive ? ArmPose::BowAndArrow : ArmPose::Empty;
+            } else if (skeletonMorph || type == Game::EntityTypeId::WitherSkeleton) {
+                // AbstractSkeletonRenderer: isHoldingBow = the main hand is a
+                // bow (the player's draw poses it through the arm poses).
+                state.isHoldingBow = morphMainHand.itemId == Game::Items::Bow;
             }
             // An armadillo morph rolled up (Left Alt): the flag bit is MC's
             // ArmadilloRenderState.isHidingInShell.
@@ -4590,8 +5527,39 @@ namespace Render {
                 }
             }
 
+            // The fish family's look, from the morph's variant (Game::Morph::
+            // DefaultVariantOf) exactly as the mob pass reads it off the mob:
+            // the tropical fish's body mesh and sheet by its pattern's base
+            // (tinted and patterned below), the salmon's mesh by its size,
+            // and the fish renderers' wobble / beached roll.
+            const bool tropicalMorph = type == Game::EntityTypeId::TropicalFish;
+            if (tropicalMorph) {
+                if (EntityModel* body = TropicalFishBody(*modelEntry, pose.variant)) bodyModel = body;
+                const TextureHandle tex = TropicalFishBodyTexture(pose.variant);
+                if (tex != INVALID_TEXTURE) bodyTexture = tex;
+            } else if (type == Game::EntityTypeId::Salmon) {
+                if (pose.variant == Game::Salmon::kSmall && modelEntry->salmonSmall) {
+                    bodyModel = modelEntry->salmonSmall.get();
+                } else if (pose.variant == Game::Salmon::kLarge && modelEntry->salmonLarge) {
+                    bodyModel = modelEntry->salmonLarge.get();
+                }
+            }
+            // In water: the fluid at the body's centre cell (the client level
+            // the body stands in) — the tail amplitude, the wobble and the
+            // beached roll read it, as they read Entity.isInWater on a mob.
+            if (Client::g_clientBlockAccess) {
+                const Game::Morph::Dims fishDims = Game::Morph::DimsOf(pose.code);
+                const glm::dvec3 centre = pose.position +
+                    glm::dvec3(0.0, 0.5 * fishDims.height * pose.scale, 0.0);
+                state.isInWater = Game::GetFluidState(*Client::g_clientBlockAccess,
+                    glm::ivec3(static_cast<int>(std::floor(centre.x)), static_cast<int>(std::floor(centre.y)),
+                               static_cast<int>(std::floor(centre.z)))).IsSame(Game::FluidType::Water);
+            }
+            SetupFishRotations(state, type);
+
             EntityModel& model = *bodyModel;
             const size_t firstIndex = m_indices.size();
+            const size_t firstVert  = m_verts.size();
             glm::mat4 entityMatrix(1.0f);
             if (type == Game::EntityTypeId::EndCrystal) {
                 // MC EndCrystalRenderer.submit: scale(2,2,2), translate
@@ -4612,9 +5580,58 @@ namespace Render {
                 entityMatrix = AppendMob(model, state, pose.position, pose.bodyYaw, cameraPos, m_verts, m_indices);
             }
             const size_t bodyIndexCount = m_indices.size() - firstIndex;
+            // MC WingsLayer — HumanoidMobRenderer's (the zombie, skeleton and
+            // piglin families): the player's worn elytra on the body's root,
+            // drawn even on an invisible body (a layer).
+            if ((pose.elytraFlags & Game::kElytraWorn) && bodyIndexCount > 0) {
+                switch (type) {
+                    case Game::EntityTypeId::Zombie:   case Game::EntityTypeId::Husk:
+                    case Game::EntityTypeId::Drowned:  case Game::EntityTypeId::ZombieVillager:
+                    case Game::EntityTypeId::Skeleton: case Game::EntityTypeId::Stray:
+                    case Game::EntityTypeId::WitherSkeleton: case Game::EntityTypeId::Bogged:
+                    case Game::EntityTypeId::Parched:
+                    case Game::EntityTypeId::Piglin:   case Game::EntityTypeId::PiglinBrute:
+                    case Game::EntityTypeId::ZombifiedPiglin: {
+                        ElytraDraw d;
+                        d.rootPx    = entityMatrix;
+                        d.baby      = state.isBaby;
+                        d.rotX      = pose.elytraRotX;
+                        d.rotY      = pose.elytraRotY;
+                        d.rotZ      = pose.elytraRotZ;
+                        d.crouching = state.isCrouching;
+                        d.glint     = (pose.elytraFlags & Game::kElytraGlint) != 0;
+                        d.glowing   = pose.glowing && EntityOutline::Get().Collecting();
+                        d.packedLight = EntityEnvironment::PackedLightAt(
+                            pose.position + glm::dvec3(0.0, dims.eyeHeight * pose.scale, 0.0));
+                        elytras.draws.push_back(d);
+                        break;
+                    }
+                    default: break;
+                }
+            }
             if (bodyIndexCount > 0) {
+                // MC TropicalFishRenderer.getModelTint: the base colour.
+                if (tropicalMorph) {
+                    TintVertices(m_verts, firstVert, m_verts.size(),
+                                 Game::DyeTextureDiffuseColor(
+                                     Game::TropicalFishVariants::Unpack(pose.variant).baseColor));
+                }
                 batches.push_back({ bodyTexture, overlay, firstIndex,
                                     bodyIndexCount, model.CullBackFaces() });
+                // MC TropicalFishPatternLayer — a copy layer (skipped on an
+                // invisible body, as the mob pass's).
+                if (tropicalMorph) {
+                    size_t layerFirst = 0;
+                    bool layerCull = false;
+                    const TextureHandle tex = AppendTropicalFishPattern(
+                        *modelEntry, pose.variant, state, pose.position, pose.bodyYaw, cameraPos,
+                        layerFirst, layerCull);
+                    if (tex != INVALID_TEXTURE) {
+                        batches.push_back({ tex, overlay, layerFirst, m_indices.size() - layerFirst,
+                                            layerCull });
+                        batches.back().part = BatchPart::BodyCopy;
+                    }
+                }
                 // MC EyesLayer: the glowing eyes drawn again over the body.
                 const char* eyesTex = nullptr;
                 switch (type) {
@@ -4657,17 +5674,20 @@ namespace Render {
                     }
                 }
             }
-            // The skeleton's bow, MC ItemInHandLayer with the mob pass's grip.
-            if (holdsBow && bodyIndexCount > 0) {
-                static constexpr DisplaySpec kBowSpec{
-                    {-1.0f, -2.0f, 2.5f}, {-80.0f, 260.0f, -40.0f}, 0.9f};
-                const size_t itemFirst = m_indices.size();
-                const TextureHandle tex = AppendHeldSprite(model, entityMatrix, "bow", kBowSpec,
-                                                           m_verts, m_indices);
-                if (tex != INVALID_TEXTURE && m_indices.size() > itemFirst) {
-                    batches.push_back({ tex, glm::vec4(0.0f), itemFirst, m_indices.size() - itemFirst, false });
-                    batches.back().part = BatchPart::Layer;   // ItemInHandLayer
-                }
+            // The player's held items and (where the mob wears it) armour:
+            // ItemInHandLayer, HumanoidArmorLayer, CustomHeadLayer — layers,
+            // NO_OVERLAY, kept on an invisible body.
+            if (bodyIndexCount > 0 && type != Game::EntityTypeId::EndCrystal) {
+                const bool babyMesh = state.isBaby && NewBabies() && bodyModel == modelEntry->babyModel.get() &&
+                                      modelEntry->babyModel != nullptr;
+                AppendMorphEquipment(pose, type, /*playerModel=*/false, model, state, entityMatrix,
+                                     pose.position, babyMesh, morphMainHand, cameraPos,
+                                     [&](TextureHandle tex, size_t first, bool cull) {
+                                         if (tex == INVALID_TEXTURE || m_indices.size() <= first) return;
+                                         batches.push_back({ tex, glm::vec4(0.0f), first,
+                                                             m_indices.size() - first, cull });
+                                         batches.back().part = BatchPart::Layer;
+                                     });
             }
 
             // The model's own second layer, where it has one (a sheared

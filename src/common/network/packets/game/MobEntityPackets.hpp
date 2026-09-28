@@ -105,6 +105,30 @@ namespace Network {
         // name tag's name, as plain text). Absent = unnamed, not visible.
         std::optional<std::string> customName;
         bool                       customNameVisible = false;
+        // APPENDED FIELD: the exact angles — the bytes above are 1.4° steps —
+        // and the BODY yaw, which MC's packet does not carry at all (its
+        // LivingEntity.recreateFromPacket snaps the body to the head). A
+        // rejoined world must show each mob exactly as the last-world
+        // panorama does, so the client places it at these, uninterpolated.
+        // With them, in the same block: the limb swing (WalkAnimationState
+        // position / speed / speedOld / positionScale) and the animation age
+        // (the client tickCount the idle loops key on; -1 = the client's own
+        // count from 0), so a mob mid-stride or mid-flap is shown in exactly
+        // that pose. Absent = the packed angles, body on yRot, at rest.
+        bool    hasExactRot   = false;
+        float   exactYRot     = 0.0f;
+        float   exactXRot     = 0.0f;
+        float   exactYHeadRot = 0.0f;
+        float   exactYBodyRot = 0.0f;
+        float   walkPosition  = 0.0f;
+        float   walkSpeed     = 0.0f;
+        float   walkSpeedOld  = 0.0f;
+        float   walkScale     = 1.0f;
+        int32_t animAge       = -1;
+        // Game::Mob::GetRenderPhase — a wolf's beg tilt and shake, a cat's
+        // lie-down, a fox's tilt and crouch (count 0..8).
+        uint8_t renderPhaseCount = 0;
+        float   renderPhase[8]   = {};
     };
 
     // MC ClientboundMoveEntityPacket.Pos / .Rot / .PosRot, merged into one
@@ -300,6 +324,22 @@ namespace Network {
             b.WriteFloat(p.scale);
             WriteEffectVisuals(b, p.effectFlags, p.effectParticles);
             WriteCustomName(b, p.customName, p.customNameVisible);
+            // Appended (exact angles + body yaw).
+            b.WriteByte(p.hasExactRot ? 1 : 0);
+            if (p.hasExactRot) {
+                b.WriteFloat(p.exactYRot);
+                b.WriteFloat(p.exactXRot);
+                b.WriteFloat(p.exactYHeadRot);
+                b.WriteFloat(p.exactYBodyRot);
+                b.WriteFloat(p.walkPosition);
+                b.WriteFloat(p.walkSpeed);
+                b.WriteFloat(p.walkSpeedOld);
+                b.WriteFloat(p.walkScale);
+                b.WriteInt(static_cast<uint32_t>(p.animAge));
+                const uint8_t n = p.renderPhaseCount > 8 ? 8 : p.renderPhaseCount;
+                b.WriteByte(n);
+                for (uint8_t i = 0; i < n; ++i) b.WriteFloat(p.renderPhase[i]);
+            }
             return b.GetData();
         }
 
@@ -332,6 +372,25 @@ namespace Network {
             if (r.Remaining() >= 4) p.scale = r.ReadFloat();
             ReadEffectVisuals(r, p.effectFlags, p.effectParticles);
             ReadCustomName(r, p.customName, p.customNameVisible);
+            if (r.Remaining() >= 1 && r.ReadByte() != 0 && r.Remaining() >= 36) {
+                p.hasExactRot   = true;
+                p.exactYRot     = r.ReadFloat();
+                p.exactXRot     = r.ReadFloat();
+                p.exactYHeadRot = r.ReadFloat();
+                p.exactYBodyRot = r.ReadFloat();
+                p.walkPosition  = r.ReadFloat();
+                p.walkSpeed     = r.ReadFloat();
+                p.walkSpeedOld  = r.ReadFloat();
+                p.walkScale     = r.ReadFloat();
+                p.animAge       = static_cast<int32_t>(r.ReadInt());
+                if (r.Remaining() >= 1) {
+                    const uint8_t n = r.ReadByte();
+                    if (n <= 8 && r.Remaining() >= static_cast<size_t>(n) * 4u) {
+                        p.renderPhaseCount = n;
+                        for (uint8_t i = 0; i < n; ++i) p.renderPhase[i] = r.ReadFloat();
+                    }
+                }
+            }
             return p;
         }
 

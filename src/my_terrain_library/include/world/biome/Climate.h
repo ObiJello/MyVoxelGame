@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <vector>
 #include <cstdint>
 #include <algorithm>
@@ -263,8 +264,25 @@ public:
         // equally distant leaves. A few owner-tagged slots per thread give
         // every live tree its own history (a thread alternating between two
         // dimensions' trees keeps both), without a hash lookup per search.
+        //
+        // The owner tag is a process-unique id, NEVER the tree's address. The
+        // slots live on threads that outlive a world (the shared worldgen
+        // pool), so a tree destroyed at world exit leaves its slot behind; a
+        // tree of the next world allocated at the same address would adopt
+        // the dead tree's Leaf* as its first search candidate and read freed
+        // memory (the Save and Quit -> reopen crash in SubTree::search on the
+        // stronghold ring search, 2026-09-28). An id is never reused, so a
+        // new tree starts with no history, exactly like Java's fresh
+        // ThreadLocal. Moves carry the id with the root.
+        uint64_t m_id = 0;
+
+        static uint64_t nextId() {
+            static std::atomic<uint64_t> s_next{0};
+            return s_next.fetch_add(1, std::memory_order_relaxed) + 1;   // 0 = free slot
+        }
+
         struct LastResultSlot {
-            const RTree* owner = nullptr;
+            uint64_t owner = 0;
             Leaf* leaf = nullptr;
         };
         static constexpr int LAST_RESULT_SLOTS = 8;
@@ -276,7 +294,7 @@ public:
 
         Leaf* getLastResult() const {
             for (const LastResultSlot& slot : lastResultSlots()) {
-                if (slot.owner == this) return slot.leaf;
+                if (slot.owner == m_id) return slot.leaf;
             }
             return nullptr;
         }
@@ -284,16 +302,16 @@ public:
         void setLastResult(Leaf* leaf) const {
             auto& slots = lastResultSlots();
             for (LastResultSlot& slot : slots) {
-                if (slot.owner == this) { slot.leaf = leaf; return; }
+                if (slot.owner == m_id) { slot.leaf = leaf; return; }
             }
             // A new tree on this thread: take the first free slot, else
             // shift out the oldest (a tree is only ever evicted once more than
             // LAST_RESULT_SLOTS trees alternate on one thread).
             for (LastResultSlot& slot : slots) {
-                if (slot.owner == nullptr) { slot.owner = this; slot.leaf = leaf; return; }
+                if (slot.owner == 0) { slot.owner = m_id; slot.leaf = leaf; return; }
             }
             for (int i = 1; i < LAST_RESULT_SLOTS; ++i) slots[static_cast<size_t>(i - 1)] = slots[static_cast<size_t>(i)];
-            slots[LAST_RESULT_SLOTS - 1] = LastResultSlot{this, leaf};
+            slots[LAST_RESULT_SLOTS - 1] = LastResultSlot{m_id, leaf};
         }
 
     public:
@@ -379,7 +397,7 @@ public:
         };
 
     private:
-        RTree(std::unique_ptr<Node>&& root) : m_root(std::move(root)) {}
+        RTree(std::unique_ptr<Node>&& root) : m_root(std::move(root)), m_id(nextId()) {}
 
     public:
         /**

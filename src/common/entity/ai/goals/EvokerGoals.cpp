@@ -1,5 +1,7 @@
 // File: src/common/entity/ai/goals/EvokerGoals.cpp
 #include "common/entity/ai/goals/EvokerGoals.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/level/ILevelWrite.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
@@ -194,6 +196,12 @@ namespace Game {
             fangs->Init(x, static_cast<double>(pos.y) + topOffset, z, angle,
                         delayTicks, m_evoker);
             level->AddFreshEntity(std::move(fangs));
+            // MC: level.gameEvent(ENTITY_PLACE, (x, y + topOffset, z), Context.of(evoker)).
+            if (ILevelWrite* write = level->MutableBlocks()) {
+                write->GameEvent(GameEventId::EntityPlace,
+                                 glm::dvec3(x, static_cast<double>(pos.y) + topOffset, z),
+                                 GameEventContext::Of(m_evoker));
+            }
         }
     }
 
@@ -238,6 +246,10 @@ namespace Game {
             vex->SetLimitedLife(20 * (30 + rng.NextInt(90)));
             // MC also copies the evoker's scoreboard team — no team system.
             level->AddFreshEntity(std::move(vex));
+            // MC: serverLevel.gameEvent(ENTITY_PLACE, pos, Context.of(evoker)).
+            if (ILevelWrite* write = level->MutableBlocks()) {
+                write->GameEvent(GameEventId::EntityPlace, pos, GameEventContext::Of(m_evoker));
+            }
         }
     }
 

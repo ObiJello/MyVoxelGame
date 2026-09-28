@@ -66,7 +66,8 @@ namespace Render {
         uint8_t g = (color >> 8) & 0xFF;
         uint8_t b = color & 0xFF;
 
-        auto addGlyph = [&](float px, float py, unsigned char c, uint8_t cr, uint8_t cg, uint8_t cb, uint8_t ca) {
+        auto addGlyph = [&](float px, float py, unsigned char c, uint8_t cr, uint8_t cg, uint8_t cb, uint8_t ca,
+                            bool slanted = false) {
             float u0, v0, u1, v1;
             GetGlyphUV(c, u0, v0, u1, v1);
 
@@ -74,10 +75,15 @@ namespace Render {
             float w = static_cast<float>(glyphW);
             float h = static_cast<float>(GLYPH_CELL_SIZE);
 
-            glm::vec2 tl = { px, py };
-            glm::vec2 tr = { px + w, py };
-            glm::vec2 br = { px + w, py + h };
-            glm::vec2 bl = { px, py + h };
+            // MC BakedSheetGlyph italic: each edge slides by 1 − 0.25·y (y
+            // down from the glyph's top) — the top a pixel right, the foot
+            // of an 8-pixel cell a pixel left.
+            const float slantTop    = slanted ? 1.0f : 0.0f;
+            const float slantBottom = slanted ? 1.0f - 0.25f * h : 0.0f;
+            glm::vec2 tl = { px + slantTop, py };
+            glm::vec2 tr = { px + w + slantTop, py };
+            glm::vec2 br = { px + w + slantBottom, py + h };
+            glm::vec2 bl = { px + slantBottom, py + h };
 
             // Apply 2D transform
             tl = glm::vec2(cmd.transform[0][0] * tl.x + cmd.transform[1][0] * tl.y + cmd.transform[2][0],
@@ -123,6 +129,7 @@ namespace Render {
         if (cmd.dropShadow) {
             float sx = cursorX;
             bool sBold = false;
+            bool sItalic = false;
             uint8_t sr = r / 4, sg = g / 4, sb = b / 4;
             for (size_t i = 0; i < cmd.text.size(); i++) {
                 unsigned char c = static_cast<unsigned char>(cmd.text[i]);
@@ -134,10 +141,12 @@ namespace Render {
                         i++;
                         char code = cmd.text[i];
                         if (code == 'r' || code == 'R') {
-                            sBold = false; sr = r / 4; sg = g / 4; sb = b / 4;
+                            sBold = false; sItalic = false; sr = r / 4; sg = g / 4; sb = b / 4;
                         } else if (code == 'l' || code == 'L') {
                             sBold = true;
-                        } else if (code == 'o' || code == 'O' || code == 'n' || code == 'N' ||
+                        } else if (code == 'o' || code == 'O') {
+                            sItalic = true;
+                        } else if (code == 'n' || code == 'N' ||
                                    code == 'm' || code == 'M' || code == 'k' || code == 'K') {
                             // no effect on the shadow's glyphs
                         } else {
@@ -154,8 +163,8 @@ namespace Render {
 
                 if (c < 32 || c > 126) { sx += 4; continue; }
 
-                addGlyph(sx + 1.0f, cursorY + 1.0f, c, sr, sg, sb, a);
-                if (sBold) addGlyph(sx + 2.0f, cursorY + 1.0f, c, sr, sg, sb, a);
+                addGlyph(sx + 1.0f, cursorY + 1.0f, c, sr, sg, sb, a, sItalic);
+                if (sBold) addGlyph(sx + 2.0f, cursorY + 1.0f, c, sr, sg, sb, a, sItalic);
                 sx += m_glyphWidths[c] + 1;
                 if (sBold) sx += 1;
             }
@@ -196,10 +205,10 @@ namespace Render {
 
             if (c < 32 || c > 126) { cursorX += 4; continue; }
 
-            addGlyph(cursorX, cursorY, c, cr, cg, cb, ca);
+            addGlyph(cursorX, cursorY, c, cr, cg, cb, ca, italic);
             // MC bold: the glyph again one pixel to the right (BakedGlyph's
             // boldOffset for a bitmap font), and the advance grows by one.
-            if (bold) addGlyph(cursorX + 1.0f, cursorY, c, cr, cg, cb, ca);
+            if (bold) addGlyph(cursorX + 1.0f, cursorY, c, cr, cg, cb, ca, italic);
             cursorX += m_glyphWidths[c] + 1;
             if (bold) cursorX += 1;
         }

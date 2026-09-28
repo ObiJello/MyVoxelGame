@@ -1,5 +1,6 @@
 // File: src/client/world/ClientLevel.cpp
 #include "ClientLevel.hpp"
+#include "client/map/ClientMaps.hpp"
 
 #include "ClientChunkManager.hpp"
 #include "ClientBlockAccess.hpp"
@@ -175,6 +176,8 @@ namespace Client {
             { PROFILE_ZONE_N("Exit.ClientLevel.Shutdown"); slot->Shutdown(); }
             { PROFILE_ZONE_N("Exit.ClientLevel.Destroy");  slot.reset(); }
         }
+        // MapTextureManager.resetData: the session's maps go with it.
+        Maps::Clear();
         ++s_activeGeneration;
     }
 

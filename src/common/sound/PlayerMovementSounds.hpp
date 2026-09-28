@@ -21,6 +21,7 @@
 // Everything here is per TICK, in MC's units (blocks per tick).
 #pragma once
 
+#include "common/world/block/BlockState.hpp"
 #include "common/world/block/Blocks.hpp"
 
 #include <glm/glm.hpp>
@@ -51,9 +52,20 @@ namespace Game {
             bool swimming = false;              // Entity.isSwimming (sprint-swimming)
         };
 
+        // The game events the same movement raises — MC applyMovementEmission-
+        // AndPlaySound's gameEvent half and doWaterSplashEffect's: STEP (with
+        // the state stepped on), SWIM, SPLASH. The server posts them to its
+        // level's dispatcher (sculk sensors, wardens); the client passes null.
+        struct Events {
+            bool       step = false;
+            BlockState stepState{};
+            bool       swim = false;
+            bool       splash = false;
+        };
+
         // One tick of movement. Appends what to play.
         void Tick(const IBlockAccess& blocks, const Input& input, JavaRandom& random,
-                  std::vector<PlayerMovementSound>& out);
+                  std::vector<PlayerMovementSound>& out, Events* events = nullptr);
 
         // MC LivingEntity.causeFallDamage's sound half, for a landing of
         // `fallDistance` blocks at `feet`: the fall damage sound (PLAYER_SMALL

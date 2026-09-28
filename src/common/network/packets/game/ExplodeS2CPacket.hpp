@@ -34,6 +34,14 @@ namespace Network {
         // The push to apply to THIS receiving player. Zero for a player who was
         // out of range, spectating, or flying in creative.
         glm::vec3  playerKnockback{0.0f};
+        // Trailing fields (absent from an older peer's packet — the defaults
+        // are what that peer meant). MC's explosionParticle: the blast's
+        // Game::ExplosionParticles pair, 0 = EXPLOSION / EXPLOSION_EMITTER,
+        // 1 = GUST_EMITTER_SMALL / GUST_EMITTER_LARGE (`small` picks). And
+        // MC's blockParticles list: false = empty (the wind charges), no
+        // POOF/SMOKE debris.
+        uint8_t    particleSet = 0;
+        bool       blockParticles = true;
     };
 
     namespace Serialization {
@@ -49,6 +57,8 @@ namespace Network {
             b.WriteFloat(p.playerKnockback.x);
             b.WriteFloat(p.playerKnockback.y);
             b.WriteFloat(p.playerKnockback.z);
+            b.WriteByte(p.particleSet);
+            b.WriteByte(p.blockParticles ? 1 : 0);
             return b.GetData();
         }
 
@@ -64,6 +74,10 @@ namespace Network {
             p.playerKnockback.x = r.ReadFloat();
             p.playerKnockback.y = r.ReadFloat();
             p.playerKnockback.z = r.ReadFloat();
+            if (r.Remaining() >= 2) {
+                p.particleSet    = r.ReadByte();
+                p.blockParticles = r.ReadByte() != 0;
+            }
             return p;
         }
 

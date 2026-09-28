@@ -247,7 +247,16 @@ namespace Client {
 } // namespace Client
 
 #include "client/entity/Player.hpp"
+#include "client/entity/RemotePlayerManager.hpp"
+#include "client/network/NetworkClient.hpp"
+#include "server/world/storage/anvil/PlayerUuid.hpp"
+
+#include <algorithm>
+#include <string>
+#include <unordered_map>
 #include "client/entity/ClientMobManager.hpp"
+#include "client/world/ClientLevelEvents.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "client/sound/ClientSounds.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/chunk/Chunk.hpp"
@@ -318,6 +327,47 @@ namespace Client {
         return true;
     }
 
+    namespace {
+        // The offline UUID of a player name (the one the server gives the
+        // player's entity), memoised: the derivation is an MD5.
+        Game::Uuid UuidOfName(const std::string& name) {
+            static std::unordered_map<std::string, Game::Uuid> cache;
+            auto it = cache.find(name);
+            if (it != cache.end()) return it->second;
+            const Game::Anvil::PlayerUuid raw = Game::Anvil::OfflinePlayerUuid(name);
+            Game::Uuid uuid{};
+            std::copy(raw.begin(), raw.end(), uuid.begin());
+            cache.emplace(name, uuid);
+            return uuid;
+        }
+    } // namespace
+
+    bool ClientBlockAccess::GetPlayerByUuid(const Game::Uuid& uuid, glm::dvec3& outPos, float& outBbHeight) const {
+        // The local player.
+        if (m_player && Client::g_networkClient) {
+            const std::string& self = Client::g_networkClient->GetPlayerName();
+            if (!self.empty() && UuidOfName(self) == uuid) {
+                const auto& ph = m_player->physics;
+                outPos = ph.position;
+                outBbHeight = ph.isSneaking ? Game::PlayerPhysics::HEIGHT_SNEAKING
+                                            : Game::PlayerPhysics::HEIGHT_STANDING;
+                return true;
+            }
+        }
+        // A remote player standing in this level.
+        if (Client::g_remotePlayerManager) {
+            for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                if (!rp.positionInitialized || rp.name.empty() || rp.dimension != GetDimension()) continue;
+                if (UuidOfName(rp.name) != uuid) continue;
+                outPos = rp.position;
+                outBbHeight = (rp.isCrouching ? Game::PlayerPhysics::HEIGHT_SNEAKING
+                                              : Game::PlayerPhysics::HEIGHT_STANDING) * rp.scale;
+                return true;
+            }
+        }
+        return false;
+    }
+
     void ClientBlockAccess::MoveLocalPlayerByPiston(const glm::dvec3& delta) {
         if (!m_player) return;
         // MC LocalPlayer.move(MoverType.PISTON, delta) — a direct move, with
@@ -343,7 +393,11 @@ namespace Client {
 
     void ClientBlockAccess::AddLocalPlayerDeltaMovement(const glm::dvec3& delta) {
         if (!m_player) return;
-        m_player->physics.velocity += glm::vec3(delta * kTicksPerSecond);
+        // Horizontal via pushVelocity (MC friction), not the portal momentum.
+        const glm::vec3 add(delta * kTicksPerSecond);
+        m_player->physics.velocity.y += add.y;
+        m_player->physics.pushVelocity.x += add.x;
+        m_player->physics.pushVelocity.z += add.z;
     }
 
     void ClientBlockAccess::CheckLocalPlayerFallDistanceAccumulation() {
@@ -358,6 +412,20 @@ namespace Client {
     void ClientBlockAccess::AddParticle(Game::ParticleKind kind, double x, double y, double z,
                                         double vx, double vy, double vz) {
         if (g_clientMobManager) g_clientMobManager->Level().AddParticle(kind, x, y, z, vx, vy, vz);
+    }
+
+    void ClientBlockAccess::DoAddParticle(const Game::ParticleOptions& options, bool overrideLimiter,
+                                          bool alwaysShow, double x, double y, double z,
+                                          double xd, double yd, double zd) {
+        if (g_clientMobManager) {
+            g_clientMobManager->Level().DoAddParticle(options, overrideLimiter, alwaysShow, x, y, z, xd, yd, zd);
+        }
+    }
+
+    void ClientBlockAccess::PlayLevelEvent(const Game::SoundExcept& except, int type, const glm::ivec3& pos,
+                                           int data) {
+        // As PlaySeededSound: a player `except` is the local player.
+        if (except.player) LevelEvents::LevelEvent(type, pos, data);
     }
 
     void ClientBlockAccess::BlockEvent(const glm::ivec3& pos, Game::BlockID block, int b0, int b1) {

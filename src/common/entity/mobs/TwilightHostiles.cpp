@@ -357,6 +357,7 @@ namespace Game {
                 std::vector<LivingEntity*> players;
                 level->GetPlayers(players);
                 for (LivingEntity* p : players) {
+                    if (p->IsSpectator()) continue;   // NO_SPECTATORS
                     const AABBd pb = p->GetAABBd();
                     if (pb.min.x < bb.max.x && pb.max.x > bb.min.x && pb.min.y < bb.max.y &&
                         pb.max.y > bb.min.y && pb.min.z < bb.max.z && pb.max.z > bb.min.z &&
@@ -1589,7 +1590,8 @@ namespace Game {
         m_level->GetPlayers(players);
         const AABB box = AABB::FromMinMax(lo, hi);
         for (LivingEntity* p : players) {
-            if (p->GetAABB().Intersects(box) &&
+            // getEntities: EntitySelector.NO_SPECTATORS.
+            if (!p->IsSpectator() && p->GetAABB().Intersects(box) &&
                 std::find(hits.begin(), hits.end(), p) == hits.end()) {
                 hits.push_back(p);
             }
@@ -1767,7 +1769,8 @@ namespace Game {
         std::vector<LivingEntity*> players;
         m_level->GetPlayers(players);
         for (LivingEntity* p : players) {
-            if (p->GetAABB().Intersects(box) &&
+            // getEntities: EntitySelector.NO_SPECTATORS.
+            if (!p->IsSpectator() && p->GetAABB().Intersects(box) &&
                 std::find(inBox.begin(), inBox.end(), p) == inBox.end()) {
                 inBox.push_back(p);
             }

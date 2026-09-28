@@ -247,7 +247,9 @@ namespace Render {
         // Centroids are kept (12 bytes a quad, versus 96 for the vertices) so a
         // re-sort only has to rewrite the index buffer — the vertex data never
         // moves. Empty for the overwhelming majority of sections, which carry
-        // no translucent geometry at all.
+        // no translucent geometry at all. SECTION-RELATIVE (the section's
+        // minimum corner is 0,0,0), like MC's — sort against
+        // TranslucentSort::SectionRelativeCamera.
         // See mesh/TranslucentSort.hpp for why this is required and not merely
         // a refinement.
         std::vector<glm::vec3> translucentCentroids;

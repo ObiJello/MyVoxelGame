@@ -208,9 +208,13 @@ bool WorldGenRegion::setBlock(
     // chunks) a BE-capable block gets the pending tag {x,y,z,id:"DUMMY"}
     // (canonical E payload "{id:\"DUMMY\"}" since x/y/z are dropped);
     // replacing a BE block with a non-BE block removes the entry. Producers
-    // (templates, loot chests, ...) overwrite the pending tag afterwards.
+    // (templates, loot chests, ...) overwrite the pending tag afterwards, and
+    // what they wrote is a live BlockEntity: ChunkAccess.setBlockEntityNbt
+    // skips a position that has one, so a later setBlock here (the template
+    // waterlogging pass turning an ocean ruined portal's chest waterlogged)
+    // keeps the loot table instead of reverting to DUMMY.
     if (blockState != nullptr && blockState->hasBlockEntity()) {
-        chunk->setBlockEntityNbt(pos, "{id:\"DUMMY\"}");
+        chunk->setPendingBlockEntityNbt(pos, "{id:\"DUMMY\"}");
     } else if (oldState != nullptr && oldState->hasBlockEntity()) {
         chunk->removeBlockEntity(pos);
     }

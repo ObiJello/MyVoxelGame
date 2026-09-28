@@ -68,6 +68,13 @@ namespace Game::Morph {
         return IsMob(code, EntityTypeId::Spider) || IsMob(code, EntityTypeId::CaveSpider);
     }
 
+    int32_t DefaultVariantOf(uint32_t code) {
+        if (IsNone(code) || KindOf(code) != Kind::Mob) return 0;
+        // Salmon.Variant.DEFAULT = MEDIUM; TropicalFish.DEFAULT_VARIANT packs
+        // to 0 (KOB, white, white).
+        return static_cast<EntityTypeId>(MobTypeOf(code)) == EntityTypeId::Salmon ? 1 : 0;
+    }
+
     bool IsFlier(uint32_t code) {
         if (!IsValid(code) || KindOf(code) != Kind::Mob) return false;
         switch (static_cast<EntityTypeId>(MobTypeOf(code))) {

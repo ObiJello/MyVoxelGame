@@ -246,8 +246,7 @@ namespace Game {
         core.push_back(std::make_unique<StopBeingAngryIfTargetDead>());
         brain.AddActivity(Activity::Core, 0, std::move(core));
 
-        // ── IDLE (MC initIdleActivity, priority 10; SetLookAndInteract
-        // skipped — its consumer is the bartering interaction) ──────────────
+        // ── IDLE (MC initIdleActivity, priority 10) ────────────────────────
         std::vector<BehaviorPtr> idle;
         idle.push_back(std::make_unique<StartAttacking>(
             [](Mob&) { return true; }, &FindTarget));
@@ -271,6 +270,7 @@ namespace Game {
         moves.push_back({ std::make_unique<StrollAroundPoi>(MemoryModule::Home, 0.6f, 5), 2 });
         moves.push_back({ std::make_unique<DoNothing>(30, 60), 1 });
         idle.push_back(MakeRunOne(std::move(moves)));
+        idle.push_back(PiglinAi::MakeSetLookAndInteractPlayer(4));
         brain.AddActivity(Activity::Idle, 10, std::move(idle));
 
         // ── FIGHT (MC initFightActivity, priority 10) ──────────────────────

@@ -36,6 +36,10 @@ namespace Game {
 
         bool MayPlace(const ItemStack& /*stack*/) const override { return false; }
         void OnTake(const ItemStack& taken, ContainerClickResult& result) override;
+        // ResultSlot.checkTakeAchievements → ItemStack.onCraftedBy →
+        // Item.onCraftedPostProcess: a crafted map is locked / scaled (and
+        // given its new map id) as it leaves the result square.
+        ItemStack Remove(int amount) override;
 
     private:
         AbstractCraftingMenu* m_menu;

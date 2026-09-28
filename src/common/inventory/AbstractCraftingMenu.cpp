@@ -1,10 +1,17 @@
 // File: src/common/inventory/AbstractCraftingMenu.cpp
 #include "AbstractCraftingMenu.hpp"
+#include "common/world/map/MapItem.hpp"
 
 namespace Game {
 
     void CraftingResultSlot::OnTake(const ItemStack& /*taken*/, ContainerClickResult& result) {
         if (m_menu) m_menu->OnResultTaken(result);
+    }
+
+    ItemStack CraftingResultSlot::Remove(int amount) {
+        ItemStack taken = Slot::Remove(amount);
+        MapItemBridge::OnCraftedPostProcess(taken);
+        return taken;
     }
 
     void AbstractCraftingMenu::Configure(IContainer* craftContainer, int craftBase,

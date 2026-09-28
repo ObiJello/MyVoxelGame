@@ -189,10 +189,34 @@ namespace Render {
             MeshHandle   mesh = INVALID_MESH;
             size_t       capacityVerts = 0;
         };
-        static constexpr size_t kStreamSlots = 8;
-        std::array<StreamSlot, kStreamSlots> m_slots;
+        //
+        // The slots are PER FRAME, not one shared ring. A fixed ring of 8
+        // was shared by consecutive frames, and Vulkan records the next frame
+        // while the last one still executes (MAX_FRAMES_IN_FLIGHT 2) into
+        // persistently mapped buffers: a frame with more than ~4 calls —
+        // looking at a portal pair (a call per portal view) while the
+        // pause menu's leave-capture prepass draws its panorama tiles (a
+        // call per tile and per tile's portal view) — wrapped onto the slot
+        // the previous frame's main view was still drawing from, and that
+        // frame showed another view's particles (skip-anchored, another
+        // level's): the sparks blinked out for a frame. Now each frame takes
+        // fresh slots from its own set (BeginFrame rotates the sets; three
+        // sets > frames in flight), growing it as needed, so no call ever
+        // writes a buffer that a queued draw still reads.
+        static constexpr size_t kFrameSets        = 3;
+        static constexpr size_t kMaxSlotsPerFrame = 64;   // wrap guard (BeginFrame never called)
+        std::array<std::vector<StreamSlot>, kFrameSets> m_frameSlots;
+        size_t m_frameSet   = 0;
         size_t m_slotCursor = 0;
         StreamSlot& AcquireSlot(size_t vertsNeeded, size_t minCapacity);
+    public:
+        // Once per frame, before any Render call (PlatformMain, beside the
+        // backend's BeginFrame): the next set of stream slots.
+        void BeginFrame() {
+            m_frameSet   = (m_frameSet + 1) % kFrameSets;
+            m_slotCursor = 0;
+        }
+    private:
         void DestroySlots();
 
         static const char* s_vertSource;

@@ -1,5 +1,6 @@
 // File: src/common/entity/Entity.cpp
 #include "common/entity/Entity.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/world/block/BlockBounce.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -8,6 +9,7 @@
 #include "common/core/Log.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/sound/EntitySounds.hpp"
@@ -139,8 +141,8 @@ namespace Game {
 
     bool Entity::StartRiding(Entity& vehicle, bool force) {
         // MC Entity.startRiding(entityToRide, force, sendEventAndTriggers),
-        // minus the pieces this port has no counterpart for: the game-event /
-        // criteria broadcast and the canSerialize gate.
+        // minus the pieces this port has no counterpart for: the criteria
+        // trigger and the canSerialize gate.
         if (&vehicle == m_vehicle) return false;
         if (!vehicle.CouldAcceptPassenger()) return false;
 
@@ -159,13 +161,23 @@ namespace Game {
 
         SetPose(Pose::Standing);
         m_vehicle = &vehicle;
-        // MC addPassenger. The player-first seat ordering is skipped: no
-        // player can mount anything yet, so insertion order is boarding order.
-        vehicle.m_passengers.push_back(this);
+        const bool vehicleWasVehicle = vehicle.IsVehicle();
+        // MC addPassenger: boarding order, except that on the server a player
+        // goes to the front of a list whose first passenger is not a player —
+        // the controlling seat of a boat is a player's whenever one is aboard.
+        const bool serverSide = m_level && !m_level->IsClientSide();
+        if (serverSide && IsPlayer() && !vehicle.m_passengers.empty() &&
+            !vehicle.m_passengers.front()->IsPlayer()) {
+            vehicle.m_passengers.insert(vehicle.m_passengers.begin(), this);
+        } else {
+            vehicle.m_passengers.push_back(this);
+        }
         // Both directions are now raw cross-entity pointers, so both ends have
         // to be visited by the pre-sweep. See Entity::HoldsEntityRefs.
         MarkHoldsEntityRefs();
         vehicle.MarkHoldsEntityRefs();
+        // The vehicle's own addPassenger override (the happy ghast's).
+        vehicle.OnPassengerAdded(*this, vehicleWasVehicle);
 
         // SIMPLIFICATION vs MC: the rider's fall state resets on mount. In MC
         // the stale value simply never settles (a passenger's move() does not
@@ -173,6 +185,15 @@ namespace Game {
         // propagates its OWN fallDistance — and avoids a bogus payout the
         // tick after a mid-air dismount.
         ResetFallDistance();
+        // MC sendEventAndTriggers: level.gameEvent(this, ENTITY_MOUNT,
+        // vehicle.position) — server side only (a no-op on a client level).
+        if (serverSide) {
+            if (ILevelWrite* write = m_level->MutableBlocks()) {
+                write->GameEvent(this, GameEventId::EntityMount, vehicle.position);
+            }
+        }
+        // MC Mob.startRiding's `if (result && isLeashed()) dropLeash()`.
+        OnStartedRiding(vehicle);
         return true;
     }
 
@@ -185,6 +206,25 @@ namespace Game {
         auto& seats = oldVehicle->m_passengers;
         seats.erase(std::remove(seats.begin(), seats.end(), this), seats.end());
         m_boardingCooldown = 60;
+        // The vehicle's own removePassenger override (the cushion's sound).
+        oldVehicle->OnPassengerRemoved(*this);
+        // MC removeVehicle: gameEvent(this, ENTITY_DISMOUNT, oldVehicle.position)
+        // unless the rider merely unloaded or changed dimension
+        // (RemovalReason.shouldDestroy).
+        const RemovalReason reason = GetRemovalReason();
+        if ((reason == RemovalReason::None || reason == RemovalReason::Killed ||
+             reason == RemovalReason::Discarded) &&
+            m_level && !m_level->IsClientSide()) {
+            if (ILevelWrite* write = m_level->MutableBlocks()) {
+                write->GameEvent(this, GameEventId::EntityDismount, oldVehicle->position);
+            }
+        }
+    }
+
+    glm::dvec3 Entity::GetDismountLocationForPassenger(const LivingEntity& passenger) const {
+        (void)passenger;
+        // MC: new Vec3(getX(), getBoundingBox().maxY, getZ()).
+        return glm::dvec3(position.x, GetAABBd().max.y, position.z);
     }
 
     void Entity::EjectPassengers() {
@@ -242,11 +282,19 @@ namespace Game {
     }
 
     void Entity::Remove(RemovalReason reason) {
-        // MC Entity.remove(reason): riders off, seat left, THEN the flag —
-        // see the lifetime note on the riding block in the header.
-        if (IsVehicle()) EjectPassengers();
+        // MC Entity.setRemoved: the flag first (so a dismount sees a vehicle
+        // that is going — LivingEntity.dismountVehicle's removed branch, the
+        // cushion keeping quiet), then the seat left and the riders off. By
+        // the time this returns no riding pointer names this entity — see
+        // the lifetime note on the riding block in the header.
+        if (m_removal == RemovalReason::None) {
+            // A subclass's remove(reason) body that runs before
+            // super.remove (a chest boat pouring out its contents).
+            OnRemoving(reason);
+            m_removal = reason;
+        }
         if (IsPassenger()) StopRiding();
-        m_removal = reason;
+        if (IsVehicle()) EjectPassengers();
     }
 
     void Entity::SetOldPosAndRot() {
@@ -355,6 +403,17 @@ namespace Game {
     const char* Entity::GetSwimSplashSound() const { return EntitySoundsOf(GetType()).splash; }
     const char* Entity::GetSwimHighSpeedSplashSound() const { return EntitySoundsOf(GetType()).splashHighSpeed; }
 
+    bool Entity::IsInRain() const {
+        // MC Entity.isInRain: isRainingAt(blockPosition()) ||
+        // isRainingAt(BlockPos.containing(pos.x, box.maxY, pos.z)) — the
+        // second probe keeps the block x/z and takes the box's top.
+        if (!m_level) return false;
+        const glm::ivec3 pos = BlockPosition();
+        if (m_level->IsRainingAt(pos)) return true;
+        const int topY = static_cast<int>(std::floor(GetAABBd().max.y));
+        return m_level->IsRainingAt(glm::ivec3(pos.x, topY, pos.z));
+    }
+
     bool Entity::EmitsMovementSounds() const {
         return EntitySoundsOf(GetType()).stepMode != EntityStepMode::None;
     }
@@ -406,9 +465,11 @@ namespace Game {
     }
 
     void Entity::DoWaterSplashEffect() {
-        // MC doWaterSplashEffect, sound half (the BUBBLE / SPLASH particles
-        // have no client particle type here): quieter strokes below 0.25 use
-        // the plain splash, a hard entry the high-speed one.
+        // MC doWaterSplashEffect: the splash sound (quieter strokes below 0.25
+        // use the plain splash, a hard entry the high-speed one — heard from
+        // the server's copy, Entity::PlaySound), then a ring of BUBBLE and
+        // SPLASH particles at the water line, 1 + width·20 of each (drawn by
+        // the client's copy; a server level ignores addParticle).
         if (!m_level) return;
         const Entity* controller = GetControllingPassenger();
         const Entity& mover = controller ? *controller : *this;
@@ -418,6 +479,55 @@ namespace Game {
         JavaRandom& rng = m_level->Random();
         const float pitch = 1.0f + (rng.NextFloat() - rng.NextFloat()) * 0.4f;
         PlaySound(speed < 0.25f ? GetSwimSplashSound() : GetSwimHighSpeedSplashSound(), speed, pitch);
+
+        const double yt = std::floor(position.y) + 1.0;
+        const double width = static_cast<double>(GetBbWidth());
+        const float count = 1.0f + GetBbWidth() * 20.0f;
+        for (int i = 0; static_cast<float>(i) < count; ++i) {
+            const double xo = (rng.NextDouble() * 2.0 - 1.0) * width;
+            const double zo = (rng.NextDouble() * 2.0 - 1.0) * width;
+            m_level->AddParticle(ParticleOptions(ParticleKind::Bubble), position.x + xo, yt, position.z + zo,
+                                 d.x, d.y - rng.NextDouble() * 0.20000000298023224, d.z);
+        }
+        for (int i = 0; static_cast<float>(i) < count; ++i) {
+            const double xo = (rng.NextDouble() * 2.0 - 1.0) * width;
+            const double zo = (rng.NextDouble() * 2.0 - 1.0) * width;
+            m_level->AddParticle(ParticleOptions(ParticleKind::Splash), position.x + xo, yt, position.z + zo,
+                                 d.x, d.y, d.z);
+        }
+        // MC doWaterSplashEffect's tail: gameEvent(SPLASH).
+        GameEvent(GameEventId::Splash);
+    }
+
+    bool Entity::CanSpawnSprintParticle() const {
+        // MC canSpawnSprintParticle: sprinting, not in water or lava, alive
+        // (a mob is never a spectator; a crouching one is a player's pose).
+        return IsSprinting() && !IsInWater() && !IsInLava() && IsAlive();
+    }
+
+    void Entity::SpawnSprintParticle() {
+        // MC spawnSprintParticle: a BLOCK particle of the block underfoot
+        // (getOnPosLegacy, 0.2 down), kicked back against the motion.
+        if (!m_level) return;
+        const IBlockAccess* blocks = m_level->Blocks();
+        if (!blocks) return;
+        const glm::ivec3 on(static_cast<int>(std::floor(position.x)), static_cast<int>(std::floor(position.y - 0.2)),
+                            static_cast<int>(std::floor(position.z)));
+        const BlockState state = blocks->GetBlockState(on.x, on.y, on.z);
+        // getRenderShape() != INVISIBLE.
+        const BlockID id = state.Block();
+        if (id == BlockID::Air || id == BlockID::Barrier || id == BlockID::StructureVoid || id == BlockID::Light ||
+            id == BlockID::MovingPiston) {
+            return;
+        }
+        JavaRandom& rng = m_level->Random();
+        const double width = static_cast<double>(GetBbWidth());
+        double x = position.x + (rng.NextDouble() - 0.5) * width;
+        double z = position.z + (rng.NextDouble() - 0.5) * width;
+        if (static_cast<int>(std::floor(position.x)) != on.x) x = std::clamp(x, static_cast<double>(on.x), on.x + 1.0);
+        if (static_cast<int>(std::floor(position.z)) != on.z) z = std::clamp(z, static_cast<double>(on.z), on.z + 1.0);
+        m_level->AddParticle(ParticleOptions::Block(state), x, position.y + 0.1, z,
+                             velocity.x * -4.0, 1.5, velocity.z * -4.0);
     }
 
     void Entity::ApplyMovementEmissionAndPlaySound(const glm::dvec3& movement) {
@@ -442,15 +552,26 @@ namespace Game {
         m_flyDist += movedDistance;
 
         const bool supportingIsAir = supportingState.Block() == BlockID::Air;
+        // MC MovementEmission: sounds and game events are separate halves
+        // (a bat or squid is felt by a sculk sensor but never heard).
+        const bool emitsSounds = EmitsMovementSounds();
+        const bool emitsEvents = EmitsMovementEvents();
         if (m_moveDist > m_nextStep && !supportingIsAir) {
             LivingEntity* living = AsLiving();
             const bool swimming = living && living->IsSwimming();
             // MC vibrationAndSoundEffectsFromBlock: a step lands when the
             // entity is on the ground (or climbing) and not swimming.
-            const auto stepOn = [&](const glm::ivec3& pos, BlockState state, bool shouldSound) {
+            const auto stepOn = [&](const glm::ivec3& pos, BlockState state, bool shouldSound,
+                                    bool shouldVibrate) {
                 if (state.Block() == BlockID::Air) return false;
                 const bool isClimbable = IsClimbableForSound(state.Block());
                 if (!(onGround || isClimbable) || swimming) return false;
+                // MC: level.gameEvent(STEP, position(), Context.of(this, blockState)).
+                if (shouldVibrate) {
+                    if (ILevelWrite* write = m_level->MutableBlocks()) {
+                        write->GameEvent(GameEventId::Step, position, GameEventContext::Of(this, state));
+                    }
+                }
                 if (shouldSound) {
                     // MC walkingStepSound: the step, and amethyst's chime.
                     PlayStepSound(pos, state);
@@ -469,17 +590,23 @@ namespace Game {
                 return true;
             };
             const bool onlyEffectState = supportingPos == effectPos;
-            bool produced = stepOn(effectPos, effectState, true);
-            if (!onlyEffectState) produced |= stepOn(supportingPos, supportingState, false);
+            // MC: the effect state vibrates only when it IS the supporting
+            // state; otherwise the supporting state carries the event.
+            bool produced = stepOn(effectPos, effectState, emitsSounds, onlyEffectState);
+            if (!onlyEffectState) produced |= stepOn(supportingPos, supportingState, false, emitsEvents);
             if (produced) {
                 m_nextStep = NextStep();
             } else if (IsInWater()) {
                 m_nextStep = NextStep();
-                WaterSwimSound();
+                if (emitsSounds) WaterSwimSound();
+                if (emitsEvents) GameEvent(GameEventId::Swim);
             }
         } else if (supportingIsAir) {
             // MC processFlappingMovement.
-            if (IsFlapping()) OnFlap();
+            if (IsFlapping()) {
+                OnFlap();
+                if (emitsEvents) GameEvent(GameEventId::Flap);
+            }
         }
     }
 
@@ -572,7 +699,7 @@ namespace Game {
         // (`!level.isClientSide() || isLocalInstanceAuthoritative()` — a mob
         // mirror is never authoritative, and its sounds would be dropped by
         // the client bridge anyway). Passengers already returned above.
-        if (!m_level->IsClientSide() && !IsRemoved() && EmitsMovementSounds()) {
+        if (!m_level->IsClientSide() && !IsRemoved() && (EmitsMovementSounds() || EmitsMovementEvents())) {
             ApplyMovementEmissionAndPlaySound(position - startPos);
         }
 
@@ -633,12 +760,36 @@ namespace Game {
                 float reduction = 0.0f;
                 if (const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr) {
                     const glm::ivec3 p = BlockPosition();
-                    reduction = FallDistanceReduction(blocks->GetBlock(
-                        p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z));
+                    const glm::ivec3 onPos(p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z);
+                    reduction = FallDistanceReduction(blocks->GetBlock(onPos.x, onPos.y, onPos.z));
+                    // The block's own fallOn reaction (a turtle egg cracked
+                    // by the landing), server-side, ahead of the damage.
+                    if (!m_level->IsClientSide()) {
+                        if (ILevelWrite* write = m_level->MutableBlocks()) {
+                            const BlockState onState = write->GetBlockState(onPos.x, onPos.y, onPos.z);
+                            if (const BlockFallOnFn fallOn = BlockRegistry::Get(onState.Block()).fallOn) {
+                                fallOn(*write, onPos, onState, *this, static_cast<double>(fallDistance));
+                            }
+                        }
+                    }
                 }
                 const float fd = fallDistance * (1.0f - reduction);
                 PropagateFallToPassengers(fd, 1.0f);
                 CauseFallDamage(fd, 1.0f);
+                // MC checkFallDamage: gameEvent(HIT_GROUND, position,
+                // Context.of(this, <the main supporting block's state, else
+                // the landed-on one>)).
+                if (m_level && !m_level->IsClientSide()) {
+                    if (ILevelWrite* write = m_level->MutableBlocks()) {
+                        const glm::ivec3 p = BlockPosition();
+                        const int supportY = static_cast<int>(std::floor(position.y - 1.0e-5));
+                        BlockState landed = write->GetBlockState(p.x, supportY, p.z);
+                        if (landed.Block() == BlockID::Air) {
+                            landed = write->GetBlockState(p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z);
+                        }
+                        write->GameEvent(GameEventId::HitGround, position, GameEventContext::Of(this, landed));
+                    }
+                }
             }
             // MC resets unconditionally inside the onGround branch.
             ResetFallDistance();
@@ -754,6 +905,26 @@ namespace Game {
 
     // MC Entity.checkInsideBlocks (Entity.java:1240-1309)
     void Entity::CheckInsideBlocks(ILevelWrite& level) {
+        // MC Entity.isAffectedByBlocks: `!isRemoved() && !noPhysics`, and a
+        // spectator is noPhysics (Player.tick) — no pressure plate, tripwire,
+        // portal, cactus, berry bush or powder snow ever sees one.
+        if (IsSpectator()) return;
+
+        // MC Entity.applyEffectsFromBlocks opens with the block underfoot:
+        // `if (onGround()) effectState.getBlock().stepOn(level, effectPos,
+        // effectState, this)` at getOnPosLegacy — a turtle egg under a
+        // walking mob or player.
+        if (onGround && !IsRemoved()) {
+            const glm::ivec3 effectPos(static_cast<int>(std::floor(position.x)),
+                                       static_cast<int>(std::floor(position.y - 0.2)),
+                                       static_cast<int>(std::floor(position.z)));
+            const BlockState effectState = level.GetBlockState(effectPos.x, effectPos.y, effectPos.z);
+            if (const BlockStepOnFn stepOn = BlockRegistry::Get(effectState.Block()).stepOn) {
+                stepOn(level, effectPos, effectState, *this);
+                if (IsRemoved()) return;
+            }
+        }
+
         // MC deflates the box by 1e-5 before choosing cells so that an entity
         // resting exactly on a boundary does not claim the cell it is merely
         // touching. The constant here is 0.001, which is coarser than MC but is
@@ -925,6 +1096,15 @@ namespace Game {
     }
 
     void Entity::BaseTick() {
+        // MC Entity.baseTick opens with computeSpeed: the displacement since
+        // the last baseTick (getKnownSpeed).
+        if (!m_hasLastKnownPosition) {
+            m_lastKnownPosition = position;
+            m_hasLastKnownPosition = true;
+        }
+        m_lastKnownSpeed = position - m_lastKnownPosition;
+        m_lastKnownPosition = position;
+
         firstTick = false;
 
         // MC Entity.baseTick: a passenger whose vehicle is gone dismounts.
@@ -937,12 +1117,15 @@ namespace Game {
             --m_boardingCooldown;
         }
 
+        // MC Entity.baseTick: the running dust.
+        if (CanSpawnSprintParticle()) SpawnSprintParticle();
+
         UpdateInWaterStateAndDoFluidPushing();
 
-        // MC Entity.baseTick: `if (isOnFire() && (isInPowderSnow ||
-        // isInWaterOrRain() || isInFloatableFluid())) clearFire()`. No rain
-        // or powder snow here; water is the whole rule.
-        if (IsOnFire() && IsInWater()) {
+        // MC: the water block's entityInside and applyEffectsFromBlocks'
+        // `if (isInRain()) clearFire()` put a burning entity out, then the
+        // `wasOnFire && !isOnFire()` hiss. Powder snow is not modelled.
+        if (IsOnFire() && IsInWaterOrRain()) {
             ClearFire();
             // MC applyEffectsFromBlocks: `wasOnFire && !isOnFire()` → the hiss.
             PlayEntityOnFireExtinguishedSound();
@@ -962,6 +1145,13 @@ namespace Game {
         if (position.y < -64.0 - 64.0) {
             Discard();
         }
+
+        // MC Entity.baseTick's last step: `if (level instanceof ServerLevel
+        // && this instanceof Leashable) Leashable.tickLeash(level, this)`.
+        // Only a Mob wears a lead (Mob::TickLeash); the base is a no-op.
+        if (m_level && !m_level->IsClientSide()) {
+            TickLeash();
+        }
     }
 
     void Entity::UpdateInWaterStateAndDoFluidPushing() {
@@ -973,9 +1163,9 @@ namespace Game {
         if (inWater) {
             ResetFallDistance();
             // MC doWaterSplashEffect on the dry→wet edge (`!wasTouchingWater
-            // && !firstTick`): the splash sound, from the server. The SPLASH
-            // / BUBBLE particles have no client particle type yet.
-            if (!m_wasTouchingWater && m_fluidPrimed && m_level && !m_level->IsClientSide()) {
+            // && !firstTick`), on both sides: the server's copy is heard, the
+            // client's copy draws the bubbles and splash.
+            if (!m_wasTouchingWater && m_fluidPrimed && m_level) {
                 DoWaterSplashEffect();
             }
         }
@@ -1009,15 +1199,22 @@ namespace Game {
 
     void SpawnExplosionVisualEffects(EntityLevel& level,
                                      double cx, double cy, double cz,
-                                     float radius, bool small, int blockCount) {
+                                     float radius, bool small, int blockCount,
+                                     uint8_t particleSet, bool blockParticles) {
         if (!level.IsClientSide()) return;
 
         // MC ClientPacketListener.handleExplosion: the centre particle.
         // xAux = 1.0 travels into HugeExplosionParticle's `size` argument
-        // (quadSize = 2 * (1 - size * 0.5) → 1.0 for the packet spawn).
-        level.AddParticle(small ? ParticleKind::Explosion
-                                : ParticleKind::ExplosionEmitter,
+        // (quadSize = 2 * (1 - size * 0.5) → 1.0 for the packet spawn); the
+        // gust emitters ignore it.
+        const bool gust = particleSet == 1;
+        level.AddParticle(gust ? (small ? ParticleKind::GustEmitterSmall : ParticleKind::GustEmitterLarge)
+                               : (small ? ParticleKind::Explosion : ParticleKind::ExplosionEmitter),
                           cx, cy, cz, 1.0, 0.0, 0.0);
+
+        // MC trackExplosionEffects with an empty blockParticles list adds
+        // nothing (the wind charges).
+        if (!blockParticles) return;
 
         // MC ClientExplosionTracker:26 — anything but Particles: All clears
         // the whole debris list; only the fireball above survives.

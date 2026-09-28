@@ -37,6 +37,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -90,7 +91,10 @@ namespace Game::Anvil {
         explicit AnvilChunkIo(std::unique_ptr<RegionStore> store)
             : m_store(std::move(store)), m_writable(false) {}
 
-        std::mutex                   m_mutex;
+        // Shared: chunk reads of regions already open (positional reads, any
+        // number at once). Exclusive: opening or evicting a region, writes,
+        // clears, closing.
+        std::shared_mutex            m_regionsMutex;
         std::unique_ptr<RegionStore> m_store;
         bool                         m_writable;
     };

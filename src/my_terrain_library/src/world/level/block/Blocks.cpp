@@ -1988,7 +1988,7 @@ protected:
 } // namespace
 
 // Static member definitions
-bool minecraft::world::level::block::Blocks::s_initialized = false;
+std::atomic<bool> minecraft::world::level::block::Blocks::s_initialized{false};
 std::unordered_map<std::string, Block*> minecraft::world::level::block::Blocks::s_blocksByName;
 
 // =========================================================================
@@ -2571,8 +2571,17 @@ RotatedPillarBlock* minecraft::world::level::block::Blocks::createLogBlock(const
 // Bootstrap
 // =========================================================================
 
+// Once per process, and safe from any thread: the game warms it up on a
+// background thread at launch (PlatformMain) while the world open that needs
+// it may already be under way on the server thread - that caller waits here
+// until the first one finishes.
 void minecraft::world::level::block::Blocks::bootstrap() {
-    if (s_initialized) return;
+    static std::once_flag s_once;
+    std::call_once(s_once, [] { bootstrapBlocks(); });
+}
+
+void minecraft::world::level::block::Blocks::bootstrapBlocks() {
+    if (s_initialized.load(std::memory_order_acquire)) return;
 
     // Initialize BlockStateProperties first
     state::properties::BlockStateProperties::initialize();
@@ -4819,11 +4828,11 @@ void minecraft::world::level::block::Blocks::bootstrap() {
     STRIPPED_PALE_OAK_LOG = createLogBlock("minecraft:stripped_pale_oak_log");
     STRIPPED_POPLAR_LOG = createLogBlock("minecraft:stripped_poplar_log");
 
-    s_initialized = true;
+    s_initialized.store(true, std::memory_order_release);
 }
 
 bool minecraft::world::level::block::Blocks::isInitialized() {
-    return s_initialized;
+    return s_initialized.load(std::memory_order_acquire);
 }
 
 Block* minecraft::world::level::block::Blocks::getBlock(const std::string& name) {

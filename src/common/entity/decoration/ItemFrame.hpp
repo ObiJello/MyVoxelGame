@@ -25,7 +25,10 @@
 //   framed item rides ItemFrameDataS2C (sent on first sight and whenever it
 //   changes — MC's DATA_ITEM). Facing: HangingEntity.
 //
-// NOT HERE: framed maps (no map system), so a frame is always 12×12.
+// FRAMED MAPS: a frame holding a map (MAP_ID) fills the whole face
+//   (createBoundingBox), draws the map full-frame (MapRenderer), shows a
+//   frame marker on the map (the server's map tick, every 10 ticks) and
+//   takes that marker away again when the map leaves it (removeFramedMap).
 #pragma once
 
 #include "common/entity/decoration/HangingEntity.hpp"
@@ -51,6 +54,8 @@ namespace Game {
         // MC setItem(stack, updateNeighbours): one of it, the add sound when
         // it is not empty, and the comparator behind told.
         void SetItem(const ItemStack& stack, bool updateNeighbours = true);
+        // MC hasFramedMap: the item carries a MAP_ID.
+        bool HasFramedMap() const;
         int  GetRotation() const { return m_rotation; }
         void SetRotation(int rotation, bool updateNeighbours = true);
         // MC getAnalogOutput.
@@ -76,6 +81,7 @@ namespace Game {
         void SetItemSilently(const ItemStack& stack) {
             m_item = stack;
             if (!m_item.IsEmpty()) m_item.count = 1;   // setItem's copyWithCount(1)
+            RecalculateBoundingBox();                   // onItemChanged
         }
 
         // MC ItemFrame.interact — server side. `held` is the player's hand
@@ -110,6 +116,8 @@ namespace Game {
     private:
         // MC dropItem(level, causedBy, withFrame).
         void DropItem(Entity* causedBy, bool withFrame);
+        // MC removeFramedMap.
+        void RemoveFramedMap(const ItemStack& stack);
         ItemStack FrameItemStackWithData() const;
         void UpdateComparatorBehind();
 

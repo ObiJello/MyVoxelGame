@@ -15,9 +15,17 @@
 #include "common/world/block/entity/SignBlockEntity.hpp"
 #include "common/world/block/entity/LecternBlockEntity.hpp"
 #include "common/world/block/entity/SpawnerBlockEntity.hpp"
+#include "common/world/block/entity/TrialSpawnerBlockEntity.hpp"
+#include "common/world/block/entity/VaultBlockEntity.hpp"
+#include "common/world/block/entity/BrushableBlockEntity.hpp"
+#include "common/world/block/entity/DecoratedPotBlockEntity.hpp"
+#include "common/world/block/entity/BannerBlockEntity.hpp"
+#include "common/world/block/entity/CopperGolemStatueBlockEntity.hpp"
+#include "server/world/storage/anvil/BlockEntityNbt.hpp"
 #include "common/nbt/NbtWrite.hpp"
 #include "server/world/storage/NBTParser.hpp"
 #include "server/world/storage/anvil/SpawnerNbt.hpp"
+#include "server/world/storage/anvil/TrialChamberNbt.hpp"
 #include "common/world/block/entity/AurelithBlockEntities.hpp"
 #include "server/world/storage/anvil/ItemStackNbt.hpp"   // ItemFromName
 #include "common/world/biome/Biomes.hpp"
@@ -553,6 +561,39 @@ namespace {
                 // SpawnData (and any SpawnPotentials / limits it carries).
                 if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadSpawner(*tree, *spawner);
             }
+            if (auto* trial = dynamic_cast<Game::TrialSpawnerBlockEntity*>(entity.get())) {
+                // MC TrialSpawner.load over the trial chambers' template tag:
+                // the normal_config / ominous_config registry references
+                // ("minecraft:trial_chamber/melee/zombie/normal", …).
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadTrialSpawner(*tree, *trial);
+            }
+            if (auto* pot = dynamic_cast<Game::DecoratedPotBlockEntity*>(entity.get())) {
+                // MC DecoratedPotBlockEntity.loadAdditional over the template
+                // tag: the sherds and, without a LootTable (the corridor
+                // pots' pots/trial_chambers/corridor, set above), the item.
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadDecoratedPot(*tree, *pot);
+            }
+            if (auto* banner = dynamic_cast<Game::BannerBlockEntity*>(entity.get())) {
+                // MC BannerBlockEntity.loadAdditional over the template tag:
+                // the pattern layers and the kept components (the outposts'
+                // and villages' ominous banners).
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadBanner(*tree, *banner);
+            }
+            if (auto* statue = dynamic_cast<Game::CopperGolemStatueBlockEntity*>(entity.get())) {
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadCopperGolemStatue(*tree, *statue);
+            }
+            if (auto* brushable = dynamic_cast<Game::BrushableBlockEntity*>(entity.get())) {
+                // MC BrushableBlockEntity.loadAdditional: the archaeology
+                // table the structure buried here (desert pyramid and well,
+                // ocean ruins, trail ruins) and its seed.
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadBrushableBlock(*tree, *brushable);
+            }
+            if (auto* vault = dynamic_cast<Game::VaultBlockEntity*>(entity.get())) {
+                // MC VaultBlockEntity.loadAdditional: the template's config
+                // (key item, loot table — reward or reward_ominous), fresh
+                // server and shared data.
+                if (auto tree = CanonicalToNbtTree(root)) Game::Anvil::ReadVault(*tree, *vault);
+            }
             gameChunk.SetBlockEntity(localX, worldY, localZ, std::move(entity));
         }
     }
@@ -629,10 +670,13 @@ namespace Game {
 
     // Two dedicated threads for the library's serial schedulers (dispatcher
     // mailbox + worldgen lane) — see ChunkMap's constructor for why they must
-    // not share the FIFO worldgen pool.
+    // not share the FIFO worldgen pool. Elevated: the lane is the one serial
+    // stage every chunk passes through (FEATURES runs on it, as on MC's
+    // consecutive "worldgen" executor), so it belongs on a performance core.
+    // Leaked for the same reason as the shared pool.
     BackgroundExecutor& SharedLaneExecutor() {
-        static BackgroundExecutor lane(2);
-        return lane;
+        static BackgroundExecutor* lane = new BackgroundExecutor(2, /*elevated=*/true, "WorldgenLane");
+        return *lane;
     }
 
     BackgroundExecutor& SharedBackgroundExecutor() {
@@ -959,6 +1003,11 @@ namespace Game {
             // dimension — see SharedBackgroundExecutor in the header.
             // ================================================================
             m_backgroundLease = std::make_unique<SharedExecutorLease>();
+            // OBEY_SHARED_LANE=1: the lane shares the worldgen pool (A/B switch).
+            static const bool s_sharedLane = std::getenv("OBEY_SHARED_LANE") != nullptr;
+            if (!s_sharedLane) {
+                m_laneLease = std::make_unique<SharedExecutorLease>(SharedLaneExecutor());
+            }
             if (const char* deco = std::getenv("OBEY_DECO_THREADS")) {
                 const int n = std::atoi(deco);
                 if (n > 0) m_decorationPool = std::make_unique<BackgroundExecutor>(static_cast<size_t>(n), /*elevated=*/true);
@@ -987,7 +1036,11 @@ namespace Game {
                 seed,
                 m_backgroundLease->getExecutor(),
                 m_mainThreadExecutor->getExecutor(),
-                nullptr,   // lane executor: share the pool (a dedicated one measured no gain and complicated shutdown)
+                // The lane on its own threads: on the FIFO pool every hop of
+                // the serial lane queued behind 5-30 ms terrain tasks, and the
+                // lane - busy ~75% of each second - paced generation while
+                // four of the nine pool threads sat idle (2026-09-26).
+                m_laneLease ? m_laneLease->getExecutor() : nullptr,
                 m_blockRegistry,
                 m_airBlock,
                 m_stoneBlock,
@@ -1157,6 +1210,11 @@ namespace Game {
         // task submitted through THIS lease has finished and drops anything
         // submitted afterwards, which is exactly what the old
         // per-generator `m_backgroundExecutor.reset()` did.
+        // The lane and the pool hand work to each other: whichever closes
+        // first drops what the other still submits to it, as intended.
+        if (m_laneLease) {
+            m_laneLease->closeAndWait();
+        }
         if (m_backgroundLease) {
             m_backgroundLease->closeAndWait();
         }
@@ -1175,8 +1233,9 @@ namespace Game {
         }
         m_mainThreadExecutor.reset();
         m_chunkCache.reset();
-        // After m_chunkCache: its executor closure holds the lease pointer.
+        // After m_chunkCache: its executor closures hold the lease pointers.
         m_backgroundLease.reset();
+        m_laneLease.reset();
         // After m_chunkCache: the pipeline's WorldGenContext pointed at this.
         m_structureState.reset();
 

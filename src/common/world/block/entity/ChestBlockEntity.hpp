@@ -33,6 +33,8 @@
 
 namespace Game {
 
+    class Entity;
+
     class ILevelWrite;
 
     // MC ChestLidController, verbatim.
@@ -89,8 +91,10 @@ namespace Game {
         // A user (a player whose chest menu covers this chest, a copper golem
         // working it) starts or stops having it open. Spectators never count;
         // callers skip them, as MC's startOpen/stopOpen do.
-        void StartOpen(ILevelWrite& level);
-        void StopOpen(ILevelWrite& level);
+        // `user` is MC's LivingEntity argument — the CONTAINER_OPEN /
+        // CONTAINER_CLOSE game event's source.
+        void StartOpen(ILevelWrite& level, Entity* user = nullptr);
+        void StopOpen(ILevelWrite& level, Entity* user = nullptr);
         // MC recheckOpeners: recount the users from the world and settle the
         // lid to match. Driven by the chest's scheduled block tick.
         void RecheckOpen(ILevelWrite& level);

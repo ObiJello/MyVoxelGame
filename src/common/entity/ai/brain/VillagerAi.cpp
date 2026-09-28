@@ -6,6 +6,7 @@
 // CheckExtraStartConditions (it starts, is ticked once, and stops — the
 // engine's default CanStillUse is false, which is exactly OneShot's life).
 #include "common/entity/ai/brain/VillagerAi.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -164,7 +165,7 @@ namespace Game {
         bool IsMobInteractableDoor(BlockState s) { return IsWoodenDoorBlock(s.Block()); }
         bool IsDoorOpen(BlockState s) { return s.GetValueByName("open") == "true"; }
 
-        void SetDoorOpen(EntityLevel& level, const glm::ivec3& pos, bool open) {
+        void SetDoorOpen(EntityLevel& level, const glm::ivec3& pos, bool open, Entity* source) {
             // MC DoorBlock.setOpen(entity, level, state, pos, open): flags 10
             // (UPDATE_CLIENTS | UPDATE_IMMEDIATE), the other half following
             // (MC through updateShape; explicit here — the engine has no
@@ -189,6 +190,8 @@ namespace Game {
                 level.PlaySound(nullptr, pos, open ? set->doorOpen : set->doorClose,
                                 SoundSource::Blocks, 1.0f, pitch);
             }
+            // MC setOpen: level.gameEvent(sourceEntity, BLOCK_OPEN / BLOCK_CLOSE, pos).
+            world->GameEvent(source, open ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
         }
 
         // MC InteractWithDoor.isMobComingThroughDoor — the other mob's live
@@ -231,7 +234,7 @@ namespace Game {
                         if (IsMobComingThroughDoor(*other, doorPos)) { othersComing = true; break; }
                     }
                 }
-                if (!othersComing) SetDoorOpen(level, doorPos, false);
+                if (!othersComing) SetDoorOpen(level, doorPos, false, &body);
                 it = doors.erase(it);
             }
         }
@@ -503,12 +506,12 @@ namespace Game {
 
                 const BlockState fromState = StateAt(level, fromPos);
                 if (IsMobInteractableDoor(fromState)) {
-                    if (!IsDoorOpen(fromState)) SetDoorOpen(level, fromPos, true);
+                    if (!IsDoorOpen(fromState)) SetDoorOpen(level, fromPos, true, &v);
                     RememberDoorToClose(v, fromPos);
                 }
                 const BlockState toState = StateAt(level, toPos);
                 if (IsMobInteractableDoor(toState) && !IsDoorOpen(toState)) {
-                    SetDoorOpen(level, toPos, true);
+                    SetDoorOpen(level, toPos, true, &v);
                     RememberDoorToClose(v, toPos);
                 }
                 CloseDoorsThatIHaveOpenedOrPassedThrough(level, v, &fromPos, &toPos);
@@ -1068,10 +1071,9 @@ namespace Game {
                         if (ComposterLevel(temp) == 7) { filled = true; break; }
                     }
                 }
-                // Level event 1500 (ComposterBlock.handleFill): the fill sound.
-                level.PlaySound(nullptr, pos,
-                                temp != before ? SoundEvents::COMPOSTER_FILL_SUCCESS : SoundEvents::COMPOSTER_FILL,
-                                SoundSource::Blocks, 1.0f, 1.0f);
+                // Level event 1500 (ComposterBlock.handleFill): the fill sound
+                // and the COMPOSTER particles, played by the receiving client.
+                level.PlayLevelEvent(nullptr, LevelEvent::COMPOSTER_FILL, pos, temp != before ? 1 : 0);
             }
             bool    m_composter;
             int64_t m_lastCheck = 0;
@@ -1227,6 +1229,11 @@ namespace Game {
                             const BlockID place = stack.AsBlockID();
                             if (place == BlockID::Air) continue;
                             level.SetBlockState(pos, BlockStates::Default(place));
+                            // MC: level.gameEvent(BLOCK_PLACE, pos, Context.of(body, place)).
+                            if (ILevelWrite* write = level.MutableBlocks()) {
+                                write->GameEvent(GameEventId::BlockPlace, pos,
+                                                 GameEventContext::Of(&body, BlockStates::Default(place)));
+                            }
                             level.PlaySound(nullptr, pos, SoundEvents::CROP_PLANTED, SoundSource::Blocks, 1.0f, 1.0f);
                             stack.count -= 1;
                             if (stack.count <= 0) stack.Clear();
@@ -1301,12 +1308,13 @@ namespace Game {
             }
             void Start(EntityLevel&, LivingEntity& body, int64_t timestamp) override {
                 SetCurrentCropAsTarget(body);
-                // (MC shows the bone meal in the main hand — no mob hand
-                // items are drawn in this engine.)
+                // MC: the bone meal shows in the main hand while working.
+                V(body).SetEquipment(EquipmentSlot::MAINHAND, ItemStack(Items::BoneMeal, 1));
                 m_nextWorkCycleTime = timestamp;
                 m_timeWorkedSoFar = 0;
             }
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
+                V(body).SetEquipment(EquipmentSlot::MAINHAND, ItemStack{});
                 m_lastBonemealingSession = body.tickCount;
             }
             void Tick(EntityLevel& level, LivingEntity& body, int64_t timestamp) override {
@@ -1381,14 +1389,16 @@ namespace Game {
                 LivingEntity* target = LookAt(body);
                 if (target) FindItemsToDisplay(level, *target, V(body));
                 if (!m_displayItems.empty()) {
-                    DisplayCyclingItems();
+                    DisplayCyclingItems(V(body));
                 } else {
+                    ClearHeldItem(V(body));
                     m_lookTime = std::min(m_lookTime, 40);
                 }
                 --m_lookTime;
             }
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
                 body.GetBrain()->EraseMemory(MemoryModule::InteractionTarget);
+                ClearHeldItem(V(body));
                 m_playerItem.reset();
                 m_displayItems.clear();
             }
@@ -1413,17 +1423,30 @@ namespace Game {
                             m_displayItems.push_back(offer.Assemble());
                         }
                     }
-                    if (!m_displayItems.empty()) m_lookTime = 900;
+                    if (!m_displayItems.empty()) {
+                        m_lookTime = 900;
+                        DisplayAsHeldItem(v, m_displayItems.front());   // displayFirstItem
+                    }
                 }
             }
-            void DisplayCyclingItems() {
-                // The cycling is kept (the timing drives lookTime); the item
-                // itself would sit in the villager's hand — MC's crossed-arms
-                // item layer, which this engine does not draw yet.
+            // The offer result sits in the villager's main hand (drawn by the
+            // crossed-arms item layer), never dropped; cleared back to the
+            // default 0.085 chance.
+            static void ClearHeldItem(Villager& v) {
+                v.SetEquipment(EquipmentSlot::MAINHAND, ItemStack{});
+                v.SetEquipmentDropChance(EquipmentSlot::MAINHAND, Mob::kDefaultEquipmentDropChance);
+            }
+            static void DisplayAsHeldItem(Villager& v, const ItemStack& stack) {
+                v.SetEquipment(EquipmentSlot::MAINHAND, stack);
+                v.SetEquipmentDropChance(EquipmentSlot::MAINHAND, 0.0f);
+            }
+            void DisplayCyclingItems(Villager& v) {
+                // Every 40 ticks the next matching offer's result.
                 if (m_displayItems.size() >= 2 && ++m_cycleCounter >= 40) {
                     ++m_displayIndex;
                     m_cycleCounter = 0;
                     if (m_displayIndex > static_cast<int>(m_displayItems.size()) - 1) m_displayIndex = 0;
+                    DisplayAsHeldItem(v, m_displayItems[static_cast<size_t>(m_displayIndex)]);
                 }
             }
             std::optional<ItemID>  m_playerItem;

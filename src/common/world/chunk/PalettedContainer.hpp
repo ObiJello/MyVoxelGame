@@ -117,7 +117,7 @@ namespace Game {
         void ForEachValue(Fn fn) const {
             if (m_global) {
                 std::unordered_map<uint32_t, int> counts;
-                for (size_t i = 0; i < m_storage.Size(); ++i) ++counts[m_storage.Get(i)];
+                m_storage.ForEach([&](uint32_t v) { ++counts[v]; });
                 for (const auto& [v, n] : counts) fn(v, n);
                 return;
             }
@@ -126,7 +126,7 @@ namespace Game {
                 return;
             }
             std::vector<int> counts(m_palette.size(), 0);
-            for (size_t i = 0; i < m_storage.Size(); ++i) ++counts[m_storage.Get(i)];
+            m_storage.ForEach([&](uint32_t v) { ++counts[v]; });
             for (size_t i = 0; i < m_palette.size(); ++i) {
                 if (counts[i] > 0) fn(m_palette[i], counts[i]);
             }

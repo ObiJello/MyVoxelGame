@@ -14,8 +14,11 @@ namespace Game {
     }
 
     bool NeutralMob::IsValidPlayerTarget(const LivingEntity& target) {
-        // MC: instanceof Player && !creative && !spectator.
-        return target.IsPlayer() && !target.IsCreative() && !target.IsSpectator();
+        // MC: instanceof Player && !creative && !spectator && the player's
+        // level is not on Peaceful.
+        if (!target.IsPlayer() || target.IsCreative() || target.IsSpectator()) return false;
+        const EntityLevel* level = target.Level();
+        return !level || level->GetDifficulty() != Difficulty::Peaceful;
     }
 
     bool NeutralMob::IsAngry() const {
@@ -64,41 +67,51 @@ namespace Game {
     }
 
     void NeutralMob::UpdatePersistentAnger(bool stayAngryIfTargetPresent) {
-        // MC NeutralMob.updatePersistentAnger, branch for branch. The local
-        // `persistentAngerTarget` is captured BEFORE any reassignment, exactly
-        // as MC's local is — the "stop being angry with nothing to be angry
-        // at" test runs against the value the tick STARTED with.
-        LivingEntity* target = m_neutralSelf->GetTarget();
-        LivingEntity* persistentAngerTarget = GetPersistentAngerTarget();
+        // MC NeutralMob.updatePersistentAnger, branch for branch. MC's local
+        // `persistentAngerTarget` is the EntityReference the tick STARTED
+        // with — an identity, not a resolved entity — so every test below
+        // that MC makes against it is made against the reference: a grudge
+        // against a player who is offline (unresolved) still expires, and
+        // "is this a new target" is a UUID compare, not a pointer one.
+        LivingEntity* previousTarget = m_neutralSelf->GetTarget();   // getTargetUnchecked
+        const EntityRef startRef = m_angryAtRef;
+        const bool hadAngerTarget = !startRef.Empty();
 
-        if (target != nullptr && target->IsDeadOrDying() &&
-            persistentAngerTarget == target &&
-            dynamic_cast<Mob*>(target) != nullptr) {
+        if (previousTarget != nullptr && previousTarget->IsDeadOrDying() &&
+            hadAngerTarget && startRef.Matches(*previousTarget) &&
+            dynamic_cast<Mob*>(previousTarget) != nullptr) {
             // MC: a dead MOB grudge (not a player) is simply dropped.
             StopBeingAngry();
             return;
         }
 
+        LivingEntity* target = m_neutralSelf->GetTarget();
         if (target != nullptr) {
-            if (persistentAngerTarget != target) {
-                SetPersistentAngerTarget(target);
-            }
-            StartPersistentAngerTimer();
+            const bool newTarget = !hadAngerTarget || !startRef.Matches(*target);
+            if (newTarget) SetPersistentAngerTarget(target);
+            if (newTarget || stayAngryIfTargetPresent) StartPersistentAngerTimer();
         }
 
-        if (persistentAngerTarget != nullptr && !IsAngry() &&
+        if (hadAngerTarget && !IsAngry() &&
             (target == nullptr || !IsValidPlayerTarget(*target) ||
              !stayAngryIfTargetPresent)) {
             StopBeingAngry();
         }
 
-        // MC: a grudge against a player who went creative or spectator is
-        // dropped (isCreative() || isSpectator()).
-        if (persistentAngerTarget != nullptr &&
-            persistentAngerTarget->IsPlayer() &&
-            (persistentAngerTarget->IsCreative() ||
-             persistentAngerTarget->IsSpectator())) {
-            StopBeingAngry();
+        // MC: a grudge (the reference the tick started with) against a player
+        // who went creative or spectator — or any grudge on Peaceful — is
+        // dropped. The reference is resolved here, as MC's
+        // EntityReference.getLivingEntity is; an offline player resolves to
+        // nothing and keeps the grudge.
+        EntityLevel* level = m_neutralSelf->Level();
+        if (hadAngerTarget && level) {
+            EntityRef resolver = startRef;
+            LivingEntity* persistentTarget = resolver.GetLiving(*level);
+            if (persistentTarget != nullptr && persistentTarget->IsPlayer() &&
+                (persistentTarget->IsCreative() || persistentTarget->IsSpectator() ||
+                 level->GetDifficulty() == Difficulty::Peaceful)) {
+                StopBeingAngry();
+            }
         }
     }
 

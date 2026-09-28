@@ -52,6 +52,12 @@ namespace Server {
         
         // Player updates
         void onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) override;
+        // MC handlePlayerInput / handleMoveVehicle / handlePaddleBoat
+        // (Server::PlayerRiding).
+        void onPlayerInputC2S(const Network::PlayerInputC2SPacket& packet) override;
+        void onMoveVehicleC2S(const Network::MoveVehicleC2SPacket& packet) override;
+        void onPaddleBoatC2S(const Network::PaddleBoatC2SPacket& packet) override;
+        void onRidingCommandC2S(const Network::RidingCommandC2SPacket& packet) override;
 #if ENABLE_IMMERSIVE_PORTALS
         void onPortalTeleportC2S(const Network::PortalTeleportC2SPacket& packet) override;
 #endif
@@ -70,6 +76,9 @@ namespace Server {
         // Trading (MerchantPackets.hpp)
         void onSelectTradeC2S(const Network::SelectTradeC2SPacket& packet) override;
         void onRenameItemC2S(const Network::RenameItemC2SPacket& packet) override;
+        // Spectator mode (SpectatorPackets.hpp)
+        void onSpectatorActionC2S(const Network::SpectatorActionC2SPacket& packet) override;
+        void onTeleportToEntityC2S(const Network::TeleportToEntityC2SPacket& packet) override;
 
         // Inventory click + close
         void onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) override;

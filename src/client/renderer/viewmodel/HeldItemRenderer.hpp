@@ -19,6 +19,8 @@
 
 #include <glm/glm.hpp>
 
+#include <optional>
+
 namespace Render {
 
     class HeldItemRenderer {
@@ -43,6 +45,42 @@ namespace Render {
         void Tick(Game::ItemID mainItem, Game::ItemID offhandItem,
                   bool attackPressedThisTick, float mainHandSwapScale,
                   float viewPitchDeg, float viewYawDeg);
+
+        // The main arm's swing, 0..1 through it (0 at rest) — the local
+        // player's LivingEntity.getAttackAnim(partialTick), which also poses
+        // their own humanoid body in third person (a /morph Herobrine).
+        // MC LivingEntity.isSwinging for the local player.
+        bool IsSwinging() const { return m_swingActive; }
+        float AttackAnim(float partialTick) const {
+            if (!m_swingActive) return 0.0f;
+            return m_swingProgressPrev + (m_swingProgress - m_swingProgressPrev) * partialTick;
+        }
+
+        // The hands' DataComponents.MAP_ID, set before each Tick. A hand
+        // whose displayed stack carries one draws MC's map pose instead of
+        // the item (FirstPersonHandsAndItemsRenderer: two-handed in the main
+        // hand with the off hand empty, else one-handed), and a change of
+        // map id is an equip swap like a change of item.
+        void SetHandMapIds(std::optional<int32_t> mainMapId, std::optional<int32_t> offMapId) {
+            m_hands[0].pendingMapId = mainMapId;
+            m_hands[1].pendingMapId = offMapId;
+        }
+
+        // The hands' live stacks, set before each Tick. MC's hand keeps the
+        // STACK, and a stack of the same item replaces the visible one at
+        // once (shouldInstantlyReplaceVisibleItem) — how a crossbow shows its
+        // load (crossbow_arrow / crossbow_firework and the CrossbowItem
+        // .isCharged pose) and a firework star its colour, with no re-equip.
+        // `mainSlot` / `offSlot`: the hands' inventory indices, the holder
+        // slots their stacks are drawn as (ItemRegistry::SetRenderSlot) — so
+        // only the hand actually in use shows a pulling bow or crossbow.
+        void SetHandStacks(const Game::ItemStack& mainStack, const Game::ItemStack& offStack,
+                           int mainSlot, int offSlot) {
+            m_hands[0].pendingStack = mainStack;
+            m_hands[1].pendingStack = offStack;
+            m_handSlots[0] = mainSlot;
+            m_handSlots[1] = offSlot;
+        }
 
         // The camera's damage-tilt / death-spin matrix for this frame (MC
         // GameRenderer.bobHurt). Set it alongside Camera::viewTilt — vanilla
@@ -91,6 +129,15 @@ namespace Render {
             m_useDuration  = durationTicks;
         }
 
+        // The rest of AvatarRenderState the first-person hand reads: the
+        // riptide in flight (isAutoSpinAttack — both hands take the spin
+        // pose) and ticksSinceKineticHitFeedback (a charging spear's recoil
+        // on a hit, SpearAnimations.hitFeedbackAmount). Per frame.
+        void SetAvatarState(bool autoSpinAttack, float ticksSinceKineticHitFeedback) {
+            m_autoSpinAttack = autoSpinAttack;
+            m_ticksSinceKineticHitFeedback = ticksSinceKineticHitFeedback;
+        }
+
     private:
         // ── Per-hand state (advanced by Tick) ───────────────────────
         // Index 0 = main hand (MC HumanoidArm.RIGHT, invert = +1),
@@ -102,16 +149,38 @@ namespace Render {
             // phase completes (MC's mainHandItem/offHandItem pair).
             Game::ItemID displayed = 0;
             Game::ItemID pending   = 0;
+            // The displayed / pending stack's map id (SetHandMapIds).
+            std::optional<int32_t> mapId;
+            std::optional<int32_t> pendingMapId;
+            // The displayed / pending stack (SetHandStacks); `stack` follows
+            // the live one while it is the displayed item.
+            Game::ItemStack stack;
+            Game::ItemStack pendingStack;
             float equipProgress     = 0.0f;   // 0=equipped, 1=fully off-screen
             float equipProgressPrev = 0.0f;
         };
         HandState m_hands[2];
+        int       m_handSlots[2] = { -1, -1 };
 
         // Swing animation (main hand only): 0=idle, ramps to 1 over
         // kSwingTicks ticks when the player starts an attack.
         float m_swingProgress     = 0.0f;
         float m_swingProgressPrev = 0.0f;
         bool  m_swingActive       = false;
+        // The swing's SwingAnimation (ItemStack.getAttackAnimation of the
+        // main hand when it began): a spear STABs for its attack duration,
+        // everything else WHACKs for 6 ticks.
+        int   m_swingDuration     = 6;
+        bool  m_swingStab         = false;
+
+        bool  m_autoSpinAttack = false;
+        float m_ticksSinceKineticHitFeedback = 0.0f;
+        // entity/trident.png, for the TridentModel drawn in the hand.
+        TextureHandle m_tridentTexture = INVALID_TEXTURE;
+        bool          m_tridentTextureTried = false;
+        // The trident's first-person draw (TridentSpecialRenderer): its model
+        // through `pose` (block units, the item's display already applied).
+        void RenderTridentModel(int hand, const glm::mat4& pose, float aspect);
 
         // Hold-to-use pose (eat wiggle / shield block). See SetUseState.
         bool                   m_useActive    = false;
@@ -154,6 +223,14 @@ namespace Render {
         // Draw one hand. `hand` indexes m_hands; invert = +1 / -1.
         void RenderHand(int hand, float aspect, float partialTick,
                         float walkDistance);
+        // A hand holding a map: MC renderTwoHandedMap / renderOneHandedMap
+        // with the player's arms (renderMapHand / renderPlayerArm) and
+        // renderMap (the paper, the map texture, its decorations).
+        void RenderMapHand(int hand, float aspect, float partialTick, float walkDistance);
+        // This frame's view pitch (MC xRot) — the two-handed map's tilt.
+        float m_viewPitchDeg = 0.0f;
+        TextureHandle m_skinTexture = INVALID_TEXTURE;
+        bool m_skinTried = false;
 
         bool m_initialized = false;
         ShaderHandle  m_shader        = INVALID_SHADER;

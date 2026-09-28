@@ -4,6 +4,11 @@
 #include "ChestRenderer.hpp"
 #include "PistonRenderer.hpp"
 #include "CampfireRenderer.hpp"
+#include "BrushableBlockRenderer.hpp"
+#include "DecoratedPotRenderer.hpp"
+#include "BannerRenderer.hpp"
+#include "BellRenderer.hpp"
+#include "CopperGolemStatueRenderer.hpp"
 #include "ShulkerBoxRenderer.hpp"
 #include "SkullBlockRenderer.hpp"
 #include "LecternRenderer.hpp"
@@ -13,6 +18,7 @@
 #include "VoiceBeaconRenderer.hpp"
 #include "AurelithQuestRenderers.hpp"
 #include "SpawnerRenderer.hpp"
+#include "VaultRenderer.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/core/Log.hpp"
 
@@ -108,6 +114,13 @@ namespace Render {
         // up. The cage itself is the spawner's ordinary block model.
         g_blockEntityRenderDispatcher->Register(
             Game::BlockEntityTypeIds::MOB_SPAWNER, std::make_unique<SpawnerRenderer>());
+        // Trial spawners — the same cage mob (MC TrialSpawnerRenderer), and
+        // vaults — the turning display item (MC VaultRenderer, through the
+        // item renderer PlatformMain hands over).
+        g_blockEntityRenderDispatcher->Register(
+            Game::BlockEntityTypeIds::TRIAL_SPAWNER, std::make_unique<SpawnerRenderer>());
+        g_blockEntityRenderDispatcher->Register(
+            Game::BlockEntityTypeIds::VAULT, std::make_unique<VaultRenderer>());
 
         // The Hush lighthouse lamp's sweeping beams. Its block model (lens,
         // base, cap) is ordinary chunk geometry; this draws only the light,
@@ -137,6 +150,48 @@ namespace Render {
                 Game::BlockEntityTypeIds::VOICE_BEACON, std::move(voiceBeacon));
         } else {
             Log::Error("[BERenderers] VoiceBeaconRenderer init failed");
+        }
+
+        // Decorated pot — its block model has no elements, so without this
+        // renderer every pot (the trial chambers' corridors are full of
+        // them) is invisible.
+        auto pot = std::make_unique<DecoratedPotRenderer>();
+        if (pot->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(
+                Game::BlockEntityTypeIds::DECORATED_POT, std::move(pot));
+        } else {
+            Log::Error("[BERenderers] DecoratedPotRenderer init failed");
+        }
+
+        // Banners, the bell's body and copper golem statues: blocks whose
+        // models are empty (or the frame only) — everything seen is theirs.
+        auto banner = std::make_unique<BannerRenderer>();
+        if (banner->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(Game::BlockEntityTypeIds::BANNER, std::move(banner));
+        } else {
+            Log::Error("[BERenderers] BannerRenderer init failed");
+        }
+        auto bell = std::make_unique<BellRenderer>();
+        if (bell->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(Game::BlockEntityTypeIds::BELL, std::move(bell));
+        } else {
+            Log::Error("[BERenderers] BellRenderer init failed");
+        }
+        auto statue = std::make_unique<CopperGolemStatueRenderer>();
+        if (statue->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(Game::BlockEntityTypeIds::COPPER_GOLEM_STATUE, std::move(statue));
+        } else {
+            Log::Error("[BERenderers] CopperGolemStatueRenderer init failed");
+        }
+
+        // Suspicious sand / gravel: the find sliding out as it is brushed
+        // (the block itself is chunk mesh).
+        auto brushable = std::make_unique<BrushableBlockRenderer>();
+        if (brushable->Initialize()) {
+            g_blockEntityRenderDispatcher->Register(
+                Game::BlockEntityTypeIds::BRUSHABLE_BLOCK, std::move(brushable));
+        } else {
+            Log::Error("[BERenderers] BrushableBlockRenderer init failed");
         }
 
         // Aurelith's quest: the key seated in a Podium socket and the item on

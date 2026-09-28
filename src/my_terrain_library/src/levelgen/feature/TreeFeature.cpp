@@ -351,6 +351,13 @@ void updateLeaves(
                          worldPos.getX(), worldPos.getY(), worldPos.getZ(),
                          static_cast<int>(direction));
         }
+        // A live level runs the real BlockState.updateShape pair itself
+        // (StructureTemplate.updateShapeAtEdge(level, 3, ...)); worldgen falls
+        // through to the emulation below.
+        if (level.updateShapeAtEdge(worldPos, core::getStepX(direction), core::getStepY(direction),
+                                    core::getStepZ(direction), 3)) {
+            return;
+        }
         shapeUpdateAt(worldPos, direction);
         shapeUpdateAt(facePos, core::getOpposite(direction));
     };
@@ -558,8 +565,11 @@ bool TreeFeature::doPlace(
     int minY = std::min(origin.getY(), trunkOrigin.getY());
     int maxY = std::max(origin.getY(), trunkOrigin.getY()) + treeHeight + 1;
 
-    // Check world bounds
-    if (minY < level.getMinY() + 1 || maxY > level.getMaxY() + 1) {
+    // Check world bounds. Java: minY >= getMinY() + 1 && maxY <= getMaxY() + 1
+    // with LevelHeightAccessor.getMaxY() INCLUSIVE (minY + height - 1); this
+    // library's WorldGenLevel.getMaxY() is exclusive (minY + height), so the
+    // same bound is maxY <= getMaxY().
+    if (minY < level.getMinY() + 1 || maxY > level.getMaxY()) {
         return false;
     }
 

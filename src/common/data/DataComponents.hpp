@@ -29,6 +29,16 @@
 //   27  ENCHANTABLE                   28  WEAPON
 //   29  BREAK_SOUND                   30  DAMAGE_RESISTANT
 //   40  PAINTING_VARIANT  (40, clear of the ids after 30 parallel work claims)
+//   64  BUCKET_ENTITY_DATA            65  AXOLOTL_VARIANT
+//   66  SALMON_SIZE                   67  TROPICAL_FISH_PATTERN
+//   68  TROPICAL_FISH_BASE_COLOR      69  TROPICAL_FISH_PATTERN_COLOR
+//   50  MAP_ID                        51  MAP_DECORATIONS
+//   52  MAP_POST_PROCESSING           53  MAP_COLOR
+//   76  FIREWORKS                     77  FIREWORK_EXPLOSION
+//   78  CHARGED_PROJECTILES
+//   84  OMINOUS_BOTTLE_AMPLIFIER      88  BANNER_PATTERNS
+//   89  INSTRUMENT                    90  POT_DECORATIONS
+//   91  CONTAINER
 //  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
 #pragma once
 
@@ -39,9 +49,14 @@
 #include "../entity/EquipmentSlot.hpp"
 #include "../entity/alchemy/Potions.hpp"   // PotionContents, SuspiciousStewEffects
 #include "BookContent.hpp"                 // WrittenBookContent, WritableBookContent
+#include "../world/map/MapTypes.hpp"       // Maps::MapDecorations, Maps::MapPostProcessing
+#include "FireworkExplosion.hpp"            // FireworkExplosion (FIREWORKS / FIREWORK_EXPLOSION)
 #include "../core/Features.hpp"
+#include <array>
 #include <cmath>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Game {
@@ -131,6 +146,24 @@ namespace Game {
         bool        noAi = false;
     };
 
+    // MC DataComponents.BUCKET_ENTITY_DATA (a CustomData compound) as the
+    // mob buckets write it: Bucketable.saveDefaultDataToBucketTag's keys —
+    // each boolean only written when true, so false here IS "absent" — plus
+    // the per-type extras (Axolotl / Tadpole: Age, AgeLocked; Axolotl:
+    // HuntingCooldown). The sulfur cube keeps its own SULFUR_CUBE_BUCKET.
+    struct BucketEntityData {
+        bool noAi = false;                     // "NoAI"
+        bool silent = false;                   // "Silent"
+        bool noGravity = false;                // "NoGravity"
+        bool glowing = false;                  // "Glowing" (carried; the engine has no entity glowing tag)
+        bool invulnerable = false;             // "Invulnerable"
+        bool persistenceRequired = false;      // "PersistenceRequired"
+        std::optional<float>   health;         // "Health"
+        std::optional<int32_t> age;            // "Age"
+        std::optional<bool>    ageLocked;      // "AgeLocked"
+        std::optional<int64_t> huntingCooldown;// "HuntingCooldown"
+    };
+
     struct FoodProperties {
         int   nutrition    = 0;
         float saturation   = 0.0f;
@@ -181,17 +214,38 @@ namespace Game {
         int                    selectedItem = -1;
     };
 
-    // Mirrors the Equippable record — Equippable.java:32. Omitted fields
-    // (assetId, cameraOverlay, allowedEntities, dispensable, equipOnInteract,
-    // canBeSheared, shearingSound) have no consumers here — no entity
-    // rendering / dispensers / mob equip; add when those exist.
+    // Mirrors the Equippable record — Equippable.java:32, every field. The
+    // first four keep their historical order so the aggregate initialisers
+    // ({slot, sound, swappable}) stay valid; the rest follow with the
+    // Builder's defaults (Equippable.Builder:188-199).
     struct Equippable {
         EquipmentSlot slot       = EquipmentSlot::HEAD;
-        std::string   equipSound = "item.armor.equip_generic"; // Holder<SoundEvent> → name (log-stub)
+        std::string   equipSound = "item.armor.equip_generic"; // Holder<SoundEvent> → its id
         bool          swappable  = true;   // right-click auto-equip allowed
         // MC damageOnHurt (default true): the piece wears when its wearer is
         // hurt (LivingEntity.doHurtEquipment). False on the elytra.
         bool          damageOnHurt = true;
+        // MC assetId — the EquipmentAsset key ("saddle", "iron",
+        // "white_carpet", "red_harness"...) the render layers look up; ""
+        // is Optional.empty().
+        std::string   assetId;
+        // MC cameraOverlay — the screen overlay while worn ("misc/pumpkinblur");
+        // "" is Optional.empty().
+        std::string   cameraOverlay;
+        // MC allowedEntities (Optional<HolderSet<EntityType>>): empty is
+        // Optional.empty() — anyone may wear it. Otherwise holder-set
+        // entries, "#minecraft:can_equip_saddle" for a tag, a bare
+        // "minecraft:llama" for a type (canBeEquippedBy).
+        std::vector<std::string> allowedEntities;
+        bool          dispensable     = true;    // EquipmentDispenseItemBehavior may put it on
+        bool          equipOnInteract = false;   // ItemStack.interactLivingEntity → equipOnTarget
+        bool          canBeSheared    = false;   // Mob.attemptToShearEquipment takes it off
+        std::string   shearingSound   = "item.shears.snip";   // SoundEvents.SHEARS_SNIP
+
+        // MC Equippable.canBeEquippedBy(type): no list, or `entityTypeId`
+        // ("minecraft:horse" or a bare "horse") is in it — directly or
+        // through a listed entity-type tag (data/<ns>/tags/entity_type).
+        bool CanBeEquippedBy(std::string_view entityTypeId) const;
     };
 
     // Mirrors the BlocksAttacks record — BlocksAttacks.java:30. The full data
@@ -226,6 +280,77 @@ namespace Game {
         }
     };
 
+
+    // Mirrors the Fireworks record — world/item/component/Fireworks.java:
+    // (flightDuration, explosions). The rocket's FIREWORKS component: the
+    // fuel count the rocket recipe put in (FireworkRocketEntity's lifetime is
+    // 10 * (flightDuration + 1) + random) and the stars it throws.
+    // ExtraCodecs.UNSIGNED_BYTE on disk, VAR_INT on the wire; at most
+    // MAX_EXPLOSIONS stars.
+    struct Fireworks {
+        static constexpr size_t kMaxExplosions = 256;   // Fireworks.MAX_EXPLOSIONS
+        int                            flightDuration = 0;
+        std::vector<FireworkExplosion> explosions;
+
+        bool operator==(const Fireworks& o) const {
+            return flightDuration == o.flightDuration && explosions == o.explosions;
+        }
+    };
+
+    // Mirrors the ChargedProjectiles record — world/item/component/
+    // ChargedProjectiles.java: the item-stack templates a loaded crossbow
+    // holds (one, or three with Multishot). EMPTY = not charged
+    // (CrossbowItem.isCharged). At most MAX_SIZE entries.
+    struct ChargedProjectiles {
+        static constexpr size_t kMaxSize = 1024;   // ChargedProjectiles.MAX_SIZE
+        std::vector<ItemStack> items;
+
+        bool IsEmpty() const { return items.empty(); }
+        // MC ChargedProjectiles.contains(item).
+        bool Contains(ItemID item) const {
+            for (const ItemStack& s : items) if (s.itemId == item) return true;
+            return false;
+        }
+    };
+
+    // Mirrors the BannerPatternLayers record — world/level/block/entity/
+    // BannerPatternLayers.java: the pattern layers painted over a banner's
+    // (or shield's) base colour, bottom to top. A layer is a banner_pattern
+    // registry id ("minecraft:rhombus") and a DyeColor ordinal (white 0 …
+    // black 15). The saved form is a list of {pattern, color} compounds;
+    // the wire carries the id string and the colour's id.
+    struct BannerPatternLayer {
+        std::string pattern;
+        uint8_t     color = 0;
+    };
+    struct BannerPatternLayers {
+        std::vector<BannerPatternLayer> layers;
+        bool IsEmpty() const { return layers.empty(); }
+    };
+
+    // MC PotDecorations (world/level/block/entity/PotDecorations.java): the
+    // item on each of a decorated pot's four sides — a pottery sherd or a
+    // brick — in the record's order back, left, right, front. Items::Air is
+    // Optional.empty() (the blank side). EMPTY is all four empty.
+    struct PotDecorations {
+        std::array<ItemID, 4> sides{};   // back, left, right, front
+        bool IsEmpty() const {
+            for (ItemID id : sides) if (id != 0) return false;
+            return true;
+        }
+        bool operator==(const PotDecorations& o) const { return sides == o.sides; }
+    };
+
+    // MC ItemContainerContents: a container item's stacks by slot (a
+    // shulker box's inventory), EMPTY holes kept, trailing empties dropped
+    // (ItemContainerContents.fromItems). At most 256 slots.
+    struct ItemContainerContents {
+        std::vector<ItemStack> items;
+        bool IsEmpty() const {
+            for (const ItemStack& s : items) if (!s.IsEmpty()) return false;
+            return true;
+        }
+    };
 }
 
 namespace Game::DataComponents {
@@ -268,6 +393,24 @@ namespace Game::DataComponents {
     // has no italics). Wins over ITEM_NAME in the tooltip name line.
     extern const DataComponentType<std::string> CUSTOM_NAME;
     extern const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET;
+    // MC DataComponents.BUCKET_ENTITY_DATA — what a fish / axolotl / tadpole
+    // bucket carries of its mob (Bucketable.saveToBucketTag).
+    extern const DataComponentType<BucketEntityData> BUCKET_ENTITY_DATA;
+    // MC DataComponents.AXOLOTL_VARIANT — the bucketed axolotl's colour
+    // (Axolotl.Variant id), applied to the axolotl the bucket releases.
+    extern const DataComponentType<int32_t> AXOLOTL_VARIANT;
+    // MC DataComponents.SALMON_SIZE ("salmon/size") — the bucketed salmon's
+    // Salmon.Variant id (small 0, medium 1, large 2).
+    extern const DataComponentType<int32_t> SALMON_SIZE;
+    // MC DataComponents.TROPICAL_FISH_PATTERN / _BASE_COLOR / _PATTERN_COLOR
+    // ("tropical_fish/pattern", "tropical_fish/base_color",
+    // "tropical_fish/pattern_color") — the bucketed tropical fish's variant:
+    // the TropicalFish.Pattern ORDINAL (TropicalFishVariants::Pattern) and
+    // two DyeColor ids. The pattern is also a TooltipProvider (the
+    // "Clownfish" / "Kob" + colours lines).
+    extern const DataComponentType<int32_t> TROPICAL_FISH_PATTERN;
+    extern const DataComponentType<int32_t> TROPICAL_FISH_BASE_COLOR;
+    extern const DataComponentType<int32_t> TROPICAL_FISH_PATTERN_COLOR;
 
     // Data-driven base name override (potion variants etc.). Mirrors
     // DataComponents.ITEM_NAME. Falls between CUSTOM_NAME and the registry
@@ -333,6 +476,27 @@ namespace Game::DataComponents {
     // paintings; the painting's own drop never carries it (MC dropItem).
     extern const DataComponentType<std::string> PAINTING_VARIANT;
 
+    // ── Maps (MC DataComponents.MAP_ID / MAP_DECORATIONS / MAP_COLOR /
+    // MAP_POST_PROCESSING) ────────────────────────────────────────────────
+    // Which MapItemSavedData a filled map shows (MapId.id — data/map_<id>.dat).
+    // Presence is what makes a stack a map in hand, in a frame and in the
+    // tooltip (MC tests `has(MAP_ID)`), for filled_map and 26.3's
+    // per-structure map items alike.
+    extern const DataComponentType<int32_t> MAP_ID;
+
+    // Markers pinned to the stack in world coordinates — the exploration
+    // map's target "+" (MapItemSavedData.addTargetDecoration). Copied onto
+    // the map's own decorations by tickCarriedBy.
+    extern const DataComponentType<Maps::MapDecorations> MAP_DECORATIONS;
+
+    // What a crafted map still has to become once taken (MapItem.
+    // onCraftedPostProcess): LOCK (cartography glass pane), SCALE (paper).
+    extern const DataComponentType<Maps::MapPostProcessing> MAP_POST_PROCESSING;
+
+    // The RGB of the item icon's markings layer (MapItemColor, the
+    // "minecraft:map_color" item tint). Absent = the tint's default.
+    extern const DataComponentType<int32_t> MAP_COLOR;
+
     // ── Durability (MC DataComponents.java:122-128) ─────────────────────────
     // Item.Properties.durability(n) sets all three on the prototype: MAX_DAMAGE
     // n, DAMAGE 0, MAX_STACK_SIZE 1 (Item.java). The free functions in
@@ -386,12 +550,67 @@ namespace Game::DataComponents {
     // far — the item entities' own fire immunity is not modelled.
     extern const DataComponentType<std::string> DAMAGE_RESISTANT;
 
+    // MC DataComponents.POT_DECORATIONS — a decorated pot item's sides
+    // (DecoratedPotBlockEntity.collectImplicitComponents / the pot's
+    // copy_components drop, the crafting recipe); placing the pot hands them
+    // to its block entity.
+    extern const DataComponentType<PotDecorations> POT_DECORATIONS;
+
+    // MC DataComponents.CONTAINER — a container item's contents: what a
+    // shulker box keeps when broken (its loot table copies it from the block
+    // entity) and puts back when placed (BaseContainerBlockEntity.
+    // applyImplicitComponents).
+    extern const DataComponentType<ItemContainerContents> CONTAINER;
+
+    // MC DataComponents.INSTRUMENT (InstrumentComponent) — the instrument a
+    // goat horn plays, as its registry id ("minecraft:ponder_goat_horn"; the
+    // definitions are data/<ns>/instrument/*.json, common/entity/
+    // Instruments.hpp). Default ponder on goat_horn (Items.java); the
+    // pillager outpost's set_instrument loot function picks one of
+    // #regular_goat_horns.
+    extern const DataComponentType<std::string> INSTRUMENT;
+
+    // MC DataComponents.FIREWORKS — a firework rocket's flight duration and
+    // explosions (Fireworks.java). Default on firework_rocket is
+    // Fireworks(1, []) (Items.java); the rocket recipe writes the fuel count
+    // and the stars. A TooltipProvider ("Flight Duration: N", the stars).
+    extern const DataComponentType<Fireworks> FIREWORKS;
+
+    // MC DataComponents.FIREWORK_EXPLOSION — a firework star's explosion
+    // (FireworkExplosion.java). Written by the star recipe; the fade recipe
+    // adds fade colours. Its colours also tint the star's icon (the
+    // "minecraft:firework" ItemTintSource).
+    extern const DataComponentType<FireworkExplosion> FIREWORK_EXPLOSION;
+
+    // MC DataComponents.CHARGED_PROJECTILES — what a loaded crossbow holds
+    // (ChargedProjectiles.java). Default EMPTY on the crossbow (Items.java);
+    // CrossbowItem loads it at full draw and shoots (and clears) it on use.
+    extern const DataComponentType<ChargedProjectiles> CHARGED_PROJECTILES;
+
+    // MC DataComponents.OMINOUS_BOTTLE_AMPLIFIER (OminousBottleAmplifier:
+    // 0..4) — the Bad Omen level an ominous bottle gives: drinking it adds
+    // BAD_OMEN at this amplifier for 120000 ticks (ConsumableBehavior), and
+    // the tooltip shows that effect. The ominous bottle's default is 0
+    // (Items.java); the set_ominous_bottle_amplifier loot function and the
+    // creative tab's five bottles set the rest.
+    inline constexpr int kOminousBottleEffectDuration = 120000;   // EFFECT_DURATION
+    inline constexpr int kOminousBottleMaxAmplifier   = 4;        // MAX_AMPLIFIER
+    extern const DataComponentType<int32_t> OMINOUS_BOTTLE_AMPLIFIER;
+
+    // MC DataComponents.BANNER_PATTERNS (BannerPatternLayers) — the painted
+    // layers of a banner item. The ominous banner (Raid.
+    // getOminousBannerInstance, common/entity/raid/OminousBanner.hpp) is a
+    // white banner carrying eight of them; a patrol leader wears it and the
+    // raid captain test (Raider.isCaptain) compares against it.
+    extern const DataComponentType<BannerPatternLayers> BANNER_PATTERNS;
+
     // ── TODO: future component types to register, in MC parity order ────────
     // Each one unlocks a chunk of behaviour by populating Item.use() base
     // dispatch (see Item.hpp ItemUseFn doc comment) and other systems.
     //
-    //   KINETIC_WEAPON     (KineticWeapon) DataComponents.java:139 — mace wind-up swing
-    //   BANNER_PATTERNS    (BannerPatternLayers) — banner / shield patterns
+    //   (KINETIC_WEAPON / PIERCING_WEAPON / ATTACK_RANGE / ATTACK_ANIMATION
+    //    are fixed per spear in vanilla and live as the spears' item
+    //    properties — common/entity/SpearItem.hpp.)
     //
     // None are registered yet because we have no consumers (no food eating,
     // no armor equipping, no anvil renaming). When the consumer lands, add

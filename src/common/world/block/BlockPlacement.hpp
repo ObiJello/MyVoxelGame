@@ -13,9 +13,14 @@
 #include "Blocks.hpp"
 #include "Direction.hpp"
 #include "BlockInteraction.hpp"
+#include "BlockRegistry.hpp"
 #include "../chunk/IBlockAccess.hpp"
 
 namespace Game {
+
+    struct AABBd;        // common/physics/Physics.hpp
+    class  Entity;       // common/entity/Entity.hpp
+    struct EntityLevel;  // common/entity/EntityLevel.hpp — a struct, as defined
 
     // The placement-orientation rules MC actually uses, named after what they
     // do rather than after any one block. The `Opposite` vs raw distinction is
@@ -130,6 +135,30 @@ namespace Game {
     // block isn't segmented or is already at 4 — where MC's canBeReplaced
     // returns false and placement falls through to the neighbouring cell.
     BlockState SegmentGrownState(BlockState state);
+
+    // ── Blocks that stack in their own cell ─────────────────────────────────
+    //
+    // Candles (CANDLES), sea pickles (PICKLES) and turtle eggs (EGGS) take
+    // more of themselves exactly like the segmented clumps above:
+    // canBeReplaced says yes below four (CanBeReplacedByPlacement), and
+    // getStateForPlacement's `state.is(this)` branch raises the count on the
+    // state already there — lit, waterlogged and hatch progress included.
+
+    // 1..4 for a candle / sea pickle / turtle egg, 0 for anything else.
+    int StackCountOf(BlockState state);
+
+    // MC PlaceOnWaterBlockItem — the lily pad and frogspawn items. Their
+    // useOn is PASS; `use` clips the look ray with ClipContext.Fluid
+    // .SOURCE_ONLY and places on the cell above whatever it hit (a water
+    // source's surface). The client runs that clip and sends the placement
+    // as a UseItemOn marked `fromUse`; the server refuses every other
+    // placement of these items.
+    bool IsPlaceOnWaterBlock(BlockID id);
+
+    // MC getStateForPlacement's grow-in-place branch for every block that has
+    // one (the segmented clumps and the three above). True, with `out` set to
+    // the grown state, when `existing` is `held` and has room for one more.
+    bool StackedPlacementState(BlockState existing, BlockID held, BlockState& out);
 
     // ── MC BlockPlaceContext / BlockItem gates ──────────────────────────────
     //
@@ -264,5 +293,41 @@ namespace Game {
     // Returns `fallback` unchanged for blocks with no world-aware rule.
     BlockState ComputeWorldPlacementState(const IBlockAccess& level, const glm::ivec3& pos,
                                           BlockState fallback);
+
+    // ── MC BlockItem.canPlace's second half ─────────────────────────────────
+    //
+    //   level.isUnobstructed(stateForPlacement, clickedPos,
+    //                        CollisionContext.placementContext(player))
+    //
+    // = CollisionGetter.isUnobstructed(state, pos, context): the placed
+    // state's COLLISION shape, moved to the cell, must not overlap any entity
+    // that blocksBuilding — every living entity (the placer and every other
+    // player included, spectators excluded), armor stands that are not
+    // markers, primed TNT, falling blocks, end crystals; not items, orbs,
+    // projectiles or hanging entities. A block with no collision (a flower, a
+    // torch, leaf litter) is never obstructed.
+    //
+    // Shared so the server's placement gate and the client's prediction ask
+    // the same question; each side gathers its own entities (the server its
+    // level and its live player sessions, the client its mob mirror, the
+    // other players it draws and itself).
+
+    // `state.getCollisionShape(level, pos, placementContext)` — empty for
+    // no-collision blocks and for the context-reading blocks that answer
+    // empty to a placement (scaffolding, powder snow, liquids).
+    BlockRegistry::BlockShapeSet PlacementCollisionShape(BlockState state);
+
+    // Does the placed shape at `pos` overlap `box` with volume?
+    bool PlacementShapeOverlaps(const BlockRegistry::BlockShapeSet& shape, const glm::ivec3& pos,
+                                const AABBd& box);
+
+    // `!isRemoved() && blocksBuilding && !isSpectator()`.
+    bool EntityBlocksPlacement(const Entity& entity);
+
+    // Any entity of `level` that blocks the placement. `skipPlayers` leaves
+    // the level's player entities out, for a caller that tests players from
+    // a fresher source (the server's live sessions).
+    bool EntitiesObstructPlacement(const EntityLevel& level, const BlockRegistry::BlockShapeSet& shape,
+                                   const glm::ivec3& pos, bool skipPlayers);
 
 } // namespace Game

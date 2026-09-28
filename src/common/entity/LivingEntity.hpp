@@ -28,7 +28,9 @@
 #include "common/entity/Entity.hpp"
 #include "common/entity/Attributes.hpp"
 #include "common/entity/EquipmentSlot.hpp"
+#include "common/entity/ImpulseContext.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/world/damagesource/CombatTracker.hpp"
 
 #include <cmath>
 #include <memory>
@@ -103,6 +105,27 @@ namespace Game {
         // effect hitting back at an attacker. Not in #no_knockback (a thorns
         // prick does push) and not in #bypasses_armor.
         Thorns,
+        // MC DamageTypes.MACE_SMASH — a mace hit that lands as a smash
+        // attack (MaceItem.getItemDamageSource while canSmashAttack). In
+        // #is_player_attack, so it breaks armor stands like a melee hit.
+        MaceSmash,
+        // MC DamageTypes.FIREWORKS — a firework rocket's blast
+        // (FireworkRocketEntity.dealExplosionDamage). In #is_explosion and
+        // #panic_causes; it knocks back.
+        Fireworks,
+        // MC DamageTypes.FLY_INTO_WALL — gliding into a wall with an elytra
+        // (LivingEntity.handleFallFlyingCollisions). In #no_knockback and
+        // #bypasses_armor.
+        FlyIntoWall,
+        // MC DamageTypes.LIGHTNING_BOLT — Entity.thunderHit's 5 damage
+        // (damageSources().lightningBolt()). In #no_knockback, #is_lightning
+        // and #bypasses_shield; armour applies.
+        Lightning,
+        // MC DamageTypes.SPEAR — a spear's jab or charge (the spears'
+        // DAMAGE_TYPE component, ItemStack.getDamageSource). In
+        // #is_player_attack and #no_knockback: the stab's push is its own
+        // causeExtraKnockback, never the hurt's.
+        Spear,
     };
 
     // MC's `#minecraft:no_knockback` damage-type tag
@@ -159,6 +182,9 @@ namespace Game {
             case MobDamageSource::Magic:
             case MobDamageSource::Wither:
             case MobDamageSource::Stalagmite:
+            case MobDamageSource::FlyIntoWall:
+            case MobDamageSource::Lightning:
+            case MobDamageSource::Spear:
                 return true;
             default:
                 return false;
@@ -312,15 +338,16 @@ namespace Game {
         // view answers from its ServerPlayer.
         virtual bool IsDiscrete() const { return false; }
         // MC LivingEntity.getArmorCoverPercentage — the share of the four
-        // HUMANOID_ARMOR slots that hold anything. Mobs carry no equipment
-        // in this engine, so 0 (which the invisibility term floors at 0.1).
+        // HUMANOID_ARMOR slots that hold anything. 0 here (which the
+        // invisibility term floors at 0.1); Mob answers from its equipment.
         virtual float GetArmorCoverPercentage() const { return 0.0f; }
         // MC LivingEntity.getItemBySlot, for the code that walks an entity's
         // equipment (the enchantment runners — EnchantmentHelper's
         // runIterationOnEquipment). Null when this entity has no such slot:
-        // mobs carry no equipment in this engine; the player's view answers
-        // from its ServerPlayer's inventory and the armor stand from its own
-        // six slots. Mutable because effects may wear what they find.
+        // a mob answers from its humanoid equipment (Mob::GetEquipment — an
+        // equipment table's armour), the player's view from its
+        // ServerPlayer's inventory and the armor stand from its own six
+        // slots. Mutable because effects may wear what they find.
         virtual ItemStack* EquipmentInSlot(EquipmentSlot slot) { (void)slot; return nullptr; }
         // Whether EquipmentInSlot can answer anything at all — lets the hot
         // damage path skip the enchantment walk for the (vast majority of)
@@ -364,6 +391,72 @@ namespace Game {
         virtual void EatFood(int nutrition, float saturationModifier) {
             (void)nutrition; (void)saturationModifier;
         }
+        // MC Player.getFoodData().getFoodLevel, for the `player` entity
+        // sub-predicate's `food` bound (Lunge's "at least 6 hunger"). Only a
+        // player has hunger; the view answers from its FoodData.
+        virtual int GetFoodLevel() const { return 20; }
+
+        // ── Item use (MC LivingEntity useItem / useItemRemaining) ──────────
+        //
+        // The hold-to-use lifecycle as a MOB runs it: startUsingItem, then
+        // updatingUsingItem every tick (LivingEntity.tick) — ItemStack
+        // .onUseTick, which for a KINETIC_WEAPON is the charge's
+        // damageEntities — until stopUsingItem. What SpearUseGoal and the
+        // piglin's SpearAttack drive. (A player's lives on ServerPlayer;
+        // the crossbow mobs keep MobCrossbow's own.) Synced as the living
+        // flags (DATA_LIVING_ENTITY_FLAGS bits 1 and 2); a client copy counts
+        // the hold down itself for the charge pose.
+        bool          IsUsingItem() const { return m_usingItem; }
+        EquipmentSlot GetUsedItemHand() const { return m_usedItemHand; }
+        int  GetUseItemRemainingTicks() const { return m_usingItem ? m_useItemRemaining : 0; }
+        // MC getTicksUsingItem.
+        int  GetTicksUsingItem() const { return m_usingItem ? m_useItemDuration - m_useItemRemaining : 0; }
+        void StartUsingItem(EquipmentSlot hand);
+        void StopUsingItem();
+
+        // ── Kinetic weapons (MC recentKineticEnemies) ─────────────────────
+        //
+        // While a KINETIC_WEAPON is in use the entity remembers when it last
+        // stabbed each target (game time); a target struck within the
+        // weapon's contact cooldown is skipped. Outside a kinetic use the
+        // table does not exist (MC's null map): nothing is remembered and
+        // nothing counts as recent.
+        bool WasRecentlyStabbed(const Entity& target, int allowedTime) const;
+        void RememberStabbedEntity(const Entity& target);
+        // MC stabbedEntities(e -> e instanceof LivingEntity).
+        int  StabbedLivingEntityCount() const;
+        void BeginKineticContacts();
+        void EndKineticContacts();
+
+        // MC LivingEntity.stabAttack — one spear strike (the jab's or the
+        // charge's) on `target`, with the weapon in `weaponSlot`: the
+        // weapon's spear damage through its `minecraft:damage` enchantment
+        // effects, the knockback pair, a dismount, hurtEnemy and the
+        // post-attack effects. True when the target was affected. The
+        // player's view overrides it with Player.stabAttack (attack charge,
+        // the attack effects and the exhaustion). Defined in SpearItem.cpp.
+        virtual bool StabAttack(EquipmentSlot weaponSlot, Entity& target, float baseDamage,
+                                bool dealsDamage, bool dealsKnockback, bool dismounts);
+        // MC LivingEntity.onAttack — Player resets its attack charge.
+        virtual void OnAttack() {}
+        // MC getAttributeValue(ATTACK_DAMAGE) as the jab reads it. The
+        // player's view answers from its ServerPlayer (base 1, the held
+        // item's modifier, Strength / Weakness), which its own attribute
+        // map does not carry.
+        virtual float GetJabAttackDamage() const {
+            return static_cast<float>(GetAttributeValue(Attribute::AttackDamage));
+        }
+        // MC LivingEntity.postPiercingAttack: the post_piercing_attack
+        // enchantment effects (Lunge), server side.
+        void PostPiercingAttack();
+
+        // MC LivingEntity.onKineticHit (entity event 2, client): at most once
+        // per HIT_FEEDBACK_TICKS, the used weapon's hit sound here and the
+        // feedback clock the spear poses recoil on.
+        void OnKineticHit();
+        // MC getTicksSinceLastKineticHitFeedback.
+        float GetTicksSinceLastKineticHitFeedback(float partialTick) const;
+        void  SetLastKineticHitFeedbackTime(int64_t gameTime) { m_lastKineticHitFeedbackTime = gameTime; }
 
         // ── Health ─────────────────────────────────────────────────────────
         float GetHealth() const { return m_health; }
@@ -398,6 +491,23 @@ namespace Game {
         // MC LivingEntity.canStandOnFluid — false for all but the strider,
         // which stands on lava.
         virtual bool CanStandOnFluid(const FluidState& fluid) const { (void)fluid; return false; }
+        // MC LivingEntity.getWaterSlowDown: the horizontal drag of a
+        // non-sprinting swim (0.8; the skeleton horse 0.96).
+        virtual float GetWaterSlowDown() const { return 0.8f; }
+        // MC LivingEntity.travelInWater as an override point: a subclass that
+        // replaces the whole method (AbstractFish's 0.01 push, 0.9 drag and
+        // -0.005 sink) does its movement here and answers true; the base
+        // body — slow-down, gravity sixteenth and jumpOutOfFluid, all of
+        // which the override drops, as in MC — then does not run. The
+        // arguments are travelInFluid's, captured before the move.
+        virtual bool TravelInWaterOverride(const glm::dvec3& input, double baseGravity,
+                                           bool isFalling, double oldY) {
+            (void)input; (void)baseGravity; (void)isFalling; (void)oldY;
+            return false;
+        }
+        // EntityTypeTags.CAN_FLOAT_WHILE_RIDDEN — the mounts MC's
+        // floatInLiquidWhileRidden lifts in water while carrying anyone.
+        static bool CanFloatWhileRidden(EntityTypeId type);
         // MC DamageSource carries TWO entities: `causingEntity` (the shooter,
         // who gets aggro and kill credit — this engine's `attacker`) and
         // `directEntity` (the arrow that actually struck, which decides the
@@ -420,6 +530,13 @@ namespace Game {
         // the victim away from the attacker).
         virtual void Knockback(double power, double dx, double dz);
 
+        // MC LivingEntity.stopRiding → dismountVehicle: off the vehicle, and
+        // (server) put down at its GetDismountLocationForPassenger — or, when
+        // the vehicle is gone or stands in a portal, at the higher of the two
+        // feet, risen to the first free spot. A player's view overrides this
+        // (its body is the ServerPlayer's; Server::PlayerRiding moves it).
+        void StopRiding() override;
+
         // MC LivingEntity.causeFallDamage / calculateFallDamage:
         //   damage = floor((fd + 1e-6 - SAFE_FALL_DISTANCE) * mult * FALL_DAMAGE_MULTIPLIER)
         // SAFE_FALL_DISTANCE defaults to 3.0, so a 23-block drop deals 20 and
@@ -428,12 +545,157 @@ namespace Game {
         bool CauseFallDamage(double fallDist, float damageMultiplier) override;
         int  CalculateFallDamage(double fallDist, float damageMultiplier) const;
 
+        // ── The current impulse (MC LivingEntity's currentImpulse* fields) ──
+        //
+        // See ImpulseContext.hpp. A mob keeps its own; a player's view hands
+        // out the ServerPlayer's, so a launch survives the view being rebuilt.
+        virtual ImpulseContext&       GetImpulseContext()       { return m_impulseContext; }
+        const ImpulseContext&         GetImpulseContext() const {
+            return const_cast<LivingEntity*>(this)->GetImpulseContext();
+        }
+
+        // MC Entity.onExplosionHit(explosionCausedBy) — the last thing
+        // ServerExplosion.hurtEntities does to each victim. Only a player
+        // reacts (ServerPlayer.onExplosionHit: a player-thrown wind charge's
+        // blast arms setIgnoreFallDamageFromCurrentImpulse at the player's
+        // position; any other blast drops the grace time).
+        virtual void OnExplosionHit(Entity* explosionCausedBy) { (void)explosionCausedBy; }
+
+        // MC `setDeltaMovement(v)` followed, for a ServerPlayer, by an
+        // immediate ClientboundSetEntityMotionPacket (MaceItem.hurtEnemy's
+        // bounce). A mob just takes the velocity and marks itself for the
+        // tracker; the player view overrides this to SEND it now, ahead of
+        // anything else this tick pushes on top.
+        virtual void SetDeltaMovementAndSync(const glm::dvec3& v) {
+            velocity = v;
+            needsSync = true;
+            hurtMarked = true;
+            physicsParked = false;
+        }
+        // MC LivingEntity.checkFallDamage: on a landing (server), a burst of
+        // BLOCK particles of the block landed on — up to 375 of them, scaled
+        // by the fall — sent to every nearby player; then Entity's.
+        void CheckFallDamage(double dy, bool onGroundNow) override;
+
         // MC LivingEntity.getMaxFallDistance -> getComfortableFallDistance(0).
         int GetMaxFallDistance() const override { return GetComfortableFallDistance(0.0f); }
 
         // MC's FlyingAnimal marker interface (bee, parrot, allay). Travel uses
         // air friction for the vertical axis instead of the falling 0.98.
         virtual bool IsFlyingAnimal() const { return false; }
+
+        // Whether a CLIENT mirror runs its own Travel between server updates
+        // (this engine's default: local physics plus the correction steps).
+        // MC's client never simulates a mob it does not control — it only
+        // interpolates the server's positions — and a mob whose motion the
+        // client cannot reproduce must do the same: a server-steered flier's
+        // flight (FlyingMoveControl and kin, NoGravity, its own hover/steer
+        // velocity) has no input and no NoGravity on the client, so local
+        // gravity dragged it down between packets and the correction dragged
+        // it back up (the rubber-banding). A mob a client-side rider steers
+        // is simulated again — its motion IS that client's.
+        virtual bool SimulatesMovementOnClient() const {
+            // A mob carrying this client's player that this client does not
+            // steer (a horse being broken in, bucking and running about; an
+            // unsaddled mount wandering on its goals) is the server's alone,
+            // as every uncontrolled mob is in MC: the camera rides it, so
+            // local physics pulling against the server's positions between
+            // packets — the correction dragging it back — reads as the ride
+            // rubber-banding. Interpolation only. (A mount this client
+            // steers never reaches here: AiStep's steering branch.)
+            if (CarriesLocalPlayer()) return false;
+            return !IsServerSteeredFlier() || HasClientControllingPassenger();
+        }
+        // The client's copy has this client's player among its riders.
+        bool CarriesLocalPlayer() const {
+            if (m_localRiderId == 0) return false;
+            for (int32_t id : m_syncedRiders) if (id == m_localRiderId) return true;
+            return false;
+        }
+        // A mob whose flight only the server's AI can produce. Base: MC's
+        // FlyingAnimal marker; Mob widens it by move control and type.
+        virtual bool IsServerSteeredFlier() const { return IsFlyingAnimal(); }
+        // MC isControlledByLocalInstance's mount half: a passenger steers this
+        // mob from the client (a player's mount). No mount steering exists
+        // yet, so this answers with getControllingPassenger — the hook the
+        // mount system overrides / fills.
+        virtual bool HasClientControllingPassenger() const { return GetControllingPassenger() != nullptr; }
+
+        // ── Steered by a riding player (MC getControllingPassenger → Player,
+        //    LivingEntity.travelRidden, isLocalInstanceAuthoritative) ─────────
+        //
+        // A player steers a mount when it sits in the first seat and the
+        // mount's own rule allows it (CanBeSteeredBy: a saddle, a harness, a
+        // carrot on a stick in hand). The steering player's CLIENT simulates
+        // the mount (its keys go into GetRiddenInput / TickRidden / Travel)
+        // and reports where it went (MoveVehicleC2S); the server only
+        // validates, exactly as for a boat. Players are no client entities,
+        // so the rider is known by its RiderControl: its keys, its view and
+        // what it holds — resolved per side by the installed resolver
+        // (Server::PlayerRiding, Client::Vehicles).
+        struct RiderControl {
+            float    xxa = 0.0f;    // MC Input.moveVector.x: left - right, normalised with zza
+            float    zza = 0.0f;    // forward - backward
+            float    yRot = 0.0f;   // the rider's view
+            float    xRot = 0.0f;
+            bool     jumping = false;
+            bool     sprinting = false;
+            bool     shift = false;
+            uint32_t mainHandItem = 0;   // ItemID of what the rider holds (ItemBasedSteering)
+            uint32_t offHandItem  = 0;
+            int32_t  playerId = 0;       // the rider's player id (wire id)
+            bool     local = false;      // client: this client's own player
+        };
+        // Fills `out` for the player in this mob's first seat (null when
+        // the first passenger is no player, or not one this side can read —
+        // a client knows only its own keys).
+        using RiderControlFn = bool (*)(const LivingEntity& mount, RiderControl& out);
+        // One per side — the integrated server and its client share a
+        // process: `clientSide` picks which levels the resolver serves.
+        static void SetRiderControlResolver(bool clientSide, RiderControlFn fn);
+        bool GetFirstPlayerRider(RiderControl& out) const;
+
+        // MC's getControllingPassenger rule for a player: may the player in
+        // the first seat steer this mob now? Base: no mob can be steered.
+        virtual bool CanBeSteeredBy(const RiderControl& rider) const { (void)rider; return false; }
+        // The steering rider, when there is one this side can read (server:
+        // any; client: only this client's player). False otherwise.
+        bool GetSteeringRider(RiderControl& out) const;
+        // Server: a player steers this mob (its view in the first seat,
+        // allowed by CanBeSteeredBy). Client: a player does, per the synched
+        // seat order, and it is this client's (IsLocallySteered).
+        bool IsSteeredByPlayer() const;
+        bool IsLocallySteered() const;
+        // MC canSimulateMovement for a mount: the server moves it unless a
+        // player steers it; a client only the mount its own player steers.
+        bool CanSimulateMountMovement() const;
+        // MC LivingEntity.travelRidden's three hooks.
+        virtual glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) {
+            (void)rider;
+            return selfInput;
+        }
+        virtual void  TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) {
+            (void)rider; (void)riddenInput;
+        }
+        virtual float GetRiddenSpeed(const RiderControl& rider) const { (void)rider; return GetSpeed(); }
+        // Server: the view steering this mob (getControllingPassenger).
+        Entity* GetSteeringPassenger() const;
+        // MC getControllingPassenger: the steering player (server).
+        Entity* GetControllingPassenger() const override { return GetSteeringPassenger(); }
+
+        // ── The client's copy of the seat order (SetPassengersS2C) ─────────
+        // Players by player id, mobs by entity id; `localPlayerId` is this
+        // client's. Read by the seats and IsLocallySteered.
+        void SetSyncedRiders(const std::vector<int32_t>& ids, int32_t localPlayerId) {
+            m_syncedRiders = ids;
+            m_localRiderId = localPlayerId;
+        }
+        const std::vector<int32_t>& SyncedRiders() const { return m_syncedRiders; }
+        int32_t FirstSyncedRider() const { return m_syncedRiders.empty() ? 0 : m_syncedRiders.front(); }
+        bool    LocalPlayerRidesFirst() const {
+            return m_localRiderId != 0 && FirstSyncedRider() == m_localRiderId;
+        }
+        int32_t LocalRiderId() const { return m_localRiderId; }
 
         // MC 26.3 LivingEntity.omnidirectionalAirMover: true makes the vertical
         // air drag the same 0.91-based friction as the horizontal axes (a
@@ -455,6 +717,27 @@ namespace Game {
 
         virtual void Die(MobDamageSource source, Entity* attacker);
         virtual void TickDeath();
+
+        // MC Entity.killedEntity(level, victim, source): the killing blow's
+        // causing entity hears of the kill from the victim's die(), before
+        // the victim's loot drops — a charged creeper drops the victim's mob
+        // head there. Server side; the base does nothing.
+        virtual void KilledEntity(LivingEntity& victim) { (void)victim; }
+
+        // MC LivingEntity.getCombatTracker — the recent hits its death
+        // message is written from (server side; players keep their own path).
+        CombatTracker&       GetCombatTracker()       { return m_combatTracker; }
+        const CombatTracker& GetCombatTracker() const { return m_combatTracker; }
+
+    private:
+        // Die's death line: a named entity's to every player, a tamed pet's
+        // to its owner (show_death_messages permitting). Server side only.
+        void AnnounceDeath();
+
+        // MC currentImpulseImpactPos / currentImpulseContextResetGraceTime.
+        ImpulseContext m_impulseContext;
+
+    public:
 
         // ── Sound (MC LivingEntity) ────────────────────────────────────────
         //
@@ -514,6 +797,24 @@ namespace Game {
         // reads it as the loot context's ATTACKING_ENTITY (whose Looting the
         // mob loot tables ask) and as dropExperience's killer.
         int32_t GetKillerId() const { return m_killerId; }
+        // MC LivingEntity.skipDropExperience / wasExperienceConsumed: a sculk
+        // catalyst that turned this death's XP into charge marks it spent,
+        // and the death drop then pays no orbs.
+        void SkipDropExperience() { m_skipDropExperience = true; }
+        bool WasExperienceConsumed() const { return m_skipDropExperience; }
+        // A player's view outlives the death (MC makes a new entity on
+        // respawn): the death path clears the mark before each new death.
+        void ClearSkipDropExperience() { m_skipDropExperience = false; }
+        // MC LivingEntity.getExperienceReward(level, killer): what this death
+        // is worth in XP. 0 for a bare LivingEntity; Mob and the server's
+        // player view override.
+        virtual int GetExperienceReward(EntityLevel& level, Entity* killer) {
+            (void)level; (void)killer;
+            return 0;
+        }
+        // MC LivingEntity.shouldDropExperience: not a baby — Monster says
+        // always (LivingEntity.cpp).
+        virtual bool ShouldDropExperience() const;
         // The same blow's DIRECT entity (the arrow for a shot, the killer
         // itself for a melee blow) — the loot tables' direct_attacker.
         int32_t GetKillerDirectId() const { return m_killerDirectId; }
@@ -522,6 +823,11 @@ namespace Game {
         // and PanicGoal read. Callers pair this with GetLastDamageSource.
         bool    HasLastDamageSource() const {
             return m_hasLastDamageSource && tickCount - m_lastDamageStamp < 40;
+        }
+        // MC getLastDamageSource(timeout): non-null while the last hit is at
+        // most `timeout` ticks old (OwnerHurtByTargetGoal asks with 100).
+        bool    HasLastDamageSourceWithin(int timeout) const {
+            return m_hasLastDamageSource && tickCount - m_lastDamageStamp <= timeout;
         }
 
         Entity* GetLastHurtMob() const { return m_lastHurtMob; }
@@ -570,6 +876,14 @@ namespace Game {
         int   swingTime    = 0;
 
         WalkAnimationState walkAnimation;
+        // The client's animation age (its tickCount, which every tick-driven
+        // idle loop — wing flaps, tail wags, bobbing — keys on) minus this
+        // entity's own tickCount; -1 = none. Server side only: set from the
+        // host's client at Save and Quit (IntegratedServer::SubmitClientMobViews),
+        // saved as obey_view_age and sent on first sight, so a rejoined mob
+        // resumes its idle animations at the phase the last-world panorama
+        // shows. viewAge + tickCount is the age to hand a client.
+        int32_t viewAge = -1;
 
         void Swing();
 
@@ -605,6 +919,15 @@ namespace Game {
         void Tick() override;
         void BaseTick() override;
 
+        // MC LivingEntity.setRecordPlayingNearby — a jukebox at `pos` started
+        // (playing) or stopped a song within earshot. Called on the CLIENT
+        // (MC LevelRenderer.notifyNearbySoundListeners); only the parrot
+        // listens (it dances). Default: nothing. `pos` is MC's BlockPos — the
+        // engine's block position is a glm::ivec3.
+        virtual void SetRecordPlayingNearby(const glm::ivec3& pos, bool playing) {
+            (void)pos; (void)playing;
+        }
+
         // MC LivingEntity.handleEntityEvent — of its long switch, the one
         // case this port answers is 60 (POOF, sent at despawn/death removal);
         // the equipment-break cases need the client copy's equipment, which a
@@ -621,6 +944,17 @@ namespace Game {
         // body, drifting outward (spawn offset −v·10 gives the puff its
         // initial spread). Client-side; addParticle no-ops on the server.
         void MakePoofParticles();
+
+        // MC LivingEntity.spawnItemParticles: `count` ITEM crumbs of `stack`
+        // out of the mouth along the look (eating, a broken tool). Client-
+        // side; addParticle no-ops on the server.
+        void SpawnItemParticles(const ItemStack& stack, int count);
+        // MC makeDrownParticles (entity event 67): 8 BUBBLEs around the body.
+        void MakeDrownParticles();
+        // A feeding site's `addParticle(HAPPY_VILLAGER, getRandomX(1),
+        // getRandomY() + 0.5, getRandomZ(1), 0, 0, 0)` run from the server
+        // (the client does not run mob interaction): one direct particle.
+        void SendHappyVillagerParticle();
 
         // The timer half of MC LivingEntity.baseTick: the hurt flash, the
         // invulnerability window and the 100-tick memory of who last hurt us.
@@ -650,6 +984,9 @@ namespace Game {
         void CalculateEntityAnimation(bool useY);
 
     protected:
+        // Client: SetPassengersS2C's seat order and this client's player id.
+        std::vector<int32_t> m_syncedRiders;
+        int32_t              m_localRiderId = 0;
         bool m_discardFriction = false;
 
         // Owned here because MC owns it on LivingEntity, and because a mob's
@@ -729,12 +1066,16 @@ namespace Game {
 
         // MC LivingEntity.isPushable: alive (spectators and climbing don't
         // reach mob physics here).
-        bool IsPushable() const override { return IsAlive(); }
+        // MC LivingEntity.isPushable: alive and not a spectator.
+        bool IsPushable() const override { return IsAlive() && !IsSpectator(); }
 
         // MC LivingEntity.pushEntities + Entity.push(Entity) — crowd shoving
         // and the maxEntityCramming damage valve. Called from aiStep's tail.
         void PushEntities();
-        void DoPush(Entity& other);
+        // Virtual as MC's is: the parrot never pushes (or is pushed by) a
+        // player through its own push (Parrot.doPush), which is what lets it
+        // close in on its owner's shoulder.
+        virtual void DoPush(Entity& other);
 
         // MC LivingEntity.serverAiStep — empty here, final on Mob.
         virtual void ServerAiStep() {}
@@ -768,15 +1109,34 @@ namespace Game {
         float m_speed  = 0.0f;
 
         int   m_invulnerableTime = 0;
+    public:
+        // MC LivingEntity.setInvulnerableTime — a fresh arrival's grace
+        // (the skeleton trap's riders take 60 ticks).
+        void SetInvulnerableTime(int ticks) { m_invulnerableTime = ticks; }
+        int  GetInvulnerableTime() const { return m_invulnerableTime; }
+    private:
         float m_lastHurt = 0.0f;
         int   m_noJumpDelay = 0;
         bool  m_dead = false;
         Entity* m_hurtDirectEntity = nullptr;   // see HurtFrom
 
+        // See IsUsingItem / WasRecentlyStabbed.
+        bool          m_usingItem = false;
+        EquipmentSlot m_usedItemHand = EquipmentSlot::MAINHAND;
+        int           m_useItemRemaining = 0;
+        int           m_useItemDuration = 0;
+        uint32_t      m_useItemId = 0;
+        bool          m_kineticContacts = false;
+        std::vector<std::pair<int32_t, int64_t>> m_recentKineticEnemies;
+        int64_t       m_lastKineticHitFeedbackTime = -2147483648LL;
+        // MC LivingEntity.updatingUsingItem → updateUsingItem.
+        void UpdatingUsingItem();
+
         // MC 26.3 Entity.restituteMovementAfterCollisions (entity bounciness).
         void RestituteMovementAfterCollisions(const glm::dvec3& preMove,
                                               const glm::dvec3& moved, float airDrag);
 
+        CombatTracker   m_combatTracker;         // MC combatTracker
         EntityRef       m_lastHurtByMobRef;
         int64_t         m_lastHurtByMobTimestamp = 0;
         float           m_absorptionAmount = 0.0f;
@@ -786,6 +1146,7 @@ namespace Game {
         bool            m_hasLastDamageSource = false;
         int             m_lastDamageStamp = 0;   // MC lastDamageStamp (tickCount)
         int32_t         m_killerId = -1;
+        bool            m_skipDropExperience = false;   // see SkipDropExperience
         int32_t         m_killerDirectId = -1;
     };
 

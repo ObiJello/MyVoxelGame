@@ -43,10 +43,6 @@
 
 namespace Server {
 
-    void GameRuleCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("gamerule", GameRuleCommand::Execute);
-    }
-
     namespace {
 
         using Game::Rules::Id;
@@ -430,6 +426,24 @@ namespace Server {
             message += " (not implemented yet: stored, no effect)";
         }
         connection.SendChatMessage(message, 1);
+    }
+
+    void GameRuleCommand::Register(CommandDispatcher& dispatcher) {
+        namespace Cmd = Game::Cmd;
+        // MC GameRuleCommand: /gamerule <rule> [<value>]. The registry's
+        // rules are one argument (the client knows them and their types);
+        // the engine's own rules are literals, each with its value's type.
+        Cmd::Node root = Cmd::Root();
+        root.Then(Cmd::Argument("rule", Cmd::Arg::GameRule).Executes()
+            .Then(Cmd::Argument("value", Cmd::Arg::GameRuleValue).Executes()));
+        for (const EngineRule& rule : EngineRules()) {
+            Cmd::Node value = rule.isInt
+                ? Cmd::Argument("value", Cmd::Arg::Integer)
+                      .Suggests({std::to_string(rule.minValue), std::to_string(rule.defaultValue)})
+                : Cmd::Argument("value", Cmd::Arg::Bool);
+            root.Then(Cmd::Literal(rule.id).Executes().Then(std::move(value).Executes()));
+        }
+        dispatcher.RegisterCommand("gamerule", GameRuleCommand::Execute, std::move(root));
     }
 
 } // namespace Server

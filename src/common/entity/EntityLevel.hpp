@@ -35,6 +35,7 @@ namespace Game {
 
     struct ExplosionParams;
     struct ItemStack;
+    struct ParticleOptions;   // common/particle/ParticleOptions.hpp
 
     class ILevelWrite;
 
@@ -46,6 +47,7 @@ namespace Game {
     class IDragonFight;
     class PoiManager;
     class Mob;
+    class WardenSpawnTracker;   // common/entity/WardenSpawnTracker.hpp
 
     // MC net.minecraft.world.Difficulty. Nothing in this engine set a
     // difficulty before mobs existed, so the level implementations default to
@@ -58,9 +60,11 @@ namespace Game {
         Hard,
     };
 
-    // MC DifficultyInstance, reduced to the one number mobs read. MC scales it
-    // by chunk inhabited time and moon phase; without those this is a plain
-    // function of the difficulty setting. The values are DELIBERATELY the
+    // A position-free stand-in for DifficultyInstance.getSpecialMultiplier —
+    // the spawn code now reads the real local difficulty
+    // (EntityLevel::GetCurrentDifficultyAt / Mob::CurrentDifficulty below);
+    // prefer that. MC scales it by chunk inhabited time and moon phase;
+    // without those this is a plain function of the difficulty setting. The values are DELIBERATELY the
     // fully-inhabited steady state (what MC converges to where players live
     // and build farms), not the fresh-world floor — a brand-new MC world
     // reads 0.0 on Normal and 0.125 on Hard, ramping up as chunks accrue
@@ -75,6 +79,56 @@ namespace Game {
         }
         return 0.5f;
     }
+
+    // MC net.minecraft.world.DifficultyInstance — the LOCAL difficulty at a
+    // position: the difficulty setting scaled up by the world's age (the
+    // overworld clock), the chunk's inhabited time and the moon. What
+    // finalizeSpawn's equipment / enchantment / leader rolls read (MC passes
+    // level.getCurrentDifficultyAt(pos) into finalizeSpawn; here a mob asks
+    // EntityLevel::GetCurrentDifficultyAt for its own block position).
+    struct DifficultyInstance {
+        Difficulty base = Difficulty::Normal;
+        float      effectiveDifficulty = 0.0f;
+
+        DifficultyInstance() = default;
+        DifficultyInstance(Difficulty baseDifficulty, int64_t totalGameTime, int64_t localGameTime,
+                           float moonBrightness)
+            : base(baseDifficulty),
+              effectiveDifficulty(CalculateDifficulty(baseDifficulty, totalGameTime, localGameTime,
+                                                      moonBrightness)) {}
+
+        Difficulty GetDifficulty() const { return base; }
+        float GetEffectiveDifficulty() const { return effectiveDifficulty; }
+        // MC isHard: effective >= Difficulty.HARD.ordinal() (3).
+        bool IsHard() const { return effectiveDifficulty >= 3.0f; }
+        bool IsHarderThan(float requiredDifficulty) const { return effectiveDifficulty > requiredDifficulty; }
+        // MC getSpecialMultiplier: 0 below 2, 1 above 4, linear between.
+        float GetSpecialMultiplier() const {
+            if (effectiveDifficulty < 2.0f) return 0.0f;
+            return effectiveDifficulty > 4.0f ? 1.0f : (effectiveDifficulty - 2.0f) / 2.0f;
+        }
+
+        // MC calculateDifficulty, verbatim constants (DIFFICULTY_TIME_GLOBAL_
+        // OFFSET -72000, MAX_DIFFICULTY_TIME_GLOBAL 1440000,
+        // MAX_DIFFICULTY_TIME_LOCAL 3600000).
+        static float CalculateDifficulty(Difficulty b, int64_t totalGameTime, int64_t localGameTime,
+                                         float moonBrightness) {
+            if (b == Difficulty::Peaceful) return 0.0f;
+            const bool isHard = b == Difficulty::Hard;
+            const auto clamp01 = [](float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); };
+            float scale = 0.75f;
+            const float globalScale =
+                clamp01((static_cast<float>(totalGameTime) + -72000.0f) / 1440000.0f) * 0.25f;
+            scale += globalScale;
+            float localScale = 0.0f;
+            localScale += clamp01(static_cast<float>(localGameTime) / 3600000.0f) * (isHard ? 1.0f : 0.75f);
+            const float moon = moonBrightness * 0.25f;
+            localScale += moon < 0.0f ? 0.0f : (moon > globalScale ? globalScale : moon);
+            if (b == Difficulty::Easy) localScale *= 0.5f;
+            scale += localScale;
+            return static_cast<float>(static_cast<int>(b)) * scale;
+        }
+    };
 
     // ── Particles the entity system emits ──────────────────────────────────
     //
@@ -178,6 +232,120 @@ namespace Game {
         // TrackingEmitter on the struck entity (entity events 200 / 201).
         Crit,
         EnchantedHit,
+
+        // ── The rest of MC 26.3 core/particles/ParticleTypes, in its own
+        // registration order (the kinds above keep their values). Names,
+        // limiter flags and option shapes: common/particle/ParticleOptions
+        // (ParticleTypes table); providers, physics and sprites: the client's
+        // MobParticleSystem (client/particle/*.java).
+        Block,                 // BLOCK (TerrainParticle; options: block state)
+        Bubble,                // BUBBLE
+        Cloud,                 // CLOUD (PlayerCloudParticle)
+        CopperFireFlame,       // COPPER_FIRE_FLAME (FlameParticle)
+        DamageIndicator,       // DAMAGE_INDICATOR (CritParticle.DamageIndicatorProvider)
+        DragonBreath,          // DRAGON_BREATH (options: power)
+        DrippingLava,
+        FallingLava,
+        LandingLava,
+        DrippingWater,
+        FallingWater,
+        Dust,                  // DUST (options: rgb, scale)
+        DustColorTransition,   // DUST_COLOR_TRANSITION (options: from, to, scale)
+        Effect,                // EFFECT (SpellParticle.InstantProvider; options: rgb, power)
+        ElderGuardian,         // ELDER_GUARDIAN (the curse's ghost)
+        Enchant,               // ENCHANT (FlyTowardsPositionParticle.EnchantProvider)
+        EndRod,                // END_ROD
+        Gust,
+        SmallGust,
+        GustEmitterLarge,
+        GustEmitterSmall,
+        SonicBoom,
+        Firework,              // FIREWORK (FireworkParticles.SparkParticle)
+        Fishing,               // FISHING (WakeParticle)
+        Infested,              // INFESTED (SpellParticle.Provider)
+        CherryLeaves,
+        PaleOakLeaves,
+        RedPoplarLeaves,
+        OrangePoplarLeaves,
+        YellowPoplarLeaves,
+        TintedLeaves,          // TINTED_LEAVES (options: argb)
+        SculkSoul,
+        SculkCharge,           // SCULK_CHARGE (options: roll)
+        SculkChargePop,
+        SoulFireFlame,
+        Soul,
+        Flash,                 // FLASH (FireworkParticles.OverlayParticle; options: argb)
+        Composter,
+        InstantEffect,         // INSTANT_EFFECT (options: rgb, power)
+        Item,                  // ITEM (BreakingItemParticle; options: item)
+        Vibration,             // VIBRATION (options: destination, arrival ticks)
+        Trail,                 // TRAIL (options: target, rgb, duration)
+        ItemSlime,
+        ItemCobweb,
+        ItemSnowball,
+        Lava,
+        Mycelium,
+        Note,
+        Rain,
+        WhiteSmoke,
+        Sneeze,
+        Spit,
+        SquidInk,
+        SweepAttack,
+        TotemOfUndying,
+        Underwater,
+        Splash,
+        BubblePop,
+        CurrentDown,
+        BubbleColumnUp,
+        Nautilus,
+        Dolphin,
+        CampfireCosySmoke,
+        CampfireSignalSmoke,
+        DrippingHoney,
+        FallingHoney,
+        LandingHoney,
+        FallingNectar,
+        FallingSporeBlossom,
+        Ash,
+        CrimsonSpore,
+        WarpedSpore,
+        SporeBlossomAir,
+        DrippingObsidianTear,
+        FallingObsidianTear,
+        LandingObsidianTear,
+        ReversePortal,
+        WhiteAsh,
+        SmallFlame,
+        Snowflake,
+        DrippingDripstoneLava,
+        FallingDripstoneLava,
+        DrippingDripstoneWater,
+        FallingDripstoneWater,
+        GlowSquidInk,
+        Glow,
+        WaxOn,
+        WaxOff,
+        ElectricSpark,
+        Scrape,
+        Shriek,                // SHRIEK (options: delay)
+        EggCrack,
+        DustPlume,
+        TrialSpawnerDetection,
+        TrialSpawnerDetectionOminous,
+        VaultConnection,
+        DustPillar,            // DUST_PILLAR (options: block state)
+        OminousSpawning,
+        RaidOmen,
+        TrialOmen,
+        BlockCrumble,          // BLOCK_CRUMBLE (options: block state)
+        Firefly,
+        SulfurCubeGoo,
+        // MC FireworkParticles.Starter — not a registered type (the rocket's
+        // entity event 17 adds it straight to the engine): the unrendered
+        // seed that throws a firework's explosions. Its explosion list rides
+        // the options (ParticleOptions::fireworkExplosions).
+        FireworkStarter,
     };
 
     // MC client ParticleStatus (Options "particles"): the ordinals are the
@@ -302,6 +470,31 @@ namespace Game {
         virtual int64_t GetDayTime()  const = 0;
         virtual Difficulty GetDifficulty() const { return Difficulty::Normal; }
 
+        // MC ChunkAccess.getInhabitedTime for the FULL chunk at (chunkX,
+        // chunkZ): false when that chunk is not loaded (MC's getChunk(...,
+        // FULL, false) == null). Server levels answer; the default has none.
+        virtual bool GetChunkInhabitedTime(int chunkX, int chunkZ, int64_t& out) const {
+            (void)chunkX; (void)chunkZ; (void)out;
+            return false;
+        }
+
+        // MC ServerLevel.getCurrentDifficultyAt(pos): the chunk's inhabited
+        // time and the moon's brightness when the chunk is loaded (0 / 0
+        // otherwise), over the overworld clock (the shared day time here).
+        DifficultyInstance GetCurrentDifficultyAt(const glm::ivec3& pos) const {
+            int64_t localTime = 0;
+            float moonBrightness = 0.0f;
+            const int cx = pos.x >> 4, cz = pos.z >> 4;
+            if (GetChunkInhabitedTime(cx, cz, localTime)) {
+                // DimensionType.MOON_BRIGHTNESS_PER_PHASE[phase], phase =
+                // (dayTime / 24000) % 8 (the MOON_PHASE timeline).
+                static constexpr float kPerPhase[8] = { 1.0f, 0.75f, 0.5f, 0.25f, 0.0f, 0.25f, 0.5f, 0.75f };
+                const int64_t day = GetDayTime() / 24000;
+                moonBrightness = kPerPhase[static_cast<size_t>(((day % 8) + 8) % 8)];
+            }
+            return DifficultyInstance(GetDifficulty(), GetDayTime(), localTime, moonBrightness);
+        }
+
         virtual JavaRandom& Random() = 0;
 
         // ── Light ──────────────────────────────────────────────────────────
@@ -344,9 +537,40 @@ namespace Game {
         // little before dusk.
         virtual bool MonstersBurn() const = 0;
 
-        // MC Level.isDay / isThundering.
+        // MC Level.isDay.
         virtual bool IsDay() const = 0;
+
+        // ── Weather (MC Level's rain / thunder levels) ─────────────────────
+        //
+        // The server's bridge reads its World (World::GetRainLevel & co., fed
+        // by Server::ServerWeather); the client's reads Client::ClientWeather
+        // (the levels the server's weather game events carry). A level that
+        // cannot have weather (DimensionCanHaveWeather) answers 0 / false.
+        //
+        // MC Level.getRainLevel(a) / getThunderLevel(a) — thunder is already
+        // multiplied by rain, so it never exceeds it.
+        virtual float GetRainLevel(float partialTick = 1.0f) const { (void)partialTick; return 0.0f; }
+        virtual float GetThunderLevel(float partialTick = 1.0f) const { (void)partialTick; return 0.0f; }
+        // MC Level.isRaining: canHaveWeather && rainLevel > 0.2.
+        virtual bool IsRaining() const { return false; }
+        // MC Level.isThundering: canHaveWeather && thunderLevel > 0.9.
         virtual bool IsThundering() const { return false; }
+        // MC Level.precipitationAt(pos): NONE unless raining, the cell sees
+        // the sky and is at or above the MOTION_BLOCKING heightmap; then the
+        // biome's precipitation there (rain, or snow where it is cold).
+        virtual int PrecipitationAt(const glm::ivec3& pos) const { (void)pos; return 0; }
+        // The same three values as Game::BiomeRegistry::Precipitation, so
+        // this header stays free of the biome table.
+        static constexpr int kPrecipitationNone = 0;
+        static constexpr int kPrecipitationRain = 1;
+        static constexpr int kPrecipitationSnow = 2;
+        // MC Level.isRainingAt(pos): precipitationAt(pos) == RAIN. The leaves'
+        // drips, farmland, fire, the fishing bobber and Entity.isInRain read it.
+        bool IsRainingAt(const glm::ivec3& pos) const { return PrecipitationAt(pos) == kPrecipitationRain; }
+        // MC ClientLevel.getClientLeafTintColor(pos): the block's tint layer 0
+        // in the world (0xRRGGBB), -1 when it has none — the colour a
+        // TintedParticleLeavesBlock's falling leaves take. Client-only.
+        virtual int GetClientLeafTintColor(const glm::ivec3& pos) const { (void)pos; return -1; }
 
         // MC Level.setSkyFlashTime — a no-op on the server; ClientLevel keeps
         // the counter that brightens the sky (LightningBolt's client tick
@@ -393,6 +617,31 @@ namespace Game {
         virtual Entity*       ResolveEntity(const Uuid& uuid) const { (void)uuid; return nullptr; }
         virtual LivingEntity* ResolvePlayer(const Uuid& uuid) const { (void)uuid; return nullptr; }
 
+        // Any entity of THIS level by its per-level id (GetId: a mob or a
+        // player's view) — MC DamageSource.getEntity for a death recorded
+        // by id (the sculk catalyst's killer). Null when gone / on a client.
+        virtual Entity* ResolveEntityById(int32_t id) const { (void)id; return nullptr; }
+
+        // MC ServerPlayer.getWardenSpawnTracker. `player` is a player's
+        // LivingEntity (the server's PlayerEntityView); null for anything
+        // else and on the client.
+        virtual WardenSpawnTracker* GetWardenSpawnTracker(LivingEntity& player) {
+            (void)player;
+            return nullptr;
+        }
+
+        // MC ShoulderRidingEntity.setEntityOnShoulder(ServerPlayer): `entity`
+        // (a parrot) is saved into the player's free shoulder slot
+        // (ServerPlayer.setEntityOnShoulder — refused while the player rides,
+        // is airborne or in water, or both shoulders are taken) and, on
+        // success, discarded from the level. The player's shoulder data
+        // lives on the server's player, outside the entity port, so it comes
+        // through the level. False on a client and for a non-player.
+        virtual bool SetEntityOnShoulder(LivingEntity& player, Mob& entity) {
+            (void)player; (void)entity;
+            return false;
+        }
+
         // The item id in a player's main hand, or 0 for empty.
         //
         // The item system lives outside the entity port (Game::ItemStack,
@@ -415,6 +664,44 @@ namespace Game {
         virtual void DisplayClientMessage(const LivingEntity& player, const std::string& text,
                                           bool actionBar) const {
             (void)player; (void)text; (void)actionBar;
+        }
+
+        // MC ServerPlayer.connection.send(new ClientboundGameEventPacket(
+        // event, param)) — one game event (GameEventS2CPacket's ids) to one
+        // player: the pufferfish's PUFFER_FISH_STING. Same bridge as
+        // DisplayClientMessage; no-op for a non-player and on a client.
+        virtual void SendGameEvent(const LivingEntity& player, uint8_t event, float param) const {
+            (void)player; (void)event; (void)param;
+        }
+
+        // MC PlayerList.broadcastSystemMessage(message, false): one chat line
+        // to every player on the server, whatever their dimension — a named
+        // entity's death message (LivingEntity::Die). No-op on a client.
+        virtual void BroadcastSystemMessage(const std::string& text) const { (void)text; }
+
+        // MC Player.startRiding(vehicle) for a mob a player can sit on (the
+        // equines' doPlayerRide): the server seats the player behind
+        // `player` (Server::PlayerRiding). False when the player cannot ride
+        // now or the seat is taken; always false on a client.
+        virtual bool StartPlayerRiding(LivingEntity& player, Mob& vehicle) {
+            (void)player; (void)vehicle;
+            return false;
+        }
+
+        // MC Player.isShiftKeyDown (isSecondaryUseActive) for the player
+        // behind `player`. Same bridge as GetHeldItemId; false for a
+        // non-player and on a client.
+        virtual bool IsPlayerSneaking(const LivingEntity& player) const {
+            (void)player;
+            return false;
+        }
+
+        // MC Player.getName for the player behind `player` (its account
+        // name), for death messages that name a player. Empty for a
+        // non-player and on a client. Same bridge as GetHeldItemId.
+        virtual std::string GetPlayerName(const LivingEntity& player) const {
+            (void)player;
+            return {};
         }
 
         // ── Effects the entity system causes ───────────────────────────────
@@ -496,6 +783,58 @@ namespace Game {
             AddParticle(kind, x, y, z, vx, vy, vz);
         }
 
+        // ── Particles with options (common/particle/ParticleOptions.hpp) ───
+        //
+        // MC ClientLevel.doAddParticle: any particle type with its options
+        // record (dust colour, block state, item, …). `overrideLimiter` is
+        // OR-ed with the type's own flag by the particle engine, as MC's
+        // addParticle does. Client-only; every other level ignores it.
+        virtual void DoAddParticle(const ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                                   double x, double y, double z, double xd, double yd, double zd) {
+            (void)options; (void)overrideLimiter; (void)alwaysShow;
+            (void)x; (void)y; (void)z; (void)xd; (void)yd; (void)zd;
+        }
+        // MC Level.addParticle(options, x, y, z, xd, yd, zd).
+        void AddParticle(const ParticleOptions& options, double x, double y, double z,
+                         double xd, double yd, double zd) {
+            DoAddParticle(options, false, false, x, y, z, xd, yd, zd);
+        }
+        // MC Level.addParticle(options, overrideLimiter, alwaysShow, ...).
+        void AddParticle(const ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                         double x, double y, double z, double xd, double yd, double zd) {
+            DoAddParticle(options, overrideLimiter, alwaysShow, x, y, z, xd, yd, zd);
+        }
+        // MC Level.addAlwaysVisibleParticle.
+        void AddAlwaysVisibleParticle(const ParticleOptions& options, double x, double y, double z,
+                                      double xd, double yd, double zd) {
+            DoAddParticle(options, false, true, x, y, z, xd, yd, zd);
+        }
+
+        // MC ServerLevel.sendParticles: a ClientboundLevelParticlesPacket to
+        // every player of this level within 32 blocks (512 with
+        // `overrideLimiter`). `count` 0 spawns one particle with velocity
+        // (dist * speed); otherwise `count` particles gaussian-spread by
+        // dist, each with a gaussian velocity of `speed`. Returns how many
+        // players it reached. Server-only (out of line, LevelParticles.cpp);
+        // a client level answers 0, as MC's sendParticles exists only on
+        // ServerLevel.
+        int SendParticles(const ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                          double x, double y, double z, int count,
+                          double xDist, double yDist, double zDist, double speed);
+        int SendParticles(const ParticleOptions& options, double x, double y, double z, int count,
+                          double xDist, double yDist, double zDist, double speed) {
+            return SendParticles(options, false, false, x, y, z, count, xDist, yDist, zDist, speed);
+        }
+
+        // MC Level.levelEvent(except, type, pos, data) — the particle (and
+        // un-networked sound) half of a level event. The server sends a
+        // ClientboundLevelEventPacket to every player within 64 blocks but
+        // `except`; the client runs LevelEventHandler at once when `except`
+        // is its own player (prediction), and ignores it otherwise. The
+        // sound half of the events that have one is PlayLevelEventSound
+        // (common/sound/LevelEventSounds.hpp), which calls this itself.
+        virtual void PlayLevelEvent(const SoundExcept& except, int type, const glm::ivec3& pos, int data);
+
         // Drop an item stack in the world. Server-only; the client
         // implementation is a no-op.
         virtual void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) {}
@@ -526,11 +865,29 @@ namespace Game {
         // item entity's stack (an emptied one despawns on its next tick).
         // Returns how many were taken — 0 when the id is gone.
         virtual int TakeFromItemEntity(int32_t id, int count) { (void)id; (void)count; return 0; }
+        // MC LivingEntity.take(entity, amount)'s packet half: the watchers are
+        // told `collectorId` (a mob) took `amount` from that item entity
+        // (ClientboundTakeItemEntityPacket — the fly-in animation and the
+        // pickup pop), and an emptied item entity retires through that
+        // packet rather than a removal. Server levels answer.
+        virtual void NoteItemEntityTaken(int32_t itemEntityId, int32_t collectorId, int amount) {
+            (void)itemEntityId; (void)collectorId; (void)amount;
+        }
         // MC Entity.addDeltaMovement on an item entity (the potent sulfur
         // geyser lifting what floats over it). False when the id is gone.
         virtual bool AddItemEntityDeltaMovement(int32_t id, const glm::dvec3& delta) {
             (void)id; (void)delta;
             return false;
+        }
+        // MC LAUNCH_ENTITY_TICKER on an experience orb (the geyser): every
+        // orb whose box meets `box` and whose vertical speed is below `maxVy`
+        // gets `delta` added (Entity.addDeltaMovement). XP orbs are not
+        // Entities here, so the geyser's entity query cannot see them.
+        // Server-only; returns how many were pushed.
+        virtual int AddExperienceOrbDeltaMovementInBox(const AABBd& box, double maxVy,
+                                                       const glm::dvec3& delta) {
+            (void)box; (void)maxVy; (void)delta;
+            return 0;
         }
 
         // The whole stack of a dropped item (components included), for the
@@ -547,6 +904,21 @@ namespace Game {
         // with no inventory behind the player.
         virtual void CreateFilledResult(LivingEntity& player, ItemStack& held,
                                         const ItemStack& filled);   // Item.cpp
+
+        // MC Player.addItem → Inventory.add: `stack` goes into the player's
+        // inventory by MC's slot priority; what does not fit is lost, as in
+        // MC (the allay handing its item back). Server-only; no-op default.
+        virtual void AddItemToPlayer(LivingEntity& player, const ItemStack& stack) {
+            (void)player; (void)stack;
+        }
+        // MC Player.getInventory().add(stack)'s answer: true when some of it
+        // went in — or, for a player with infinite materials, when none did
+        // (Inventory.add empties the stack and says yes). What an arrow's or
+        // a trident's pickup asks (AbstractArrow.tryPickup). Server only.
+        virtual bool TryAddItemToPlayer(LivingEntity& player, const ItemStack& stack) {
+            (void)player; (void)stack;
+            return false;
+        }
 
         // MC BehaviorUtils.throwItem: an item entity launched with an
         // explicit velocity and pickup delay (a villager handing a neighbour
@@ -569,6 +941,26 @@ namespace Game {
         // (the same request/perform split as IUsePlayer::OpenMenu).
         virtual void OpenMerchantMenu(LivingEntity& player, Mob& merchant) {
             (void)player; (void)merchant;
+        }
+
+        // MC ContainerEntity.interactWithContainerVehicle → player.openMenu:
+        // the chest boat's or container minecart's inventory opens for the
+        // player behind `player` (a ChestMenu of 3 rows, or the hopper's
+        // 5 slots). Recorded like the merchant menu and opened by the
+        // session once the interaction returns. False on a client, or when
+        // the entity holds no container.
+        virtual bool OpenContainerEntityMenu(LivingEntity& player, Mob& containerEntity) {
+            (void)player; (void)containerEntity;
+            return false;
+        }
+
+        // MC ServerPlayer.openHorseInventory / openNautilusInventory: the
+        // mount screen (MountInventoryMenu over `mount`'s saddle, body and
+        // chest slots) opens for the player behind `player` — recorded like
+        // the menus above and opened by the session once the interaction or
+        // the inventory key returns. Nothing on a client.
+        virtual void OpenMountInventory(LivingEntity& player, Mob& mount) {
+            (void)player; (void)mount;
         }
 
         // MC ExperienceOrb.award(level, pos, amount): spawns real orb
@@ -732,10 +1124,30 @@ namespace Game {
         // MC ClientboundExplodePacket — tell watching clients to draw the
         // blast. `blockCount` drives the debris particle count and `small`
         // picks EXPLOSION vs EXPLOSION_EMITTER (MC Explosion.isSmall).
+        // `particleSet` is the blast's Game::ExplosionParticles pair (0 the
+        // vanilla EXPLOSION / EXPLOSION_EMITTER, 1 the wind charges' gusts);
+        // `blockParticles` false is MC's empty blockParticles list (no
+        // POOF/SMOKE debris).
         virtual void BroadcastExplosion(const glm::dvec3& center, float radius,
-                                        int blockCount, bool small) {
+                                        int blockCount, bool small,
+                                        uint8_t particleSet = 0, bool blockParticles = true) {
             (void)center; (void)radius; (void)blockCount; (void)small;
+            (void)particleSet; (void)blockParticles;
         }
+
+        // Whether the jukebox at `pos` is playing a song — the parrot's party
+        // check. The client answers from the jukebox block entity's synced
+        // song state and the songs it is actually playing (so a parrot that
+        // flies in, or a player who walks up, mid-song sees the dance); the
+        // server has no dancing and answers false.
+        virtual bool IsJukeboxPlaying(const glm::ivec3& pos) const {
+            (void)pos;
+            return false;
+        }
+        // Every jukebox in this level the client is playing a song at (a
+        // parrot entering the client mid-song picks them up once). Server:
+        // none.
+        virtual void GetPlayingJukeboxes(std::vector<glm::ivec3>& out) const { (void)out; }
 
         // ── Container block entities read BY mobs ──────────────────────────
         //

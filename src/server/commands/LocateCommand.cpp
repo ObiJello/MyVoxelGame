@@ -27,7 +27,12 @@
 namespace Server {
 
     void LocateCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("locate", LocateCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("locate", LocateCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literal("structure").Then(Cmd::Argument("structure", Cmd::Arg::LocateStructure).Executes()))
+                .Then(Cmd::Literal("biome").Then(Cmd::Argument("biome", Cmd::Arg::LocateBiome).Executes()))
+                .Then(Cmd::Literal("poi").Then(Cmd::Argument("poi", Cmd::Arg::LocatePoi).Executes())));
     }
 
     namespace {

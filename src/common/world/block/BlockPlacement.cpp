@@ -16,7 +16,14 @@
 #include "Vine.hpp"
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
+#include "SnowLayerBlock.hpp"
+#include "CandleBlocks.hpp"
+#include "PlantBlocks.hpp"
+#include "entity/DoubleChest.hpp"
 #include "../../core/Log.hpp"
+#include "../../entity/Entity.hpp"
+#include "../../entity/EntityLevel.hpp"
+#include "../../physics/Physics.hpp"
 
 #include <array>
 #include <cmath>
@@ -142,6 +149,7 @@ namespace Game {
             if (Has(n, "_glazed_terracotta") ||
                 Is(n, "furnace") || Is(n, "blast_furnace") || Is(n, "smoker") ||
                 Is(n, "chest") || Is(n, "trapped_chest") || Is(n, "ender_chest") ||
+                Is(n, "copper_chest") || (Has(n, "_copper_chest") && !Has(n, "_copper_chestplate")) ||
                 Is(n, "carved_pumpkin") || Is(n, "jack_o_lantern") ||
                 Is(n, "loom") || Is(n, "stonecutter") || Is(n, "lectern") ||
                 Is(n, "chiseled_bookshelf") || Is(n, "beehive") || Is(n, "bee_nest") ||
@@ -210,7 +218,7 @@ namespace Game {
         // WHICH neighbour this chest paired with at the moment it was placed,
         // which geometry alone can never recover — with a lone chest on either
         // side, both are equally valid partners and only the click says which.
-        if ((id == BlockID::Chest || id == BlockID::TrappedChest) && context.world) {
+        if (IsChestBlock(id) && context.world) {   // chest, trapped chest, copper chests
             const glm::ivec3 clicked = context.hitResult.blockPos;
             // face: 0 bottom, 1 top, 2 north, 3 south, 4 west, 5 east.
             static const glm::ivec3 kFaceOffset[6] = {
@@ -223,7 +231,9 @@ namespace Game {
             // AND still SINGLE — a chest already in a pair cannot take a third.
             auto candidatePartnerFacing =
                 [&](const glm::ivec3& at) -> std::string_view {
-                    if (context.world->GetBlock(at.x, at.y, at.z) != id) return {};
+                    // ChestBlock.chestCanConnectTo: the same block — or, for a
+                    // copper chest, any copper chest.
+                    if (!ChestCanConnectTo(id, context.world->GetBlock(at.x, at.y, at.z))) return {};
                     const BlockState st = context.world->GetBlockState(at.x, at.y, at.z);
                     if (st.GetValueByName("type") != "single") return {};
                     return st.GetValueByName("facing");
@@ -666,6 +676,49 @@ namespace Game {
         return state.SetIndex(prop, amount);
     }
 
+    namespace {
+        // The count property of the blocks that stack in their own cell by
+        // their getStateForPlacement's `state.is(this)` branch — CANDLES,
+        // PICKLES, EGGS — or Count for everything else.
+        PropertyId StackPropertyOf(BlockID id) {
+            if (Candles::IsCandle(id))     return PropertyId::CANDLES;
+            if (id == BlockID::SeaPickle)  return PropertyId::PICKLES;
+            if (id == BlockID::TurtleEgg)  return PropertyId::EGGS;
+            return PropertyId::Count;
+        }
+    } // namespace
+
+    bool IsPlaceOnWaterBlock(BlockID id) {
+        return id == BlockID::LilyPad || id == BlockID::Frogspawn;
+    }
+
+    int StackCountOf(BlockState state) {
+        const PropertyId prop = StackPropertyOf(state.Block());
+        if (prop == PropertyId::Count || !state.HasProperty(prop)) return 0;
+        const int index = state.GetIndex(prop);   // all three run 1..4
+        return index < 0 ? 0 : index + 1;
+    }
+
+    bool StackedPlacementState(BlockState existing, BlockID held, BlockState& out) {
+        if (existing.Block() != held) return false;
+        // SegmentableBlock.getStateForPlacement: setValue(segment, min(4, n + 1)).
+        if (IsSegmentedBlock(held)) {
+            const BlockState grown = SegmentGrownState(existing);
+            if (grown == existing) return false;
+            out = grown;
+            return true;
+        }
+        // CandleBlock: state.cycle(CANDLES); SeaPickleBlock / TurtleEggBlock:
+        // setValue(n, min(4, n + 1)). canBeReplaced only lets a count below
+        // four through, where the three agree. Every other property — LIT,
+        // WATERLOGGED, HATCH — carries over, as `state.setValue` keeps it.
+        const PropertyId prop = StackPropertyOf(held);
+        const int n = StackCountOf(existing);
+        if (prop == PropertyId::Count || n <= 0 || n >= 4) return false;
+        out = existing.SetIndex(prop, n);   // value n + 1 sits at index n
+        return true;
+    }
+
     bool CanBeReplacedByPlacement(BlockState existing,
                                   BlockID held, bool secondaryUse,
                                   const PlacementClick& click) {
@@ -738,6 +791,15 @@ namespace Game {
             return !secondaryUse && SegmentAmountOf(existing) < 4;
         }
 
+        // MC CandleBlock / SeaPickleBlock / TurtleEggBlock.canBeReplaced — the
+        // same shape as the segmented rule, on CANDLES / PICKLES / EGGS:
+        //   !isSecondaryUseActive() && itemInHand.is(asItem()) && n < 4
+        //       ? true : super.canBeReplaced(state, context)
+        // and super (none of the three is `.replaceable()`) says no.
+        if (existingId == held && StackCountOf(existing) > 0) {
+            return !secondaryUse && StackCountOf(existing) < 4;
+        }
+
         // MC SnowLayerBlock.canBeReplaced:
         //
         //   int layers = state.getValue(LAYERS);
@@ -749,10 +811,12 @@ namespace Game {
         // 2-to-8-layer pile is not, and a falling block landing on one must
         // pop as an item rather than overwrite it. The blanket replaceable
         // flag said yes at every depth, which quietly deleted snow piles.
-        if (existingId == BlockID::Snow) {
-            const int layers = std::atoi(
-                std::string(existing.GetValueByName("layers")).c_str());
-            if (held == existingId && layers < 8) {
+        //
+        // BlockID::SnowLayer is `minecraft:snow`; BlockID::Snow is snow_block,
+        // a full cube this rule must never reach.
+        if (existingId == BlockID::SnowLayer) {
+            const int layers = SnowLayer::Layers(existing);
+            if (held == existingId && layers < SnowLayer::kMaxHeight) {
                 if (!click.replacingClickedOnBlock) return true;
                 return click.clickedFace == Direction::Up;
             }
@@ -1058,6 +1122,7 @@ namespace Game {
         if (id == BlockID::PointedDripstone) {
             return PointedDripstoneCanSurvive(level, pos, state);
         }
+        if (id == BlockID::SnowLayer) return SnowLayer::CanSurvive(level, pos);
         return CanSurviveAt(level, pos, id);
     }
 
@@ -1083,6 +1148,12 @@ namespace Game {
             // MC RedStoneWireBlock.getStateForPlacement:
             //   getConnectionState(level, this.crossState, pos)
             return RedstonePlacementState(level, pos);
+        }
+        if (IsSnowyBlock(id)) {
+            // MC SnowyBlock.getStateForPlacement:
+            //   defaultBlockState().setValue(SNOWY, isSnowySetting(above))
+            // so grass set down under a snow layer is already snowy.
+            return SnowyPlacementState(level, pos, fallback);
         }
         if (id == BlockID::PotentSulfur) {
             // MC PotentSulfurBlock.getStateForPlacement:
@@ -1174,6 +1245,16 @@ namespace Game {
                                                       /*secondaryUse=*/false);
         }
 
+        // MC CopperChestBlock.getStateForPlacement →
+        // getLeastOxidizedChestOfConnectedBlocks: a copper chest that pairs
+        // with another copper chest becomes the LEAST oxidized of the two —
+        // unwaxed first when only one of them is waxed — so the new pair
+        // shows one oxidation. (The partner follows through CopperChest's
+        // updateShape / the placement's partner write.)
+        if (IsCopperChestBlock(id)) {
+            fallback = CopperChestLeastOxidizedState(level, pos, fallback);
+        }
+
         // MC FenceGateBlock.getStateForPlacement's IN_WALL clause. FACING has
         // already been set by the horizontal placement rule below/above, which
         // is the same `context.getHorizontalDirection()` vanilla uses.
@@ -1227,6 +1308,7 @@ namespace Game {
     bool HasModelledSurvivalRule(BlockID id) {
         if (HasRedstoneSurvivalRule(id)) return true;
         if (id == BlockID::HangingWhisperfruit) return true;   // CanSurviveAt: lantern leaves above
+        if (id == BlockID::SnowLayer) return true;             // CanSurviveAt: SnowLayer::CanSurvive
         // Every family the two functions above actually branch on. Kept as one
         // list so adding a rule and advertising it is a single edit.
         static constexpr std::string_view kModelled[] = {
@@ -1309,12 +1391,29 @@ namespace Game {
                    belowId == BlockID::Bamboo || belowId == BlockID::BambooSapling;
         }
 
+        // SnowLayerBlock.canSurvive only reads the block below, whatever the
+        // layer count — the state-free and state-aware answers are one rule.
+        // This is what refuses snow on ice, packed ice, a barrier, a slab's
+        // lower half or a fence, and what a snow golem's trail consults.
+        if (id == BlockID::SnowLayer) return SnowLayer::CanSurvive(level, pos);
+
         // The Hush's whisperfruit hangs from the underside of lantern leaves
         // and nothing else (HushBlocks.cpp; its updateShape drops it when the
         // leaf goes) — the ABOVE-block twin of the support rules here.
         if (id == BlockID::HangingWhisperfruit) {
             return level.GetBlock(pos.x, pos.y + 1, pos.z) == BlockID::LanternLeaves;
         }
+
+        // CandleBlock.canSurvive: Block.canSupportCenter(below, UP). Cake and
+        // candle cake: `below.isSolid()`.
+        if (Candles::IsCandle(id)) return Candles::CandleCanSurvive(level, pos);
+        if (id == BlockID::Cake || Candles::IsCandleCake(id)) return Candles::CakeCanSurvive(level, pos);
+        // SeaPickleBlock / LilyPadBlock / FrogspawnBlock / MushroomBlock
+        // canSurvive — the fluid, face and light rules in PlantBlocks.cpp.
+        if (id == BlockID::SeaPickle) return SeaPickle::CanSurvive(level, pos);
+        if (id == BlockID::LilyPad)   return LilyPadCanSurvive(level, pos);
+        if (id == BlockID::Frogspawn) return FrogspawnCanSurvive(level, pos);
+        if (IsSmallMushroom(id))      return MushroomCanSurvive(level, pos);
 
         // CocoaBlock.canSurvive is about the block it FACES, not the one below,
         // and the facing is not known until placement resolves. Left to the
@@ -1467,6 +1566,69 @@ namespace Game {
 
     BlockState DoorUpperState(BlockState lower) {
         return lower.SetName(PropertyId::DOUBLE_BLOCK_HALF, "upper");
+    }
+
+    // ── MC CollisionGetter.isUnobstructed(state, pos, placementContext) ─────
+
+    BlockRegistry::BlockShapeSet PlacementCollisionShape(BlockState state) {
+        BlockRegistry::BlockShapeSet empty;
+        const BlockID id = state.Block();
+        if (id == BlockID::Air || !BlockRegistry::HasCollision(id)) return empty;
+        // The three getCollisionShape overrides that read the context answer
+        // EMPTY for a placement: ScaffoldingBlock (`context.isPlacement()`),
+        // PowderSnowBlock (only a non-placement entity context collides) and
+        // LiquidBlock (no collision at all).
+        if (id == BlockID::Scaffolding || id == BlockID::PowderSnow ||
+            id == BlockID::Water || id == BlockID::Lava) {
+            return empty;
+        }
+        return BlockRegistry::GetBlockCollisionShapeSet(state);
+    }
+
+    bool PlacementShapeOverlaps(const BlockRegistry::BlockShapeSet& shape, const glm::ivec3& pos,
+                                const AABBd& box) {
+        // Shapes.joinIsNotEmpty(shape.move(pos), Shapes.create(entityBox), AND):
+        // an intersection with volume. Faces that only touch — a player whose
+        // feet rest on the top of the cell being filled below them — do not
+        // count; the tolerance is VoxelShape's own 1e-7.
+        constexpr double kEps = 1.0e-7;
+        const glm::dvec3 origin(pos);
+        for (const auto& b : shape) {
+            const glm::dvec3 lo = origin + glm::dvec3(b.min);
+            const glm::dvec3 hi = origin + glm::dvec3(b.max);
+            if (lo.x < box.max.x - kEps && hi.x > box.min.x + kEps &&
+                lo.y < box.max.y - kEps && hi.y > box.min.y + kEps &&
+                lo.z < box.max.z - kEps && hi.z > box.min.z + kEps) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool EntityBlocksPlacement(const Entity& entity) {
+        // EntityGetter.isUnobstructed: getEntities(null, bounds) — which is
+        // NO_SPECTATORS — then `!isRemoved() && blocksBuilding`.
+        return !entity.IsRemoved() && entity.BlocksBuilding() && !entity.IsSpectator();
+    }
+
+    bool EntitiesObstructPlacement(const EntityLevel& level, const BlockRegistry::BlockShapeSet& shape,
+                                   const glm::ivec3& pos, bool skipPlayers) {
+        if (shape.count == 0) return false;
+        // shape.bounds(), the query box.
+        glm::vec3 lo(1e30f), hi(-1e30f);
+        for (const auto& b : shape) {
+            lo = glm::min(lo, b.min);
+            hi = glm::max(hi, b.max);
+        }
+        const glm::vec3 base(pos);
+        std::vector<Entity*> found;
+        level.GetEntitiesInBox(AABB::FromMinMax(base + lo, base + hi), nullptr, found);
+        for (const Entity* e : found) {
+            if (!e || !EntityBlocksPlacement(*e)) continue;
+            if (skipPlayers && e->IsPlayer()) continue;
+            if (PlacementShapeOverlaps(shape, pos, ToAABBd(e->GetAABB()))) return true;
+        }
+        return false;
     }
 
 } // namespace Game

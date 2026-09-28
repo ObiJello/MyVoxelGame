@@ -46,6 +46,9 @@ namespace Game::Anvil {
     // CanSerialize() is false, it is already removed, or its type has no
     // vanilla name. A half-formed compound must never reach the file.
     bool WriteMob (Nbt::Writer& w, Nbt::Writer::ListScope& list, const Mob& mob);
+    // The same mob as a NAMED compound — MC's RootVehicle "Entity" (the
+    // vehicle a player logged out on, with its Passengers).
+    bool WriteMobCompound(Nbt::Writer& w, std::string_view key, const Mob& mob);
     bool WriteItem(Nbt::Writer& w, Nbt::Writer::ListScope& list, const ItemEntity& item);
     bool WriteOrb (Nbt::Writer& w, Nbt::Writer::ListScope& list, const ExperienceOrb& orb);
 

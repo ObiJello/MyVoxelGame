@@ -48,6 +48,14 @@ namespace Game {
         Trigger,  // wind charges: triggers blocks, breaks nothing
     };
 
+    // MC Level.explode's smallExplosionParticles / largeExplosionParticles
+    // pair — the centre particle every client adds (Explosion.isSmall()
+    // picks which of the two). Vanilla uses exactly two pairs.
+    enum class ExplosionParticles : uint8_t {
+        Vanilla = 0,   // EXPLOSION / EXPLOSION_EMITTER
+        Gust    = 1,   // GUST_EMITTER_SMALL / GUST_EMITTER_LARGE (wind charges, Wind Burst)
+    };
+
     // MC Explosion.BlockInteraction — the resolved answer.
     enum class ExplosionBlockInteraction : uint8_t {
         Keep,               // touch no blocks
@@ -107,6 +115,25 @@ namespace Game {
         // Per-explosion policy overrides; all-null means MC's base calculator.
         ExplosionDamageCalculator calculator{};
 
+        // MC SimpleExplosionDamageCalculator — the wind charges' and every
+        // enchantment `explode` effect's (Wind Burst). Its
+        // getKnockbackMultiplier answers 0 for a player whose abilities are
+        // flying (any game mode), so a flying player is never pushed.
+        bool  simpleCalculator = false;
+
+        // SimpleExplosionDamageCalculator's immuneBlocks =
+        // #minecraft:blocks_wind_charge_explosions (barrier, bedrock): those
+        // resist 3,600,000, and EVERY OTHER block reports no resistance at
+        // all (Optional.empty) — a wind charge's rays pass through walls to
+        // reach the buttons and doors behind them.
+        bool  windChargeImmuneBlocks = false;
+
+        // ENGINE RULE (deliberate deviation from MC): the tamed pets of this
+        // entity are left out of the blast entirely — set by the enchantment
+        // `explode` effect (Wind Burst) to its wielder, so a smash's burst
+        // never throws the attacker's own wolves, cats or horses. Null = MC.
+        const Entity* sparePetsOf = nullptr;
+
         // Broadcast the client-side visual. False only for tests.
         bool  spawnVisual = true;
 
@@ -114,11 +141,35 @@ namespace Game {
         // .explosionSound): GENERIC_EXPLODE for everything but the wind
         // charges (WIND_CHARGE_BURST). Empty = a silent blast.
         const char* explosionSound = "entity.generic.explode";
+
+        // The centre particle pair (see ExplosionParticles), and MC's
+        // blockParticles list: false is the empty WeightedList the wind
+        // charges pass — no POOF/SMOKE debris around the blast.
+        ExplosionParticles particles = ExplosionParticles::Vanilla;
+        bool  blockParticles = true;
     };
 
     struct ExplosionResult {
         int blocksDestroyed = 0;
     };
+
+    // Everything a wind-charge-shaped blast has in common — MC's
+    // AbstractWindCharge.EXPLOSION_DAMAGE_CALCULATOR (a
+    // SimpleExplosionDamageCalculator: blocks yes, entities no, immune to
+    // #blocks_wind_charge_explosions) with Level.ExplosionInteraction.TRIGGER,
+    // the GUST_EMITTER_SMALL / _LARGE pair and an empty blockParticles list.
+    // The caller fills centre, radius, source, the knockback multiplier (1.22
+    // for the player's WindCharge's own calculator, 1.0 otherwise) and the
+    // sound.
+    inline void ConfigureWindChargeExplosion(ExplosionParams& p) {
+        p.interaction            = ExplosionInteraction::Trigger;
+        p.fire                   = false;
+        p.damageEntities         = false;
+        p.simpleCalculator       = true;
+        p.windChargeImmuneBlocks = true;
+        p.particles              = ExplosionParticles::Gust;
+        p.blockParticles         = false;
+    }
 
     // MC ServerExplosion.explode(). A no-op returning zero on the client —
     // vanilla's ClientLevel.explode is literally an empty method, because the

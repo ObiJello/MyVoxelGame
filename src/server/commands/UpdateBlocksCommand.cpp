@@ -20,7 +20,9 @@ namespace Server {
     } // namespace
 
     void UpdateBlocksCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("updateblocks", UpdateBlocksCommand::Execute);
+        dispatcher.RegisterCommand("updateblocks", UpdateBlocksCommand::Execute,
+            Game::Cmd::Root().Executes().Then(Game::Cmd::Argument("radius", Game::Cmd::Arg::Integer)
+                .Suggests({"8", "16", "32", "64"}).Executes()));
     }
 
     void UpdateBlocksCommand::Execute(const CommandSourceStack& source,

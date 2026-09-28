@@ -117,6 +117,20 @@ namespace Game::Anvil {
         // absent, which is the common case and not worth logging.
         bool Read(int localX, int localZ, std::vector<uint8_t>& out, std::string& error);
 
+        // Read's first half: the chunk's compressed bytes as stored and their
+        // compression id, without decompressing. Same absent/error contract.
+        // The caller decompresses with Inflate, outside whatever lock guards
+        // the region file (AnvilChunkIo::ReadChunkNbt).
+        // Reads with positional I/O (PositionalRead), so any number of threads
+        // may call it at once on one region (under AnvilChunkIo's shared lock);
+        // writes keep the exclusive lock and are flushed before they return.
+        bool ReadCompressed(int localX, int localZ, std::vector<uint8_t>& raw, uint8_t& compression,
+                            std::string& error) const;
+
+        // Decompress a chunk stream (Read's second half). No region state.
+        static bool Inflate(const uint8_t* src, size_t n, uint8_t compression,
+                            std::vector<uint8_t>& out, std::string& error);
+
         // `payload` must ALREADY be compressed with `compression`. Compression
         // happens on the caller's thread so it stays off the single I/O thread.
         bool Write(int localX, int localZ, const std::vector<uint8_t>& payload,
@@ -141,10 +155,10 @@ namespace Game::Anvil {
         bool ReadHeader(std::string& error);
         bool WriteHeader(std::string& error);
         bool ReadAt (uint64_t offset, void* dst, size_t n, std::string& error);
+        // pread: no shared file position, safe to run concurrently.
+        bool PositionalRead(uint64_t offset, void* dst, size_t n, std::string& error) const;
         bool WriteAt(uint64_t offset, const void* src, size_t n, std::string& error);
         bool Sync(std::string& error, const char* what);
-        bool Inflate(const uint8_t* src, size_t n, uint8_t compression,
-                     std::vector<uint8_t>& out, std::string& error);
         std::filesystem::path ExternalPath(int localX, int localZ) const;
 
         std::filesystem::path m_path;

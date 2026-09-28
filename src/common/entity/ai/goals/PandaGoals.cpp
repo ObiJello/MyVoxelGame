@@ -9,6 +9,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/WorldDrops.hpp"
 
 #include <cmath>
 
@@ -299,6 +300,77 @@ namespace Game {
                 panda->SetTarget(&attacker);
             }
         }
+    }
+
+    // ── PandaSitGoal ──────────────────────────────────────────────────────
+
+    bool PandaSitGoal::FindFood(double range, glm::dvec3& out) const {
+        EntityLevel* level = m_panda->Level();
+        if (!level) return false;
+        AABBd box = m_panda->GetAABBd();
+        box.min -= glm::dvec3(range);
+        box.max += glm::dvec3(range);
+        std::vector<EntityLevel::NearbyItemEntity> items;
+        level->GetItemEntitiesInBox(box, items);
+        for (const auto& item : items) {
+            if (!item.canPickUp) continue;
+            const ItemStack* stack = level->GetItemEntityStack(item.id);
+            if (!stack || !Panda::CanPickUpAndEat(*stack)) continue;
+            out = item.pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool PandaSitGoal::CanUse() {
+        if (m_cooldown > m_panda->tickCount || m_panda->IsBaby() || m_panda->IsInWater() ||
+            !m_panda->CanPerformAction() || m_panda->GetUnhappyCounter() > 0) {
+            return false;
+        }
+        if (!m_panda->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty()) return true;
+        glm::dvec3 at;
+        return FindFood(6.0, at);
+    }
+
+    bool PandaSitGoal::CanContinueToUse() {
+        EntityLevel* level = m_panda->Level();
+        if (!level) return false;
+        JavaRandom& random = level->Random();
+        if (!m_panda->IsInWater() &&
+            (m_panda->IsLazy() || random.NextInt(ReducedTickDelay(600)) != 1)) {
+            return random.NextInt(ReducedTickDelay(2000)) != 1;
+        }
+        return false;
+    }
+
+    void PandaSitGoal::Tick() {
+        if (!m_panda->IsSitting() && !m_panda->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty()) {
+            m_panda->TryToSit();
+        }
+    }
+
+    void PandaSitGoal::Start() {
+        if (m_panda->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty()) {
+            glm::dvec3 at;
+            if (FindFood(8.0, at)) m_panda->GetNavigation().MoveTo(at.x, at.y, at.z, 1.2000000476837158);
+        } else {
+            m_panda->TryToSit();
+        }
+        m_cooldown = 0;
+    }
+
+    void PandaSitGoal::Stop() {
+        const ItemStack held = m_panda->GetEquipment(EquipmentSlot::MAINHAND);
+        if (!held.IsEmpty()) {
+            if (EntityLevel* level = m_panda->Level()) {
+                DropItemStackAt(level->Dimension(), m_panda->position, held);   // spawnAtLocation
+                m_panda->SetEquipment(EquipmentSlot::MAINHAND, ItemStack{});
+                JavaRandom& random = level->Random();
+                const int waitSeconds = m_panda->IsLazy() ? random.NextInt(50) + 10 : random.NextInt(150) + 10;
+                m_cooldown = m_panda->tickCount + waitSeconds * 20;
+            }
+        }
+        m_panda->Sit(false);
     }
 
 } // namespace Game

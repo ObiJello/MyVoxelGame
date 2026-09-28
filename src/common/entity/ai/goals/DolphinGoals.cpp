@@ -10,6 +10,7 @@
 #include "common/core/Mth.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/fluid/FluidState.hpp"
 #include "common/sound/SoundEvents.hpp"
 
 #include <cmath>
@@ -317,10 +318,8 @@ namespace Game {
     }
 
     bool DolphinSwimToTreasureGoal::CanUse() {
-        // MC gates on gotFish && air >= 100; feeding rides the item layer,
-        // so gotFish is never raised and the hunt never starts. (When it
-        // does, start() below already runs MC's no-structure path.)
-        return false;
+        // MC canUse: gotFish && getAirSupply() >= 100.
+        return m_dolphin->GotFish() && m_dolphin->GetAirSupply() >= 100;
     }
 
     void DolphinSwimToTreasureGoal::Start() {
@@ -329,6 +328,70 @@ namespace Game {
         m_dolphin->GetNavigation().Stop();
     }
 
-    void DolphinSwimToTreasureGoal::Stop() {}
+    void DolphinSwimToTreasureGoal::Stop() {
+        // MC stop(): no treasure (or stuck, or arrived) — the fish is spent.
+        m_dolphin->SetGotFish(false);
+    }
+
+    // ── DolphinMoveToItemGoal / PlayWithItemsGoal ─────────────────────────
+
+    DolphinMoveToItemGoal::DolphinMoveToItemGoal(Dolphin* dolphin) : m_dolphin(dolphin) {
+        SetFlags(static_cast<uint8_t>(GoalFlag::Move));
+    }
+
+    bool DolphinMoveToItemGoal::FindItem(glm::dvec3& out) const {
+        // Dolphin.ALLOWED_ITEMS: past its pickup delay, alive, in water —
+        // within the box inflated by 8.
+        EntityLevel* level = m_dolphin->Level();
+        const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
+        if (!blocks) return false;
+        AABBd box = m_dolphin->GetAABBd();
+        box.min -= glm::dvec3(8.0);
+        box.max += glm::dvec3(8.0);
+        std::vector<EntityLevel::NearbyItemEntity> items;
+        level->GetItemEntitiesInBox(box, items);
+        for (const auto& item : items) {
+            if (!item.canPickUp || item.count <= 0) continue;
+            const glm::ivec3 cell(glm::floor(item.pos));
+            if (GetFluidState(*blocks, cell).type != FluidType::Water) continue;
+            out = item.pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool DolphinMoveToItemGoal::CanUse() {
+        if (m_cooldown > m_dolphin->tickCount) return false;
+        glm::dvec3 at;
+        return FindItem(at);
+    }
+
+    void DolphinMoveToItemGoal::Stop() {
+        if (m_dolphin->DropHeldItem() && m_dolphin->Level()) {
+            m_cooldown = m_dolphin->tickCount + m_dolphin->Level()->Random().NextInt(100);
+        }
+    }
+
+    void DolphinMoveToItemGoal::Start() {
+        glm::dvec3 at;
+        if (FindItem(at)) {
+            m_dolphin->GetNavigation().MoveTo(at.x, at.y, at.z, 1.2000000476837158);
+            m_dolphin->PlaySound(SoundEvents::DOLPHIN_PLAY, 1.0f, 1.0f);
+        }
+        m_cooldown = 0;
+    }
+
+    void DolphinMoveToItemGoal::Tick() {
+        glm::dvec3 at;
+        if (FindItem(at)) m_dolphin->GetNavigation().MoveTo(at.x, at.y, at.z, 1.2000000476837158);
+    }
+
+    bool PlayWithItemsGoal::CanUse() {
+        return !m_dolphin->GetEquipment(EquipmentSlot::MAINHAND).IsEmpty();
+    }
+
+    void PlayWithItemsGoal::Stop() { m_dolphin->DropHeldItem(); }
+
+    void PlayWithItemsGoal::Tick() { m_dolphin->DropHeldItem(); }
 
 } // namespace Game

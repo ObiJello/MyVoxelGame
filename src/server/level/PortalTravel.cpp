@@ -37,6 +37,13 @@
 #include "common/world/portal/PortalFamily.hpp"
 #include "common/world/portal/PortalShape.hpp"
 #include "server/portal/TwilightTeleporter.hpp"
+#include "server/entity/PlayerRiding.hpp"
+#include "server/level/MobLevelTransfer.hpp"
+#include "common/entity/Mob.hpp"
+#include "common/entity/PrimedTnt.hpp"
+#include "common/entity/ai/navigation/PathNavigation.hpp"
+#include "common/entity/projectile/Projectile.hpp"
+#include <vector>
 
 #include <algorithm>
 #include <cmath>
@@ -344,20 +351,132 @@ namespace Server {
                     }
                 }
 
-                // Non-player entities do not travel yet. When they do, primed TNT
-                // needs `tnt->SetUsedPortal(true)` on arrival (MC PrimedTnt
-                // .teleport) or the first charge through a portal blows the portal
-                // out behind it. See PrimedTnt::UsedPortal.
-                //
-                // MC destroys and recreates
-                // the entity in the destination level (Entity.java:3050); here that
-                // means moving ownership between two MobManagers and re-keying the
-                // entity tracker, and getting it half-right leaves a mob ticking in
-                // one dimension while its client copy stands in another. The
-                // cooldown is already armed by the caller, so the entity simply
-                // sits in the portal rather than retrying every tick.
-                Log::Debug("[PortalTravel] Entity %d reached a portal but only players travel",
-                           entity.GetId());
+                // ── A mob, and everything riding it ────────────────────────
+                // MC Entity.teleportCrossDimension: the passengers go first,
+                // each to the same transition offset by where it sat
+                // (calculatePassengerTransition), then the vehicle, and the
+                // passengers are put back on it (startRiding, forced). Here
+                // the mob and its mob riders move between the levels as the
+                // same objects (MobLevelTransfer — their riding links stay),
+                // and a riding PLAYER crosses as a player (MovePlayer) and is
+                // seated again once they stand in the new level
+                // (PlayerRiding::CarryAcross).
+                auto* mob = dynamic_cast<Game::Mob*>(&entity);
+                if (!mob || mob->IsPassenger()) return;
+                // Projectiles keep their owners in the level they left; they
+                // do not take frame portals here.
+                if (dynamic_cast<Game::Projectile*>(mob)) return;
+                // MC Entity.canTeleport: not End → Overworld with a player
+                // aboard who has not seen the credits.
+                std::vector<Server::PlayerEntityView*> riders;
+                {
+                    std::vector<Game::Entity*> stack(mob->GetPassengers().begin(), mob->GetPassengers().end());
+                    while (!stack.empty()) {
+                        Game::Entity* e = stack.back();
+                        stack.pop_back();
+                        if (!e) continue;
+                        if (auto* view = dynamic_cast<Server::PlayerEntityView*>(e)) riders.push_back(view);
+                        for (Game::Entity* p : e->GetPassengers()) stack.push_back(p);
+                    }
+                }
+                const float rootYaw   = mob->yRot;
+                const float rootPitch = mob->xRot;
+                const float newYaw   = landing.absoluteRotation ? landing.yRotAbsolute : rootYaw + landing.yRotDelta;
+                const float newPitch = landing.absoluteRotation ? landing.xRotAbsolute : rootPitch;
+                const bool crossDimension = &from != &to;
+
+                // The riding players: where each sat relative to the vehicle,
+                // its facing relative to the vehicle's.
+                struct CarriedRider {
+                    Server::PlayerEntityView* view;
+                    Server::ServerPlayer* player;
+                    glm::dvec3 offset;
+                    float yawOffset, pitchOffset;
+                    int32_t vehicleId;
+                };
+                std::vector<CarriedRider> carried;
+                for (Server::PlayerEntityView* view : riders) {
+                    Server::ServerPlayer* player = view->GetPlayer();
+                    Game::Entity* seat = view->GetVehicle();
+                    if (!player || !seat) continue;
+                    carried.push_back(CarriedRider{view, player, player->getPosition() - mob->position,
+                                                   player->getYaw() - rootYaw, player->getPitch() - rootPitch,
+                                                   seat->GetId()});
+                }
+
+                if (crossDimension) {
+                    // Every player off before the vehicle leaves its level —
+                    // their views stay behind in it.
+                    for (CarriedRider& r : carried) {
+                        auto session = server.GetSessionManager()
+                                           ? server.GetSessionManager()->GetSession(r.player->getPlayerId())
+                                           : nullptr;
+                        if (session) PlayerRiding::CarryAcross(*session, r.vehicleId, to.Dimension());
+                    }
+                    if (!MobLevelTransfer::TransferTree(from, to, *mob)) {
+                        Log::Warning("[PortalTravel] Mob #%d could not leave '%s'", mob->GetId(),
+                                     std::string(Game::DimensionName(from.Dimension())).c_str());
+                        return;
+                    }
+                }
+
+                const glm::dvec3 rootFrom = mob->position;
+                // PostTeleportTransition.PLACE_PORTAL_TICKET: the landing's
+                // chunks stay loaded for the arrival.
+                PlacePortalTicket(to, landing.position);
+                // Entity.teleportSetPosition: the new position and facing,
+                // the carried momentum (zero for a portal crossing), the fall
+                // reset; the watchers snap rather than slide.
+                mob->position = landing.position;
+                mob->oldPosition = landing.position;
+                mob->velocity = landing.velocity;
+                mob->yRot = mob->yRotO = newYaw;
+                mob->xRot = mob->xRotO = newPitch;
+                mob->yBodyRot = mob->yBodyRotO = newYaw;
+                mob->yHeadRot = mob->yHeadRotO = newYaw;
+                mob->fallDistance = 0.0f;
+                mob->needsSync = true;
+                mob->portal.MarkCrossedSurface();
+                if (mob->HasAiControls()) mob->GetNavigation().Stop();
+                // MC PrimedTnt.teleport: a charge that came through a portal
+                // does not blow the portal out behind it.
+                if (auto* tnt = dynamic_cast<Game::PrimedTnt*>(mob)) tnt->SetUsedPortal(true);
+                // The mob riders follow their seats on the next passenger
+                // tick; their old positions go with them, so nothing lerps
+                // across the gap.
+                {
+                    std::vector<Game::Entity*> stack(mob->GetPassengers().begin(), mob->GetPassengers().end());
+                    while (!stack.empty()) {
+                        Game::Entity* e = stack.back();
+                        stack.pop_back();
+                        if (!e || e->IsPlayer()) continue;
+                        e->position = landing.position + (e->position - rootFrom);
+                        e->oldPosition = e->position;
+                        e->fallDistance = 0.0f;
+                        e->needsSync = true;
+                        for (Game::Entity* p : e->GetPassengers()) stack.push_back(p);
+                    }
+                }
+
+                if (crossDimension) {
+                    for (CarriedRider& r : carried) {
+                        Landing riderLanding;
+                        riderLanding.position = landing.position + r.offset;
+                        riderLanding.absoluteRotation = true;
+                        riderLanding.yRotAbsolute = newYaw + r.yawOffset;
+                        riderLanding.xRotAbsolute = newPitch + r.pitchOffset;
+                        riderLanding.velocity = landing.velocity;
+                        r.player->portalState().CopyFrom(entity.portal);
+                        MovePlayer(server, from, to, *r.player, riderLanding);
+                    }
+                    Log::Info("[PortalTravel] Mob #%d crossed '%s' -> '%s' with %zu player rider(s)",
+                              mob->GetId(), std::string(Game::DimensionName(from.Dimension())).c_str(),
+                              std::string(Game::DimensionName(to.Dimension())).c_str(), carried.size());
+                } else {
+                    // A hop within the level: the riders stay seated; their
+                    // bodies and views follow the vehicle.
+                    PlayerRiding::OnVehicleTeleported(*mob);
+                }
             }
 
             // ── End gateways (MC TheEndGatewayBlockEntity) ─────────────────
@@ -598,6 +717,8 @@ namespace Server {
                     entity.position = landing;
                     entity.fallDistance = 0.0f;
                     entity.needsSync = true;
+                    // 26.x: a vehicle takes its riders through the gateway.
+                    if (entity.IsVehicle()) PlayerRiding::OnVehicleTeleported(entity);
                     Log::Info("[PortalTravel] Entity %d took a gateway to "
                               "(%.1f, %.1f, %.1f)",
                               entity.GetId(), landing.x, landing.y, landing.z);

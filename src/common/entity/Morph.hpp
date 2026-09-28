@@ -71,6 +71,17 @@ namespace Game::Morph {
         return Encode(Kind::Block, (IdOf(code) & ~kBlockOpenBit) | (open ? kBlockOpenBit : 0u));
     }
 
+    // A mob morph's LOOK beyond the code — the per-instance variant the
+    // 24-bit id has no room for, carried beside it as its own trailing field
+    // (PlayerUpdateS2C / PlayerAbilitiesS2C `morphVariant`) and kept with
+    // the morph on the server. Its meaning is the type's:
+    //   tropical_fish   MC's packed variant int (TropicalFishVariant.hpp)
+    //   salmon          Salmon.Variant id (small 0, medium 1, large 2)
+    //   anything else   unused (0)
+    // DefaultVariantOf is the look of a morph nobody rolled one for — MC's
+    // DEFAULT_VARIANT / Variant.DEFAULT (KOB white-on-white, medium).
+    int32_t DefaultVariantOf(uint32_t code);
+
     // A known kind with an id in range.
     bool IsValid(uint32_t code);
 

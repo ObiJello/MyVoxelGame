@@ -64,9 +64,7 @@ namespace Game::Lighting::NetCodec {
     inline DataLayer ReadLayer(Network::PacketReader& in) {
         const uint8_t tag = in.ReadByte();
         if (tag == kTagArray) {
-            std::array<uint8_t, DataLayer::kSize> bytes{};
-            in.ReadBytes(bytes.data(), bytes.size());
-            return DataLayer::FromBytes(bytes.data());
+            return DataLayer::FromBytes(in.ReadSpan(DataLayer::kSize));
         }
         return DataLayer(tag & 15);
     }

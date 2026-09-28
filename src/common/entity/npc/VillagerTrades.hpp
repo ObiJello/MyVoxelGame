@@ -20,9 +20,9 @@
 // Supported item modifiers are every function the vanilla trades use:
 // enchant_randomly, enchant_with_levels, filtered (+discard), set_name,
 // set_potion, set_random_potion, set_stew_effect, set_random_dyes, and
-// exploration_map — which, with no filled-map system to write into, leaves the
-// blank map, so the trade's own "filtered: map_id" guard discards the offer
-// exactly as MC does when no structure is found. Enchanted GEAR has no
+// exploration_map — run through the server's map system from the merchant's
+// position; when no structure is found the trade's own "filtered: map_id"
+// guard discards the offer, exactly as MC does. Enchanted GEAR has no
 // ENCHANTMENTS component in this engine yet (only books store
 // enchantments); those trades' "filtered: enchantments" guard discards them
 // the same way. Both are named in the villager docs as the gaps they are.
@@ -31,6 +31,8 @@
 #include "common/entity/npc/MerchantOffer.hpp"
 #include "common/entity/npc/VillagerData.hpp"
 
+#include <glm/glm.hpp>
+
 #include <string>
 
 namespace Game {
@@ -38,6 +40,14 @@ namespace Game {
     class JavaRandom;
 
     namespace VillagerTrades {
+
+        // The LootContext a trade's item modifiers see beyond the random:
+        // ORIGIN (the merchant's position) in the merchant's level — what
+        // the cartographer's exploration maps search from.
+        struct TradeOrigin {
+            int dimensionId = 0;
+            glm::dvec3 position{0.0};
+        };
 
         // MC AbstractVillager.addOffersFromTradeSet: roll the set's amount and
         // draw that many offers from its trades (without duplicates unless
@@ -50,7 +60,8 @@ namespace Game {
         // none, so pass nullopt and any such predicate fails, as it would on
         // a non-villager in MC.
         void AddOffersFromTradeSet(const std::string& tradeSetKey, MerchantOffers& offers,
-                                   JavaRandom& random, std::optional<VillagerType> merchantType);
+                                   JavaRandom& random, std::optional<VillagerType> merchantType,
+                                   const TradeOrigin* origin = nullptr);
 
         // True when data/<ns>/trade_set/<path>.json exists and parsed.
         bool TradeSetExists(const std::string& tradeSetKey);

@@ -57,7 +57,8 @@ namespace Game {
                                         JavaRandom& rng);
 
     protected:
-        void UpdateNoActionTime();
+        // Virtual as in MC: Raider replaces the light test with a flat +2.
+        virtual void UpdateNoActionTime();
     };
 
 } // namespace Game

@@ -39,7 +39,9 @@ namespace Game {
 
     // MC FluidState.animateTick → WaterFluid / LavaFluid.animateTick: the
     // fluid in a sampled cell, waterlogged blocks included (ClientLevel
-    // .doAnimateTick runs it for any non-empty fluid state).
+    // .doAnimateTick runs it for any non-empty fluid state). The whole of it
+    // — the sounds and the two particles that share their rolls (still
+    // water's UNDERWATER motes, the lava pop's LAVA).
     void FluidAnimateTickSounds(EntityLevel& level, const glm::ivec3& pos, FluidState fluid,
                                 JavaRandom& random);
 

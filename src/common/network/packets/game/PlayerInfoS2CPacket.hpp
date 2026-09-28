@@ -21,12 +21,28 @@ namespace Network {
         enum class Action : uint8_t {
             ADD    = 0, // Player joined
             REMOVE = 1, // Player left
+            // MC ClientboundPlayerInfoUpdatePacket.Action.UPDATE_GAME_MODE —
+            // broadcast to everyone when a player's game mode changes
+            // (ServerPlayerGameMode.changeGameModeForPlayer). The tab list's
+            // spectator styling, the spectator menu's player list and the
+            // spectator-only rendering of other players all read it.
+            UPDATE_GAME_MODE = 2,
+            // MC Action.UPDATE_LATENCY — PlayerList.tick re-sends every
+            // player's latency to everyone each 600 ticks; the tab list's
+            // ping bars read it.
+            UPDATE_LATENCY = 3,
         };
 
         Action      action  = Action::ADD;
         uint32_t    playerId = 0;
         std::string playerName;       // Only meaningful for ADD
         uint8_t     colorId = 0;      // Game::PlayerColorId — only for ADD
+        // Server::GameMode raw value (0 survival … 3 spectator): ADD (trailing,
+        // after the colour) and UPDATE_GAME_MODE.
+        uint8_t     gameMode = 0;
+        // Round-trip latency in ms (MC ServerCommonPacketListenerImpl
+        // .latency()): ADD (trailing, after the game mode) and UPDATE_LATENCY.
+        int32_t     latency = 0;
     };
 
     namespace Serialization {
@@ -38,6 +54,12 @@ namespace Network {
             if (packet.action == PlayerInfoS2CPacket::Action::ADD) {
                 buffer.WriteString(packet.playerName);
                 buffer.WriteByte(packet.colorId);
+                buffer.WriteByte(packet.gameMode);
+                buffer.WriteVarInt(static_cast<uint32_t>(packet.latency));
+            } else if (packet.action == PlayerInfoS2CPacket::Action::UPDATE_GAME_MODE) {
+                buffer.WriteByte(packet.gameMode);
+            } else if (packet.action == PlayerInfoS2CPacket::Action::UPDATE_LATENCY) {
+                buffer.WriteVarInt(static_cast<uint32_t>(packet.latency));
             }
             return buffer.GetData();
         }
@@ -52,6 +74,18 @@ namespace Network {
                 if (reader.Remaining() >= 1) {
                     packet.colorId = reader.ReadByte();
                 }
+                if (reader.Remaining() >= 1) {
+                    packet.gameMode = reader.ReadByte();
+                }
+                if (reader.Remaining() >= 1) {
+                    packet.latency = static_cast<int32_t>(reader.ReadVarInt());
+                }
+            } else if (packet.action == PlayerInfoS2CPacket::Action::UPDATE_GAME_MODE &&
+                       reader.Remaining() >= 1) {
+                packet.gameMode = reader.ReadByte();
+            } else if (packet.action == PlayerInfoS2CPacket::Action::UPDATE_LATENCY &&
+                       reader.Remaining() >= 1) {
+                packet.latency = static_cast<int32_t>(reader.ReadVarInt());
             }
             return packet;
         }

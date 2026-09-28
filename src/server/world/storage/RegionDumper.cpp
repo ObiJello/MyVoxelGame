@@ -2,75 +2,32 @@
 #include "RegionDumper.hpp"
 #include "RegionFileCache.hpp"
 #include "common/core/Log.hpp"
+#include <algorithm>
 #include <iostream>
 #include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <ctime>
-#include <zlib.h>
+#include "common/core/Deflate.hpp"
 
 namespace World {
 
     // **NEW**: Thread-safe file access with per-thread file handles
     static std::mutex s_fileAccessMutex;
 
-    // Proper inflate function that handles both zlib and gzip
+    // A zlib or gzip chunk stream (Core::Deflate takes the wrapper from the bytes).
     bool InflateAll(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
         if (in.empty()) {
             Log::Error("Empty input data for inflation");
             return false;
         }
-
-        z_stream strm{};
-        strm.next_in = (Bytef*)in.data();
-        strm.avail_in = in.size();
-
-        // 15 window bits + 32 to auto-detect zlib or gzip header
-        int ret = inflateInit2(&strm, 15 + 32);
-        if (ret != Z_OK) {
-            Log::Error("inflateInit2 failed: %d", ret);
+        const Core::Deflate::Status status = Core::Deflate::Decompress(in.data(), in.size(), out, 256u << 20);
+        if (status != Core::Deflate::Status::Ok) {
+            Log::Error("inflate failed: %s", status == Core::Deflate::Status::TooLarge ? "past 256 MB" : "corrupt data");
             return false;
         }
-
-        out.clear();
-        out.resize(in.size() * 4); // Start with 4x the compressed size
-        strm.next_out = (Bytef*)out.data();
-        strm.avail_out = out.size();
-
-        while (true) {
-            ret = inflate(&strm, Z_NO_FLUSH);
-
-            if (ret == Z_STREAM_END) {
-                // Successfully decompressed
-                break;
-            } else if (ret == Z_BUF_ERROR || ret == Z_OK) {
-                // Need more output buffer space
-                size_t used = strm.total_out;
-                out.resize(out.size() * 2);
-                strm.next_out = (Bytef*)out.data() + used;
-                strm.avail_out = out.size() - used;
-                continue;
-            } else {
-                // Error occurred
-                const char* errorMsg = "Unknown error";
-                switch (ret) {
-                    case Z_STREAM_ERROR: errorMsg = "Stream error"; break;
-                    case Z_DATA_ERROR: errorMsg = "Data error"; break;
-                    case Z_MEM_ERROR: errorMsg = "Memory error"; break;
-                    case Z_VERSION_ERROR: errorMsg = "Version error"; break;
-                }
-                Log::Error("inflate failed: %s (code: %d)", errorMsg, ret);
-                inflateEnd(&strm);
-                return false;
-            }
-        }
-
-        size_t finalSize = strm.total_out;
-        inflateEnd(&strm);
-        out.resize(finalSize);
-
         Log::Debug("Decompression successful: %zu -> %zu bytes (ratio: %.2f%%)",
-                  in.size(), finalSize, (100.0 * in.size()) / finalSize);
+                  in.size(), out.size(), (100.0 * in.size()) / std::max<size_t>(out.size(), 1));
         return true;
     }
 

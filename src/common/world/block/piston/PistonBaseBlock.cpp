@@ -4,6 +4,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/entity/IUsePlayer.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/RedstoneSignal.hpp"
@@ -12,6 +13,7 @@
 #include "common/world/block/entity/PistonMovingBlockEntity.hpp"
 #include "common/world/block/piston/PistonStructureResolver.hpp"
 #include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/level/NeighborUpdater.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
@@ -164,7 +166,16 @@ namespace Game {
                 const glm::ivec3 pos = toDestroy[static_cast<size_t>(i)];
                 const BlockState blockState = StateAt(level, pos);
                 DropBlockLoot(level, pos, blockState);
+                // MC: `if (!is(FIRE) && isClientSide) levelEvent(2001, …)` —
+                // each client's mirrored move puffs the crushed block. This
+                // engine's clients do not run the move, so the server sends it.
+                if (!level.IsClientSide() && !blockState.Is(BlockID::Fire) && !blockState.Is(BlockID::SoulFire)) {
+                    PlayLevelEventSound(level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                        static_cast<int>(blockState.RawId()), level.Random());
+                }
                 SetBlock(level, pos, BlockState{}, F18);
+                // MC moveBlocks: gameEvent(BLOCK_DESTROY, pos, Context.of(blockState)).
+                level.GameEvent(GameEventId::BlockDestroy, pos, GameEventContext::Of(blockState));
                 toUpdate.push_back(blockState);
             }
 
@@ -255,6 +266,8 @@ namespace Game {
                 // MC PistonBaseBlock.triggerEvent:169 — playSound(null, …).
                 level.PlaySound(nullptr, pos, SoundEvents::PISTON_EXTEND, SoundSource::Blocks, 0.5f,
                                 rf * 0.25f + 0.6f);
+                // :170 gameEvent(BLOCK_ACTIVATE, pos, Context.of(extendedState)).
+                level.GameEvent(GameEventId::BlockActivate, pos, GameEventContext::Of(extendedState));
             } else if (b0 == kTriggerContract || b0 == kTriggerDrop) {
                 if (auto* prev = dynamic_cast<PistonMovingBlockEntity*>(level.GetBlockEntity(Relative(pos, direction)))) {
                     prev->FinalTick(level);
@@ -297,6 +310,8 @@ namespace Game {
                 // MC PistonBaseBlock.triggerEvent:209.
                 level.PlaySound(nullptr, pos, SoundEvents::PISTON_CONTRACT, SoundSource::Blocks, 0.5f,
                                 rf * 0.15f + 0.6f);
+                // :210 gameEvent(BLOCK_DEACTIVATE, pos, Context.of(movingPistonState)).
+                level.GameEvent(GameEventId::BlockDeactivate, pos, GameEventContext::Of(movingPistonState));
             }
             return true;
         }

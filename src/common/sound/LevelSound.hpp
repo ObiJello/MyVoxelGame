@@ -92,10 +92,43 @@ namespace Game {
                                              int32_t entityId, const glm::dvec3& pos,
                                              std::string_view event, SoundSource source,
                                              float volume, float pitch, int64_t seed) = 0;
+
+            // MC ServerLevel.levelEvent(except, type, pos, data) →
+            // PlayerList.broadcast(except, x, y, z, 64.0, dimension,
+            // ClientboundLevelEventPacket): every player in `dimension`
+            // within 64 blocks of the cell, minus `except`. Only the events
+            // whose client half cannot be played as an ordinary sound travel
+            // this way (the jukebox's 1010 / 1011 — a streamed song the
+            // client must be able to STOP); the rest are sounds
+            // (LevelEventSounds.hpp). The default drops it, for a sink with
+            // no players behind it.
+            virtual void LevelEvent(DimensionId dimension, const SoundExcept& except, int type,
+                                    const glm::ivec3& pos, int data) {
+                (void)dimension; (void)except; (void)type; (void)pos; (void)data;
+            }
+
+            // Engine addition (the "Jukebox Range: Global" option): a
+            // jukebox song started, is still playing, or stopped, told to
+            // EVERY player on the server whatever their dimension or
+            // distance (JukeboxSongS2C). `songId` -1 is a stop; `ticks` is
+            // how far into the song it is; `fresh` marks a new start (the
+            // "Now Playing" line) rather than a resync. Clients on Normal
+            // range keep the record and play nothing from it.
+            virtual void JukeboxSongEverywhere(DimensionId dimension, const glm::ivec3& pos, int songId,
+                                               int64_t ticks, bool fresh) {
+                (void)dimension; (void)pos; (void)songId; (void)ticks; (void)fresh;
+            }
         };
 
         void SetServerSink(ServerSoundSink* sink);
         ServerSoundSink* GetServerSink();
+
+        // The server half of MC Level.levelEvent for common code: forwards
+        // to the installed sink (nothing when there is none — a client-only
+        // process). Callers raise it on the server side only; the client's
+        // half of an event runs where the packet lands.
+        void BroadcastLevelEvent(DimensionId dimension, const SoundExcept& except, int type,
+                                 const glm::ivec3& pos, int data);
 
         // The block-centre convenience every BlockPos overload of MC's
         // Level.playSound applies: pos + 0.5 on each axis.

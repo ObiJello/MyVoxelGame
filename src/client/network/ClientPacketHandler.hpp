@@ -5,9 +5,12 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/network/IPacketListener.hpp"
 #include "client/ClientTickRateManager.hpp"
+#include "client/world/ClientWeather.hpp"
 #include <memory>
 #include <chrono>
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 
 namespace Game {
     class ClientPlayer;
@@ -63,12 +66,24 @@ namespace Client {
         void onHurtAnimationS2C(const Network::HurtAnimationS2CPacket& packet) override { handleHurtAnimation(packet); }
         // ── Beds ───────────────────────────────────────────────────────────
         void onPlayerSleepS2C(const Network::PlayerSleepS2CPacket& packet) override { handlePlayerSleep(packet); }
+        void onPlayerMountS2C(const Network::PlayerMountS2CPacket& packet) override;
+        // ── Vehicles (VehiclePackets.hpp → Client::Vehicles) ────────────────
+        void onSetPassengersS2C(const Network::SetPassengersS2CPacket& packet) override;
+        void onMoveVehicleS2C(const Network::MoveVehicleS2CPacket& packet) override;
+        void onVehicleDataS2C(const Network::VehicleDataS2CPacket& packet) override;
+        // MC handleMountScreenOpen — a horse's / llama's / camel's /
+        // nautilus's inventory screen (MountInventoryScreen).
+        void onMountScreenOpenS2C(const Network::MountScreenOpenS2CPacket& packet) override;
+        void onPlayerSwingS2C(const Network::PlayerSwingS2CPacket& packet) override;
+        void onShoulderParrotsS2C(const Network::ShoulderParrotsS2CPacket& packet) override;
         // ── Signs ──────────────────────────────────────────────────────────
         void onOpenSignEditorS2C(const Network::OpenSignEditorS2CPacket& packet) override { handleOpenSignEditor(packet); }
         // MC handleOpenBook (BookPackets.hpp)
         void onOpenBookS2C(const Network::OpenBookS2CPacket& packet) override;
         // MC handleMerchantOffers (MerchantPackets.hpp)
         void onMerchantOffersS2C(const Network::MerchantOffersS2CPacket& packet) override;
+        // Spectator mode — MC ClientPacketListener.handleSetCamera.
+        void onSetCameraS2C(const Network::SetCameraS2CPacket& packet) override;
         // ── /control ───────────────────────────────────────────────────────
         void onControlS2C(const Network::ControlS2CPacket& packet) override;
         void onControlInputS2C(const Network::ControlInputPacket& packet) override;
@@ -79,6 +94,11 @@ namespace Client {
         void onUpdateMobEffectS2C(const Network::UpdateMobEffectS2CPacket& packet) override;
         // MC handleSoundEvent / handleSoundEntityEvent (SoundPackets.hpp).
         void onSoundS2C(const Network::SoundS2CPacket& packet) override;
+        void onLevelEventS2C(const Network::LevelEventS2CPacket& packet) override;
+        void onJukeboxSongS2C(const Network::JukeboxSongS2CPacket& packet) override;
+        // MC handleParticleEvent (ServerLevel.sendParticles).
+        void onLevelParticlesS2C(const Network::LevelParticlesS2CPacket& packet) override;
+        void onSelfParticleStateS2C(const Network::SelfParticleStateS2CPacket& packet) override;
         void onSoundEntityS2C(const Network::SoundEntityS2CPacket& packet) override;
         void onRemoveMobEffectS2C(const Network::RemoveMobEffectS2CPacket& packet) override;
         void onMorphPickupS2C(const Network::MorphPickupS2CPacket& packet) override;
@@ -88,6 +108,14 @@ namespace Client {
         void onEndCrystalBeamS2C(const Network::EndCrystalBeamS2CPacket& packet) override { handleEndCrystalBeam(packet); }
         void onArmorStandDataS2C(const Network::ArmorStandDataS2CPacket& packet) override { handleArmorStandData(packet); }
         void onItemFrameDataS2C(const Network::ItemFrameDataS2CPacket& packet) override { handleItemFrameData(packet); }
+        void onFishingHookDataS2C(const Network::FishingHookDataS2CPacket& packet) override;
+        // MC handleMapItemData — one map's colour patch / decorations.
+        void onMapItemDataS2C(const Network::MapItemDataS2CPacket& packet) override;
+        // MC handleEntityLinkPacket — a leashed mob's holder.
+        void onSetEntityLinkS2C(const Network::SetEntityLinkS2CPacket& packet) override { handleSetEntityLink(packet); }
+        void onBodyArmorS2C(const Network::BodyArmorS2CPacket& packet) override { handleBodyArmor(packet); }
+        void onFireworkRocketDataS2C(const Network::FireworkRocketDataS2CPacket& packet) override;
+        void onUpdateAttributesS2C(const Network::UpdateAttributesS2CPacket& packet) override;
 
         // ── /tick state ────────────────────────────────────────────────────
         // Handled inline: both are two-field mirrors into the client's
@@ -103,6 +131,16 @@ namespace Client {
 
         void onChangeDimensionS2C(const Network::ChangeDimensionS2CPacket& packet) override {
             handleChangeDimension(packet);
+        }
+
+        // MC handleGameEvent: the weather branches (ClientWeather.hpp) and
+        // PUFFER_FISH_STING (the sound at the local player).
+        void onGameEventS2C(const Network::GameEventS2CPacket& packet) override {
+            if (packet.event == Network::GameEventS2CPacket::kPufferFishSting) {
+                handlePufferFishSting();
+                return;
+            }
+            ClientWeather::OnGameEvent(packet.event, packet.param);
         }
 
         // Stream scope — the level the following packets are applied to.
@@ -122,7 +160,9 @@ namespace Client {
         void onDisconnect(const std::string& reason) override { handleDisconnect(reason); }
         void onKeepAlive(uint64_t id) override { handleKeepAlive(id); }
         void onChunkBatchStart() override { handleChunkBatchStart(); }
-        void onChunkBatchFinished(int batchSize) override { handleChunkBatchFinished(batchSize); }
+        void onChunkBatchFinished(int batchSize, uint32_t serverSendMicros) override {
+            handleChunkBatchFinished(batchSize, serverSendMicros);
+        }
         void onHotbarSyncS2C(const Network::HotbarSyncS2CPacket& packet) override { handleHotbarSync(packet); }
         void onInventoryFullS2C(const Network::InventoryFullS2CPacket& packet) override { handleInventoryFull(packet); }
         void onInventorySetSlotS2C(const Network::InventorySetSlotS2CPacket& packet) override { handleInventorySetSlot(packet); }
@@ -161,7 +201,7 @@ namespace Client {
         void onPortalFizzleS2C(const Network::PortalFizzleS2CPacket& packet) override { handlePortalFizzle(packet); }
 #endif
         void onSetChunkCacheRadiusS2C(int viewDistance) override { handleSetChunkCacheRadius(viewDistance); }
-        void onCommandsS2C(const std::vector<std::string>& names) override { handleCommands(names); }
+        void onCommandsS2C(const Network::CommandsS2CPacket& packet) override { handleCommands(packet); }
         void onWorldgenIdsS2C(const Network::WorldgenIdsS2CPacket& packet) override;
 
         // ========================================================================
@@ -200,6 +240,8 @@ namespace Client {
         void handleEndCrystalBeam(const Network::EndCrystalBeamS2CPacket& packet);
         void handleArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
         void handleItemFrameData(const Network::ItemFrameDataS2CPacket& packet);
+        void handleSetEntityLink(const Network::SetEntityLinkS2CPacket& packet);
+        void handleBodyArmor(const Network::BodyArmorS2CPacket& packet);
         void handleItemEntityMove(const Network::ItemEntityMoveS2CPacket& packet);
         void handleTakeItemEntity(const Network::TakeItemEntityS2CPacket& packet);
         void handleXpOrbSpawn(const Network::XpOrbSpawnS2CPacket& packet);
@@ -223,7 +265,7 @@ namespace Client {
 
         // Chunk batch (adaptive rate control)
         void handleChunkBatchStart();
-        void handleChunkBatchFinished(int batchSize);
+        void handleChunkBatchFinished(int batchSize, uint32_t serverSendMicros);
 
         // Inventory sync
         void handleHotbarSync(const Network::HotbarSyncS2CPacket& packet);
@@ -243,6 +285,9 @@ namespace Client {
         // x/z and an Overworld mob turns up standing in lava.
         void handleChangeDimension(const Network::ChangeDimensionS2CPacket& packet);
         void handleExplode(const Network::ExplodeS2CPacket& packet);
+        // MC handleGameEvent PUFFER_FISH_STING: level.playSound(player, the
+        // player's position, PUFFER_FISH_STING, NEUTRAL, 1, 1).
+        void handlePufferFishSting();
 
 #if ENABLE_IMMERSIVE_PORTALS
         // Immersive portals — forwards into the client mirror, see
@@ -265,7 +310,7 @@ namespace Client {
 
         // View distance
         void handleSetChunkCacheRadius(int viewDistance);
-        void handleCommands(const std::vector<std::string>& commandNames);
+        void handleCommands(const Network::CommandsS2CPacket& packet);
 
         // ========================================================================
         // STATISTICS
@@ -289,7 +334,21 @@ namespace Client {
 
         // Chunk batch rate getters for pipeline debug panel
         float GetDesiredChunksPerTick() const { return m_batchCalculator.getDesiredChunksPerTick(); }
-        float GetAvgNanosPerChunk() const { return static_cast<float>(m_batchCalculator.aggregatedNanosPerChunk); }
+        // Set by ClientConnection::DrainIncomingPackets around each packet it
+        // applies: when the packet ARRIVED (its I/O-thread timestamp).
+        void SetPacketReceivedAt(std::chrono::steady_clock::time_point received) { m_packetReceivedAt = received; }
+        // Chunk packets received and not yet applied (the network thread counts
+        // one in as it queues it, the drain one out as it applies it, decoded
+        // or not): the estimator's backlog guard.
+        void NoteChunkPacketReceived() { m_chunkBacklog.fetch_add(1, std::memory_order_relaxed); }
+        void NoteChunkPacketApplied() { m_chunkBacklog.fetch_sub(1, std::memory_order_relaxed); }
+
+        // Which server this connection talks to: only the safety cap differs
+        // (512 chunks a tick from our own integrated server, 256 from a remote
+        // one). The estimate itself is the same measurement either way.
+        // OBEY_CHUNK_BUDGET_MS / OBEY_CHUNK_RATE_MAX override for A/B runs.
+        void SetLocalServer(bool local);
+        float GetAvgNanosPerChunk() const { return static_cast<float>(m_batchCalculator.bottleneckNanosPerChunk()); }
 
     private:
         HandlerStats m_stats;
@@ -301,61 +360,112 @@ namespace Client {
         ClientConnection* m_connection = nullptr;   // MC ClientPacketListener.connection
         // Note: NetworkClient is accessed via g_networkClient global
 
-        // Chunk batch rate calculator (Minecraft's ChunkBatchSizeCalculator)
+        // Chunk batch rate calculator: Minecraft's ChunkBatchSizeCalculator
+        // role (tell the server how many chunks a tick to send), measured per
+        // stage instead of by wall time.
+        //
+        // Vanilla divides a batch's WALL time, start packet to finish packet,
+        // by its size. That window also holds time that is no chunk's cost:
+        // the server spreading the batch across its send phase, the batch
+        // waiting for the next frame's drain, the client's own startup frames.
+        // Here it read 45-425 us a chunk against a real ~3 us main-thread apply
+        // and held a saved view to 250-380 chunks a tick (2026-09-26).
+        //
+        // A chunk passes three stages, and each is timed directly:
+        //   link   - the batch's arrival span minus the server's own send span
+        //            (a trailing field on ChunkBatchFinishedS2C): what the
+        //            connection added. ~0 on loopback, the transfer time over
+        //            a slow internet link.
+        //   decode - measured on the ChunkDecodePool threads, which run in
+        //            parallel (ChunkDecodeThreadCount()).
+        //   apply  - measured on the main thread, which may spend budgetNanos
+        //            of each tick on chunks (vanilla's 7 ms).
+        // A tick can take as many chunks as the slowest stage can handle; the
+        // client asks for that. If received chunks still pile up unapplied
+        // (the machine got busy), the request shrinks with the backlog.
         struct ChunkBatchSizeCalculator {
-            // Vanilla starts at 2 ms/chunk with a 49-sample history weight and
-            // a 3x outlier clamp: with ~0.08 ms real apply cost that ramp took
-            // ~5 s to reach full rate on a 3,725-chunk saved area (measured
-            // 2026-08-30: 134/384/565/728/957 chunks per second). Same
-            // estimator, tuned to our cost: 0.25 ms start, 9-sample weight,
-            // 5x clamp. The 7 ms/tick budget is unchanged.
-            double aggregatedNanosPerChunk = 250000.0; // 0.25ms initial estimate
-            int oldSamplesWeight = 1;
-            std::chrono::steady_clock::time_point batchStartTime;
-            // Main-thread time spent applying this batch's chunks. Diagnostic
-            // only — see onBatchFinished for why the rate is NOT computed
-            // from it.
-            double applyNanos = 0.0;
+            static constexpr double kTickNanos = 50.0e6;
+            // The share of each stage the estimate may plan to use.
+            static constexpr double kLinkShare = 0.9;
+            static constexpr double kDecodeShare = 0.75;
 
-            void onBatchStart() {
-                batchStartTime = std::chrono::steady_clock::now();
-                applyNanos = 0.0;
+            // Per-chunk costs, averaged over recent batches (a light average:
+            // the measurements are direct, so they need little smoothing).
+            double linkNanosPerChunk = 0.0;
+            double decodeNanosPerChunk = 100000.0;   // before the first batch reports
+            double applyNanosPerChunk = 20000.0;
+            int samples = 0;
+
+            // The batch in progress.
+            std::chrono::steady_clock::time_point batchStartReceived;
+            double batchDecodeNanos = 0.0;
+            double batchApplyNanos = 0.0;
+
+            double budgetNanos = 7.0e6;   // main-thread time per tick for chunks
+            float rateMax = 256.0f;       // safety cap (vanilla 64)
+            int decodeThreads = 1;
+            int backlog = 0;              // chunk packets waiting when the batch finished
+
+            void onBatchStart(std::chrono::steady_clock::time_point received) {
+                batchStartReceived = received;
+                batchDecodeNanos = 0.0;
+                batchApplyNanos = 0.0;
             }
-            void onChunkApplied(double nanos) { applyNanos += nanos; }
+            void onChunkApplied(double decodeNanos, double applyNanos) {
+                batchDecodeNanos += decodeNanos;
+                batchApplyNanos += applyNanos;
+            }
 
-            void onBatchFinished(int batchSize) {
+            void onBatchFinished(int batchSize, std::chrono::steady_clock::time_point received,
+                                 uint32_t serverSendMicros, int waiting) {
+                backlog = waiting;
                 if (batchSize <= 0) return;
-                // WALL time from batch start to batch finish, as vanilla
-                // measures it. That window contains whatever held the batch
-                // up: applying it, and — the part that matters for a remote
-                // player — waiting for its bytes to arrive. Measuring apply
-                // time alone (2026-08-30 tuning) made the requested rate blind
-                // to the link: a far-away friend on a slow connection asked for
-                // up to 256 chunks a tick, the server queued megabytes behind
-                // the 10-batch window, command replies waited behind all of it
-                // and the queued chunks were for where she had BEEN. A batch
-                // that straddles frames because the client is behind also
-                // lowers the rate — correctly: the client is behind.
-                const double batchNanos = std::chrono::duration<double, std::nano>(
-                    std::chrono::steady_clock::now() - batchStartTime).count();
-                double nanosPerChunk = batchNanos / batchSize;
+                const double n = static_cast<double>(batchSize);
+                const double arrival = std::max(0.0,
+                    std::chrono::duration<double, std::nano>(received - batchStartReceived).count());
+                const double link = std::max(0.0, arrival - static_cast<double>(serverSendMicros) * 1000.0) / n;
+                const double decode = batchDecodeNanos / n;
+                const double apply = batchApplyNanos / n;
+                if (samples == 0) {
+                    linkNanosPerChunk = link;
+                    decodeNanosPerChunk = decode;
+                    applyNanosPerChunk = apply;
+                } else {
+                    const double w = static_cast<double>(std::min(samples, 3));
+                    linkNanosPerChunk = (linkNanosPerChunk * w + link) / (w + 1.0);
+                    decodeNanosPerChunk = (decodeNanosPerChunk * w + decode) / (w + 1.0);
+                    applyNanosPerChunk = (applyNanosPerChunk * w + apply) / (w + 1.0);
+                }
+                ++samples;
+            }
 
-                // Clamp to 3x range of current average (reject outliers)
-                double lo = aggregatedNanosPerChunk / 5.0;
-                double hi = aggregatedNanosPerChunk * 5.0;
-                double clamped = std::clamp(nanosPerChunk, lo, hi);
-
-                // Weighted moving average (up to 49 old samples)
-                aggregatedNanosPerChunk =
-                    (aggregatedNanosPerChunk * oldSamplesWeight + clamped) / (oldSamplesWeight + 1);
-                oldSamplesWeight = std::min(9, oldSamplesWeight + 1);
+            // Chunks a tick each stage can take. Costs under 1 us are noise
+            // (a loopback link, timer granularity) and do not limit.
+            double linkCapacity() const {
+                return linkNanosPerChunk > 1000.0 ? kTickNanos * kLinkShare / linkNanosPerChunk : 1.0e9;
+            }
+            double decodeCapacity() const {
+                return kTickNanos * kDecodeShare * decodeThreads / std::max(decodeNanosPerChunk, 1000.0);
+            }
+            double applyCapacity() const {
+                return budgetNanos / std::max(applyNanosPerChunk, 1000.0);
             }
 
             float getDesiredChunksPerTick() const {
-                return static_cast<float>(7000000.0 / aggregatedNanosPerChunk); // 7ms budget
+                double desired = std::min({linkCapacity(), decodeCapacity(), applyCapacity()});
+                // Backlog guard: more than two ticks' worth of chunks still
+                // waiting means the estimate is ahead of this machine right now.
+                if (backlog > 2.0 * desired) desired *= 2.0 * desired / backlog;
+                return static_cast<float>(desired);
+            }
+            // The slowest stage's time per chunk (debug panel).
+            double bottleneckNanosPerChunk() const {
+                return kTickNanos / std::max(1.0, static_cast<double>(getDesiredChunksPerTick()));
             }
         };
         ChunkBatchSizeCalculator m_batchCalculator;
+        std::chrono::steady_clock::time_point m_packetReceivedAt{};
+        std::atomic<int> m_chunkBacklog{0};
     };
 
 } // namespace Client

@@ -30,6 +30,7 @@
 #endif
 #include "server/level/ServerLevel.hpp"
 #include <nlohmann/json.hpp>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -263,8 +264,15 @@ namespace Game::Portal {
 #if ENABLE_IMMERSIVE_PORTALS
         std::string GunTag(uint64_t gunId) { return "gun:" + std::to_string(gunId); }
 
+        // Drops the gun's surfaces whatever the CURRENT mode says: a surface
+        // mirrored while immersive mode was on must still go when the pair
+        // closes after the mode changed (or when the rebuild at world open
+        // ran against the previous world's mode) — otherwise the client
+        // keeps a see-through surface with no rim, the server keeps a
+        // crossable portal, and both are saved.
         void RemoveImmersive(uint64_t gunId) {
-            auto* registry = Server::g_integratedServer->ImmersivePortals();
+            auto* registry = Server::g_integratedServer ? Server::g_integratedServer->ImmersivePortals() : nullptr;
+            if (!registry) return;
             const std::string tag = GunTag(gunId);
             std::vector<Game::Immersive::PortalId> ids;
             registry->ForEach([&](const Game::Immersive::Portal& p) {
@@ -348,8 +356,12 @@ namespace Game::Portal {
 
         Network::PortalSetS2CPacket BuildSetPacket(uint64_t gunId,
                                                    PortalColor color,
-                                                   const Portal& p) {
+                                                   const Portal& p,
+                                                   bool opening = false) {
             Network::PortalSetS2CPacket pk;
+            // Only a real placement (a shot, /portalgun move) plays the
+            // opening; a catch-up sync shows the portal already open.
+            pk.opening = opening ? 1 : 0;
             pk.gunId   = gunId;
             pk.color   = static_cast<uint8_t>(color);
             pk.originX = p.origin.x;
@@ -370,7 +382,9 @@ namespace Game::Portal {
             if (!Server::g_integratedServer) return;
             auto* mgr = Server::g_integratedServer->GetSessionManager();
             if (!mgr) return;
-            const auto packet = BuildSetPacket(gunId, color, p);
+            // Every broadcast set is a portal opening (PlacePortal,
+            // MovePortals); SyncToClient builds its own, not opening.
+            const auto packet = BuildSetPacket(gunId, color, p, /*opening=*/true);
             const auto data   = Network::Serialization::Serialize(packet);
             for (auto& session : mgr->GetAllSessions()) {
                 if (!session) continue;
@@ -451,11 +465,16 @@ namespace Game::Portal {
         return (it == m_pairs.end()) ? nullptr : &it->second;
     }
 
+    PortalPair* PortalRegistry::TryGetPairMutable(uint64_t gunId) {
+        auto it = m_pairs.find(gunId);
+        return (it == m_pairs.end()) ? nullptr : &it->second;
+    }
+
     void PortalRegistry::ClearPair(uint64_t gunId) {
         auto it = m_pairs.find(gunId);
         if (it == m_pairs.end()) return;
 #if ENABLE_IMMERSIVE_PORTALS
-        if (ImmersiveMode()) RemoveImmersive(gunId);
+        RemoveImmersive(gunId);   // not gated on ImmersiveMode — see RemoveImmersive
 #endif
         // Broadcast a close burst for each active portal BEFORE erasing
         // the pair, since the burst origin needs the old portal pose.
@@ -508,6 +527,46 @@ namespace Game::Portal {
                 {"wallB",  {p.wallB.x, p.wallB.y, p.wallB.z}},
             };
         }
+        // The gun's last confirmed location. The session handle (entityId)
+        // means nothing after a relaunch, so a dropped item or an entity
+        // holder comes back as Stored at its last position — on disk with
+        // that chunk, which is exactly where the save put it.
+        nlohmann::json WhereaboutsToJson(const GunWhereabouts& w) {
+            nlohmann::json j = {
+                {"kind", static_cast<int>(w.kind)},
+                {"dimension", Game::DimensionToRaw(w.dimension)},
+                {"pos", {w.pos.x, w.pos.y, w.pos.z}},
+            };
+            if (!w.player.empty()) j["player"] = w.player;
+            return j;
+        }
+        GunWhereabouts WhereaboutsFromJson(const nlohmann::json& j) {
+            GunWhereabouts w;
+            if (!j.is_object()) return w;
+            const int kind = j.value("kind", 0);
+            w.dimension = Game::DimensionFromRaw(j.value("dimension", 0));
+            if (j.contains("pos") && j["pos"].is_array() && j["pos"].size() == 3) {
+                w.pos = {j["pos"][0].get<int>(), j["pos"][1].get<int>(), j["pos"][2].get<int>()};
+            }
+            w.player = j.value("player", std::string{});
+            switch (static_cast<GunWhereabouts::Kind>(kind)) {
+                case GunWhereabouts::Kind::Player:
+                    w.kind = w.player.empty() ? GunWhereabouts::Kind::Unknown : GunWhereabouts::Kind::Player;
+                    break;
+                case GunWhereabouts::Kind::Container:
+                    w.kind = GunWhereabouts::Kind::Container;
+                    break;
+                case GunWhereabouts::Kind::ItemEntity:
+                case GunWhereabouts::Kind::Entity:
+                case GunWhereabouts::Kind::Stored:
+                    w.kind = GunWhereabouts::Kind::Stored;
+                    break;
+                default:
+                    w.kind = GunWhereabouts::Kind::Unknown;
+                    break;
+            }
+            return w;
+        }
         bool PortalFromJson(const nlohmann::json& j, Portal& p) {
             auto v3 = [&](const char* key, auto& out) {
                 if (!j.contains(key) || !j[key].is_array() || j[key].size() != 3) return false;
@@ -532,13 +591,19 @@ namespace Game::Portal {
             std::error_code ec;
             std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
             nlohmann::json j;
-            j["version"] = 1;
+            j["version"] = 2;
             j["nextId"]  = m_nextId;
+            // 1 = the one-time orphan sweep has run for this world (see
+            // PortalGunTracker.cpp); pairs from then on are tracked live.
+            j["orphanSweep"] = m_orphanSweepDone ? 1 : 0;
             nlohmann::json pairs = nlohmann::json::array();
             for (const auto& [gunId, pair] : m_pairs) {
-                pairs.push_back({{"gun", gunId},
-                                 {"blue", PortalToJson(pair.blue)},
-                                 {"orange", PortalToJson(pair.orange)}});
+                nlohmann::json pj = {{"gun", gunId},
+                                     {"blue", PortalToJson(pair.blue)},
+                                     {"orange", PortalToJson(pair.orange)},
+                                     {"seen", WhereaboutsToJson(pair.seen)}};
+                if (!pair.owner.empty()) pj["owner"] = pair.owner;
+                pairs.push_back(std::move(pj));
             }
             j["pairs"] = std::move(pairs);
             const std::string tmp = path + ".tmp";
@@ -556,6 +621,14 @@ namespace Game::Portal {
     }
 
     bool PortalRegistry::Load() {
+        // The registry is process-global and outlives a world: whatever the
+        // previous world left behind must not leak into this one, even when
+        // this world has no file of its own.
+        m_pairs.clear();
+        m_prevWaist.clear();
+        m_prevPlayerPos.clear();
+        m_teleportCooldown.clear();
+        m_orphanSweepDone = false;
         const std::string path = GunSavePath();
         if (path.empty()) return false;
         std::error_code ec;
@@ -573,11 +646,14 @@ namespace Game::Portal {
                     if (pj.contains("blue"))   PortalFromJson(pj["blue"], pair.blue);
                     if (pj.contains("orange")) PortalFromJson(pj["orange"], pair.orange);
                     if (!pair.blue.active && !pair.orange.active) continue;
+                    pair.owner = pj.value("owner", std::string{});
+                    if (pj.contains("seen")) pair.seen = WhereaboutsFromJson(pj["seen"]);
                     m_pairs[gunId] = pair;
                     m_nextId = std::max(m_nextId, gunId + 1);
                 }
             }
             m_nextId = std::max(m_nextId, j.value("nextId", uint64_t{1}));
+            m_orphanSweepDone = j.value("orphanSweep", 0) >= 1;
             Log::Info("[PortalGun] Loaded %zu pair(s) from %s", m_pairs.size(), path.c_str());
             return true;
         } catch (const std::exception& e) {
@@ -639,7 +715,7 @@ namespace Game::Portal {
             destroy(pair.blue,   PortalColor::Blue);
             destroy(pair.orange, PortalColor::Orange);
 #if ENABLE_IMMERSIVE_PORTALS
-            if (wasLinked && !(pair.blue.active && pair.orange.active) && ImmersiveMode()) {
+            if (wasLinked && !(pair.blue.active && pair.orange.active)) {
                 RemoveImmersive(gunId);
             }
 #endif
@@ -773,6 +849,15 @@ namespace Game::Portal {
         }
         if (color == PortalColor::Blue) pair.blue   = p;
         else                            pair.orange = p;
+        // The shooter owns the pair now, and is holding the gun: the gun
+        // tracker starts from there (PortalGunTracker.cpp).
+        if (player) {
+            pair.owner = player->getName();
+            pair.seen = GunWhereabouts{};
+            pair.seen.kind      = GunWhereabouts::Kind::Player;
+            pair.seen.player    = player->getName();
+            pair.seen.dimension = p.dimension;
+        }
 
         // Drop cached crossing state for this portal so the FIRST tick after
         // placement doesn't trigger a spurious teleport for any player who
@@ -800,6 +885,95 @@ namespace Game::Portal {
 #endif
         BroadcastPortalSet(gunId, color, p);
         return PlaceResult::Placed;
+    }
+
+    bool PortalRegistry::MovePortals(uint64_t gunId, bool moveBlue, const glm::ivec3& blueDelta,
+                                     bool moveOrange, const glm::ivec3& orangeDelta,
+                                     bool force, std::string& error) {
+        auto it = m_pairs.find(gunId);
+        if (it == m_pairs.end()) { error = "that gun has no open portals"; return false; }
+        PortalPair& pair = it->second;
+        if (!moveBlue && !moveOrange) { error = "nothing to move"; return false; }
+        if (moveBlue && !pair.blue.active)     { error = "its blue portal is not open"; return false; }
+        if (moveOrange && !pair.orange.active) { error = "its orange portal is not open"; return false; }
+
+        auto moved = [](const Portal& p, const glm::ivec3& d) {
+            Portal q = p;
+            q.origin += glm::dvec3(d);
+            q.wallA  += d;
+            q.wallB  += d;
+            return q;
+        };
+        const Portal newBlue   = moveBlue   ? moved(pair.blue,   blueDelta)   : pair.blue;
+        const Portal newOrange = moveOrange ? moved(pair.orange, orangeDelta) : pair.orange;
+
+        if (!force) {
+            char buf[192];
+            auto validate = [&](const Portal& p, const char* name) -> bool {
+                Server::ServerLevel* level = Server::g_integratedServer
+                    ? Server::g_integratedServer->GetLevel(p.dimension) : nullptr;
+                Game::World* world = level ? level->World() : nullptr;
+                if (!world) {
+                    error = std::string("the ") + name + " portal's dimension is not loaded";
+                    return false;
+                }
+                const glm::ivec3 n = glm::ivec3(glm::round(p.normal));
+                for (const glm::ivec3& wall : {p.wallA, p.wallB}) {
+                    if (!IsValidPortalSurface(world, wall)) {
+                        std::snprintf(buf, sizeof(buf),
+                                      "the %s portal would need a solid full block at %d %d %d behind it",
+                                      name, wall.x, wall.y, wall.z);
+                        error = buf;
+                        return false;
+                    }
+                    const glm::ivec3 front = wall + n;
+                    if (!IsAirSpace(world, front)) {
+                        std::snprintf(buf, sizeof(buf),
+                                      "the %s portal would need free space at %d %d %d in front of it",
+                                      name, front.x, front.y, front.z);
+                        error = buf;
+                        return false;
+                    }
+                }
+                return true;
+            };
+            if (moveBlue && !validate(newBlue, "blue")) return false;
+            if (moveOrange && !validate(newOrange, "orange")) return false;
+            // Two portals on one wall cell (same wall, same side) would be
+            // one opening leading into itself.
+            if (newBlue.active && newOrange.active && newBlue.dimension == newOrange.dimension &&
+                glm::ivec3(glm::round(newBlue.normal)) == glm::ivec3(glm::round(newOrange.normal))) {
+                for (const glm::ivec3& a : {newBlue.wallA, newBlue.wallB}) {
+                    if (a == newOrange.wallA || a == newOrange.wallB) {
+                        error = "the blue and orange portals would overlap";
+                        return false;
+                    }
+                }
+            }
+        }
+
+        // Commit — the same steps a re-fire takes in PlacePortal.
+#if ENABLE_IMMERSIVE_PORTALS
+        RemoveImmersive(gunId);   // whatever the mode (see RemoveImmersive)
+#endif
+        auto commit = [&](Portal& slot, const Portal& next, PortalColor color) {
+            BroadcastPortalFizzle(slot.origin, slot.normal, static_cast<uint8_t>(color), kFizzleClose);
+            slot = next;
+            const uint64_t key = PortalKey(gunId, color);
+            for (auto& [pid, m] : m_prevWaist) m.erase(key);
+            BroadcastPortalSet(gunId, color, slot);
+            Log::Info("[PortalGun] Moved %s portal of gun=%llu to (%.2f,%.2f,%.2f)%s",
+                      color == PortalColor::Blue ? "BLUE" : "ORANGE",
+                      static_cast<unsigned long long>(gunId),
+                      slot.origin.x, slot.origin.y, slot.origin.z, force ? " (forced)" : "");
+        };
+        if (moveBlue)   commit(pair.blue,   newBlue,   PortalColor::Blue);
+        if (moveOrange) commit(pair.orange, newOrange, PortalColor::Orange);
+#if ENABLE_IMMERSIVE_PORTALS
+        if (ImmersiveMode()) SyncImmersive(gunId, pair);
+#endif
+        Save();
+        return true;
     }
 
     void PortalRegistry::Tick(Server::IntegratedServer* server) {
@@ -871,6 +1045,9 @@ namespace Game::Portal {
                     if (isFirstObs) continue;
 
                     if (m_teleportCooldown[pid] > 0) continue;
+                    // A rider goes through with its vehicle (the mob crossing),
+                    // never on its own.
+                    if (player->isPassenger()) continue;
 
                     // Eye in close zone. Drop edge-detection so a
                     // stopped player inside the zone still teleports

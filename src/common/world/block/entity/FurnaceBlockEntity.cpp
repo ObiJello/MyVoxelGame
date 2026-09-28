@@ -4,7 +4,10 @@
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/level/World.hpp"
+#include "common/entity/EntityLevel.hpp"
+#include "common/core/JavaRandom.hpp"
 #include <algorithm>
+#include <cmath>
 #include <string>
 
 namespace Game {
@@ -209,6 +212,23 @@ namespace Game {
         m_cookingTime  = static_cast<int>(in.ReadVarInt());
         m_cookingTotal = static_cast<int>(in.ReadVarInt());
         if (in.HasMore()) m_storedXp = in.ReadFloat();
+    }
+
+    void FurnaceBlockEntity::PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos, BlockState oldState) {
+        BaseContainerBlockEntity::PreRemoveSideEffects(level, pos, oldState);
+        if (level.IsClientSide()) return;
+        const float banked = TakeStoredExperience();
+        if (banked <= 0.0f) return;
+        // AbstractFurnaceBlockEntity.createExperience: floor, then a chance at
+        // the fraction.
+        int amount = static_cast<int>(std::floor(banked));
+        const float fraction = banked - static_cast<float>(amount);
+        if (fraction != 0.0f && level.Random() && level.Random()->NextFloat() < fraction) ++amount;
+        if (amount > 0) {
+            if (EntityLevel* entities = level.Entities()) {
+                entities->AwardExperience(glm::dvec3(pos) + glm::dvec3(0.5), amount, -1);
+            }
+        }
     }
 
 } // namespace Game

@@ -110,6 +110,17 @@ namespace Game {
         // side stays on frame 0 until the shield's condition-dispatch model
         // is modelled — this flag is the data feed for that.
         bool usingItemBlock = false;
+        // The local player's item in use, for the models' "minecraft:
+        // using_item" condition and the "use_duration" / "crossbow/pull"
+        // ranges (UseDuration.useDuration: ticks into the use). MC evaluates
+        // them per rendered stack against its holder — `owner.getUseItem()
+        // == itemStack` — so only the stack in the using slot answers:
+        // `useSlot` is that inventory index (-1 = nothing in use) and the
+        // renderer names the slot it is drawing (ItemRegistry::
+        // SetRenderSlot). See ItemStackUseTicks.
+        int    useSlot   = -1;
+        ItemID useItemId = 0;
+        int    useTicks  = 0;
     };
 
     // Per-item frame selector. Returns the index into `spriteFrames` to draw THIS frame.
@@ -161,6 +172,17 @@ namespace Game {
     // `remainingTicks` is MC's timeLeft (releaseUsing's third argument).
     using ItemFinishUsingFn  = void (*)(IUsePlayer& player, ItemStack& stack);
     using ItemReleaseUsingFn = void (*)(IUsePlayer& player, ItemStack& stack, int remainingTicks);
+    // MC Item.onUseTick(level, entity, stack, ticksRemaining) — every tick of
+    // the hold, before the countdown (LivingEntity.updateUsingItem). SERVER
+    // only here, like the two above: the crossbow's loading sounds and its
+    // load at full draw (CrossbowItem.onUseTick).
+    using ItemUseTickFn      = void (*)(IUsePlayer& player, ItemStack& stack, int remainingTicks);
+
+    // Which sprite a STACK shows when that depends on its components — MC's
+    // "select" / "condition" item-model nodes the flat ClientItemDesc cannot
+    // express (a loaded crossbow's crossbow_arrow / crossbow_firework, its
+    // pulling frames). Empty = the item's own sprite.
+    using ItemStackSpriteFn  = std::string (*)(const ItemStack& stack);
 
     // Base `Item.use` — mirrors Item.java:196-219. Dispatches on the held
     // stack's DataComponents:
@@ -168,7 +190,8 @@ namespace Game {
     //   2. EQUIPPABLE      → if swappable, SwapWithEquipmentSlot (:202-204)
     //   3. BLOCKS_ATTACKS  → player.startUsingItem(hand) → Consume (:205-207)
     //   4. else            → Pass                            (:215)
-    // (MC's KINETIC_WEAPON step (:209-214) is omitted — no combat system.)
+    // (MC's KINETIC_WEAPON step (:209-214) is the spears' own `use`
+    // callback — WeaponItems::SpearBegin, registered in ItemBehaviors.)
     // Implemented in Item.cpp. Server dispatch rule:
     //   item.use ? item.use(...) : Item_DefaultUse(...)
     // NOTE: still takes the concrete World* / ServerPlayer* — unlike the
@@ -184,7 +207,8 @@ namespace Game {
 
     // Mirrors Item.getUseDuration (Item.java:315-322): CONSUMABLE →
     // consumeTicks(); BLOCKS_ATTACKS → 72000 (≈ infinite); else 0.
-    // (KINETIC_WEAPON branch omitted — no combat.) A result > 0 is what makes
+    // (The KINETIC_WEAPON spears carry their 72000 as the item's useDuration
+    // — SpearItem.hpp.) A result > 0 is what makes
     // right-click enter the hold-to-use lifecycle instead of a one-shot use.
     int GetUseDuration(const ItemStack& stack);
 
@@ -285,6 +309,15 @@ namespace Game {
         ItemUseAnimation              useAnimation = ItemUseAnimation::NONE;
         ItemFinishUsingFn             finishUsing  = nullptr;
         ItemReleaseUsingFn            releaseUsing = nullptr;
+        ItemUseTickFn                 onUseTick    = nullptr;
+        // MC Item.useOnRelease: the hold never completes on its own (the
+        // countdown reaching zero does not finish the use), and letting go
+        // runs one more use tick after releaseUsing (LivingEntity.
+        // releaseUsingItem). The crossbow's.
+        bool                          useOnRelease = false;
+        // See ItemStackSpriteFn. Consulted by the GUI icon, the held item
+        // and the dropped-item renderers before the item's own sprite.
+        ItemStackSpriteFn             stackSprite  = nullptr;
         // Inventory click-behaviour overrides (bundle). See the fn typedefs
         // above; consulted by AbstractContainerMenu::TryItemClickBehaviourOverride
         // (mirrors AbstractContainerMenu.tryItemClickBehaviourOverride).
@@ -386,6 +419,13 @@ namespace Game {
         static void SetRenderContext(const ItemRenderContext& ctx);
         static const ItemRenderContext& GetRenderContext();
 
+        // The inventory index of the stack being drawn right now (the
+        // hotbar, the off-hand slot, a held hand), -1 for a stack with no
+        // holder slot (a dropped item, a tab icon, a tooltip). Per thread;
+        // set around a draw with ScopedItemRenderSlot.
+        static void SetRenderSlot(int inventoryIndex);
+        static int  GetRenderSlot();
+
         // Drive any per-frame simulation for animated items (e.g. compass needle wobble).
         // Call once per render frame from the client with the elapsed seconds. Internally
         // ticks the compass simulation at MC's fixed 20 TPS based on the accumulated time.
@@ -399,6 +439,19 @@ namespace Game {
                                          std::vector<std::string> frames,
                                          ItemFrameSelector selector,
                                          int maxStack = 64);
+    };
+
+    // Names the holder slot of the stacks drawn in its scope (see
+    // ItemRegistry::SetRenderSlot).
+    struct ScopedItemRenderSlot {
+        explicit ScopedItemRenderSlot(int inventoryIndex) : m_previous(ItemRegistry::GetRenderSlot()) {
+            ItemRegistry::SetRenderSlot(inventoryIndex);
+        }
+        ~ScopedItemRenderSlot() { ItemRegistry::SetRenderSlot(m_previous); }
+        ScopedItemRenderSlot(const ScopedItemRenderSlot&) = delete;
+        ScopedItemRenderSlot& operator=(const ScopedItemRenderSlot&) = delete;
+    private:
+        int m_previous;
     };
 
     // Inventory slot contents. Replaces the old InventorySlot { BlockID, count } struct.
@@ -458,6 +511,12 @@ namespace Game {
     // (getColorOr(default), made opaque), so a Potion of Swiftness is blue
     // and a Potion of Fire Resistance orange from the same item.
     uint32_t ResolveItemLayerTint(const ItemStack& stack, size_t layer);
+
+    // MC's per-stack use properties for the stack being drawn: ticks into
+    // the local player's use (UseDuration.useDuration) when THIS stack is the
+    // one in use — drawn from the using slot and of the using item — else -1
+    // (IsUsingItem false: every other stack shows its resting model).
+    int ItemStackUseTicks(const ItemStack& stack);
 
     // MC ItemStack.getItemName → Item.getName(stack): the ITEM_NAME component
     // or the registry name — except PotionItem / TippedArrowItem, whose name

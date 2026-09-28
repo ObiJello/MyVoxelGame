@@ -4,6 +4,7 @@
 #include "common/world/crafting/RecipeManager.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include <algorithm>
 #include <string_view>
 
@@ -79,6 +80,12 @@ namespace Game {
                 SetItem(slot, ItemStack{});
                 m_cookingProgress[slot] = 0;
                 m_cookingTime[slot]     = 0;
+                // MC cookTick: gameEvent(BLOCK_CHANGE, pos, Context.of(state)).
+                if (world) {
+                    const glm::ivec3& p = GetWorldPos();
+                    world->GameEvent(GameEventId::BlockChange, p,
+                                     GameEventContext::Of(world->GetBlockState(p.x, p.y, p.z)));
+                }
             } else {
                 SetItem(slot, result);
                 m_cookingProgress[slot] = m_cookingTime[slot];

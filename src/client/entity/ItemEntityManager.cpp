@@ -5,6 +5,7 @@
 #endif
 #include "../world/ClientBlockAccess.hpp"
 #include "RemotePlayerManager.hpp"
+#include "ClientMobManager.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -135,6 +136,18 @@ namespace Client {
 
     glm::dvec3 ItemEntityManager::ResolveTarget(uint32_t playerId,
                                                 const glm::dvec3& localPlayerPos) const {
+        // A mob collector (Mob::TakeItemEntity — a zombie grabbing a sword,
+        // a fox a berry): MC's (getY() + getEyeY()) / 2 of that mob. A mob
+        // this client no longer has falls through to the local player, MC's
+        // own `to == null` fallback.
+        if (Game::IsMobEntityId(static_cast<int32_t>(playerId)) && g_clientMobManager) {
+            if (const ClientMob* entry = g_clientMobManager->GetMob(static_cast<int32_t>(playerId));
+                entry && entry->mob) {
+                glm::dvec3 mid = entry->mob->position;
+                mid.y = (mid.y + entry->mob->GetEyeY()) * 0.5;
+                return mid;
+            }
+        }
         glm::dvec3 feet = localPlayerPos;
         if (g_remotePlayerManager) {
             const auto& players = g_remotePlayerManager->GetPlayers();

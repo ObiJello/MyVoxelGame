@@ -27,6 +27,8 @@
     #define PROFILE_PLOT(name, value)       TracyPlot(name, value)
     #define PROFILE_ZONE_TEXT(txt, len)     ZoneText(txt, len)
     #define PROFILE_ZONE_VALUE(v)           ZoneValue(static_cast<uint64_t>(v))
+    // A timestamped line in Tracy's Messages pane (copied; any lifetime).
+    #define PROFILE_MESSAGE(txt, len)       TracyMessage(txt, len)
 
     // A zone on a call site hot enough that the instrumentation itself
     // distorts the measurement. Each ZoneScopedN pair is a TracyQueuePrepare +
@@ -52,5 +54,6 @@
     #define PROFILE_PLOT(name, value)       (void)0
     #define PROFILE_ZONE_TEXT(txt, len)     (void)0
     #define PROFILE_ZONE_VALUE(v)           (void)0
+    #define PROFILE_MESSAGE(txt, len)       (void)0
     #define PROFILE_ZONE_DETAIL(name)       (void)0
 #endif

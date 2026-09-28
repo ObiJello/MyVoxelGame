@@ -72,6 +72,17 @@ namespace Game {
             return *this;
         }
 
+        // MC HurtByTargetGoal(mob, toIgnoreDamage...) — a hit from any of
+        // these classes is never answered (the illagers, witch and ravager
+        // pass Raider.class: raider friendly fire is shrugged off). C++ has
+        // no isAssignableFrom, so the class list is a predicate on the
+        // attacker.
+        using IgnoreDamagePredicate = bool (*)(const LivingEntity& attacker);
+        HurtByTargetGoal& SetIgnoreDamageFrom(IgnoreDamagePredicate ignore) {
+            m_ignoreDamage = ignore;
+            return *this;
+        }
+
     protected:
         // Protected rather than private: MC's PolarBearHurtByTargetGoal calls
         // alertOthers() directly when a cub is hit.
@@ -85,6 +96,7 @@ namespace Game {
         int64_t        m_timestamp = 0;
         bool           m_alertOthers = false;
         AlertPredicate m_alertFilter = nullptr;
+        IgnoreDamagePredicate m_ignoreDamage = nullptr;
     };
 
     // MC PolarBear.PolarBearHurtByTargetGoal — retaliation with the family
@@ -185,9 +197,8 @@ namespace Game {
         Llama* m_llama;
     };
 
-    // MC Llama.LlamaAttackWolfGoal — hunt UNTAMED wolves (no taming system,
-    // so every wolf qualifies), at a quarter of the usual follow distance and
-    // without needing line of sight first.
+    // MC Llama.LlamaAttackWolfGoal — hunt UNTAMED wolves, at a quarter of
+    // the usual follow distance and without needing line of sight first.
     class LlamaAttackWolfGoal : public NearestAttackableTargetGoal {
     public:
         explicit LlamaAttackWolfGoal(Llama* llama);

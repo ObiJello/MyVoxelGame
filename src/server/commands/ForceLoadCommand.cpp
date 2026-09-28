@@ -44,7 +44,17 @@ namespace Server {
     } // namespace
 
     void ForceLoadCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("forceload", ForceLoadCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC ForceLoadCommand: add <from> [<to>] | remove <from> [<to>] |
+        // remove all | query [<pos>].
+        const Cmd::Node range = Cmd::Argument("from", Cmd::Arg::ColumnPos).Executes()
+            .Then(Cmd::Argument("to", Cmd::Arg::ColumnPos).Executes());
+        dispatcher.RegisterCommand("forceload", ForceLoadCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literal("add").Then(range))
+                .Then(Cmd::Literal("remove").Then(range).Then(Cmd::Literal("all").Executes()))
+                .Then(Cmd::Literal("query").Executes()
+                    .Then(Cmd::Argument("pos", Cmd::Arg::ColumnPos).Executes())));
     }
 
     void ForceLoadCommand::Execute(const CommandSourceStack& source,

@@ -347,6 +347,12 @@ namespace Game {
                                  std::string& error);
         bool ClearEntityChunk   (Math::ChunkPos pos, std::string& error);
         bool EntityPersistenceEnabled() const { return m_anvilIo != nullptr; }
+        // The raw saved NBT of region/*.mca for THIS dimension, read through
+        // the same AnvilChunkIo the saver writes with (so a concurrent save
+        // can never be read half-relocated). Read-only; any thread. False
+        // with an EMPTY error when the chunk is not on disk or persistence
+        // is off. The portal-gun orphan sweep scans saved chunks with it.
+        bool ReadTerrainChunkNbt(Math::ChunkPos pos, std::vector<uint8_t>& out, std::string& error);
 
         // MC ServerLevel.addWorldGenChunkEntities' input: the entities world
         // generation placed in this chunk (Chunk::worldgenEntities), handed

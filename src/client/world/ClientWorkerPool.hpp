@@ -6,6 +6,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "../renderer/mesh/SectionMesh.hpp"
+#include "../renderer/mesh/MeshPriority.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include <array>
 #include <functional>
@@ -156,6 +157,21 @@ namespace Threading {
         void SetPlayerPosition(Game::DimensionId dimension, const glm::vec3& position);
         glm::vec3 GetPlayerPosition(Game::DimensionId dimension) const;
 
+        // Every level's portal-aware priority field (MeshPriority.hpp),
+        // published once a frame by Render::UpdateMeshPortalRoutes. The
+        // poll ranks each job by it against its level's camera, as the
+        // scheduler's candidate sort does.
+        void SetMeshPriorityFields(const ::Render::MeshPriority::Fields& fields);
+        ::Render::MeshPriority::Field GetMeshPriorityField(Game::DimensionId dimension) const;
+
+        // The camera a level's translucent quads are sorted against when a
+        // section is built (MC SectionRenderDispatcher.cameraPosition, set by
+        // the renderer each frame). Double, like MC's Vec3: the sort itself is
+        // section-relative. Falls back to the player position until a
+        // renderer has drawn the level.
+        void SetTranslucentSortCamera(Game::DimensionId dimension, const glm::dvec3& cameraPos);
+        glm::dvec3 GetTranslucentSortCamera(Game::DimensionId dimension) const;
+
         // ========================================================================
         // STATISTICS
         // ========================================================================
@@ -237,6 +253,9 @@ namespace Threading {
         // Camera per level (Game::DimensionSlot) for priority calculations.
         mutable std::mutex m_playerMutex;
         std::array<glm::vec3, Game::kDimensionCount> m_cameraByDimension{};
+        std::array<glm::dvec3, Game::kDimensionCount> m_sortCameraByDimension{};
+        std::array<bool, Game::kDimensionCount> m_sortCameraSet{};
+        ::Render::MeshPriority::Fields m_priorityFields{};
 
         // Statistics
         ClientWorkerStats m_stats;
@@ -271,7 +290,8 @@ namespace Threading {
         // recompile quota. Caller MUST hold m_jobQueueMutex.
         // Each job is measured against its own level's camera.
         std::optional<MeshJob> PollNearestLocked(
-            const std::array<glm::vec3, Game::kDimensionCount>& cameras);
+            const std::array<glm::vec3, Game::kDimensionCount>& cameras,
+            const ::Render::MeshPriority::Fields& fields);
 
         // Priority calculation
         float CalculatePriority(Game::Math::ChunkPos chunkPos, int sectionY, const glm::vec3& playerPos) const;
@@ -305,6 +325,7 @@ namespace Threading {
 
     // Player position updates
     void SetClientWorkerPlayerPosition(Game::DimensionId dimension, const glm::vec3& position);
+    void SetClientWorkerSortCamera(Game::DimensionId dimension, const glm::dvec3& cameraPos);
 
     // Job cancellation
     void CancelClientMeshJob(Game::Math::ChunkPos chunkPos);

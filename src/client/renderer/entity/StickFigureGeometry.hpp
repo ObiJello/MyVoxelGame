@@ -56,6 +56,36 @@ namespace Render {
                           const glm::vec3& feetPos,
                           float headYawDeg, float bodyYawDeg,
                           float pitchDeg, bool isCrouching,
-                          PlayerColor color = kDefaultPlayerColor);
+                          PlayerColor color = kDefaultPlayerColor,
+                          bool isSitting = false);
+    // `isSitting`: MC HumanoidModel.setupAnim's isPassenger pose — the legs
+    // from their pivots (±1.9 px, 12 px up) thrust forward (xRot −1.4137167,
+    // yRot ±0.31415927, zRot ±0.07853982) and the arms turned forward by
+    // xRot −0.62831855; head, neck and body keep their standing heights.
+
+    // The figure's joints, exactly as BuildStickFigure places them (it builds
+    // from this). Positions in the space `feetPos` was given in, unscaled.
+    struct StickFigureSkeleton {
+        glm::vec3 bodyFwd{0.0f}, bodyRight{0.0f};
+        glm::vec3 lookDir{0.0f}, faceRight{0.0f};
+        glm::vec3 feetPos{0.0f};
+        glm::vec3 neck{0.0f}, hip{0.0f}, headC{0.0f};
+        glm::vec3 footL{0.0f}, footR{0.0f};
+        glm::vec3 shoulderL{0.0f}, shoulderR{0.0f};
+        glm::vec3 handL{0.0f}, handR{0.0f};
+        glm::vec3 legTopL{0.0f}, legTopR{0.0f};
+        float     hipY = 0.0f;
+        bool      isCrouching = false;   // after the sitting override
+    };
+    StickFigureSkeleton ComputeStickFigureSkeleton(const glm::vec3& feetPos,
+                                                   float headYawDeg, float bodyYawDeg,
+                                                   bool isCrouching, bool isSitting);
+
+    // Where the figure's hand is — the end of the arm line BuildStickFigure
+    // draws (right = the player's right, MC's default main arm). The lead
+    // renderer ties a held lead there. Unscaled: a caller drawing the figure
+    // scaled about its feet scales this the same way.
+    glm::vec3 StickFigureHand(const glm::vec3& feetPos, float bodyYawDeg,
+                              bool isCrouching, bool isSitting, bool rightHand);
 
 } // namespace Render

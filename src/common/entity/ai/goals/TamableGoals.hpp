@@ -36,6 +36,8 @@ namespace Game {
         void Start() override;
         void Stop() override;
         void Tick() override;
+        // The begged-at player may disconnect (its view is freed).
+        void ClearReferenceTo(const Entity* entity) override;
         const char* Name() const override { return "BegGoal"; }
 
     private:
@@ -98,16 +100,27 @@ namespace Game {
     // MC TamableAnimal.TamableAnimalPanicGoal — PanicGoal whose tick also
     // teleports to the owner when the flight has carried the mob out of
     // range, so a panicked pet does not strand itself.
+    //
+    // MC's second constructor takes the damage-type tag that may start the
+    // panic: the wolf passes DamageTypeTags.PANIC_ENVIRONMENTAL_CAUSES
+    // (cactus, freeze, hot floor, in/on fire, lava, lightning) so a hit wolf
+    // fights instead of fleeing; everything else keeps PANIC_CAUSES.
     class TamableAnimalPanicGoal : public PanicGoal {
     public:
+        enum class Causes : uint8_t { All, EnvironmentalOnly };
+
         TamableAnimalPanicGoal(PathfinderMob* mob, TamableAnimal* tamable,
-                               double speedModifier);
+                               double speedModifier, Causes causes = Causes::All);
 
         void Tick() override;
         const char* Name() const override { return "TamableAnimalPanicGoal"; }
 
+    protected:
+        bool ShouldPanic() const override;
+
     private:
         TamableAnimal* m_tamable;
+        Causes         m_causes;
     };
 
     // MC target/OwnerHurtByTargetGoal — attack whatever last hurt the owner.

@@ -11,6 +11,7 @@
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/Explosion.hpp"
 #include "common/world/level/World.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/entity/MobManager.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
@@ -763,10 +764,9 @@ namespace Server {
         const glm::ivec3 pos(x, 75, z);
 
         // MC levelEvent 3000 — the explosion-emitter flash and gateway-spawn
-        // sound. The explosion packet is the closest visual this engine has.
-        if (ServerLevelBridge* bridge = m_level.MobLevel()) {
-            bridge->BroadcastExplosion(glm::dvec3(pos) + glm::dvec3(0.5),
-                                       1.0f, 0, /*small=*/false);
+        // sound (Client::LevelEvents plays both).
+        if (Game::World* world = m_level.World()) {
+            world->PlayLevelEvent(nullptr, Game::LevelEvent::ANIMATION_END_GATEWAY_SPAWN, pos, 0);
         }
         PlaceGatewayBlocks(pos);
         Save();
@@ -949,11 +949,16 @@ namespace Server {
     }
 
     void EndDragonFight::TickRespawn() {
-        // MC DragonRespawnAnimation, transcribed stage by stage. Level events
-        // 3001 (the world growl) are sound-system work and skipped.
+        // MC DragonRespawnAnimation, transcribed stage by stage, with its
+        // level events 3001 (the growl over the portal).
         ServerLevelBridge* bridge = m_level.MobLevel();
         const glm::ivec3 beamPos(0, 128, 0);
         const int time = m_respawnTime++;
+        const auto growl = [this, &beamPos]() {
+            if (Game::World* world = m_level.World()) {
+                world->PlayLevelEvent(nullptr, Game::LevelEvent::ANIMATION_DRAGON_SUMMON_ROAR, beamPos, 0);
+            }
+        };
 
         switch (m_respawnStage) {
             case RespawnStage::Start: {
@@ -968,6 +973,8 @@ namespace Server {
             case RespawnStage::PreparingToSummonPillars: {
                 if (time >= 100) {
                     SetRespawnStage(RespawnStage::SummoningPillars);
+                } else if (time == 0 || time == 50 || time == 51 || time == 52 || time >= 95) {
+                    growl();
                 }
                 break;
             }
@@ -1036,12 +1043,16 @@ namespace Server {
                     }
                     m_respawnCrystalIds.clear();
                     SetRespawnStage(RespawnStage::End);
+                } else if (time >= 80) {
+                    growl();
                 } else if (time == 0) {
                     for (int32_t id : m_respawnCrystalIds) {
                         if (Game::EndCrystal* crystal = ResolveCrystal(id)) {
                             crystal->SetBeamTarget(beamPos);
                         }
                     }
+                } else if (time < 5) {
+                    growl();
                 }
                 break;
             }

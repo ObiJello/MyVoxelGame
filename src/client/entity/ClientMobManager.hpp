@@ -25,6 +25,7 @@
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/core/JavaRandom.hpp"
 
 #include <atomic>
@@ -71,13 +72,26 @@ namespace Client {
         int64_t GetDayTime()  const override { return m_dayTime; }
         Game::JavaRandom& Random() override { return m_random; }
 
-        // The client never runs a spawn or AI light test, so a constant is
-        // honest here — anything that did read it would be a bug.
-        int  GetSkyBrightness(int, int, int) const override { return 15; }
-        int  GetMaxLocalRawBrightness(int, int, int) const override { return 15; }
-        int  GetMaxLocalRawBrightness(int, int, int, int) const override { return 15; }
-        int  GetSkyDarken() const override { return 0; }
+        // The chunk light the server sent (Chunk::light) and the day's sky
+        // darkening — MC ClientLevel answers these from its own light engine,
+        // and client-side block code reads them (FireflyBushBlock.animateTick's
+        // getMaxLocalRawBrightness). Out of line (ClientMobManager.cpp).
+        int  GetSkyBrightness(int x, int y, int z) const override;
+        int  GetMaxLocalRawBrightness(int x, int y, int z) const override;
+        int  GetMaxLocalRawBrightness(int x, int y, int z, int amount) const override;
+        int  GetSkyDarken() const override;
+        // MC ClientLevel's weather from the client's levels (ClientWeather).
+        float GetRainLevel(float partialTick = 1.0f) const override;
+        float GetThunderLevel(float partialTick = 1.0f) const override;
+        bool  IsRaining() const override;
+        bool  IsThundering() const override;
+        int   PrecipitationAt(const glm::ivec3& pos) const override;
+        int  GetClientLeafTintColor(const glm::ivec3& pos) const override;
         bool CanSeeSky(int, int, int) const override { return true; }
+        // The jukebox's synced song (JukeboxBlockEntity) or a song this client
+        // is playing there (JukeboxSongPlayback). Out of line.
+        bool IsJukeboxPlaying(const glm::ivec3& pos) const override;
+        void GetPlayingJukeboxes(std::vector<glm::ivec3>& out) const override;
         bool MonstersBurn() const override { return false; }
         bool IsDay() const override { return (m_dayTime % 24000) < 12000; }
 
@@ -127,15 +141,27 @@ namespace Client {
         // main thread (same loop PlatformMain drives), so the queue needs no
         // lock — do NOT push into it from another thread.
         struct QueuedParticle {
-            Game::ParticleKind kind;
-            double x, y, z;
-            double vx, vy, vz;
+            Game::ParticleKind kind = Game::ParticleKind::Smoke;
+            double x = 0.0, y = 0.0, z = 0.0;
+            double vx = 0.0, vy = 0.0, vz = 0.0;
             // ENTITY_EFFECT tint (MC ColorParticleOption); 1,1,1,1 for
             // everything spawned through the colourless overload.
             float r = 1.0f, g = 1.0f, b = 1.0f, a = 1.0f;
             // BLOCK_MARKER's BlockParticleOption: the state whose particle
             // sprite the marker shows (BlockState::RawId). 0 elsewhere.
             uint32_t blockState = 0;
+            // ── A request through DoAddParticle (any type with its options).
+            // `options` is authoritative when `hasOptions` is set; the
+            // fields above then mirror its colour / state for old readers.
+            bool hasOptions = false;
+            // MC addParticle(options, overrideLimiter, alwaysShow, ...).
+            bool overrideLimiter = false;
+            bool alwaysShow = false;
+            // Modifiers applied to the constructed particle — MC
+            // ClientLevel.addBreakingParticles' .setPower(0.2F).scale(0.6F).
+            float power = 1.0f;
+            float scale = 1.0f;
+            Game::ParticleOptions options;
         };
 
         // ── The queue cap ──────────────────────────────────────────────
@@ -190,6 +216,38 @@ namespace Client {
             m_particleQueue.push_back({Game::ParticleKind::BlockMarker, x, y, z, 0.0, 0.0, 0.0,
                                        1.0f, 1.0f, 1.0f, 1.0f, state.RawId()});
         }
+
+        // MC ClientLevel.doAddParticle for any type with its options.
+        using Game::EntityLevel::AddParticle;
+        void DoAddParticle(const Game::ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                           double x, double y, double z, double xd, double yd, double zd) override {
+            QueuedParticle q;
+            q.kind = options.kind;
+            q.x = x; q.y = y; q.z = z;
+            q.vx = xd; q.vy = yd; q.vz = zd;
+            q.r = options.r; q.g = options.g; q.b = options.b; q.a = options.a;
+            q.blockState = options.blockState;
+            q.hasOptions = true;
+            q.overrideLimiter = overrideLimiter;
+            q.alwaysShow = alwaysShow;
+            q.options = options;
+            QueueParticle(std::move(q));
+        }
+        // A fully-formed request (the modifiers included). Main thread or
+        // any thread: the queue is locked.
+        void QueueParticle(QueuedParticle&& q) {
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            std::lock_guard<std::mutex> lock(m_particleMutex);
+            if (m_particleQueue.size() >= kMaxQueuedParticles) return;
+            m_particleQueue.push_back(std::move(q));
+        }
+
+        // MC ClientLevel.levelEvent(except, type, pos, data): run the
+        // LevelEventHandler port at once when `except` is this client's own
+        // player (the prediction's half); the server sends it to everyone
+        // else. Out of line (ClientMobManager.cpp).
+        void PlayLevelEvent(const Game::SoundExcept& except, int type, const glm::ivec3& pos,
+                            int data) override;
 
         void DrainParticles(std::vector<QueuedParticle>& out) {
             out.insert(out.end(), m_particleQueue.begin(), m_particleQueue.end());
@@ -305,10 +363,31 @@ namespace Client {
         // `blockStateRaw` is AddEntityS2C's per-type data int: the block a
         // falling block or a primed TNT carries. Zero for everything else, and
         // zero is air's default state, so a type that ignores it is unaffected.
+        // AddEntityS2C's exact block (its appended field): the server's own
+        // yaw, pitch, head and BODY yaw, limb swing and animation age. Spawn
+        // places the mob at these — no interpolation, previous-tick values
+        // included, before the pose starts any animation timer — so a
+        // rejoined world shows each mob exactly as the last-world panorama
+        // does.
+        struct SpawnExactState {
+            float   yRot = 0.0f, xRot = 0.0f, yHeadRot = 0.0f, yBodyRot = 0.0f;
+            float   walkPosition = 0.0f, walkSpeed = 0.0f, walkSpeedOld = 0.0f, walkScale = 1.0f;
+            int32_t animAge = -1;   // -1: keep the client's own count
+            int     renderPhaseCount = 0;   // Game::Mob::SetRenderPhase
+            float   renderPhase[8] = {};
+        };
         void Spawn(int32_t id, uint16_t type, const glm::dvec3& pos, const glm::vec3& vel,
                    float yRot, float xRot, float yHeadRot,
                    float health, uint8_t flags, uint8_t variantData,
-                   uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0);
+                   uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0,
+                   const SpawnExactState* exact = nullptr);
+        // While the WORLD is paused (the pause menu, the join transition's
+        // hold) the mobs are not ticked, so a move that arrived just before
+        // the server paused would stay half-interpolated forever — and the
+        // last-world panorama, captured under the pause menu, would show
+        // them short of where the server (and the save) has them. This lands
+        // every pending interpolation at once, rotations included.
+        void SettleInterpolation();
         void MoveDelta(int32_t id, bool hasPos, const glm::dvec3& delta,
                        bool hasRot, float yRot, float xRot, float yHeadRot, bool onGround);
         // `snap`: the entity went through an immersive surface — it is put
@@ -324,13 +403,28 @@ namespace Client {
         void SetArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
         // ItemFrameDataS2C: the frame's framed item (MC DATA_ITEM).
         void SetItemFrameItem(int32_t id, const Game::ItemStack& item);
+        // SetEntityLinkS2C: a leashed mob's holder id (Game::Leash::kNoHolder
+        // unlinks) — MC Leashable.setDelayedLeashHolderId. No-op for an
+        // unknown id or a type that cannot wear a lead.
+        void SetLeashHolder(int32_t id, int32_t holderId);
+        // BodyArmorS2C: a mob's BODY equipment slot (the wolf's armour, which
+        // WolfArmorLayer draws). No-op for anything without one.
+        void SetBodyArmor(int32_t id, const Game::ItemStack& item);
+        // BodyArmorS2C for a humanoid slot: a mob's worn / held equipment
+        // (Mob::SetEquipment — HumanoidArmorLayer and ItemInHandLayer draw it).
+        void SetEquipment(int32_t id, Game::EquipmentSlot slot, const Game::ItemStack& item);
+        // BodyArmorS2C with slot MAINHAND: a mob's held item (the allay's,
+        // which its ItemInHandLayer draws). No-op for anything without one.
+        void SetMainHandItem(int32_t id, const Game::ItemStack& item);
 
         // MC ParticleEngine.createTrackingEmitter(entity, type) — the crit /
         // enchanted-hit burst on a struck entity (entity events 200 / 201):
         // sixteen tries a tick at a random point inside the entity's box, for
         // three ticks (the first at once), following it as it moves. Players
         // are found through the sound resolver, so a hit player sparks too.
-        void CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind);
+        // `lifeTime` is MC's createTrackingEmitter(entity, type, lifeTime)
+        // — the totem of undying's burst runs 30 ticks.
+        void CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind, int lifeTime = 3);
         // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
         // DragonPackets.hpp. No-op for anything that is not an End crystal.
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
@@ -466,6 +560,7 @@ namespace Client {
             int32_t            entityId = 0;
             Game::ParticleKind kind{};
             int                life = 0;
+            int                lifeTime = 3;
         };
         static constexpr int kTrackingEmitterLifeTime = 3;   // MC's default lifeTime
         std::vector<TrackingEmitter> m_trackingEmitters;

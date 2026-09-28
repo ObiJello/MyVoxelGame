@@ -99,7 +99,7 @@ namespace Dev {
 
             void onClientboundPlayerPosition(const Network::ClientboundPlayerPositionPacket& packet) override;
             void onChunkBatchStart() override;
-            void onChunkBatchFinished(int batchSize) override;
+            void onChunkBatchFinished(int batchSize, uint32_t serverSendMicros) override;
             void onChangeDimensionS2C(const Network::ChangeDimensionS2CPacket& packet) override;
             void onChunkUnchangedS2C(const Network::ChunkUnchangedS2CPacket& packet) override;
             void onChatMessageS2C(const Network::ChatMessageS2CPacket& packet) override;
@@ -203,7 +203,7 @@ namespace Dev {
             m_bot.rate.OnStart(m_bot.packetTime);
         }
 
-        void BotListener::onChunkBatchFinished(int batchSize) {
+        void BotListener::onChunkBatchFinished(int batchSize, uint32_t /*serverSendMicros*/) {
             m_bot.rate.OnFinished(batchSize, m_bot.packetTime);
             if (batchSize > 0) {
                 m_bot.chunksTotal += static_cast<uint64_t>(batchSize);
@@ -407,7 +407,7 @@ namespace Dev {
             } else if (raw.rawId() == static_cast<uint8_t>(Network::PacketId::ChunkBatchFinishedS2C) &&
                        raw.payload().size() >= 4) {
                 Network::PacketReader r(raw.payload());
-                bot.listener->onChunkBatchFinished(static_cast<int>(r.ReadInt()));
+                bot.listener->onChunkBatchFinished(static_cast<int>(r.ReadInt()), 0);
             }
         }
 

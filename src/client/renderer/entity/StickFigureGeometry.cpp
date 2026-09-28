@@ -94,17 +94,11 @@ namespace Render {
 
     } // namespace
 
-    void BuildStickFigure(std::vector<StickVertex>& lineVerts,
-                          std::vector<StickVertex>& ringTris,
-                          std::vector<StickVertex>& discTris,
-                          const glm::vec3& feetPos,
-                          float headYawDeg, float bodyYawDeg,
-                          float /*pitchDeg*/, bool isCrouching,
-                          PlayerColor color) {
-        const uint8_t cr = color.r, cg = color.g, cb = color.b, ca = color.a;
-        constexpr float PI = 3.14159265f;
+    StickFigureSkeleton ComputeStickFigureSkeleton(const glm::vec3& entityFeetPos,
+                                                   float headYawDeg, float bodyYawDeg,
+                                                   bool isCrouching, bool isSitting) {
+        StickFigureSkeleton sk;
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
-
         // Body orientation. Yaws are MC's (0 = +Z, clockwise) — the same
         // numbers that arrive on the wire and that the camera stores.
         glm::vec3 bodyFwd = Game::Mth::HorizontalViewVector(bodyYawDeg);
@@ -113,6 +107,14 @@ namespace Render {
         // Head orientation
         glm::vec3 lookDir = Game::Mth::HorizontalViewVector(headYawDeg);
         glm::vec3 faceRight = glm::normalize(glm::cross(lookDir, worldUp));
+
+        // Sitting (MC HumanoidModel.setupAnim, isPassenger) never crouches
+        // (LocalPlayer.aiStep: crouching needs !isPassenger). The body keeps
+        // its standing height — MC moves no part but the limbs — and the
+        // feet stay the entity's, which the vehicle attachment put 0.6 below
+        // the seat.
+        if (isSitting) isCrouching = false;
+        const glm::vec3& feetPos = entityFeetPos;
 
         // Crouching (Minecraft's HumanoidModel.java)
         float crouchTilt     = isCrouching ? 0.5f : 0.0f;
@@ -137,10 +139,102 @@ namespace Render {
         glm::vec3 handL = feetPos + worldUp * handY + bodyRight * (-0.35f) + bodyFwd * std::sin(crouchTilt) * 0.2f;
         glm::vec3 handR = feetPos + worldUp * handY + bodyRight * ( 0.35f) + bodyFwd * std::sin(crouchTilt) * 0.2f;
 
+        // The two legs' tops; standing, both hang from the one hip point.
+        glm::vec3 legTopL = hip, legTopR = hip;
+        if (isSitting) {
+            // MC's pose, applied the way ModelPart.translateAndRotate does:
+            // a part vector v in model space (pixels, +X = the body's left,
+            // +Y = down, +Z = back) turns by Rz · Ry · Rx. The model frame is
+            // bodyRight/worldUp/bodyFwd with every axis negated
+            // (LivingEntityRenderer's rotate(180 − yBodyRot) + scale(−1,−1,1)).
+            const auto toWorld = [&](const glm::vec3& m) {
+                return -bodyRight * m.x - worldUp * m.y - bodyFwd * m.z;
+            };
+            const auto toModel = [&](const glm::vec3& w) {
+                return glm::vec3(-glm::dot(w, bodyRight), -glm::dot(w, worldUp), -glm::dot(w, bodyFwd));
+            };
+            const auto rotZYX = [](glm::vec3 v, float xRot, float yRot, float zRot) {
+                // Rx
+                v = glm::vec3(v.x, v.y * std::cos(xRot) - v.z * std::sin(xRot),
+                              v.y * std::sin(xRot) + v.z * std::cos(xRot));
+                // Ry
+                v = glm::vec3(v.x * std::cos(yRot) + v.z * std::sin(yRot), v.y,
+                              -v.x * std::sin(yRot) + v.z * std::cos(yRot));
+                // Rz
+                return glm::vec3(v.x * std::cos(zRot) - v.y * std::sin(zRot),
+                                 v.x * std::sin(zRot) + v.y * std::cos(zRot), v.z);
+            };
+            // HumanoidModel.setupAnim's isPassenger branch:
+            //   rightLeg.xRot = −1.4137167, yRot = +π/10, zRot = +π/40
+            //   leftLeg.xRot  = −1.4137167, yRot = −π/10, zRot = −π/40
+            //   rightArm.xRot, leftArm.xRot += −π/5
+            constexpr float kLegX = -1.4137167f, kLegY = 0.31415927f, kLegZ = 0.07853982f;
+            constexpr float kArmX = -0.62831855f;
+            // The legs hang from their pivots (PlayerModel: right_leg at
+            // (−1.9, 12, 0), left_leg at (1.9, 12, 0)) — 12 px up, the hip —
+            // and are 12 px long.
+            constexpr float kPx = 1.0f / 16.0f;
+            hip     = feetPos + worldUp * (12.0f * kPx);
+            legTopR = hip + toWorld(glm::vec3(-1.9f * kPx, 0.0f, 0.0f));
+            legTopL = hip + toWorld(glm::vec3( 1.9f * kPx, 0.0f, 0.0f));
+            const glm::vec3 leg(0.0f, 12.0f * kPx, 0.0f);
+            footR = legTopR + toWorld(rotZYX(leg, kLegX,  kLegY,  kLegZ));
+            footL = legTopL + toWorld(rotZYX(leg, kLegX, -kLegY, -kLegZ));
+            // The arms keep their standing hang, turned forward about the
+            // shoulder by the added xRot.
+            handR = shoulderR + toWorld(rotZYX(toModel(handR - shoulderR), kArmX, 0.0f, 0.0f));
+            handL = shoulderL + toWorld(rotZYX(toModel(handL - shoulderL), kArmX, 0.0f, 0.0f));
+        }
+
+        sk.bodyFwd = bodyFwd; sk.bodyRight = bodyRight;
+        sk.lookDir = lookDir; sk.faceRight = faceRight;
+        sk.feetPos = feetPos;
+        sk.neck = neck; sk.hip = hip; sk.headC = headC;
+        sk.footL = footL; sk.footR = footR;
+        sk.shoulderL = shoulderL; sk.shoulderR = shoulderR;
+        sk.handL = handL; sk.handR = handR;
+        sk.legTopL = legTopL; sk.legTopR = legTopR;
+        sk.hipY = hipY;
+        sk.isCrouching = isCrouching;
+        return sk;
+    }
+
+    void BuildStickFigure(std::vector<StickVertex>& lineVerts,
+                          std::vector<StickVertex>& ringTris,
+                          std::vector<StickVertex>& discTris,
+                          const glm::vec3& entityFeetPos,
+                          float headYawDeg, float bodyYawDeg,
+                          float /*pitchDeg*/, bool isCrouching,
+                          PlayerColor color, bool isSitting) {
+        const uint8_t cr = color.r, cg = color.g, cb = color.b, ca = color.a;
+        constexpr float PI = 3.14159265f;
+        const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
+
+        // The joints — shared with StickFigureHand (a lead held in the hand).
+        const StickFigureSkeleton sk =
+            ComputeStickFigureSkeleton(entityFeetPos, headYawDeg, bodyYawDeg, isCrouching, isSitting);
+        isCrouching = sk.isCrouching;
+        const glm::vec3 bodyFwd = sk.bodyFwd, bodyRight = sk.bodyRight;
+        const glm::vec3 lookDir = sk.lookDir, faceRight = sk.faceRight;
+        const glm::vec3 feetPos = sk.feetPos;
+        const glm::vec3 neck = sk.neck, hip = sk.hip, headC = sk.headC;
+        const glm::vec3 footL = sk.footL, footR = sk.footR;
+        const glm::vec3 shoulderL = sk.shoulderL, shoulderR = sk.shoulderR;
+        const glm::vec3 handL = sk.handL, handR = sk.handR;
+        const glm::vec3 legTopL = sk.legTopL, legTopR = sk.legTopR;
+        const float hipY = sk.hipY;
+        (void)bodyFwd; (void)bodyRight; (void)lookDir; (void)faceRight; (void)feetPos;
+        (void)neck; (void)hip; (void)headC; (void)footL; (void)footR; (void)hipY;
+        (void)legTopL; (void)legTopR; (void)handL; (void)handR; (void)shoulderL; (void)shoulderR;
+
         // --- LINES: Body, legs, arms ---
         PushLine(lineVerts, neck, hip, cr, cg, cb, ca);
-        PushLine(lineVerts, hip, footL, cr, cg, cb, ca);
-        PushLine(lineVerts, hip, footR, cr, cg, cb, ca);
+        if (isSitting) {
+            // The pelvis between the two leg pivots, then each leg.
+            PushLine(lineVerts, legTopL, legTopR, cr, cg, cb, ca);
+        }
+        PushLine(lineVerts, legTopL, footL, cr, cg, cb, ca);
+        PushLine(lineVerts, legTopR, footR, cr, cg, cb, ca);
         PushLine(lineVerts, shoulderL, handL, cr, cg, cb, ca);
         PushLine(lineVerts, shoulderR, handR, cr, cg, cb, ca);
 
@@ -192,6 +286,13 @@ namespace Render {
         // showed visible polygonal sides next to the smooth front circle.
         PushDisc(discTris, headC, faceRight, worldUp, -lookDir,
                  headRadius, 64, cr, cg, cb, ca);
+    }
+
+    glm::vec3 StickFigureHand(const glm::vec3& feetPos, float bodyYawDeg,
+                              bool isCrouching, bool isSitting, bool rightHand) {
+        const StickFigureSkeleton sk =
+            ComputeStickFigureSkeleton(feetPos, bodyYawDeg, bodyYawDeg, isCrouching, isSitting);
+        return rightHand ? sk.handR : sk.handL;
     }
 
 } // namespace Render

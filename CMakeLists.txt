@@ -36,7 +36,7 @@ endif()
 # every TU that uses src/pch.hpp.
 find_program(CCACHE_PROGRAM ccache)
 if(CCACHE_PROGRAM)
-    # CXX only, deliberately. Our C sources are minizip and crashpad, neither of
+    # CXX only, deliberately. Our C sources are libdeflate and crashpad, neither of
     # which is on the hot path — and crashpad's Mach `mig` step shells out to the
     # C compiler in a way that does not survive being wrapped (a fresh configure
     # failed generating child_portUser.c with the launcher on both languages).
@@ -141,7 +141,6 @@ endif()
 # 3) Vendor subprojects
 add_subdirectory(ext/glfw)
 add_subdirectory(ext/glad)
-add_subdirectory(ext/zlib)    # static-only zlibstatic
 set(ALSOFT_CPUEXT_NEON  OFF CACHE BOOL "Disable ARM NEON" FORCE)
 set(ALSOFT_REQUIRE_NEON OFF CACHE BOOL "Disable ARM NEON requirement" FORCE)
 add_subdirectory(ext/OpenAL)  # static-only OpenAL
@@ -169,6 +168,27 @@ FetchContent_Declare(
         GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(nlohmann_json)
+# ────────────────────────────────────────────────────────────────────────────
+
+# ── libdeflate: every deflate/zlib/gzip stream (common/core/Deflate) ───────
+# Region chunks, NBT files, network frames, zip entries (resource and shader
+# packs, the launcher's updates; common/core/ZipArchive), PNGs. It replaced
+# zlib and minizip entirely. MIT, plain C, picks its code path from the CPU
+# at run time (x86 SSE2/AVX2, ARM NEON/CRC32), so one build serves Apple
+# silicon, Intel Macs, Windows and Linux, and each slice of a universal build
+# gets its own. ~2-3x zlib's inflate and deflate. Whole buffers only (no
+# streaming), which is all anything here needs.
+set(LIBDEFLATE_BUILD_STATIC_LIB ON  CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_GZIP       OFF CACHE BOOL "" FORCE)
+set(LIBDEFLATE_BUILD_TESTS      OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+        libdeflate
+        GIT_REPOSITORY https://github.com/ebiggers/libdeflate.git
+        GIT_TAG v1.24
+        GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(libdeflate)
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── Add Sentry Native SDK for crash reporting ────────────────────────────────
@@ -342,7 +362,6 @@ target_include_directories(imgui PRIVATE
         ext/imgui
         ext/imgui/backends
         ${PROJECT_SOURCE_DIR}/ext/glm
-        ${PROJECT_SOURCE_DIR}/ext/zlib
         ${PROJECT_SOURCE_DIR}/src
         ${CMAKE_BINARY_DIR}/generated
 )
@@ -383,9 +402,8 @@ add_library(terrain_library STATIC ${TERRAIN_LIBRARY_SOURCES})
 target_include_directories(terrain_library PUBLIC
         src/my_terrain_library/include
         ${PROJECT_SOURCE_DIR}/ext/md5  # MD5 wrapper (uses CommonCrypto on macOS, OpenSSL elsewhere)
-        ${PROJECT_SOURCE_DIR}/ext/zlib  # zlib headers for NBT compression
 )
-target_link_libraries(terrain_library PUBLIC zlibstatic)
+target_link_libraries(terrain_library PUBLIC libdeflate::libdeflate_static)   # NBT / region compression (util/Deflate.h)
 target_compile_features(terrain_library PUBLIC cxx_std_20)
 
 # Profiling for the terrain library (include/util/TerrainProfiling.h).
@@ -539,6 +557,18 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/entity_outline_sobel_vk.frag
             ${VK_SHADER_DIR}/entity_outline_blur_vk.frag
             ${VK_SHADER_DIR}/entity_outline_blit_vk.frag
+            ${VK_SHADER_DIR}/post_screenquad_vk.vert
+            ${VK_SHADER_DIR}/post_rotscale_vk.vert
+            ${VK_SHADER_DIR}/post_blit_vk.frag
+            ${VK_SHADER_DIR}/post_bits_vk.frag
+            ${VK_SHADER_DIR}/post_box_blur_vk.frag
+            ${VK_SHADER_DIR}/post_color_convolve_vk.frag
+            ${VK_SHADER_DIR}/post_invert_vk.frag
+            ${VK_SHADER_DIR}/post_spiderclip_vk.frag
+            ${VK_SHADER_DIR}/oit_composite_vk.frag
+            ${VK_SHADER_DIR}/oit_depth_bounds_cull_vk.frag
+            ${VK_SHADER_DIR}/oit_blit_vk.frag
+            ${VK_SHADER_DIR}/oit_blit_depth_vk.frag
             ${VK_SHADER_DIR}/beam_volume_vk.vert
             ${VK_SHADER_DIR}/beam_volume_vk.frag
             ${VK_SHADER_DIR}/beam_sprite_vk.vert
@@ -556,6 +586,27 @@ if(HAS_VULKAN)
                 COMMENT "Compiling SPIR-V: ${SHADER_NAME}"
             )
             list(APPEND VK_SPV_FILES ${SPV_FILE})
+        endforeach()
+        # Improved Transparency (MC 26.3 wavelet OIT): each participating
+        # fragment shader's per-stage variants, <name>_oit_{db,tr,ac}_vk.frag
+        # .spv, from the same source with the stage's defines (oit_lib.glsl).
+        set(VK_OIT_SHADERS terrain_solid block mob_particle clouds)
+        set(VK_OIT_STAGES db tr ac)
+        set(VK_OIT_DEFINES_db -DOIT -DOIT_ALPHA_ONLY -DOIT_DEPTH_BOUNDS)
+        set(VK_OIT_DEFINES_tr -DOIT -DOIT_ALPHA_ONLY -DOIT_TRANSMITTANCE)
+        set(VK_OIT_DEFINES_ac -DOIT -DOIT_ACCUMULATE)
+        foreach(OIT_NAME ${VK_OIT_SHADERS})
+            foreach(OIT_STAGE ${VK_OIT_STAGES})
+                set(OIT_SRC ${VK_SHADER_DIR}/${OIT_NAME}_vk.frag)
+                set(OIT_SPV ${VK_SPV_DIR}/${OIT_NAME}_oit_${OIT_STAGE}_vk.frag.spv)
+                add_custom_command(
+                    OUTPUT ${OIT_SPV}
+                    COMMAND ${GLSLC} -fshader-stage=frag ${VK_OIT_DEFINES_${OIT_STAGE}} ${OIT_SRC} -o ${OIT_SPV}
+                    DEPENDS ${OIT_SRC} ${VK_SHADER_DIR}/oit_lib.glsl
+                    COMMENT "Compiling SPIR-V: ${OIT_NAME}_oit_${OIT_STAGE}_vk.frag"
+                )
+                list(APPEND VK_SPV_FILES ${OIT_SPV})
+            endforeach()
         endforeach()
         add_custom_target(compile_shaders ALL DEPENDS ${VK_SPV_FILES})
     else()
@@ -600,10 +651,18 @@ set(GAME_SOURCES
             src/common/nbt/ModifiedUtf8.hpp
             src/common/nbt/NbtWrite.cpp
             src/common/nbt/NbtWrite.hpp
+            src/common/core/Deflate.cpp       # every deflate/zlib/gzip stream (libdeflate)
+            src/common/core/Deflate.hpp
+            src/common/core/ZipArchive.cpp    # .zip reading: resource and shader packs
+            src/common/core/ZipArchive.hpp
             src/common/core/Log.cpp
             src/common/core/ProcessMemory.cpp
             # Sound — the shared half (event registry, SoundType tables,
             # Level.playSound's `except` and the server sink seam)
+            # Command argument trees (MC Brigadier nodes): registered with each
+            # server command, shipped in CommandsS2C, walked by chat completion
+            src/common/command/CommandSyntax.cpp
+            src/common/command/CommandSyntax.hpp
             src/common/sound/SoundSource.hpp
             src/common/sound/SoundEvents.cpp
             src/common/sound/SoundEvents.hpp
@@ -611,6 +670,12 @@ set(GAME_SOURCES
             src/common/sound/SoundType.hpp
             src/common/sound/LevelSound.cpp
             src/common/sound/LevelSound.hpp
+            # Particle types + options (MC core/particles), the level
+            # particles / level event server seam
+            src/common/particle/ParticleOptions.cpp
+            src/common/particle/ParticleOptions.hpp
+            src/common/particle/LevelParticles.cpp
+            src/common/particle/LevelParticles.hpp
             src/common/sound/AurelithSoundCues.hpp
             src/common/sound/PlayerMovementSounds.cpp
             src/common/sound/PlayerMovementSounds.hpp
@@ -618,6 +683,8 @@ set(GAME_SOURCES
             src/common/sound/EntitySounds.hpp
             src/common/sound/LevelEventSounds.hpp
             src/common/network/packets/game/SoundPackets.hpp
+            src/common/network/packets/game/LevelEventS2CPacket.hpp
+            src/common/network/packets/game/JukeboxSongS2CPacket.hpp
             src/common/network/packets/game/BookPackets.hpp
             src/common/core/Log.hpp
             src/common/core/Mth.hpp
@@ -656,16 +723,28 @@ set(GAME_SOURCES
             src/client/entity/RemotePlayerManager.hpp
             src/client/entity/ItemEntityManager.cpp
             src/client/entity/ItemEntityManager.hpp
+            src/client/entity/LocalItemCooldowns.cpp   # MC LocalPlayer.getCooldowns() mirror
+            src/client/entity/LocalItemCooldowns.hpp
             src/client/entity/XpOrbManager.cpp
             src/client/entity/XpOrbManager.hpp
             src/client/entity/ClientMobManager.cpp
             src/client/entity/ClientMobManager.hpp
+            src/client/entity/ClientVehicles.cpp
+            src/client/entity/ClientVehicles.hpp
             src/client/entity/ClientFallingBlocks.cpp
+            src/client/entity/ClientFishing.cpp
+            src/client/entity/ClientFireworks.cpp
             src/client/entity/ClientFallingBlocks.hpp
 
             # Client rendering - Particles
             src/client/renderer/particle/MobParticleSystem.cpp
             src/client/renderer/particle/MobParticleSystem.hpp
+            src/client/renderer/particle/ParticleProviders.cpp
+            src/client/renderer/particle/ParticleTicks.cpp
+            src/client/renderer/particle/ParticleSprites.cpp
+            src/client/renderer/particle/ParticleSprites.hpp
+            src/client/renderer/particle/BlockParticleTint.cpp
+            src/client/renderer/particle/BlockParticleTint.hpp
 
             # Client rendering - Entity
             src/client/renderer/entity/PlayerRenderer.cpp
@@ -684,7 +763,16 @@ set(GAME_SOURCES
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/entity/StickFigureGeometry.hpp
             src/client/renderer/entity/MobRenderer.cpp
+            src/client/renderer/entity/ElytraLayer.cpp
+            src/client/renderer/entity/RiptideLayer.cpp   # MC SpinAttackEffectLayer
+            src/client/renderer/entity/VehicleRenderer.cpp
+            src/client/renderer/entity/ItemDisplayTransforms.cpp
+            src/client/renderer/entity/MobEquipmentLayers.cpp
+            src/client/renderer/entity/MountEquipmentLayers.cpp
             src/client/renderer/entity/MobRenderer.hpp
+            src/client/renderer/entity/LeashRenderer.cpp
+            src/client/renderer/entity/FishingHookRenderer.cpp
+            src/client/renderer/entity/LeashRenderer.hpp
             src/client/renderer/entity/ModMobRender.cpp
             src/client/renderer/entity/ModMobRender.hpp
             src/client/renderer/entity/ModModelHelpers.hpp
@@ -695,6 +783,7 @@ set(GAME_SOURCES
             src/client/renderer/entity/model/ModelPart.cpp
             src/client/renderer/entity/model/ModelPart.hpp
             src/client/renderer/entity/model/EntityModels.cpp
+            src/client/renderer/entity/model/HumanoidArmorModel.cpp
             src/client/renderer/entity/model/GeneratedEntityModels.cpp
             src/client/renderer/entity/GeneratedBabyTextures.cpp
             src/client/renderer/entity/GeneratedBabyTextures.hpp
@@ -724,6 +813,8 @@ set(GAME_SOURCES
             src/client/renderer/environment/HushAtmosphere.cpp
             src/client/renderer/environment/HushAtmosphere.hpp
             src/client/renderer/environment/CloudRenderer.cpp
+            src/client/renderer/environment/WeatherEffectRenderer.cpp
+            src/client/renderer/environment/WeatherEffectRenderer.hpp
             src/client/renderer/environment/CloudRenderer.hpp
             src/client/renderer/environment/JavaRandom.hpp
 
@@ -764,11 +855,17 @@ set(GAME_SOURCES
             src/client/renderer/blockentity/ChestRenderer.hpp
             src/client/renderer/blockentity/ChestRenderer.cpp
             src/client/renderer/blockentity/CampfireRenderer.cpp
+            src/client/renderer/blockentity/BrushableBlockRenderer.cpp
+            src/client/renderer/blockentity/DecoratedPotRenderer.cpp
+            src/client/renderer/blockentity/BannerRenderer.cpp
+            src/client/renderer/blockentity/BellRenderer.cpp
+            src/client/renderer/blockentity/CopperGolemStatueRenderer.cpp
             src/client/renderer/blockentity/ShulkerBoxRenderer.cpp
             src/client/renderer/blockentity/ShulkerBoxRenderer.hpp
             src/client/renderer/blockentity/SkullBlockRenderer.cpp
             src/client/renderer/blockentity/LecternRenderer.cpp
             src/client/renderer/blockentity/SpawnerRenderer.cpp
+            src/client/renderer/blockentity/VaultRenderer.cpp
             src/client/renderer/blockentity/PistonRenderer.cpp
             src/client/renderer/blockentity/PistonRenderer.hpp
             src/client/renderer/blockentity/SignRenderer.cpp
@@ -818,20 +915,32 @@ set(GAME_SOURCES
             src/client/renderer/gui/FontRenderer.cpp
             src/client/renderer/gui/HudRenderer.hpp
             src/client/renderer/gui/HudRenderer.cpp
+            src/client/renderer/gui/SpectatorGui.cpp
+            src/client/renderer/gui/PlayerTabOverlay.cpp
+            src/client/renderer/post/PostChain.cpp
+            src/client/renderer/post/ImprovedTransparency.cpp
             src/client/renderer/gui/EffectsInInventory.cpp
             src/client/renderer/gui/EffectsInInventory.hpp
             src/client/renderer/gui/ChatComponent.hpp
             src/client/renderer/gui/ChatComponent.cpp
             src/client/renderer/gui/ChatScreen.hpp
             src/client/renderer/gui/ChatScreen.cpp
+            src/client/renderer/gui/CommandSuggestions.hpp
+            src/client/renderer/gui/CommandSuggestions.cpp
             src/client/renderer/gui/AbstractContainerScreen.hpp
             src/client/renderer/gui/AbstractContainerScreen.cpp
             src/client/renderer/gui/InventoryScreen.hpp
             src/client/renderer/gui/InventoryScreen.cpp
             src/client/renderer/gui/MerchantScreen.hpp
             src/client/renderer/gui/MerchantScreen.cpp
+            src/client/renderer/gui/MountInventoryScreen.cpp
+            src/client/renderer/gui/MountInventoryScreen.hpp
             src/client/renderer/gui/CreativeModeInventoryScreen.hpp
             src/client/renderer/gui/CreativeModeInventoryScreen.cpp
+            src/client/renderer/gui/CreativeModeTabs.hpp
+            src/client/renderer/gui/CreativeModeTabs.cpp
+            src/client/renderer/gui/CreativeHotbars.hpp
+            src/client/renderer/gui/CreativeHotbars.cpp
             src/client/renderer/gui/CraftingScreen.hpp
             src/client/renderer/gui/ContainerScreen.cpp
             src/client/renderer/gui/ContainerScreen.hpp
@@ -841,6 +950,8 @@ set(GAME_SOURCES
             src/client/renderer/gui/AnvilScreen.hpp
             src/client/renderer/gui/EnchantmentScreen.cpp
             src/client/renderer/gui/EnchantmentScreen.hpp
+            src/client/renderer/gui/LoomScreen.cpp
+            src/client/renderer/gui/LoomScreen.hpp
             src/client/renderer/gui/CraftingScreen.cpp
 
             # Client rendering - Menu screens (title / options tree)
@@ -876,9 +987,6 @@ set(GAME_SOURCES
             src/client/shader/ShaderOptions.cpp
             src/common/core/AssetLocator.hpp
             src/common/core/AssetLocator.cpp
-            # minizip (vendored with zlib): .zip resource packs
-            ext/zlib/contrib/minizip/unzip.c
-            ext/zlib/contrib/minizip/ioapi.c
             src/client/renderer/gui/screens/PauseScreen.hpp
             src/client/renderer/gui/screens/PauseScreen.cpp
             src/client/renderer/gui/screens/LevelLoadingScreen.hpp
@@ -935,6 +1043,7 @@ set(GAME_SOURCES
             src/client/renderer/gui/items/HeadItemRenderer.cpp
             src/client/renderer/gui/items/ShieldItemRenderer.hpp
             src/client/renderer/gui/items/ShieldItemRenderer.cpp
+            src/client/renderer/gui/items/DecoratedPotItemRenderer.cpp
             src/client/renderer/gui/items/PlayerInventoryPreview.hpp
             src/client/renderer/gui/items/PlayerInventoryPreview.cpp
 
@@ -969,6 +1078,12 @@ set(GAME_SOURCES
             src/client/world/PendingDiffsManager.cpp
             src/client/world/ClientAnimateTick.cpp
             src/client/world/ClientAnimateTick.hpp
+            src/client/world/ClientLevelEvents.cpp
+            src/client/world/ClientLevelEvents.hpp
+            src/client/world/ClientParticleTicks.cpp
+            src/client/world/ClientParticleTicks.hpp
+            src/client/world/ClientWeather.cpp
+            src/client/world/ClientWeather.hpp
             src/client/world/HushSignalState.cpp
             src/client/world/AurelithState.cpp
             src/client/world/AurelithState.hpp
@@ -1004,6 +1119,8 @@ set(GAME_SOURCES
             src/client/sound/ClientSounds.cpp
             src/client/sound/ClientSounds.hpp
             src/client/sound/SoundHost.cpp
+            src/client/sound/JukeboxSongPlayback.hpp
+            src/client/sound/JukeboxSongPlayback.cpp
             src/client/sound/SoundHost.hpp
             src/client/sound/AudioAttributes.cpp
             src/client/sound/AudioAttributes.hpp
@@ -1046,8 +1163,11 @@ set(GAME_SOURCES
             src/common/world/block/BlockInteraction.hpp
             src/common/world/block/BlockRegistry.cpp
             src/common/world/block/BlockBehaviors.cpp
+            src/common/world/block/MenuProviders.cpp
             src/common/world/block/BlockAmbientSounds.cpp
             src/common/world/block/BlockAmbientSounds.hpp
+            src/common/world/block/BlockAnimateParticles.cpp
+            src/common/world/block/BlockAnimateParticles.hpp
             src/common/world/block/ContainerOpeners.cpp
             src/common/world/block/ContainerOpeners.hpp
             src/common/world/block/ChoirPuzzle.cpp
@@ -1061,6 +1181,8 @@ set(GAME_SOURCES
             src/common/world/level/GeneratedAurelithBooks.inc
             src/common/world/block/AurelithBlocks.hpp
             src/common/world/block/BlockGrowth.cpp
+            src/common/world/block/TreeGrower.cpp
+            src/common/world/block/TreeGrower.hpp
             src/common/world/block/RedstoneWire.cpp
             src/common/world/block/RedstoneWire.hpp
             src/common/world/block/Stairs.cpp
@@ -1093,6 +1215,17 @@ set(GAME_SOURCES
             src/common/world/block/FallingBlock.hpp
             src/common/world/block/TntBlock.cpp
             src/common/world/block/TntBlock.hpp
+            src/common/world/block/CandleBlocks.cpp
+            src/common/world/block/CandleBlocks.hpp
+            src/common/world/block/PlantBlocks.cpp
+            src/common/world/block/PlantBlocks.hpp
+            src/common/world/block/TurtleEggBlock.cpp
+            src/common/world/block/TurtleEggBlock.hpp
+            src/common/world/block/CopperChestBlock.cpp
+            src/common/world/block/FireBlock.cpp
+            src/common/world/block/FireBlock.hpp
+            src/common/world/block/GeneratedFireFlammability.inc
+            src/common/world/block/CopperChestBlock.hpp
             src/common/world/fluid/FluidState.cpp
             src/common/world/fluid/FluidState.hpp
             src/common/world/fluid/FlowingFluid.cpp
@@ -1132,12 +1265,25 @@ set(GAME_SOURCES
             src/common/world/block/entity/CampfireBlockEntity.cpp
             src/common/world/block/entity/LecternBlockEntity.hpp
             src/common/world/block/entity/LecternBlockEntity.cpp
+            src/common/world/block/entity/JukeboxBlockEntity.hpp
+            src/common/world/block/entity/JukeboxBlockEntity.cpp
+            src/common/world/block/entity/BrushableBlockEntity.cpp
+            src/common/world/block/entity/DecoratedPotBlockEntity.cpp
+            src/common/world/block/entity/BannerBlockEntity.cpp
+            src/common/world/block/entity/BellBlockEntity.cpp
+            src/common/world/block/entity/CopperGolemStatueBlockEntity.cpp
+            src/common/world/block/entity/ChiseledBookShelfBlockEntity.cpp
             src/common/world/block/entity/AurelithBlockEntities.cpp
             src/common/world/block/entity/AurelithBlockEntities.hpp
             src/common/world/block/entity/SpawnerBlockEntity.hpp
             src/common/world/block/entity/SpawnerBlockEntity.cpp
+            src/common/world/block/entity/TrialSpawnerConfig.cpp
+            src/common/world/block/entity/TrialSpawnerBlockEntity.cpp
+            src/common/world/block/entity/VaultBlockEntity.cpp
             src/common/world/block/entity/PotentSulfurBlockEntity.hpp
             src/common/world/block/entity/PotentSulfurBlockEntity.cpp
+            src/common/world/block/entity/SculkBlockEntities.hpp
+            src/common/world/block/entity/SculkBlockEntities.cpp
             src/common/world/block/entity/SignBlockEntity.cpp
             src/common/world/block/entity/SignBlockEntity.hpp
             src/common/world/level/WorldDrops.cpp
@@ -1148,6 +1294,7 @@ set(GAME_SOURCES
             src/common/world/block/ExplosionTrigger.cpp
             src/common/world/block/ExplosionTrigger.hpp
             src/common/world/level/BlockClip.cpp
+            src/common/world/level/VisualClip.cpp
             src/common/world/level/BlockClip.hpp
             src/common/world/level/Explosion.cpp
             src/common/world/level/Explosion.hpp
@@ -1159,10 +1306,21 @@ set(GAME_SOURCES
             src/common/entity/PrimedTnt.hpp
             src/common/entity/EndCrystal.cpp
             src/common/entity/ArmorStand.cpp
+            src/common/entity/decoration/BlockAttachedEntity.cpp
+            src/common/entity/decoration/BlockAttachedEntity.hpp
+            src/common/entity/decoration/Cushion.cpp
+            src/common/entity/vehicle/VehicleEntity.cpp
+            src/common/entity/vehicle/VehicleContainer.cpp
+            src/common/entity/vehicle/Boat.cpp
+            src/common/entity/vehicle/Minecart.cpp
+            src/common/entity/vehicle/VehicleItems.cpp
+            src/common/entity/decoration/Cushion.hpp
             src/common/entity/decoration/HangingEntity.cpp
             src/common/entity/decoration/HangingEntity.hpp
             src/common/entity/decoration/ItemFrame.cpp
             src/common/entity/decoration/ItemFrame.hpp
+            src/common/entity/decoration/LeashFenceKnot.cpp
+            src/common/entity/decoration/LeashFenceKnot.hpp
             src/common/entity/decoration/Painting.cpp
             src/common/entity/decoration/Painting.hpp
             src/common/entity/decoration/PaintingVariants.cpp
@@ -1240,8 +1398,22 @@ set(GAME_SOURCES
             src/common/world/block/RedstoneContainers.cpp
             src/common/world/block/LecternBlock.hpp
             src/common/world/block/LecternBlock.cpp
+            src/common/world/block/JukeboxBlock.hpp
+            src/common/world/block/JukeboxBlock.cpp
+            src/common/world/block/DecoratedPotBlock.cpp
+            src/common/world/block/CopperGolemStatueBlock.cpp
+            src/common/world/block/ChiseledBookShelfBlock.cpp
+            src/common/world/block/TrialChamberBlocks.cpp
             src/common/world/block/PotentSulfurBlock.hpp
             src/common/world/block/PotentSulfurBlock.cpp
+            src/common/world/block/SculkBlocks.hpp
+            src/common/world/block/SculkBlocks.cpp
+            src/common/world/block/SculkSpreader.hpp
+            src/common/world/block/SculkSpreader.cpp
+            src/common/world/block/SnowLayerBlock.hpp
+            src/common/world/block/SnowLayerBlock.cpp
+            src/common/world/level/Precipitation.hpp
+            src/common/world/level/Precipitation.cpp
             src/common/world/block/RedstoneContainers.hpp
             src/common/world/level/NeighborUpdater.cpp
             src/common/world/level/NeighborUpdater.hpp
@@ -1252,6 +1424,17 @@ set(GAME_SOURCES
             src/common/world/level/World.cpp
             src/common/world/level/World.hpp
             src/common/world/level/WorldGlobals.hpp
+
+            # Common world - Game events + vibrations (MC world/level/gameevent)
+            src/common/world/level/gameevent/GameEvent.hpp
+            src/common/world/level/gameevent/GameEvent.cpp
+            src/common/world/level/gameevent/GameEventDispatcher.hpp
+            src/common/world/level/gameevent/GameEventDispatcher.cpp
+            src/common/world/level/gameevent/GameEventLevel.cpp
+            src/common/world/level/gameevent/VibrationSystem.hpp
+            src/common/world/level/gameevent/VibrationSystem.cpp
+            src/common/entity/WardenSpawnTracker.hpp
+            src/common/entity/WardenSpawnTracker.cpp
 
             # Common world - Gen
             src/common/world/gen/ProceduralChunkGenerator.cpp
@@ -1280,6 +1463,7 @@ set(GAME_SOURCES
             src/common/entity/GeneratedItemList.hpp
             src/common/entity/PlayerColors.cpp
             src/common/entity/PlayerColors.hpp
+            src/common/entity/PlayerArmPose.hpp
 
             # Common entity - mob system (MC net.minecraft.world.entity port)
             src/common/entity/EntityType.hpp
@@ -1295,17 +1479,29 @@ set(GAME_SOURCES
             src/common/entity/effect/MobEffects.hpp
             src/common/entity/Mob.cpp
             src/common/entity/Mob.hpp
+            src/common/entity/MobLeash.cpp
+            src/common/entity/Leashable.cpp
+            src/common/entity/Leashable.hpp
             src/common/entity/NeutralMob.cpp
+            src/common/entity/DyeColorUtil.cpp
             src/common/entity/NeutralMob.hpp
             src/common/entity/TamableAnimal.cpp
             src/common/entity/TamableAnimal.hpp
             src/common/entity/Monster.cpp
             src/common/entity/Monster.hpp
             src/common/entity/Animal.cpp
+            src/common/entity/Bucketable.cpp
+            src/common/entity/Bucketable.hpp
             src/common/entity/GeneratedEntityTypes.cpp
             src/common/entity/GeneratedMobDefs.cpp
             src/common/entity/mobs/GenericMobs.cpp
     src/common/entity/mobs/AnimatedMobs.cpp
+    src/common/entity/mobs/Allay.cpp
+    src/common/entity/mobs/Pillager.cpp
+    src/common/entity/raid/Raider.cpp
+    src/common/entity/raid/Raider.hpp
+    src/common/entity/raid/OminousBanner.cpp
+    src/common/entity/raid/OminousBanner.hpp
     src/common/entity/mobs/HushMobs.cpp
     src/common/entity/mobs/HushMobs.hpp
     src/common/entity/mobs/HushCreatures.cpp
@@ -1347,6 +1543,7 @@ set(GAME_SOURCES
     src/common/entity/npc/VillagerTrades.cpp
     src/common/entity/npc/VillagerTrades.hpp
     src/common/entity/npc/Villager.cpp
+    src/common/entity/npc/WanderingTrader.cpp
     src/common/entity/npc/Villager.hpp
     src/common/entity/ai/brain/TadpoleAi.cpp
     src/common/entity/ai/brain/HoglinAi.cpp
@@ -1369,6 +1566,7 @@ set(GAME_SOURCES
             src/common/entity/mobs/Monsters.cpp
             src/common/entity/mobs/Monsters.hpp
             src/common/entity/mobs/Animals.cpp
+            src/common/entity/mobs/WolfVariants.cpp
             src/common/entity/mobs/Animals.hpp
 
             # Common entity - AI
@@ -1411,17 +1609,21 @@ set(GAME_SOURCES
             src/common/entity/ai/goals/FoxGoals.cpp
             src/common/entity/ai/goals/FoxGoals.hpp
             src/common/entity/ai/goals/TurtleGoals.cpp
+            src/common/entity/ai/goals/TraderGoals.cpp
             src/common/entity/ai/goals/TurtleGoals.hpp
             src/common/entity/ai/goals/PandaGoals.cpp
             src/common/entity/ai/goals/PandaGoals.hpp
             src/common/entity/ai/goals/CatGoals.cpp
             src/common/entity/ai/goals/CatGoals.hpp
             src/common/entity/ai/goals/TamableGoals.cpp
+            src/common/entity/ai/goals/ParrotGoals.cpp
             src/common/entity/ai/goals/TamableGoals.hpp
             src/common/entity/ai/goals/DolphinGoals.cpp
             src/common/entity/ai/goals/DolphinGoals.hpp
             src/common/entity/ai/goals/HorseGoals.cpp
             src/common/entity/ai/goals/HorseGoals.hpp
+            src/common/entity/ai/goals/LlamaGoals.cpp
+            src/common/entity/ai/goals/LlamaGoals.hpp
             src/common/entity/ai/goals/HappyGhastGoals.cpp
             src/common/entity/ai/goals/HappyGhastGoals.hpp
             src/common/entity/RangedAttackMob.hpp
@@ -1433,6 +1635,8 @@ set(GAME_SOURCES
             src/common/entity/mobs/GeneratedSulfurCubeArchetypes.hpp
             src/common/entity/mobs/Fish.cpp
             src/common/entity/mobs/Fish.hpp
+            src/common/entity/mobs/TropicalFishVariant.cpp
+            src/common/entity/mobs/TropicalFishVariant.hpp
             src/common/entity/projectile/Arrow.cpp
             src/common/entity/projectile/Arrow.hpp
             src/common/entity/projectile/ResonanceArrow.cpp
@@ -1450,13 +1654,23 @@ set(GAME_SOURCES
             src/common/entity/projectile/LlamaSpit.cpp
             src/common/entity/projectile/LlamaSpit.hpp
             src/common/entity/projectile/ThrownTrident.cpp
+            src/common/entity/projectile/FireworkRocket.cpp
+            src/common/entity/projectile/FishingHook.cpp
             src/common/entity/projectile/ThrownTrident.hpp
             src/common/entity/projectile/EvokerFangs.cpp
             src/common/entity/projectile/EvokerFangs.hpp
             src/common/entity/LightningBolt.cpp
+            src/common/entity/OminousItemSpawner.cpp
+            src/common/entity/MobEquipment.cpp
+            src/common/entity/MountInventory.cpp
+            src/common/entity/MountInventory.hpp
+            src/common/entity/MobCrossbow.cpp
+            src/common/entity/TrialItems.cpp
             src/common/entity/LightningBolt.hpp
             src/common/entity/projectile/AreaEffectCloud.cpp
             src/common/entity/projectile/AreaEffectCloud.hpp
+            src/common/entity/ai/goals/RaiderGoals.cpp
+            src/common/entity/ai/goals/RaiderGoals.hpp
             src/common/entity/ai/goals/RestrictionGoals.cpp
             src/common/entity/ai/goals/RestrictionGoals.hpp
             src/common/entity/ai/goals/GuardianGoals.cpp
@@ -1543,23 +1757,38 @@ set(GAME_SOURCES
             src/server/commands/KillCommand.hpp
             src/server/commands/KillCommand.cpp
             src/server/commands/HealCommand.cpp
+            src/server/commands/WardenSpawnTrackerCommand.cpp
+            src/server/commands/WardenSpawnTrackerCommand.hpp
             src/server/commands/LootCommand.hpp
             src/server/commands/LootCommand.cpp
             src/server/commands/HealCommand.hpp
             src/server/commands/EffectCommand.cpp
             src/server/commands/EffectCommand.hpp
+            src/server/commands/ParticleCommand.cpp
+            src/server/commands/ParticleCommand.hpp
+            src/server/commands/PlaySoundCommand.cpp
+            src/server/commands/PlaySoundCommand.hpp
+            src/server/commands/StopSoundCommand.cpp
+            src/server/commands/StopSoundCommand.hpp
             src/server/commands/EntityStatsCommand.cpp
             src/server/commands/EntityStatsCommand.hpp
             src/server/commands/ShapeCommand.cpp
             src/server/commands/ShapeCommand.hpp
             src/server/commands/TimeCommand.hpp
             src/server/commands/TimeCommand.cpp
+            src/server/commands/WeatherCommand.hpp
+            src/server/commands/WeatherCommand.cpp
             src/server/commands/DimensionCommand.hpp
             src/server/commands/DimensionCommand.cpp
             src/server/commands/LocateCommand.hpp
             src/server/commands/LocateCommand.cpp
             src/server/level/LocateFinder.hpp
             src/server/level/LocateFinder.cpp
+            src/server/level/maps/MapDataStore.cpp
+            src/server/level/maps/MapItemServer.cpp
+            src/server/level/maps/MapFill.cpp
+            src/server/level/LiveFeatureLevel.cpp
+            src/server/level/LiveFeatureLevel.hpp
             src/server/commands/GameRuleCommand.hpp
             src/server/commands/GameRuleCommand.cpp
             src/server/commands/SeedCommand.cpp
@@ -1589,9 +1818,12 @@ set(GAME_SOURCES
             # ========================================================================
 
             src/server/player/ServerPlayer.cpp
+            src/server/player/SpectatorMode.cpp
             src/server/player/ServerPlayer.hpp
             src/server/commands/SummonCommand.cpp
             src/server/commands/SummonCommand.hpp
+            src/server/commands/SnbtParser.cpp      # MC TagParser: /summon <nbt>
+            src/server/commands/SnbtParser.hpp
             src/server/commands/SetBlockCommand.cpp
             src/server/commands/ForceLoadCommand.cpp
             src/server/commands/UpdateBlocksCommand.cpp
@@ -1609,8 +1841,13 @@ set(GAME_SOURCES
             src/server/entity/FallingBlockStore.hpp
             src/server/entity/LocalMobCapCalculator.hpp
             src/server/entity/ServerLevelBridge.cpp
+            src/server/entity/PlayerRiding.cpp
+            src/server/entity/PlayerRiding.hpp
+            src/server/entity/ShoulderEntities.cpp
             src/server/sound/ServerSoundBroadcaster.cpp
             src/server/sound/ServerSoundBroadcaster.hpp
+            src/server/particle/ServerParticleBroadcaster.cpp
+            src/server/particle/ServerParticleBroadcaster.hpp
             src/server/entity/ServerLevelBridge.hpp
             src/server/entity/ServerEntityTracker.cpp
             src/server/entity/ServerEntityTracker.hpp
@@ -1626,7 +1863,12 @@ set(GAME_SOURCES
             src/server/level/LevelEntityStore.hpp
             src/server/level/ServerLevel.cpp
             src/server/level/ServerLevel.hpp
+            src/server/level/NamedEntityIndex.cpp   # name= selectors reach named entities in unloaded chunks
+            src/server/level/NamedEntityIndex.hpp
             src/server/level/ChunkKeeper.cpp
+            src/server/level/WanderingTraderSpawner.cpp
+            src/server/level/PatrolSpawner.cpp
+            src/server/level/PatrolSpawner.hpp
             src/server/level/EndDragonFight.cpp
             src/server/level/EndDragonFight.hpp
             src/server/level/SilentWardenBossBars.cpp
@@ -1638,6 +1880,9 @@ set(GAME_SOURCES
             src/server/level/LighthouseGuide.cpp
             src/server/level/LighthouseGuide.hpp
             src/server/items/HushItems.cpp
+            src/server/items/ArchaeologyItems.cpp
+            src/server/items/TridentSpearItems.cpp   # TridentItem / spear use, the player's stab
+            src/server/items/FireworkItems.cpp
             src/server/items/AurelithItems.cpp
             src/server/items/HushItems.hpp
             src/client/renderer/gui/BossBarState.hpp
@@ -1646,14 +1891,18 @@ set(GAME_SOURCES
             src/server/level/PortalForcer.cpp
             src/server/level/PortalForcer.hpp
             src/server/level/PortalTravel.cpp
+            src/server/level/MobLevelTransfer.cpp
             src/server/level/PortalTravel.hpp
             src/server/portal/TwilightTeleporter.cpp
             src/server/portal/TwilightTeleporter.hpp
             src/server/level/StrongholdLocate.cpp
             src/server/level/StrongholdLocate.hpp
             src/server/level/EnderEyeThrow.cpp
+            src/server/level/FishingRodUse.cpp
             src/server/level/LightningSpawn.cpp
             src/server/level/LightningSpawn.hpp
+            src/server/level/ServerWeather.cpp
+            src/server/level/ServerWeather.hpp
 
             # Container menus (shared by client prediction and server authority)
             src/common/inventory/Container.hpp
@@ -1674,12 +1923,15 @@ set(GAME_SOURCES
             src/common/inventory/CraftingMenu.cpp
             src/common/inventory/CraftingMenu.hpp
             src/common/inventory/ChestMenu.cpp
+            src/common/inventory/MountInventoryMenu.cpp
+            src/common/inventory/MountInventoryMenu.hpp
             src/common/inventory/ChestMenu.hpp
             src/common/inventory/FurnaceMenu.cpp
             src/common/inventory/LecternMenu.hpp
             src/common/inventory/LecternMenu.cpp
             src/common/inventory/FurnaceMenu.hpp
             src/common/inventory/UtilityMenus.cpp
+            src/common/world/banner/BannerPatterns.cpp
             src/common/inventory/UtilityMenus.hpp
             src/common/inventory/SystemMenus.cpp
             src/common/inventory/SystemMenus.hpp
@@ -1698,6 +1950,9 @@ set(GAME_SOURCES
             # Container loot tables (runtime JSON, MC LootTable.fill)
             src/common/world/loot/ChestLootTables.hpp
             src/common/world/loot/ChestLootTables.cpp
+            src/common/world/map/MapColor.cpp
+            src/common/world/map/MapItemSavedData.cpp
+            src/common/world/map/MapItem.cpp
             src/common/world/enchantment/EnchantmentDefinitions.hpp
             src/common/world/enchantment/EnchantmentDefinitions.cpp
 
@@ -1721,8 +1976,11 @@ set(GAME_SOURCES
             src/server/world/storage/anvil/AnvilRegion.cpp
             src/server/world/storage/anvil/AnvilRegion.hpp
             src/server/world/storage/anvil/BlockEntityNbt.cpp
+            src/server/world/storage/anvil/VibrationNbt.hpp
+            src/server/world/storage/anvil/VibrationNbt.cpp
             src/server/world/storage/anvil/BlockEntityNbt.hpp
             src/server/world/storage/anvil/SpawnerNbt.cpp
+            src/server/world/storage/anvil/TrialChamberNbt.cpp
             src/server/world/storage/anvil/SpawnerNbt.hpp
             src/server/world/storage/anvil/ChunkSerializer.cpp
             src/server/world/storage/anvil/ChunkSerializer.hpp
@@ -1821,10 +2079,27 @@ set(GAME_SOURCES
             # causing LNK2019 for ItemRegistry::Initialize/Get/Size etc.
             src/common/entity/Item.cpp
             src/common/entity/Morph.cpp
+            src/common/entity/EntityNbtHints.cpp   # /summon {…} key + value completion
+            src/common/entity/EntityNbtHints.hpp
             src/common/entity/Morph.hpp
             src/common/entity/Item.hpp
             src/common/entity/ItemBehaviors.cpp
+            src/common/entity/FoodOnAStickItem.cpp    # MC FoodOnAStickItem (pig / strider boost)
+            src/common/entity/FoodOnAStickItem.hpp
+            src/common/entity/ItemBasedSteering.hpp   # MC ItemBasedSteering + ItemSteerable
             src/common/entity/ItemDurability.cpp
+            src/common/entity/ItemCooldowns.cpp      # MC ItemCooldowns (use_cooldown)
+            src/common/entity/Instruments.cpp        # MC Instrument registry (goat horns)
+            src/common/entity/ItemCooldowns.hpp
+            src/common/entity/MaceItem.cpp           # MC MaceItem: smash attack
+            src/common/entity/MaceItem.hpp
+            src/common/entity/SpearItem.cpp          # MC spears: KINETIC/PIERCING_WEAPON, ATTACK_RANGE
+            src/common/entity/SpearItem.hpp
+            src/common/entity/WeaponItems.hpp        # trident / spear item bridge (server/items/TridentSpearItems.cpp)
+            src/common/entity/ai/goals/SpearGoals.cpp # MC SpearUseGoal
+            src/common/entity/ai/goals/SpearGoals.hpp
+            src/common/core/Ease.hpp
+            src/common/entity/ImpulseContext.hpp
             src/common/entity/GeneratedItemDurability.cpp
             src/common/entity/GeneratedItemDurability.hpp
             src/common/entity/ConsumableBehavior.cpp
@@ -1838,6 +2113,9 @@ set(GAME_SOURCES
             src/common/entity/alchemy/PotionItems.cpp
             src/common/entity/BookItems.hpp
             src/common/entity/BookItems.cpp
+            src/common/entity/FireworkItems.cpp
+            src/common/entity/JukeboxSongs.hpp
+            src/common/entity/JukeboxSongs.cpp
             src/common/text/TextComponent.hpp
             src/common/text/TextComponent.cpp
             src/common/text/Language.hpp
@@ -1869,6 +2147,11 @@ set(GAME_SOURCES
             src/common/world/enchantment/EnchantmentEffects.hpp
             src/common/world/damagesource/DamageSourceInfo.cpp
             src/common/world/damagesource/DamageSourceInfo.hpp
+            src/common/world/damagesource/CombatTracker.cpp
+            src/common/entity/HorseTaming.cpp
+            src/common/entity/HorseTaming.hpp
+            src/common/entity/PlayerRideable.hpp
+            src/common/world/damagesource/CombatTracker.hpp
 
             # Portal Gun feature — Features.hpp ENABLE_PORTAL_GUN strips
             # bodies when off (so safe to always list). Missing from this
@@ -1877,6 +2160,10 @@ set(GAME_SOURCES
             src/common/entity/PortalGunBehavior.cpp
             src/server/portal/PortalRegistry.cpp
             src/server/portal/PortalRegistry.hpp
+            src/server/portal/PortalGunTracker.cpp
+            src/server/portal/PortalGunTracker.hpp
+            src/server/commands/PortalGunCommand.cpp
+            src/server/commands/PortalGunCommand.hpp
             src/client/portal/ClientPortalManager.cpp
             src/client/portal/ClientPortalManager.hpp
 
@@ -1891,6 +2178,7 @@ set(GAME_SOURCES
             src/client/portal/ClientImmersivePortals.cpp
             src/client/portal/ClientImmersivePortals.hpp
             src/client/world/ClientLevel.cpp
+            src/client/map/ClientMaps.cpp
             src/client/world/ClientLevel.hpp
             src/client/renderer/portal/ImmersivePortalRenderer.cpp
             src/client/renderer/portal/ImmersivePortalRenderer.hpp
@@ -1957,12 +2245,6 @@ endif()
 
 # 7) PCH
 target_precompile_headers(MyVoxelGame PRIVATE src/pch.hpp)
-# The vendored minizip is C: keep the C++ PCH off it (otherwise CMake builds
-# a C flavour of pch.hpp and fails on <cstdint>).
-set_source_files_properties(
-        ext/zlib/contrib/minizip/unzip.c
-        ext/zlib/contrib/minizip/ioapi.c
-        PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 
 # Hide console window on Windows (distribution builds only, requires -DJALIN=ON)
 if(WIN32 AND JALIN)
@@ -1990,8 +2272,6 @@ target_include_directories(MyVoxelGame PRIVATE
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/stb_image
-        ${PROJECT_SOURCE_DIR}/ext/zlib
-        ${PROJECT_SOURCE_DIR}/ext/zlib/contrib/minizip
         ${PROJECT_SOURCE_DIR}/ext/OpenAL/include
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
@@ -2014,7 +2294,7 @@ target_link_libraries(MyVoxelGame PRIVATE
         glad
         stb_image
         stb_vorbis     # Ogg Vorbis decoding (client/sound)
-        zlibstatic     # static zlib
+        libdeflate::libdeflate_static   # every deflate/zlib/gzip stream (common/core/Deflate)
         OpenAL::OpenAL       # static OpenAL
         imgui
         nlohmann_json::nlohmann_json  # ADDED: JSON library for block models
@@ -2629,15 +2909,6 @@ endif()
 if(CURL_FOUND)
     message(STATUS "Found curl - building ObeyCraft Launcher")
 
-    # Minizip sources for zip extraction
-    set(MINIZIP_SOURCES
-        ext/zlib/contrib/minizip/unzip.c
-        ext/zlib/contrib/minizip/ioapi.c
-    )
-    if(WIN32)
-        list(APPEND MINIZIP_SOURCES ext/zlib/contrib/minizip/iowin32.c)
-    endif()
-
     # Launcher sources
     set(LAUNCHER_SOURCES
         src/launcher/main.cpp
@@ -2661,7 +2932,9 @@ if(CURL_FOUND)
         # Minecraft worlds, so the launcher needs the NBT reader too. Its only
         # dependency is Log.cpp, already above.
         src/server/world/storage/NBTParser.cpp
-        ${MINIZIP_SOURCES}
+        # Update archives (Installer) and level.dat (GameDirectory): libdeflate.
+        src/common/core/Deflate.cpp
+        src/common/core/ZipArchive.cpp
     )
 
     if(APPLE)
@@ -2685,8 +2958,6 @@ if(CURL_FOUND)
         ${PROJECT_SOURCE_DIR}/ext/glad/include
         ${PROJECT_SOURCE_DIR}/ext/glm
         ${PROJECT_SOURCE_DIR}/ext/stb_image
-        ${PROJECT_SOURCE_DIR}/ext/zlib
-        ${PROJECT_SOURCE_DIR}/ext/zlib/contrib/minizip
         ${PROJECT_SOURCE_DIR}/ext/imgui
         ${PROJECT_SOURCE_DIR}/ext/imgui/backends
     )
@@ -2744,7 +3015,7 @@ if(CURL_FOUND)
     endif()
 
     target_link_libraries(ObeyCraftLauncher PRIVATE
-        glfw glad stb_image zlibstatic
+        glfw glad stb_image libdeflate::libdeflate_static
         imgui_launcher
         nlohmann_json::nlohmann_json
         CURL::libcurl
@@ -2881,7 +3152,7 @@ message(STATUS "  GLAD:               Bundled (ext/glad)")
 message(STATUS "  GLM:                Bundled (ext/glm)")
 message(STATUS "  STB Image:          Bundled (ext/stb_image)")
 message(STATUS "  STB Vorbis:         Bundled (ext/stb_vorbis)")
-message(STATUS "  zlib:               Bundled (ext/zlib)")
+message(STATUS "  libdeflate:         FetchContent (v1.24)")
 message(STATUS "  OpenAL:             Bundled (ext/OpenAL)")
 message(STATUS "  ImGui:              Bundled (ext/imgui)")
 message(STATUS "  nlohmann/json:      FetchContent (v3.11.3)")

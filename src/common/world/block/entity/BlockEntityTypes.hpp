@@ -88,6 +88,36 @@ namespace Game {
         constexpr uint16_t CHORD_SOCKET     = 42;
         constexpr uint16_t VOICE_PEDESTAL   = 43;
         constexpr uint16_t CHOIR_CABINET    = 44;
+        // MC BlockEntityTypes.JUKEBOX — the disc in a jukebox and its song
+        // player (JukeboxBlockEntity). 53, clear of the ids straight after
+        // 28 and 44 that parallel work claims next.
+        constexpr uint16_t JUKEBOX          = 53;
+        // MC BlockEntityTypes.SCULK_SENSOR / CALIBRATED_SCULK_SENSOR /
+        // SCULK_CATALYST / SCULK_SHRIEKER (SculkBlockEntities.hpp) — the
+        // vibration listeners and the catalyst's spreader. 58..61, clear of
+        // the band parallel work fills from 45 up.
+        constexpr uint16_t SCULK_SENSOR            = 58;
+        constexpr uint16_t CALIBRATED_SCULK_SENSOR = 59;
+        constexpr uint16_t SCULK_CATALYST          = 60;
+        constexpr uint16_t SCULK_SHRIEKER          = 61;
+        // MC BlockEntityTypes.TRIAL_SPAWNER / VAULT — the trial chambers'
+        // spawner (TrialSpawnerBlockEntity) and reward vault
+        // (VaultBlockEntity). 29 closes the vanilla band; 30 sits after it.
+        constexpr uint16_t TRIAL_SPAWNER   = 29;
+        constexpr uint16_t VAULT           = 30;
+        // MC BlockEntityTypes.BRUSHABLE_BLOCK (suspicious sand and gravel —
+        // the archaeology find, BrushableBlockEntity) and DECORATED_POT (the
+        // pot's sherds, its one stack and its loot table,
+        // DecoratedPotBlockEntity). 31 / 32, straight after the vault.
+        constexpr uint16_t BRUSHABLE_BLOCK = 31;
+        constexpr uint16_t DECORATED_POT   = 32;
+        // MC BlockEntityTypes.BANNER (every standing and wall banner),
+        // BELL and COPPER_GOLEM_STATUE (the eight statues).
+        constexpr uint16_t BANNER              = 33;
+        constexpr uint16_t BELL                = 34;
+        constexpr uint16_t COPPER_GOLEM_STATUE = 35;
+        // MC BlockEntityTypes.CHISELED_BOOKSHELF — the six book slots.
+        constexpr uint16_t CHISELED_BOOKSHELF  = 36;
         // ... 20..29 reserved for the remaining MC BE types (Sign, Banner,
         // Bed, Bell, Conduit, EnchantingTable, Lectern, MobSpawner,
         // TrialSpawner, Vault, StructureBlock, TestInstanceBlock, Piston,

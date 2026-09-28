@@ -18,7 +18,7 @@
 #include <glm/glm.hpp>
 #include <cstdint>
 
-namespace Game { class BlockEntity; }
+namespace Game { class BlockEntity; struct ItemStack; }
 
 namespace Render {
 
@@ -95,6 +95,14 @@ namespace Render {
         // one. Only a renderer that owns its item geometry should claim the
         // shortcut; everything else falls through and renders as a block.
         virtual bool SupportsBEWLR() const { return false; }
+
+        // The same hook with the item stack in hand, for renderers whose item
+        // form depends on its components (a decorated pot's sherds — MC's
+        // SpecialModelRenderer.extractArgument). Default: the block-only form.
+        virtual void RenderBEWLRStack(Game::BlockID blockId, const Game::ItemStack& /*stack*/,
+                                      const glm::mat4& mvp, const BEWLRLight& light = BEWLRLight{}) {
+            RenderBEWLR(blockId, mvp, light);
+        }
     };
 
 } // namespace Render

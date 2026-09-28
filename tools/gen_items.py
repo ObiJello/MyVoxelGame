@@ -40,6 +40,17 @@ MC2_ITEMS      = {
     "swamp_hut_map", "taiga_village_map", "warm_ocean_ruins_map",
     "woodland_mansion_map",
 }
+# 26.3 ColorCollection items (ColorCollection.registerItems(ItemIds.X, ...)):
+# one row per DyeColor, "<color>_<base>", in DyeColor order. The builder is a
+# multi-line lambda the line regexes cannot read, so each base carries its
+# stack size here (CushionItem: stacksTo(16)).
+MC2_COLORED_ITEMS: list[tuple[str, int]] = [
+    ("cushion", 16),   # the Cushion (world/entity/decoration/Cushion.java)
+]
+DYE_COLORS = [
+    "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+    "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
+]
 # ── Engine-only items ───────────────────────────────────────────────────────
 # Items this engine has that no Items.java does (The Hush, docs/the-hush.md).
 # They are appended AFTER every MC row, in this order, and become wire/save
@@ -458,6 +469,14 @@ def parse_items_java2(seen: set[str]) -> list[tuple[str, str, str, int]]:
                 continue
             seen.add(symbol)
             out.append((symbol, slug, detect_predicate(slug), max_stack_size(line)))
+    for base, max_stack in MC2_COLORED_ITEMS:
+        for color in DYE_COLORS:
+            slug = f"{color}_{base}"
+            symbol = slug.upper()
+            if symbol in seen:
+                continue
+            seen.add(symbol)
+            out.append((symbol, slug, detect_predicate(slug), max_stack))
     return out
 
 

@@ -3,6 +3,10 @@
 #include "common/world/level/Explosion.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/particle/ParticleOptions.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/enchantment/EnchantmentHelper.hpp"
 
 #include <cmath>
 #include <memory>
@@ -47,6 +51,14 @@ namespace Game {
             if (len > 1.0e-9 && m_accelerationPower != 0.0) {
                 v += velocity / len * m_accelerationPower;
             }
+            // In water: four BUBBLEs a quarter of the motion behind.
+            if (IsInWater()) {
+                for (int i = 0; i < 4; ++i) {
+                    m_level->AddParticle(ParticleKind::Bubble, position.x - velocity.x * 0.25,
+                                         position.y - velocity.y * 0.25, position.z - velocity.z * 0.25,
+                                         velocity.x, velocity.y, velocity.z);
+                }
+            }
             const float inertia = IsInWater() ? GetLiquidInertia() : GetInertia();
             velocity = v * static_cast<double>(inertia);
         }
@@ -64,6 +76,22 @@ namespace Game {
         if (ShouldBurn()) IgniteForSeconds(1);
 
         if (hit.IsHit() && IsAlive()) OnHit(hit);
+
+        // MC createParticleTrail (the client copy draws it).
+        ParticleOptions trail;
+        if (m_level && GetTrailParticle(trail)) {
+            m_level->AddParticle(trail, position.x, position.y + 0.5, position.z, 0.0, 0.0, 0.0);
+        }
+    }
+
+    bool HurtingProjectile::GetTrailParticle(ParticleOptions& out) const {
+        out = ParticleOptions(ParticleKind::Smoke);
+        return true;
+    }
+
+    bool DragonFireball::GetTrailParticle(ParticleOptions& out) const {
+        out = ParticleOptions::Power(ParticleKind::DragonBreath, 1.0f);
+        return true;
     }
 
     // ── SmallFireball ──────────────────────────────────────────────────────
@@ -203,7 +231,8 @@ namespace Game {
             std::vector<LivingEntity*> players;
             m_level->GetPlayers(players);
             for (LivingEntity* p : players) {
-                if (p && p->GetAABB().Intersects(searchBox)) nearby.push_back(p);
+                // getEntitiesOfClass: EntitySelector.NO_SPECTATORS.
+                if (p && !p->IsSpectator() && p->GetAABB().Intersects(searchBox)) nearby.push_back(p);
             }
 
             auto cloud = std::make_unique<AreaEffectCloud>(m_level);
@@ -211,7 +240,8 @@ namespace Game {
             if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
                 cloud->SetOwner(livingOwner);
             }
-            // MC: setCustomParticle(DRAGON_BREATH) — no particle system.
+            // MC: setCustomParticle(PowerParticleOption(DRAGON_BREATH, 1)).
+            cloud->SetCustomParticle(ParticleOptions::Power(ParticleKind::DragonBreath, 1.0f));
             cloud->SetRadius(3.0f);
             cloud->SetDuration(600);
             cloud->SetRadiusPerTick((7.0f - cloud->GetRadius()) /
@@ -229,7 +259,10 @@ namespace Game {
                 }
             }
 
-            // MC level event 2006 (dragon-breath impact) — no particle system.
+            // MC level event 2006: the dragon-breath impact burst (data 1 =
+            // with its sound, -1 = silent).
+            m_level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_DRAGON_FIREBALL_SPLASH, BlockPosition(),
+                                    IsSilent() ? -1 : 1);
             m_level->AddFreshEntity(std::move(cloud));
             Discard();
         }
@@ -238,9 +271,10 @@ namespace Game {
     // ── Wind charges ───────────────────────────────────────────────────────
 
     void AbstractWindCharge::Tick() {
-        // MC: a charge that flies 30 blocks over the build limit pops. The
-        // engine's world tops out at y=320 (MC 1.18 world height).
-        if (m_level && !m_level->IsClientSide() && position.y > 320.0 + 30.0) {
+        // MC: a charge that flies 30 blocks over the build limit
+        // (getBlockY() > level.getMaxY() + 30) pops where it is.
+        if (m_level && !m_level->IsClientSide() &&
+            BlockPosition().y > m_level->GetMaxY() + 30) {
             Explode(position);
             Discard();
             return;
@@ -250,27 +284,40 @@ namespace Game {
 
     bool AbstractWindCharge::CanHitEntity(const Entity& entity) const {
         if (dynamic_cast<const AbstractWindCharge*>(&entity)) return false;
+        if (entity.GetType() == EntityTypeId::EndCrystal) return false;
         return HurtingProjectile::CanHitEntity(entity);
     }
 
     void AbstractWindCharge::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
 
-        if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
-            livingOwner->SetLastHurtMob(&target);
+        auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner());
+        if (livingOwner) livingOwner->SetLastHurtMob(&target);
+        // MC damageSources().windCharge(this, owner): direct = this charge,
+        // causing = the owner (or nobody). 1 damage, then the target's
+        // post-attack enchantment effects (its Thorns).
+        if (DealHitDamage(target, hit, MobDamageSource::Projectile, 1.0f,
+                          GetOwner() ? GetOwner() : this)) {
+            const DamageSourceInfo source =
+                DamageSourceInfo::Of(MobDamageSource::Projectile, livingOwner, this);
+            EnchantmentHelper::DoPostAttackEffects(*m_level, target, source);
         }
-        DealHitDamage(target, hit, MobDamageSource::Projectile, 1.0f,
-                      GetOwner() ? GetOwner() : this);
         Explode(position);
     }
 
     void AbstractWindCharge::OnHitBlock(const HitResult& hit) {
         if (!m_level || m_level->IsClientSide()) return;
-        // MC nudges the burst 0.25 blocks off the struck face along its
-        // normal; the block march has no face normal, so the burst happens at
-        // the impact point — a quarter-block difference inside a radius-1.2+
-        // sphere.
-        Explode(hit.location);
+        // MC: the burst sits a quarter block off the struck face, along its
+        // normal (hit location + normal * 0.25). The hit carries a point, not
+        // a face, so the face is recovered from where on the cell the point
+        // lies — the same recovery NotifyBlockOfProjectileHit makes.
+        const glm::dvec3 local = hit.location - glm::dvec3(hit.blockPos) - glm::dvec3(0.5);
+        const double ax = std::abs(local.x), ay = std::abs(local.y), az = std::abs(local.z);
+        glm::dvec3 normal(0.0);
+        if (ay >= ax && ay >= az)  normal.y = local.y > 0.0 ? 1.0 : -1.0;
+        else if (ax >= az)         normal.x = local.x > 0.0 ? 1.0 : -1.0;
+        else                       normal.z = local.z > 0.0 ? 1.0 : -1.0;
+        Explode(hit.location + normal * 0.25);
         Discard();
     }
 

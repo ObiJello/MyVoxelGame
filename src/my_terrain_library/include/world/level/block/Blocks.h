@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #include "world/level/block/Block.h"
 #include "world/level/block/state/BlockState.h"
 #include "world/level/block/blocks/StairBlock.h"
@@ -418,7 +420,8 @@ public:
     static BlockState* resolveState(const std::string& name, const std::map<std::string, std::string>& properties);
 
 private:
-    static bool s_initialized;
+    static void bootstrapBlocks();   // bootstrap()'s body, run once
+    static std::atomic<bool> s_initialized;
     static std::unordered_map<std::string, Block*> s_blocksByName;
 
     /**

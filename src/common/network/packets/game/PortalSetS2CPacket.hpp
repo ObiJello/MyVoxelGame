@@ -44,6 +44,11 @@ namespace Network {
         // takes the dimension it is standing in.
         static constexpr int8_t kDimensionUnknown = 127;
         int8_t   dimensionId = kDimensionUnknown;
+        // 1 = the portal opens now (a shot, /portalgun move): the client plays
+        // the open animation and the partner's static ping. 0 = it already
+        // existed (the join / catch-up sync): shown fully open at once.
+        // Trailing, optional: absent reads as 0.
+        uint8_t  opening = 0;
     };
 
     namespace Serialization {
@@ -63,6 +68,7 @@ namespace Network {
             b.WriteFloat(p.upZ);
             b.WriteByte(p.immersive);
             b.WriteByte(static_cast<uint8_t>(p.dimensionId));
+            b.WriteByte(p.opening);
             return b.GetData();
         }
 
@@ -83,6 +89,7 @@ namespace Network {
             p.immersive = r.HasMore() ? r.ReadByte() : 0;
             p.dimensionId = r.HasMore() ? static_cast<int8_t>(r.ReadByte())
                                         : PortalSetS2CPacket::kDimensionUnknown;
+            p.opening = r.HasMore() ? r.ReadByte() : 0;
             return p;
         }
 

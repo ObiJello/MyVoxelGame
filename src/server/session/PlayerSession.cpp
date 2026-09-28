@@ -1,6 +1,10 @@
 // File: src/server/session/PlayerSession.cpp
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/entity/WeaponItems.hpp"
+#include "common/network/packets/game/PlayerSwingS2CPacket.hpp"
 #include "server/level/ServerLevel.hpp"
 #include "server/items/HushItems.hpp"
+#include "server/entity/ShoulderEntities.hpp"
 #include "common/world/portal/PortalFamily.hpp"
 #include "server/entity/MobManager.hpp"
 #include "common/world/level/WorldDrops.hpp"
@@ -8,6 +12,7 @@
 #include "PlayerSession.hpp"
 #include "common/world/block/TntBlock.hpp"
 #include "common/core/Mth.hpp"
+#include "common/core/TickParallel.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../network/ServerConnection.hpp"
@@ -28,9 +33,12 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/fluid/FlowingFluid.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include "common/world/block/SnowLayerBlock.hpp"
 #include "common/world/block/RedstoneComponents.hpp"
 #include <limits>
 #include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/JukeboxBlockEntity.hpp"
+#include "common/network/packets/game/LevelEventS2CPacket.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/entity/ChestBlockEntity.hpp"
 #include "common/world/block/ContainerOpeners.hpp"
@@ -47,30 +55,47 @@
 #include "common/inventory/MerchantMenu.hpp"
 #include "common/entity/npc/Villager.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
+#include "common/entity/Leashable.hpp"
+#include "common/world/block/CrossCollision.hpp"
+#include "server/entity/PlayerRiding.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/entity/vehicle/Boat.hpp"
+#include "common/entity/vehicle/VehicleContainer.hpp"
+#include "common/world/damagesource/CombatTracker.hpp"
 #include "common/entity/BookItems.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/world/block/FallingBlock.hpp"   // AnvilDamaged
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/decoration/Cushion.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/PlayerMovementSounds.hpp"
 #include "common/sound/SoundType.hpp"
 #include "common/physics/Physics.hpp"             // Game::AABB for the monster sweep
+#include "common/entity/Morph.hpp"                // the live player box a placement tests
+#include "common/world/block/TurtleEggBlock.hpp"
 #include "common/world/level/Explosion.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
 #include "common/entity/mobs/Monsters.hpp"          // ZombifiedPiglin: rests only when calm
+#include "common/entity/ai/brain/PiglinAi.hpp"
+#include "common/world/tags/DataTags.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"       // MakeGenericMob: the echo core's Silent Warden
 #include "common/entity/mobs/HushCreatures.hpp"     // OnResonantCrystalBroken: the crystal golems' alarm
 #include "common/world/spawn/SpawnPlacements.hpp"   // floor/headroom tests for where it emerges
 #include "common/entity/NeutralMob.hpp"
 #include "../entity/ServerLevelBridge.hpp"
 #include "../IntegratedServer.hpp"
+#include "../player/SpectatorMode.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 #include "../entity/MorphCarry.hpp"
 #include "../portal/ImmersivePortalRegistry.hpp"   // self-guarded by ENABLE_IMMERSIVE_PORTALS
 #include "common/inventory/AbstractContainerMenu.hpp"
 #include "common/inventory/ChestMenu.hpp"
+#include "common/inventory/MountInventoryMenu.hpp"
+#include "common/entity/MountInventory.hpp"
+#include "common/network/packets/game/VehiclePackets.hpp"
 #include "common/inventory/CraftingMenu.hpp"
 #include "common/world/block/entity/BaseContainerBlockEntity.hpp"
 #include "common/world/block/entity/FurnaceBlockEntity.hpp"
@@ -85,6 +110,7 @@
 #include "common/core/Features.hpp"
 #if ENABLE_PORTAL_GUN
 #include "../portal/PortalRegistry.hpp"
+#include "../portal/PortalGunTracker.hpp"
 #endif
 #include "common/entity/Item.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -94,7 +120,9 @@
 #include <iterator>
 #include <array>
 #include <cmath>
-#include <cstdlib>   // std::abs(int) in WakeSilentWarden
+#include <cstdio>
+#include <cstdlib>   // std::abs(int) in WakeSilentWarden; std::getenv
+#include <chrono>
 #include <optional>
 
 
@@ -108,16 +136,26 @@ namespace {
     //
     // Server-only on purpose: the resulting block change is broadcast, so the
     // client corrects itself rather than having to predict the fix-up.
-    void SetChestType(Game::World& world, const glm::ivec3& pos, const char* type) {
+    //
+    // `asBlock` is the new partner's block for a copper chest: MC
+    // CopperChestBlock.updateShape hands a connected copper chest its
+    // partner's block (`neighbourState.getBlock().withPropertiesOf(state)`),
+    // so the two halves always share one oxidation and one wax.
+    void SetChestType(Game::World& world, const glm::ivec3& pos, const char* type,
+                      Game::BlockID asBlock = Game::BlockID::Air) {
         const Game::BlockID id = world.GetBlock(pos.x, pos.y, pos.z);
-        if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) return;
-        const auto& def = Game::BlockRegistry::GetStateDefinition(id);
+        if (!Game::IsChestBlock(id)) return;
+        const Game::BlockID writeId =
+            (asBlock != Game::BlockID::Air && Game::IsCopperChestBlock(id) &&
+             Game::IsCopperChestBlock(asBlock)) ? asBlock : id;
+        const auto& def = Game::BlockRegistry::GetStateDefinition(writeId);
         const Game::BlockState cur = world.GetBlockState(pos.x, pos.y, pos.z);
-        if (cur.GetValueByName("type") == type) return;      // already right
+        if (cur.GetValueByName("type") == type && writeId == id) return;      // already right
         Game::BlockRegistry::BlockStateDefinition::PropertyMap props;
-        props["facing"] = std::string(cur.GetValueByName("facing"));
-        props["type"]   = type;
-        world.SetBlock(pos.x, pos.y, pos.z, id, Game::World::UpdateFlags::All,
+        props["facing"]      = std::string(cur.GetValueByName("facing"));
+        props["type"]        = type;
+        props["waterlogged"] = std::string(cur.GetValueByName("waterlogged"));
+        world.SetBlock(pos.x, pos.y, pos.z, writeId, Game::World::UpdateFlags::All,
                        def.IndexOf(props));
     }
 
@@ -211,7 +249,7 @@ namespace {
         for (const glm::ivec3& off : kHorizontal) {
             const glm::ivec3 n = pos + off;
             const Game::BlockID id = world.GetBlock(n.x, n.y, n.z);
-            if (id != Game::BlockID::Chest && id != Game::BlockID::TrappedChest) continue;
+            if (!Game::IsChestBlock(id)) continue;
             const Game::BlockState st = world.GetBlockState(n.x, n.y, n.z);
             const auto claimed = ChestPartnerCell(st, n);
             if (claimed && *claimed == pos) SetChestType(world, n, "single");
@@ -318,6 +356,37 @@ namespace Server {
         }
     }
 
+    void PlayerSession::StartDigEffects(Game::World& world, const glm::ivec3& pos, uint8_t face) {
+        // RaycastHit::hitFace (0 +X, 1 -X, 2 +Y, 3 -Y, 4 +Z, 5 -Z) as MC's
+        // Direction ordinal (DOWN, UP, NORTH, SOUTH, WEST, EAST).
+        static constexpr int kDirection[6] = {5, 4, 1, 0, 3, 2};
+        m_dig.active = true;
+        m_dig.pos = pos;
+        m_dig.face = face < 6 ? kDirection[face] : 1;
+        m_dig.dimension = world.GetDimension();
+        m_dig.ticks = 0;
+    }
+
+    void PlayerSession::TickDigEffects() {
+        // MC ServerPlayerGameMode.tick while isDestroyingBlock: every tick a
+        // levelEvent — 2020 (crack particles AND the hit sound) when the
+        // ticks spent destroying are a multiple of four, 2019 (particles
+        // only) otherwise — to every player in range but the digger, whose
+        // own client already shows its crack and plays its hit.
+        if (!m_dig.active || !m_player) return;
+        IntegratedServer* server = g_integratedServer.get();
+        ServerLevel* level = server ? server->GetLevel(m_dig.dimension) : nullptr;
+        Game::World* world = level ? level->World() : nullptr;
+        if (!world || world->GetBlock(m_dig.pos.x, m_dig.pos.y, m_dig.pos.z) == Game::BlockID::Air) {
+            m_dig.active = false;
+            return;
+        }
+        ++m_dig.ticks;
+        const int event = m_dig.ticks % 4 == 0 ? Game::LevelEvent::PARTICLES_AND_SOUND_DESTROY_PROGRESS
+                                                : Game::LevelEvent::PARTICLES_DESTROY_PROGRESS;
+        world->PlayLevelEvent(Game::SoundExcept(m_player), event, m_dig.pos, m_dig.face);
+    }
+
     void PlayerSession::Tick(int64_t serverTick) {
         PROFILE_ZONE_N("SessionTick");
         auto tickStart = std::chrono::steady_clock::now();
@@ -326,6 +395,8 @@ namespace Server {
         if (m_state != State::PLAYING && m_state != State::JOINING) {
             return;
         }
+
+        TickDigEffects();
         
         // Latency now comes from the connection's MC-style EMA, refreshed on
         // the network I/O thread by ServerConnection::HandleKeepAliveResponse
@@ -387,7 +458,15 @@ namespace Server {
         // never advanced).
         if (m_player) {
             ASSERT_SERVER_THREAD();
-            m_player->tick(SessionWorld(), static_cast<int>(serverTick));
+            // Not while the server is paused: MC IntegratedServer.tickServer
+            // skips super.tickServer — player ticks included — for as long as
+            // it is paused (every player's menu up, or the owner's join
+            // transition hold). Effects, air, fire and the void check wait
+            // with the rest of the world. (A /tick freeze is not a pause:
+            // players keep ticking through it, as MC's isEntityFrozen says.)
+            if (!(g_integratedServer && g_integratedServer->IsPaused())) {
+                m_player->tick(SessionWorld(), static_cast<int>(serverTick));
+            }
 
             // MC ServerPlayer.die (:932) ends with
             //     this.connection.markClientUnloadedAfterDeath();
@@ -397,9 +476,20 @@ namespace Server {
             // same, one call at the moment of death.
             TickSleep();
 
+            // MC Player.rideTick / ServerLevel.tickPassenger: the cushion
+            // seat (PlayerRiding.hpp) — get up on a sneak, put back in the
+            // seat otherwise.
+            PlayerRiding::Tick(*this);
+            TickSwing();
+
             // The Hush's items: the module clock (cooldowns) and the echo
             // compass's periodic vault lookup (server/items/HushItems).
             HushItems::TickPlayer(*this, serverTick);
+
+            // MC Player.aiStep → ServerPlayer.handleShoulderEntities: the
+            // shoulder parrots' chatter and drop rules, plus the drops the
+            // hurt / spectator paths asked for (server/entity/ShoulderEntities).
+            ShoulderEntities::Tick(*m_player);
 
             const bool deadNow = m_player->isDead();
             if (deadNow && !m_wasPlayerDead) {
@@ -426,6 +516,21 @@ namespace Server {
                                                   m_player->getLastDamageSource(),
                                                   m_player->getLastAttackerName()),
                         0xFFFFFFFFu);
+                }
+
+                // MC ServerPlayer.die: removeEntitiesOnShoulder (subject to
+                // its 20-tick guard) — the parrots fly off the corpse.
+                ShoulderEntities::RemoveEntitiesOnShoulder(*m_player);
+
+                // MC LivingEntity.die: gameEvent(ENTITY_DIE) before the death
+                // drops — a sculk catalyst in range takes the XP the body
+                // would pay (the view's SkipDropExperience, read by
+                // DropInventoryOnDeath).
+                if (auto* server = g_integratedServer.get()) {
+                    if (Server::PlayerEntityView* view = server->GetPlayerEntityView(GetConnectionId())) {
+                        view->ClearSkipDropExperience();
+                        view->GameEvent(Game::GameEventId::EntityDie);
+                    }
                 }
 
                 DropInventoryOnDeath();
@@ -544,6 +649,10 @@ namespace Server {
 
     void PlayerSession::Cleanup() {
         m_state = State::DISCONNECTING;
+
+        // Off a cushion, with the saved position moved off the seat (no
+        // broadcast: the session manager's lock is held — PlayerRiding.hpp).
+        PlayerRiding::OnDisconnect(*this);
 
         // MC ServerPlayer.disconnect → stopSleepInBed(true, false): the bed
         // is released. Only the block is touched here — the session manager
@@ -818,7 +927,7 @@ namespace Server {
         // A big re-centre (teleport, dimension change, join): report the
         // first batches' send order so a regression to scan order shows up
         // in the log. Walking a chunk boundary enters one row — not logged.
-        if (entered > 64) m_chunkOrderLogBatches = 12;
+        if (entered > 64) m_chunkOrderLogBatches = kChunkOrderLogBatches;
 
         Log::Info("UpdateChunkTracking: player %u loaders=%zu watched=%zu entered=%d left=%d "
                   "simulated=%zu (+%d -%d)",
@@ -865,21 +974,82 @@ namespace Server {
         return false;
     }
 
-    int PlayerSession::DistanceSqToNearestLoader(Game::DimensionId dimension,
-                                                 Game::Math::ChunkPos pos) const {
-        int best = INT32_MAX;
+    double PlayerSession::SendPriorityDistance(Game::DimensionId dimension, Game::Math::ChunkPos pos,
+                                               int* outRoute, double* outDirect) const {
+        constexpr double kInf = std::numeric_limits<double>::infinity();
+        auto chunkDist = [&](int cx, int cz) {
+            const double dx = static_cast<double>(pos.x - cx);
+            const double dz = static_cast<double>(pos.z - cz);
+            return std::sqrt(dx * dx + dz * dz);
+        };
+
+        // The player's own view (and its simulation ring, same centre).
+        double direct = kInf;
         for (const ChunkLoader& loader : m_loaders) {
             if (loader.dimension != dimension) continue;
-            const int dx = pos.x - loader.view.center.x;
-            const int dz = pos.z - loader.view.center.z;
-            best = std::min(best, dx * dx + dz * dz);
+            if (loader.source != ChunkLoader::Source::Player &&
+                loader.source != ChunkLoader::Source::Simulation) continue;
+            direct = std::min(direct, chunkDist(loader.view.center.x, loader.view.center.z));
         }
-        if (best == INT32_MAX) {
-            const int dx = pos.x - m_anchorChunk.x;
-            const int dz = pos.z - m_anchorChunk.z;
-            best = dx * dx + dz * dz;
+        double best = direct;
+        int bestRoute = -1;
+
+        // Through a portal: the walk to its surface, then the far leg from
+        // where the view comes out — the far side of a portal beside the
+        // player ranks with the chunks beside the player. Both legs in
+        // chunks; the far leg from the chunk D lies in, like the direct one
+        // from the anchor chunk.
+        bool routed = false;
+        for (size_t i = 0; i < m_sendRoutes.size(); ++i) {
+            const Game::PortalRoute::Route& r = m_sendRoutes[i];
+            if (r.dimension != dimension) continue;
+            routed = true;
+            const int fx = static_cast<int>(std::floor(r.farPoint.x)) >> 4;
+            const int fz = static_cast<int>(std::floor(r.farPoint.z)) >> 4;
+            const double d = r.entryCost / 16.0 + chunkDist(fx, fz) * r.invScale;
+            if (d < best) { best = d; bestRoute = static_cast<int>(i); }
         }
+
+        // A portal loader in a level no route reaches (the player stands
+        // behind its portal, or its portal is an indirect one): its own
+        // centre, the order this had before routes.
+        if (!routed) {
+            for (const ChunkLoader& loader : m_loaders) {
+                if (loader.dimension != dimension || loader.IsSimulation() ||
+                    loader.source == ChunkLoader::Source::Player) continue;
+                best = std::min(best, chunkDist(loader.view.center.x, loader.view.center.z));
+            }
+        }
+        if (best == kInf) best = chunkDist(m_anchorChunk.x, m_anchorChunk.z);
+
+        if (outRoute)  *outRoute  = bestRoute;
+        if (outDirect) *outDirect = direct;
         return best;
+    }
+
+    void PlayerSession::LogSendRouteCoverage(const char* when) const {
+        constexpr int kRadius = 2;
+        for (size_t i = 0; i < m_sendRoutes.size(); ++i) {
+            const Game::PortalRoute::Route& r = m_sendRoutes[i];
+            const DimensionSendState& st = Dim(r.dimension);
+            const int fx = static_cast<int>(std::floor(r.farPoint.x)) >> 4;
+            const int fz = static_cast<int>(std::floor(r.farPoint.z)) >> 4;
+            int watched = 0, loaded = 0, sent = 0, total = 0;
+            for (int dz = -kRadius; dz <= kRadius; ++dz) {
+                for (int dx = -kRadius; dx <= kRadius; ++dx) {
+                    ++total;
+                    const Game::Math::ChunkPos p{fx + dx, fz + dz};
+                    if (IsWatching(r.dimension, p)) ++watched;
+                    const bool isSent = st.sent.count(p) > 0;
+                    if (isSent) ++sent;
+                    if (isSent || st.pending.count(p) > 0) ++loaded;   // pending = loaded, queued to send
+                }
+            }
+            Log::Info("[ChunkOrder] player %u %s: route %zu portal #%u -> %s far chunk (%d,%d), %.1f blocks to it: "
+                      "%d/%d watched, %d/%d loaded, %d/%d sent",
+                      m_playerId, when, i, r.portalId, std::string(Game::DimensionName(r.dimension)).c_str(),
+                      fx, fz, r.entryCost, watched, total, loaded, total, sent, total);
+        }
     }
 
     void PlayerSession::ForgetDimensionSilently(Game::DimensionId dimension) {
@@ -967,7 +1137,7 @@ namespace Server {
                 int slot;
                 Game::Math::ChunkPos pos;
                 uint64_t stamp;
-                int distSq;
+                double dist;   // SendPriorityDistance, chunks
             };
             std::vector<UnchangedRef> unchangedRefs;
             for (int slot = 0; slot < Game::kDimensionCount; ++slot) {
@@ -981,11 +1151,11 @@ namespace Server {
                     if (known == st.clientStamps.end() || !IsWatching(dim, pos)) continue;
                     auto chunk = world->GetLoadedChunk(pos.x, pos.z);
                     if (!chunk || chunk->ModStamp() != known->second) continue;
-                    unchangedRefs.push_back({slot, pos, known->second, DistanceSqToNearestLoader(dim, pos)});
+                    unchangedRefs.push_back({slot, pos, known->second, SendPriorityDistance(dim, pos)});
                 }
             }
             const size_t sendCount = std::min(unchangedRefs.size(), kMaxUnchangedPerTick);
-            const auto nearer = [](const UnchangedRef& a, const UnchangedRef& b) { return a.distSq < b.distSq; };
+            const auto nearer = [](const UnchangedRef& a, const UnchangedRef& b) { return a.dist < b.dist; };
             if (sendCount < unchangedRefs.size()) {
                 std::partial_sort(unchangedRefs.begin(), unchangedRefs.begin() + sendCount,
                                   unchangedRefs.end(), nearer);
@@ -1022,14 +1192,18 @@ namespace Server {
 
         int maxBatch = static_cast<int>(m_batchQuota);
 
-        // Collect loaded chunks from EVERY dimension, sorted by distance from
-        // the loader that wants them — nearest first across all worlds, as
-        // the mod's PlayerChunkLoading does.
+        // Collect loaded chunks from EVERY dimension, nearest first across
+        // all worlds, as the mod's PlayerChunkLoading does — "nearest"
+        // counted through the portals the player can look through
+        // (SendPriorityDistance), so the far side of a portal beside them
+        // is sent with the ground beside them, not as a later tier.
         struct ChunkDist {
             Game::DimensionId dimension;
             Game::Math::ChunkPos pos;
             std::shared_ptr<Game::Chunk> chunk;
-            int distSq;
+            double dist;     // chunks, portal-aware
+            int    route;    // winning index into m_sendRoutes, -1 direct
+            double direct;   // player-loader distance (+inf in another level), for the log
         };
         std::vector<ChunkDist> candidates;
         candidates.reserve(GetPendingChunksToSendCount());
@@ -1062,7 +1236,10 @@ namespace Server {
                     if (outNotResident) outNotResident->push_back(PendingChunkRef{dim, pos});
                     continue;
                 }
-                candidates.push_back({dim, pos, chunk, DistanceSqToNearestLoader(dim, pos)});
+                int route = -1;
+                double direct = 0.0;
+                const double dist = SendPriorityDistance(dim, pos, &route, &direct);
+                candidates.push_back({dim, pos, chunk, dist, route, direct});
             }
             for (const auto& pos : staleChunks) {
                 st.pending.erase(pos);
@@ -1076,10 +1253,10 @@ namespace Server {
         size_t toSend = std::min(static_cast<size_t>(maxBatch), candidates.size());
         if (candidates.size() > toSend) {
             std::partial_sort(candidates.begin(), candidates.begin() + toSend, candidates.end(),
-                              [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+                              [](const ChunkDist& a, const ChunkDist& b) { return a.dist < b.dist; });
         } else {
             std::sort(candidates.begin(), candidates.end(),
-                      [](const ChunkDist& a, const ChunkDist& b) { return a.distSq < b.distSq; });
+                      [](const ChunkDist& a, const ChunkDist& b) { return a.dist < b.dist; });
         }
 
         // Send ChunkBatchStartS2C
@@ -1087,44 +1264,30 @@ namespace Server {
             auto data = Network::Serialization::Serialize(Network::ChunkBatchStartS2CPacket{});
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchStartS2C), data);
         }
+        // Start of the batch's send span (see ChunkBatchFinishedS2CPacket).
+        const auto batchSendStart = std::chrono::steady_clock::now();
 
         // Send each chunk
         size_t sentCount = 0;
-        // A time budget on top of the count quota. The client may ask for up
-        // to 256 chunks a tick and serialising one costs ~90 µs, so a burst
-        // after a join or a portal crossing was 20-27 ms of a 50 ms tick
-        // (Tracy, 2026-09-04: every tick over 25 ms in the capture was this).
-        // Nearest-first order is kept: what does not fit stays pending for
-        // the next tick, a delay nobody can see, and the tick stays flat.
+        // A time budget on top of the count quota. The client may ask for
+        // hundreds of chunks a tick and serialising one costs ~90 us, so a
+        // burst after a join or a portal crossing was 20-27 ms of a 50 ms
+        // tick (Tracy, 2026-09-04: every tick over 25 ms in the capture was
+        // this). Nearest-first order is kept: what does not fit stays pending
+        // for the next tick, and the tick stays flat.
+        //
+        // The chunks are serialised in waves on the tick-parallel workers
+        // (the section copies and the byte stream only READ the chunk, which
+        // the server thread owns and is blocked on here), then sent in order.
+        // Serially, the budget held a saved view to ~130 chunks a tick while
+        // the client asked for 300-500 (2026-09-26).
         constexpr auto kSerializeBudget = std::chrono::milliseconds(12);
         const auto sendStart = std::chrono::steady_clock::now();
-        for (size_t i = 0; i < toSend; ++i) {
-            if (i > 0 && std::chrono::steady_clock::now() - sendStart > kSerializeBudget) break;
-            const auto& cd = candidates[i];
-            DimensionSendState& st = Dim(cd.dimension);
+        const size_t waveSize = std::max<size_t>(8, Core::ParallelWidth() * 4);
+
+        // One chunk's ChunkDataS2C bytes, built off the server thread's hands.
+        auto buildChunkPacket = [](const ChunkDist& cd) -> std::vector<uint8_t> {
             PROFILE_ZONE_N("SerializeChunk");
-
-            // Retained on the client and unchanged since -> 20-byte packet.
-            {
-                const uint64_t stamp = cd.chunk->ModStamp();
-                auto known = st.clientStamps.find(cd.pos);
-                if (known != st.clientStamps.end() && known->second == stamp) {
-                    Network::ChunkUnchangedS2CPacket unchanged;
-                    unchanged.chunkX = cd.pos.x; unchanged.chunkZ = cd.pos.z; unchanged.modStamp = stamp;
-                    m_connection->SendPacketIn(cd.dimension,
-                                               static_cast<uint8_t>(Network::PacketId::ChunkUnchangedS2C),
-                                               Network::Serialization::Serialize(unchanged));
-                    st.pending.erase(cd.pos);
-                    st.sent.insert(cd.pos);
-                    if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
-                    sentCount++;
-                    ++m_unchangedSent;
-                    continue;
-                }
-                st.clientStamps[cd.pos] = stamp;
-            }
-
-            // Build ChunkDataS2CPacket
             Network::ChunkDataS2CPacket packet;
             packet.chunkX = cd.pos.x;
             packet.chunkZ = cd.pos.z;
@@ -1148,15 +1311,9 @@ namespace Server {
             };
 
             // EVERY section, in order, with no skipping — the wire is
-            // positional now and section Y is the index. This loop used to
-            // `continue` past all-air sections and record the survivors in a
-            // bitmask; the omission took their BIOMES with it, which is why
-            // anything placed high above terrain tinted with the fallback
-            // biome. MC has no such filter and no such mask.
-            //
-            // An all-air section costs about seven bytes: a two-byte count,
-            // then two single-value containers, each one `bits` byte plus a
-            // one-entry VarInt palette and no words at all.
+            // positional and section Y is the index (MC has no filter and no
+            // mask). An all-air section costs about seven bytes: a two-byte
+            // count, then two single-value containers.
             for (int sectionY = 0; sectionY < Game::Math::SECTIONS_PER_CHUNK; ++sectionY) {
                 const auto* section = cd.chunk->GetSection(sectionY);
 
@@ -1164,13 +1321,9 @@ namespace Server {
 
                 // Defensive, and load-bearing if it ever fires: a `continue`
                 // here would shift every later section down one slot on a
-                // positional wire. Emit a placeholder instead so the stream
-                // stays in phase. GetSection is total for an in-range index,
+                // positional wire. GetSection is total for an in-range index,
                 // so this is unreachable today.
                 if (!section) {
-                    Log::Warning("[PlayerSession] Chunk (%d, %d) section %d missing; "
-                                 "sending an empty placeholder to keep the stream aligned",
-                                 cd.pos.x, cd.pos.z, sectionY);
                     sectionData.states.bits = 0;
                     sectionData.states.palette = { Game::BlockState{}.RawId() };
                     sectionData.biomes.bits = 0;
@@ -1179,19 +1332,12 @@ namespace Server {
                     continue;
                 }
 
-                // MC nonEmptyBlockCount. Counted off the palette rather than by
-                // walking voxels: the container already knows how many of each
-                // distinct state it holds. IsAllAir short-circuits the common
-                // sky case to zero without touching the palette at all.
-                uint32_t nonAir = 0;
-                if (!section->IsAllAir()) {
-                    section->States().ForEachValue([&](uint32_t stateId, int count) {
-                        if (Game::BlockState::FromRawId(stateId).Block() != Game::BlockID::Air) {
-                            nonAir += static_cast<uint32_t>(count);
-                        }
-                    });
-                }
-                sectionData.blockCount = static_cast<uint16_t>(nonAir > 0xFFFFu ? 0xFFFFu : nonAir);
+                // MC nonEmptyBlockCount: LevelChunkSection.write sends the
+                // maintained census, and so does this (ChunkSection keeps it
+                // on every write and recounts on every bulk adopt). Recounting
+                // it here walked all 4096 voxels of every non-empty section,
+                // per chunk, per player.
+                sectionData.blockCount = section->nonAirCount;
 
                 copyContainer(section->States(), sectionData.states);
                 copyContainer(section->Biomes(), sectionData.biomes);
@@ -1199,57 +1345,126 @@ namespace Server {
                 packet.sections.push_back(std::move(sectionData));
             }
 
-            // Biomes ride inside each section's container above, where MC
-            // keeps them — not as a flat per-chunk array.
-
             // The column's light rides at the tail (MC
-            // ClientboundLevelChunkWithLightPacket). Serialised right here on
-            // the server thread, where the light engine also runs, so the
-            // layers are read at rest.
+            // ClientboundLevelChunkWithLightPacket), read at rest: the light
+            // engine runs on the server thread, which is waiting here.
             packet.lightSource = &cd.chunk->light;
             packet.lightHasSky = Game::DimensionHasSkyLight(cd.dimension);
+            return Network::Serialization::Serialize(packet);
+        };
 
-            auto data = Network::Serialization::Serialize(packet);
-            packet.lightSource = nullptr;
-            ++m_statChunksSent;
-            m_statChunkBytes += data.size();
-            m_connection->SendPacketIn(cd.dimension,
-                                       static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), data);
+        std::vector<size_t> wave;             // candidate indices to build
+        std::vector<Network::NetworkConnection::PreparedPacket> built;
+        std::vector<size_t> builtPayloadBytes;
+        // Deflated on the workers too, for a connection that compresses (a
+        // remote player): the network thread only frames and writes.
+        const int compressionThreshold = m_connection->CompressionThresholdHint();
+        size_t next = 0;
+        while (next < toSend) {
+            if (next > 0 && std::chrono::steady_clock::now() - sendStart > kSerializeBudget) break;
 
-            // The chunk's block entities follow it (MC carries them inside
-            // ClientboundLevelChunkWithLightPacket). Without this a chest
-            // only ever reached a client that watched it being placed: a
-            // chunk streamed in — a rejoin, a walk back — had the chest
-            // block and nothing to draw or open in it.
-            for (const auto& [localPos, be] : cd.chunk->GetAllBlockEntities()) {
-                if (!be || !be->GetType()) continue;
-                const glm::ivec3 world = be->GetWorldPos();
-                Network::BlockEntityDataS2CPacket bePacket(world.x, world.y, world.z,
-                                                           be->GetType()->TypeId());
-                Network::PacketBuffer scratch;
-                be->Save(scratch);
-                bePacket.dataBlob = scratch.GetData();
-                m_connection->SendPacketIn(cd.dimension,
-                                           static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
-                                           Network::Serialization::Serialize(bePacket));
+            // Pass 1 (in order): unchanged chunks go out as they come; the
+            // rest form the next wave. A wave never runs past an unchanged
+            // chunk out of order, since the unchanged packet goes first.
+            wave.clear();
+            while (next < toSend && wave.size() < waveSize) {
+                const auto& cd = candidates[next];
+                DimensionSendState& st = Dim(cd.dimension);
+                // Retained on the client and unchanged since -> 20-byte packet.
+                const uint64_t stamp = cd.chunk->ModStamp();
+                auto known = st.clientStamps.find(cd.pos);
+                if (known != st.clientStamps.end() && known->second == stamp) {
+                    if (!wave.empty()) break;   // keep the order: send the wave first
+                    Network::ChunkUnchangedS2CPacket unchanged;
+                    unchanged.chunkX = cd.pos.x; unchanged.chunkZ = cd.pos.z; unchanged.modStamp = stamp;
+                    m_connection->SendPacketIn(cd.dimension,
+                                               static_cast<uint8_t>(Network::PacketId::ChunkUnchangedS2C),
+                                               Network::Serialization::Serialize(unchanged));
+                    st.pending.erase(cd.pos);
+                    st.sent.insert(cd.pos);
+                    if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
+                    sentCount++;
+                    ++m_unchangedSent;
+                    ++next;
+                    continue;
+                }
+                wave.push_back(next);
+                ++next;
             }
+            if (wave.empty()) continue;
 
-            // Move from pending to sent
-            st.pending.erase(cd.pos);
-            st.sent.insert(cd.pos);
-            // Portals (and, later, anything else anchored in the chunk) ride
-            // right behind the terrain so the client never holds one without
-            // the blocks it sits in.
-            if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
-            sentCount++;
+            // Pass 2: build the wave's packets in parallel.
+            built.assign(wave.size(), {});
+            builtPayloadBytes.assign(wave.size(), 0);
+            Core::ParallelFor(wave.size(), 1, [&](size_t w) {
+                const std::vector<uint8_t> payload = buildChunkPacket(candidates[wave[w]]);
+                builtPayloadBytes[w] = payload.size();
+                built[w] = Network::NetworkConnection::PreparePacket(
+                    static_cast<uint8_t>(Network::PacketId::ChunkDataS2C), payload, compressionThreshold);
+            });
 
-            Log::Debug("Sent chunk (%d, %d) [%s] to player %u", cd.pos.x, cd.pos.z,
-                       std::string(Game::DimensionName(cd.dimension)).c_str(), m_playerId);
+            // Pass 3 (in order): send, with each chunk's block entities behind it.
+            for (size_t w = 0; w < wave.size(); ++w) {
+                const auto& cd = candidates[wave[w]];
+                DimensionSendState& st = Dim(cd.dimension);
+                st.clientStamps[cd.pos] = cd.chunk->ModStamp();
+                ++m_statChunksSent;
+                m_statChunkBytes += builtPayloadBytes[w];
+                m_connection->SendPreparedIn(cd.dimension, std::move(built[w]));
+
+                // The chunk's block entities follow it (MC carries them inside
+                // ClientboundLevelChunkWithLightPacket). Without this a chest
+                // only ever reached a client that watched it being placed.
+                for (const auto& [localPos, be] : cd.chunk->GetAllBlockEntities()) {
+                    if (!be || !be->GetType()) continue;
+                    const glm::ivec3 world = be->GetWorldPos();
+                    Network::BlockEntityDataS2CPacket bePacket(world.x, world.y, world.z,
+                                                               be->GetType()->TypeId());
+                    Network::PacketBuffer scratch;
+                    be->Save(scratch);
+                    bePacket.dataBlob = scratch.GetData();
+                    m_connection->SendPacketIn(cd.dimension,
+                                               static_cast<uint8_t>(Network::PacketId::BlockEntityDataS2C),
+                                               Network::Serialization::Serialize(bePacket));
+                    // A jukebox playing in a chunk this player newly receives
+                    // (walking up to it, joining, a reopened world, a chunk
+                    // back from an unload): its song starts for them at the
+                    // point it has reached — level event 1010 with the
+                    // engine's startTicks. Positional, so it carries only as
+                    // far as vanilla's 64 blocks.
+                    if (const auto* jukebox = dynamic_cast<const Game::JukeboxBlockEntity*>(be.get());
+                        jukebox && jukebox->GetSongPlayer().IsPlaying()) {
+                        Network::LevelEventS2CPacket event;
+                        event.type = 1010;   // LevelEvent.SOUND_PLAY_JUKEBOX_SONG
+                        event.x = world.x;
+                        event.y = world.y;
+                        event.z = world.z;
+                        event.data = jukebox->GetSongPlayer().GetSongId();
+                        event.startTicks = jukebox->GetSongPlayer().GetTicksSinceSongStarted();
+                        m_connection->SendPacketIn(cd.dimension,
+                                                   static_cast<uint8_t>(Network::PacketId::LevelEventS2C),
+                                                   Network::Serialization::Serialize(event));
+                    }
+                }
+
+                // Move from pending to sent
+                st.pending.erase(cd.pos);
+                st.sent.insert(cd.pos);
+                // Portals (and, later, anything else anchored in the chunk) ride
+                // right behind the terrain so the client never holds one without
+                // the blocks it sits in.
+                if (g_integratedServer) g_integratedServer->OnChunkSentToClient(*this, cd.dimension, cd.pos);
+                sentCount++;
+            }
         }
 
         // Send ChunkBatchFinishedS2C
         {
-            Network::ChunkBatchFinishedS2CPacket finishPacket(static_cast<int32_t>(sentCount));
+            const auto sendMicros = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - batchSendStart).count();
+            Network::ChunkBatchFinishedS2CPacket finishPacket(
+                static_cast<int32_t>(sentCount),
+                static_cast<uint32_t>(std::clamp<long long>(sendMicros, 0, 0x7FFFFFFF)));
             auto data = Network::Serialization::Serialize(finishPacket);
             m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::ChunkBatchFinishedS2C), data);
         }
@@ -1264,12 +1479,50 @@ namespace Server {
         // means the chunks are BECOMING loaded out of order (load/generation
         // queue), not being sent out of order.
         if (m_chunkOrderLogBatches > 0 && sentCount > 0) {
+            // The first batch after the re-centre also shows the portal
+            // routes and what they did to the order: each route's walk to
+            // its surface and far chunk, then the first chunks it pulled
+            // forward, with their direct distance (or "-": another level)
+            // beside the portal-adjusted one.
+            if (m_chunkOrderLogBatches == kChunkOrderLogBatches && !m_sendRoutes.empty()) {
+                for (size_t i = 0; i < m_sendRoutes.size(); ++i) {
+                    const Game::PortalRoute::Route& r = m_sendRoutes[i];
+                    Log::Info("[ChunkOrder] player %u route %zu: portal #%u into %s, %.1f blocks to the surface, "
+                              "far chunk (%d,%d), far scale 1/%.2f",
+                              m_playerId, i, r.portalId, std::string(Game::DimensionName(r.dimension)).c_str(),
+                              r.entryCost,
+                              static_cast<int>(std::floor(r.farPoint.x)) >> 4,
+                              static_cast<int>(std::floor(r.farPoint.z)) >> 4,
+                              r.invScale > 0.0 ? 1.0 / r.invScale : 0.0);
+                }
+                std::string routed;
+                size_t shown = 0;
+                for (size_t i = 0; i < sentCount && shown < 12; ++i) {
+                    const ChunkDist& cd = candidates[i];
+                    if (cd.route < 0) continue;
+                    char buf[160];
+                    if (std::isinf(cd.direct)) {
+                        std::snprintf(buf, sizeof(buf), " [#%zu %s (%d,%d) direct - via route %d %.1f]", i,
+                                      std::string(Game::DimensionName(cd.dimension)).c_str(),
+                                      cd.pos.x, cd.pos.z, cd.route, cd.dist);
+                    } else {
+                        std::snprintf(buf, sizeof(buf), " [#%zu %s (%d,%d) direct %.1f via route %d %.1f]", i,
+                                      std::string(Game::DimensionName(cd.dimension)).c_str(),
+                                      cd.pos.x, cd.pos.z, cd.direct, cd.route, cd.dist);
+                    }
+                    routed += buf;
+                    ++shown;
+                }
+                Log::Info("[ChunkOrder] player %u first batch, portal-routed chunks (send index, chunks):%s",
+                          m_playerId, routed.empty() ? " none in this batch" : routed.c_str());
+            }
             --m_chunkOrderLogBatches;
-            Log::Info("[ChunkOrder] player %u batch: sent %zu of %zu loaded-pending, distance %.1f..%.1f chunks "
-                      "from the nearest loader, anchor (%d,%d) %s",
-                      m_playerId, sentCount, candidates.size(),
-                      std::sqrt(static_cast<double>(candidates.front().distSq)),
-                      std::sqrt(static_cast<double>(candidates[sentCount - 1].distSq)),
+            size_t viaPortal = 0;
+            for (size_t i = 0; i < sentCount; ++i) if (candidates[i].route >= 0) ++viaPortal;
+            Log::Info("[ChunkOrder] player %u batch: sent %zu of %zu loaded-pending (%zu through a portal), "
+                      "distance %.1f..%.1f chunks (portal-aware), anchor (%d,%d) %s",
+                      m_playerId, sentCount, candidates.size(), viaPortal,
+                      candidates.front().dist, candidates[sentCount - 1].dist,
                       m_anchorChunk.x, m_anchorChunk.z,
                       std::string(Game::DimensionName(candidates.front().dimension)).c_str());
         }
@@ -1299,7 +1552,11 @@ namespace Server {
             m_batchRtt.sumMs += ms;
             ++m_batchRtt.count;
         }
-        m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, 256.0f);   // matches the client clamp (was vanilla's 64)
+        // The client decides its rate (ClientPacketHandler::SetLocalServer: 256
+        // a tick from a remote server, 512 from its own integrated one); this
+        // only bounds it. Vanilla clamps at 64.
+        static const float s_rateMax = [] { const char* e = std::getenv("OBEY_CHUNK_RATE_MAX"); return e ? static_cast<float>(std::atof(e)) : 512.0f; }();
+        m_desiredChunksPerTick = std::isnan(desiredRate) ? 0.01f : std::clamp(desiredRate, 0.01f, s_rateMax);
         if (m_unackedBatches == 0) m_batchQuota = 1.0f;
         m_maxUnackedBatches = 10;
 
@@ -1476,6 +1733,27 @@ namespace Server {
         // being well-behaved.
         if (!HasClientLoaded()) return;
 
+        // MC handleAnimate → Player.swing(hand): the arm swing reaches every
+        // other player (ClientboundAnimatePacket), whatever the position part
+        // of this packet turns out to be worth.
+        if (packet.swungMainHand && m_player) {
+            NoteSwing();
+            Network::PlayerSwingS2CPacket swing;
+            swing.playerId = m_playerId;
+            swing.hand = 0;
+            const auto data = Network::Serialization::Serialize(swing);
+            if (auto* server = g_integratedServer.get()) {
+                if (PlayerSessionManager* sessions = server->GetSessionManager()) {
+                    for (const auto& other : sessions->GetAllSessions()) {
+                        if (!other || other.get() == this) continue;
+                        if (ServerConnection* conn = other->GetConnection()) {
+                            conn->SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerSwingS2C), data);
+                        }
+                    }
+                }
+            }
+        }
+
         // A move stamped with another dimension was produced before the
         // client learned of (or predicted) a dimension change; its
         // coordinates belong to the other world.
@@ -1511,6 +1789,25 @@ namespace Server {
             return;
         }
 
+        // A spectator looking through another entity is not moving their own
+        // body: MC's client sends no position while it is not the camera
+        // (LocalPlayer.isControlledCamera) and ServerPlayer.tick snaps them to
+        // the camera every tick. Only the sneak key matters — it is how they
+        // leave (wantsToStopRiding, Spectator::TickCamera).
+        if (m_player && m_player->isCameraDetached()) {
+            m_player->setSneaking(packet.isCrouching);
+            return;
+        }
+
+        // A passenger's position is its vehicle's (MC LocalPlayer.sendChanges
+        // sends only ServerboundMovePlayerPacket.Rot while riding, plus the
+        // input whose shift gets them up — PlayerRiding::Tick reads it).
+        if (m_player && m_player->isPassenger()) {
+            m_player->setRotation(packet.rotation.x, packet.rotation.y);
+            m_player->setSneaking(packet.isCrouching);
+            return;
+        }
+
         // Movement statistics BEFORE the position write (needs the old Y /
         // horizontal delta) — fall-distance accumulation + exhaustion
         // sources, mirroring ServerPlayer.checkMovementStatistics and
@@ -1523,12 +1820,22 @@ namespace Server {
         if (m_player) {
             m_player->setSneaking(packet.isCrouching);
             m_player->setMorphAnim(packet.morphAnim);   // /morph: relayed on the next broadcast
+            // A deliberate deviation: the shoulder parrots leave ONLY on a jump
+            // made while sneaking (and on death / spectator / leaving) — never
+            // for falling, damage, water, flying or sleeping as in MC.
+            if (packet.jumpedThisTick && packet.isCrouching) m_player->requestShoulderEntityRemoval();
         }
     }
 
     void PlayerSession::UpdateMovementStats(const Network::PlayerMoveC2SPacket& packet) {
         ServerPlayer& p = *m_player;
-        const glm::dvec3 oldPos = p.getPosition();
+        // MC handleMovePlayer measures every delta from the position the
+        // server last ACCEPTED (its player never moves on its own). The
+        // ServerPlayer's m_position also carries updatePosition's gravity
+        // drift between packets — at a fall's speed that drift outruns the
+        // client, so the next packet read as an upward move and reset the
+        // fall (the mace never smashed, crits undercounted).
+        const glm::dvec3 oldPos = p.getMovePacketBase();
         const glm::dvec3 newPos = packet.position;
 
         // First move after join/teleport snaps can produce huge deltas —
@@ -1562,14 +1869,98 @@ namespace Server {
         //    (SAFE_FALL_DISTANCE = 3, FALL_DAMAGE_MULTIPLIER = 1).
         //    Sanity clamp: terminal-velocity falls in a 384-block world
         //    can't meaningfully exceed ~512 blocks.
+        //
+        // MC ServerPlayer.checkFallDamage runs first: a mace smash armed
+        // spawnExtraParticlesOnFall, and the landing after the bounce throws
+        // up clamp(50 * fallDistance, 0, 200) BLOCK particles of the block
+        // landed on, from the top face of that block. `fallDistance` is the
+        // server's own — the fall since the bounce reset it — plus this
+        // move's descent.
+        {
+            Game::ImpulseContext& impulse = p.impulseContext();
+            const double serverFall = static_cast<double>(p.getFallDistance()) + std::max(0.0, -dy);
+            if (impulse.spawnExtraParticlesOnFall && packet.onGround && serverFall > 0.0) {
+                if (Game::World* world = SessionWorld()) {
+                    const glm::ivec3 onPos(static_cast<int>(std::floor(newPos.x)),
+                                           static_cast<int>(std::floor(newPos.y - 0.2)),
+                                           static_cast<int>(std::floor(newPos.z)));
+                    const Game::BlockState onState = world->GetBlockState(onPos.x, onPos.y, onPos.z);
+                    const int particles = static_cast<int>(std::clamp(50.0 * serverFall, 0.0, 200.0));
+                    world->SendParticles(Game::ParticleOptions::Block(onState),
+                                         onPos.x + 0.5, onPos.y + 1.0, onPos.z + 0.5, particles,
+                                         0.30000001192092896, 0.30000001192092896, 0.30000001192092896,
+                                         0.15000000596046448);
+                }
+                impulse.spawnExtraParticlesOnFall = false;
+            }
+        }
+
         if (packet.fallDistance > 0.0f && !p.isFlying() && !inWater) {
+            // MC checkFallDamage's landing, with this player's view as the
+            // entity (the landed-on block's fallOn itself runs from the
+            // server's own movement — see "doCheckFallDamage" below).
+            if (IntegratedServer* server = g_integratedServer.get()) {
+                ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+                ServerLevelBridge* bridge = level ? level->MobLevel() : nullptr;
+                Game::World* world = SessionWorld();
+                PlayerEntityView* view = bridge ? bridge->GetPlayerView(GetConnectionId()) : nullptr;
+                if (world && view) {
+                    const glm::ivec3 onPos(static_cast<int>(std::floor(newPos.x)),
+                                           static_cast<int>(std::floor(newPos.y - 0.2)),
+                                           static_cast<int>(std::floor(newPos.z)));
+                    const Game::BlockState onState = world->GetBlockState(onPos.x, onPos.y, onPos.z);
+                    // MC checkFallDamage: gameEvent(HIT_GROUND, position,
+                    // Context.of(this, <main supporting block, else the
+                    // landed-on one>)) — a jump's landing is heard too.
+                    if (!p.isSpectator()) {
+                        Game::BlockState landed = world->GetBlockState(
+                            onPos.x, static_cast<int>(std::floor(newPos.y - 1.0e-5)), onPos.z);
+                        if (landed.Block() == Game::BlockID::Air) landed = onState;
+                        world->GameEvent(Game::GameEventId::HitGround, newPos,
+                                         Game::GameEventContext::Of(view, landed));
+                    }
+                }
+            }
             // In body heights, not blocks: a player half the size falls
             // twice as far relative to themselves (the scaled portal's
             // "the world is just bigger" rule, see ApplyGravity).
             const float fd = std::min(packet.fallDistance, 512.0f) / std::max(p.getScale(), 0.05f);
             // SAFE_FALL_DISTANCE is 3 plus JUMP_BOOST's +1 per level.
             const int dmg = static_cast<int>(std::floor(fd + 1.0e-6f - p.getSafeFallDistance()));
-            if (dmg > 0) {
+            // MC LivingEntity.causeFallDamage: a fall that began with an
+            // impulse (the player's own wind charge, a mace bounce) pays only
+            // for the height below where the impulse happened — the context
+            // is spent by a landing at or above it, otherwise asked to end.
+            // The dust above keeps the RAW fall (checkFallDamage reads
+            // fallDistance, not the effective one).
+            const double effectiveFall = p.impulseContext().EffectiveFallDistance(
+                static_cast<double>(std::min(packet.fallDistance, 512.0f)), newPos.y);
+            const float effectiveFd = static_cast<float>(effectiveFall) / std::max(p.getScale(), 0.05f);
+            const int fallDamage =
+                static_cast<int>(std::floor(effectiveFd + 1.0e-6f - p.getSafeFallDistance()));
+            // MC LivingEntity.checkFallDamage: the landing's dust — BLOCK
+            // particles of the block landed on (getOnPosLegacy), up to 375,
+            // scaled by the fall power, to everyone nearby (the faller too).
+            // Engine rule: an invisible player (/invisible or INVISIBILITY)
+            // leaves no dust.
+            const bool hiddenPlayer = p.isInvisible() || p.hasEffect(Game::MobEffectId::Invisibility);
+            if (dmg > 0 && !hiddenPlayer) {
+                if (Game::World* world = SessionWorld()) {
+                    const glm::ivec3 onPos(static_cast<int>(std::floor(newPos.x)),
+                                           static_cast<int>(std::floor(newPos.y - 0.2)),
+                                           static_cast<int>(std::floor(newPos.z)));
+                    const Game::BlockState onState = world->GetBlockState(onPos.x, onPos.y, onPos.z);
+                    if (onState.Block() != Game::BlockID::Air) {
+                        const double power = static_cast<double>(dmg);
+                        const double scale = std::min(0.20000000298023224 + power / 15.0, 2.5);
+                        world->SendParticles(Game::ParticleOptions::Block(onState), newPos.x, newPos.y, newPos.z,
+                                             static_cast<int>(150.0 * scale), 0.0, 0.0, 0.0, 0.15000000596046448);
+                    }
+                }
+            }
+            if (fallDamage > 0) {
+                // MC: a landing that hurts ends the impulse outright.
+                p.impulseContext().Reset();
                 // LivingEntity.causeFallDamage's sounds — the fall damage
                 // sound and the landed-on block's — for everyone but the
                 // faller, whose client played them on landing
@@ -1578,13 +1969,13 @@ namespace Server {
                 if (Game::World* world = SessionWorld(); world && !p.isFlying() &&
                     p.getGameMode() != GameMode::CREATIVE && p.getGameMode() != GameMode::SPECTATOR) {
                     std::vector<Game::PlayerMovementSound> landing;
-                    Game::PlayerMovementSounds::Landing(*world, newPos, packet.fallDistance, p.getScale(),
-                                                        p.getSafeFallDistance(), landing);
+                    Game::PlayerMovementSounds::Landing(*world, newPos, static_cast<float>(effectiveFall),
+                                                        p.getScale(), p.getSafeFallDistance(), landing);
                     for (const Game::PlayerMovementSound& s : landing) {
                         world->PlaySound(m_player, newPos, s.event, Game::SoundSource::Players, s.volume, s.pitch);
                     }
                 }
-                p.damage(static_cast<float>(dmg), DamageSource::FALL);
+                p.damage(static_cast<float>(fallDamage), DamageSource::FALL);
             }
 
             // NOT ported, by choice: MC FarmBlock.fallOn (FarmBlock.java:91-100)
@@ -1615,9 +2006,25 @@ namespace Server {
             // to know; a sprint through water is the swim).
             in.swimming = packet.isSprinting && inWater;
             std::vector<Game::PlayerMovementSound> sounds;
-            p.movementSounds().Tick(*world, in, p.soundRandom(), sounds);
+            Game::PlayerMovementSounds::Events events;
+            p.movementSounds().Tick(*world, in, p.soundRandom(), sounds, &events);
             for (const Game::PlayerMovementSound& s : sounds) {
                 world->PlaySound(m_player, newPos, s.event, Game::SoundSource::Players, s.volume, s.pitch);
+            }
+            // The same replay's game events (MC Entity.move on the server's
+            // player): STEP with the state stepped on, SWIM, SPLASH — what a
+            // sculk sensor or a warden hears of a walking player.
+            if (events.step || events.swim || events.splash) {
+                Game::Entity* source = nullptr;
+                if (IntegratedServer* server = g_integratedServer.get()) {
+                    source = server->GetPlayerEntityView(GetConnectionId());
+                }
+                if (events.splash) world->GameEvent(source, Game::GameEventId::Splash, newPos);
+                if (events.step) {
+                    world->GameEvent(Game::GameEventId::Step, newPos,
+                                     Game::GameEventContext::Of(source, events.stepState));
+                }
+                if (events.swim) world->GameEvent(source, Game::GameEventId::Swim, newPos);
             }
         }
 
@@ -1661,15 +2068,77 @@ namespace Server {
         // (`if (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION))
         // resetFallDistance()`), so neither a slow faller nor a levitating
         // player can land a critical hit.
+        //
+        // MC handleMovePlayer also resets it on any move UPWARD
+        // (`if (movedUpwards) player.resetFallDistance()`): a player thrown
+        // up by a wind charge, or bounced by a mace smash, starts counting
+        // again from the top of the arc — which is what a mace's next smash
+        // (and Wind Burst's 1.5-block requirement) measure.
+        // MC handleMovePlayer → player.doCheckFallDamage(dx, dy, dz, onGround)
+        // → checkFallDamage: this move's descent joins the accumulated fall,
+        // and the move that touches down with any fall behind it hands the
+        // block landed on (getOnPosLegacy) its fallOn — ONCE per landing,
+        // from the server's own movement, as vanilla does (a turtle egg
+        // jumped on loses one egg one time in three). The fall DAMAGE keeps
+        // the client's exact landing report above.
+        if (packet.onGround && !p.isFlying()) {
+            const double fall = static_cast<double>(p.getFallDistance()) +
+                                ((!inWater && dy < 0.0) ? -dy : 0.0);
+            IntegratedServer* server = g_integratedServer.get();
+            ServerLevel* level = server ? server->GetLevel(Game::DimensionFromRaw(GetDimensionId())) : nullptr;
+            ServerLevelBridge* bridge = level ? level->MobLevel() : nullptr;
+            Game::World* world = SessionWorld();
+            PlayerEntityView* view = bridge ? bridge->GetPlayerView(GetConnectionId()) : nullptr;
+            if (fall > 0.0 && world && view) {
+                const glm::ivec3 onPos(static_cast<int>(std::floor(newPos.x)),
+                                       static_cast<int>(std::floor(newPos.y - 0.2)),
+                                       static_cast<int>(std::floor(newPos.z)));
+                const Game::BlockState onState = world->GetBlockState(onPos.x, onPos.y, onPos.z);
+                if (const Game::BlockFallOnFn fallOn = Game::BlockRegistry::Get(onState.Block()).fallOn) {
+                    fallOn(*world, onPos, onState, *view, fall);
+                }
+            }
+        }
         if (packet.onGround || p.isFlying() ||
             p.hasEffect(Game::MobEffectId::SlowFalling) ||
             p.hasEffect(Game::MobEffectId::Levitation)) {
             p.resetFallDistance();
         } else if (dy < 0.0) {
             p.addFallDistance(static_cast<float>(-dy));
+        } else if (dy > 0.0) {
+            p.resetFallDistance();
+        }
+        // MC handleMovePlayer: `if (isOnGround || hasLandedInLiquid ||
+        // onClimbable || isSpectator || isFallFlying || isAutoSpinAttack)
+        // player.tryResetCurrentImpulseContext()` — once the grace window
+        // after a launch has run out, touching down (or into water, or onto
+        // a ladder) ends the impulse.
+        {
+            bool onClimbable = false;
+            if (IntegratedServer* server = g_integratedServer.get()) onClimbable = server->IsOnClimbable(p);
+            const bool landedInLiquid = inWater && dy < 1.0e-5;
+            if (packet.onGround || landedInLiquid || onClimbable ||
+                p.getGameMode() == GameMode::SPECTATOR) {
+                p.impulseContext().TryReset();
+            }
         }
         p.setOnGround(packet.onGround);
         p.setSprinting(packet.isSprinting);
+        // Elytra flight: the client's START_FALL_FLYING / stop, re-checked.
+        p.setFallFlyingFromClient(packet.fallFlying);
+        // MC LivingEntity.handleFallFlyingCollisions — the glide the client
+        // flew into a wall: the fall-damage sound (big past 4) for everyone
+        // but the glider, whose client played it, then FLY_INTO_WALL.
+        if (packet.flyIntoWallDamage > 0.0f && std::isfinite(packet.flyIntoWallDamage)) {
+            const float dmg = std::min(packet.flyIntoWallDamage, 1024.0f);
+            if (Game::World* world = SessionWorld()) {
+                world->PlaySound(m_player, newPos,
+                                 static_cast<int>(dmg) > 4 ? Game::SoundEvents::PLAYER_BIG_FALL
+                                                           : Game::SoundEvents::PLAYER_SMALL_FALL,
+                                 Game::SoundSource::Players, 1.0f, 1.0f);
+            }
+            p.damage(dmg, DamageSource::FLY_INTO_WALL);
+        }
 
         // MC LivingEntity.getKnownMovement — the per-tick movement the sweep
         // check compares against the walk speed. Move packets are one per
@@ -1704,6 +2173,11 @@ namespace Server {
             Log::Debug("HandleBlockAction: client not loaded yet");
             return;
         }
+
+        // MC ServerPlayerGameMode.handleBlockBreakAction →
+        // Player.blockActionRestricted: a spectator neither punches nor breaks
+        // anything. The ack above already rolls back any prediction.
+        if (m_player->getGameMode() == GameMode::SPECTATOR) return;
 
         // The arm a dig swings (PlayerEntityView::SetDigging): all the way
         // from a survival START to its STOP or ABORT, as MC's client swings
@@ -1744,13 +2218,19 @@ namespace Server {
                 const Game::BlockID id = world->GetBlock(pos.x, pos.y, pos.z);
                 const Game::Block& def = Game::BlockRegistry::Get(id);
                 if (def.attack) def.attack(*world, pos);
+                // ServerPlayerGameMode's isDestroyingBlock: from here to the
+                // STOP / ABORT, TickDigEffects sends the crack particles (and
+                // every fourth tick the hit sound) to everyone else.
+                StartDigEffects(*world, pos, packet.face);
                 break;
             }
             case Network::BlockActionType::ABORT_DESTROY:
+                m_dig.active = false;
                 break;
             // Both BREAK (legacy) and STOP_DESTROY (new) finalize the dig.
             case Network::BlockActionType::STOP_DESTROY:
             case Network::BlockActionType::BREAK: {
+                m_dig.active = false;
                 glm::ivec3 pos(packet.worldX, packet.worldY, packet.worldZ);
 
                 // Validate reach
@@ -1919,8 +2399,7 @@ namespace Server {
         // future partner, since candidatePartnerFacing only accepts a
         // neighbour still typed SINGLE. Each un-reset break therefore
         // burned one neighbour permanently.
-        if (oldBlock == Game::BlockID::Chest ||
-            oldBlock == Game::BlockID::TrappedChest) {
+        if (Game::IsChestBlock(oldBlock)) {   // chest, trapped chest, copper chests
             ResetOrphanedChestPartners(*world, pos);
         }
         // A door's other half goes with the one that was broken (MC
@@ -1931,6 +2410,11 @@ namespace Server {
             const bool lower = oldBlockState.GetValueByName("half") == "lower";
             const glm::ivec3 other = pos + glm::ivec3(0, lower ? 1 : -1, 0);
             if (world->GetBlock(other.x, other.y, other.z) == oldBlock) {
+                // MC's updateShape → destroyBlock: the vanishing half's
+                // break puff (levelEvent 2001), for everyone.
+                Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::PARTICLES_DESTROY_BLOCK, other,
+                                          static_cast<int>(world->GetBlockState(other.x, other.y, other.z).RawId()),
+                                          nullptr);
                 world->SetBlock(other.x, other.y, other.z, Game::BlockID::Air);
             }
         }
@@ -1947,6 +2431,9 @@ namespace Server {
             if (otherState.Block() == oldBlock &&
                 Game::IsBedHead(otherState) != Game::IsBedHead(oldBlockState)) {
                 if (!Game::IsBedHead(oldBlockState)) lootState = otherState;
+                // The other half's break puff (MC levelEvent 2001).
+                Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::PARTICLES_DESTROY_BLOCK, other,
+                                          static_cast<int>(otherState.RawId()), nullptr);
                 world->SetBlock(other.x, other.y, other.z, Game::BlockID::Air);
             }
         }
@@ -1956,14 +2443,48 @@ namespace Server {
         // to happen BEFORE SetBlock, because clearing the cell tears
         // the block entity down and takes the contents with it.
         std::vector<Game::ItemStack> spilled;
+        // MC LootContextParams.BLOCK_ENTITY for copy_components, and whether
+        // there was one: what the entity collects, taken after the spill (MC
+        // removeBlock → preRemoveSideEffects, then playerDestroy with the
+        // old entity).
+        Game::DataComponentMap brokenEntityComponents;
+        bool hadBlockEntity = false;
+        // ShulkerBoxBlock.playerWillDestroy's creative drop, below.
+        Game::ItemStack creativeShulkerDrop;
         {
             const auto cp = Game::Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
             if (auto chunk = world->GetChunk(cp.x, cp.z)) {
                 auto* be = chunk->GetBlockEntity(pos.x - cp.x * 16, pos.y,
                                                  pos.z - cp.z * 16);
+                // A shulker box keeps its contents (ShulkerBoxBlockEntity.
+                // preRemoveSideEffects does nothing): they leave in the
+                // dropped box's CONTAINER component. An ender chest holds
+                // nothing of its own.
+                const bool keepsContents = be && be->GetType() &&
+                    (be->GetType()->StringId() == std::string("shulker_box") ||
+                     be->GetType()->StringId() == std::string("ender_chest"));
                 if (auto* container =
-                        dynamic_cast<Game::BaseContainerBlockEntity*>(be)) {
+                        dynamic_cast<Game::BaseContainerBlockEntity*>(be); container && !keepsContents) {
                     spilled = container->TakeAllContents();
+                }
+                if (be) {
+                    if (auto* container = dynamic_cast<Game::BaseContainerBlockEntity*>(be)) {
+                        container->UnpackLootTable();   // a table still owed is rolled first
+                    }
+                    be->CollectComponents(brokenEntityComponents);
+                    hadBlockEntity = true;
+                    // MC ShulkerBoxBlock.playerWillDestroy: a creative break
+                    // of a box that holds something still drops the box,
+                    // contents and name aboard.
+                    if (creativeBreak && be->GetType() &&
+                        be->GetType()->StringId() == std::string("shulker_box")) {
+                        if (auto* box = dynamic_cast<Game::BaseContainerBlockEntity*>(be); box && !box->IsEmpty()) {
+                            creativeShulkerDrop = Game::ItemStack(oldBlock, 1);
+                            for (const char* name : { "container", "custom_name" }) {
+                                creativeShulkerDrop.components.CopyNamed(brokenEntityComponents, name);
+                            }
+                        }
+                    }
                 }
                 // A furnace destroyed with banked smelting XP pays it
                 // out at the block — MC AbstractFurnaceBlockEntity
@@ -1989,6 +2510,21 @@ namespace Server {
         // destroyTime on the creative path).
         if (Game::BlockRegistry::Get(oldBlock).destroyTime < 0.0f && !creativeBreak) return;
 
+        // MC DecoratedPotBlock.playerWillDestroy: broken with a tool in
+        // #breaks_decorated_pots that carries no #prevents_decorated_pot_
+        // shattering enchantment (Silk Touch), the pot cracks first — its
+        // break is then the shatter (SoundType.DECORATED_POT_CRACKED) and
+        // its drop the sherds (getDrops' dynamic "sherds").
+        if (oldBlock == Game::BlockID::DecoratedPot) {
+            const Game::ItemStack& tool = m_player->getItemInHand(0);
+            const std::string_view toolSlug = Game::ItemRegistry::Slug(tool.itemId);
+            if (!tool.IsEmpty() &&
+                Game::DataTags::HasTag(Game::DataTags::Registry::Item, toolSlug, "minecraft:breaks_decorated_pots") &&
+                Game::EnchantmentHelper::GetItemEnchantmentLevel(Game::Enchantments::SilkTouch, tool) <= 0) {
+                oldBlockState = oldBlockState.SetName(Game::PropertyId::CRACKED, "true");
+                lootState = oldBlockState;
+            }
+        }
         // MC Block.playerWillDestroy → spawnDestroyParticles → level.levelEvent(
         // player, 2001, pos, getId(state)): the break sound (and particles)
         // for everyone near EXCEPT the breaker, whose client played its own
@@ -2001,6 +2537,27 @@ namespace Server {
             Game::PlayLevelEventSound(*world, nullptr, Game::LevelEvent::SOUND_EXTINGUISH_FIRE, pos, 0,
                                       world->Random());
         }
+        // Block.playerWillDestroy: breaking a block piglins guard
+        // (#guarded_by_piglins — gold, the bastion's loot containers) turns
+        // the idle piglins within 16 blocks on the breaker, seen or not.
+        if (const std::string& slug = Game::BlockRegistry::Get(oldBlock).registrySlug;
+            !slug.empty() && Game::DataTags::HasTag(Game::DataTags::Registry::Block, slug,
+                                                    "minecraft:guarded_by_piglins")) {
+            if (IntegratedServer* server = g_integratedServer.get()) {
+                ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+                ServerLevelBridge* bridge = level ? level->MobLevel() : nullptr;
+                if (PlayerEntityView* view = bridge ? bridge->GetPlayerView(GetConnectionId()) : nullptr) {
+                    Game::PiglinAi::AngerNearbyPiglins(*bridge, *view, /*onlyIfTheySeeThePlayer=*/false);
+                }
+            }
+        }
+        // Block.playerWillDestroy's tail: gameEvent(BLOCK_DESTROY, pos,
+        // Context.of(player, state)) — the only destroy event a player's
+        // break raises (the removal below is a plain SetBlock, MC's
+        // level.removeBlock, which posts none).
+        world->GameEvent(Game::GameEventId::BlockDestroy, pos,
+                         Game::GameEventContext::Of(m_player ? m_player->GameEventSource() : nullptr,
+                                                    oldBlockState));
 
         // MC TntBlock.playerWillDestroy — an UNSTABLE TNT primes
         // instead of dropping when a survival player breaks it. Runs
@@ -2035,6 +2592,13 @@ namespace Server {
         // A TNT that primed on break has become an entity; dropping the
         // item as well would duplicate it.
         if (primedOnBreak) return;
+
+        // MC TurtleEggBlock.playerDestroy (survival only, as
+        // ServerPlayerGameMode calls it): the clutch comes back one egg
+        // smaller — breaking three eggs takes three hits.
+        if (oldBlock == Game::BlockID::TurtleEgg && !creativeBreak) {
+            Game::TurtleEgg::PlayerDestroy(*world, pos, oldBlockState);
+        }
 
         // The Hush's boss trigger: an echo core wakes the Silent Warden
         // (WakeSilentWarden above). Creative breaks count too — the core is
@@ -2099,10 +2663,16 @@ namespace Server {
         // regardless of game mode and regardless of the tool: they were
         // never the block's loot, they were the player's items being
         // stored. MC drops them even in creative for the same reason.
-        if (auto* items = ItemEntitiesOrNull()) {
-            for (const Game::ItemStack& stored : spilled) {
-                items->PopResource(pos, stored);
-            }
+        // MC Containers.dropContents → dropItemStack: split into 10..30
+        // stacks from a random point in the cell, tossed up.
+        for (const Game::ItemStack& stored : spilled) {
+            Game::DropContainerItemStack(*world, glm::dvec3(pos), stored);
+        }
+        // ShulkerBoxBlock.playerWillDestroy (creative, not empty): the box
+        // at the block's centre with the default pickup delay.
+        if (!creativeShulkerDrop.IsEmpty()) {
+            Game::SpawnItemEntity(world->GetDimension(), glm::dvec3(pos) + glm::dvec3(0.5),
+                                  glm::dvec3(0.0), creativeShulkerDrop, 10);
         }
 
         // Roll the block's loot table and pop the result into the world.
@@ -2139,6 +2709,7 @@ namespace Server {
                 lootCtx.pos            = pos;
                 lootCtx.brokenByEntity = true;   // a player did this
                 lootCtx.rng            = &m_lootRandom;
+                if (hadBlockEntity) lootCtx.blockEntityComponents = &brokenEntityComponents;
 
                 // Loot pops into the WORLD, not straight into the
                 // breaker's inventory (MC Block.dropResources →
@@ -2153,6 +2724,18 @@ namespace Server {
                 if (auto* items = ItemEntitiesOrNull(); items && blockDrops) {
                     for (const Game::ItemStack& drop : Game::LootTables::GetDrops(lootCtx)) {
                         items->PopResource(pos, drop);
+                    }
+                    // DecoratedPotBlock.getDrops: a cracked pot's table picks
+                    // the dynamic "sherds" entry — each decorated side, in
+                    // the order left, back, front, right.
+                    if (oldBlock == Game::BlockID::DecoratedPot &&
+                        lootState.GetName(Game::PropertyId::CRACKED) == "true") {
+                        if (auto decorations = brokenEntityComponents.get(Game::DataComponents::POT_DECORATIONS)) {
+                            for (int side : { 1, 0, 3, 2 }) {
+                                const Game::ItemID id = decorations->sides[static_cast<size_t>(side)];
+                                if (id != Game::Items::Air) items->PopResource(pos, Game::ItemStack(id, 1));
+                            }
+                        }
                     }
                 }
 
@@ -2352,6 +2935,10 @@ namespace Server {
                     break;
                 case Game::EntityTypeId::ArmorStand: item = Game::Items::ArmorStand; break;
                 case Game::EntityTypeId::EndCrystal: item = Game::Items::EndCrystal; break;
+                case Game::EntityTypeId::Cushion:
+                    // MC Cushion.getPickResult: the cushion of its colour.
+                    if (auto* cushion = dynamic_cast<Game::Cushion*>(mob)) item = cushion->PickResult().itemId;
+                    break;
                 default:
                     for (const Game::SpawnEggEntry& e : Game::kSpawnEggTable) {
                         if (e.type == mob->GetType()) { item = e.item; break; }
@@ -2467,14 +3054,16 @@ namespace Server {
         if (!world) return;
         std::vector<glm::ivec3> cells{pos};
         if (partnerPos) cells.push_back(*partnerPos);
+        // The CONTAINER_OPEN game event's source: this player's entity.
+        Game::Entity* user = m_player->GameEventSource();
         for (const glm::ivec3& cell : cells) {
             auto* chest = dynamic_cast<Game::ChestBlockEntity*>(world->GetBlockEntity(cell));
             if (chest) {
-                chest->StartOpen(*world);
+                chest->StartOpen(*world, user);
             } else if (Game::ContainerOpeners::Handles(*world, cell)) {
                 // A barrel or a shulker box: same menu family, its own opener
                 // counter (the open sound, a barrel's OPEN state).
-                Game::ContainerOpeners::StartOpen(*world, cell);
+                Game::ContainerOpeners::StartOpen(*world, cell, user);
             } else {
                 continue;
             }
@@ -2491,11 +3080,12 @@ namespace Server {
         // A world left since (a dimension change) is not stopped here; the
         // chest's own recheck no longer counts this player and settles it.
         if (!world || world != SessionWorld()) return;
+        Game::Entity* user = m_player ? m_player->GameEventSource() : nullptr;
         for (const glm::ivec3& cell : cells) {
             if (auto* chest = dynamic_cast<Game::ChestBlockEntity*>(world->GetBlockEntity(cell))) {
-                chest->StopOpen(*world);
+                chest->StopOpen(*world, user);
             } else {
-                Game::ContainerOpeners::StopOpen(*world, cell);
+                Game::ContainerOpeners::StopOpen(*world, cell, user);
             }
         }
     }
@@ -2511,6 +3101,10 @@ namespace Server {
     bool PlayerSession::CloseMenuIfBlockGone() {
         // An entity-backed merchant menu has its own stillValid.
         if (CloseMerchantMenuIfInvalid()) return true;
+        // So has a vehicle's container menu.
+        if (CloseVehicleMenuIfInvalid()) return true;
+        // And a mount's (MC AbstractMountInventoryMenu.stillValid).
+        if (CloseMountMenuIfInvalid()) return true;
         // MC AbstractContainerMenu.stillValid → ContainerLevelAccess.evaluate:
         // every tick a block menu re-checks that its block is still there, and
         // closes if it isn't. That check is not cosmetic here — a block menu's
@@ -2677,6 +3271,14 @@ namespace Server {
         // menu whose block entity is gone.
         if (CloseMenuIfBlockGone()) return;
 
+        // MC handleContainerClick: `if (!player.isSpectator() && ...)` — a
+        // spectator looks, never takes. Their screen predicted the click, so
+        // the menu is sent back whole to put it right at once.
+        if (m_player->getGameMode() == GameMode::SPECTATOR) {
+            SendInventoryFull();
+            return;
+        }
+
 #if INVENTORY_CLICK_TRACE
         const auto& traceInv = m_player->getInventory();
         const auto  beforeCarried = m_player->getCarried();
@@ -2705,9 +3307,33 @@ namespace Server {
         if (auto* anvil = dynamic_cast<Game::AnvilMenu*>(&m_player->container())) {
             anvil->SetPlayerLevel(m_player->getExperience().Level());
         }
+#if ENABLE_PORTAL_GUN
+        // A portal gun's instance id is what owns its pair of portals, so a
+        // copy must never carry the original's id: a creative-palette stack
+        // that arrives with one, or a creative middle-click CLONE, is a NEW
+        // gun that mints its own id on its first shot (PortalGunTracker.hpp,
+        // "duplicate ids").
+        Network::InventoryClickC2SPacket sanitized;
+        const Network::InventoryClickC2SPacket* click = &packet;
+        if (Game::Portal::GunInstanceOf(packet.creativeStack) != 0) {
+            sanitized = packet;
+            Game::Portal::StripGunInstance(sanitized.creativeStack);
+            click = &sanitized;
+        }
+        // CLONE copies into an EMPTY cursor only; a gun already on the
+        // cursor is the original and keeps its id.
+        const bool cloneIntoEmptyCursor =
+            static_cast<Network::ContainerInput>(packet.action) == Network::ContainerInput::CLONE &&
+            m_player->getCarried().IsEmpty();
+        auto result = m_player->container().DoClick(*click);
+        if (cloneIntoEmptyCursor) Game::Portal::StripGunInstance(m_player->getCarried());
+#else
         auto result = m_player->container().DoClick(packet);
+#endif
         ApplyMenuTakeCosts(result);
         ApplyGrindstoneTake(result);
+        ApplyCartographyTake(result);
+        ApplyLoomTake(result);
 
 #if INVENTORY_CLICK_TRACE
         {
@@ -2824,6 +3450,32 @@ namespace Server {
                                   world->Random());
     }
 
+    void PlayerSession::ApplyCartographyTake(const Game::ContainerClickResult& result) {
+        if (!result.cartographyUsed || !m_player) return;
+        Game::World* world = SessionWorld();
+        if (!world) return;
+        // access.execute: level.playSound(null, pos, UI_CARTOGRAPHY_TABLE_
+        // TAKE_RESULT, BLOCKS, 1, 1) unless one already played this tick.
+        const int64_t gameTime = world->GetGameTime();
+        if (m_lastCartographySoundTime == gameTime) return;
+        m_lastCartographySoundTime = gameTime;
+        world->PlaySound(nullptr, m_openMenuPos, Game::SoundEvents::UI_CARTOGRAPHY_TABLE_TAKE_RESULT,
+                         Game::SoundSource::Blocks, 1.0f, 1.0f);
+    }
+
+    void PlayerSession::ApplyLoomTake(const Game::ContainerClickResult& result) {
+        if (!result.loomUsed || !m_player) return;
+        Game::World* world = SessionWorld();
+        if (!world) return;
+        // LoomMenu's result onTake → access.execute: UI_LOOM_TAKE_RESULT at
+        // the loom for everyone, unless one already played this game tick.
+        const int64_t gameTime = world->GetGameTime();
+        if (m_lastLoomSoundTime == gameTime) return;
+        m_lastLoomSoundTime = gameTime;
+        world->PlaySound(nullptr, m_openMenuPos, Game::SoundEvents::UI_LOOM_TAKE_RESULT,
+                         Game::SoundSource::Blocks, 1.0f, 1.0f);
+    }
+
     void PlayerSession::AwardWorldExperience(const glm::dvec3& pos, int amount) {
         if (amount <= 0) return;
         // THIS session's level — GetXpOrbs() is Overworld-pinned, so mining
@@ -2893,7 +3545,11 @@ namespace Server {
 
         auto& xp = m_player->getExperience();
         const int reward = std::min(xp.Level() * 7, 100);
-        if (reward > 0) AwardWorldExperience(pos, reward);
+        // dropExperience's `!wasExperienceConsumed()`: a sculk catalyst
+        // took it (the ENTITY_DIE post just before this).
+        const Server::PlayerEntityView* deathView =
+            g_integratedServer ? g_integratedServer->GetPlayerEntityView(GetConnectionId()) : nullptr;
+        if (reward > 0 && !(deathView && deathView->WasExperienceConsumed())) AwardWorldExperience(pos, reward);
         xp.SetLevel(0);
         xp.SetProgress(0.0f);
         xp.SetTotal(0);
@@ -3138,6 +3794,11 @@ namespace Server {
         Game::ItemStack& held = m_player->getItemInHand(pending->hand);
         const Game::ItemStack before = held;
         if (!campfire->PlaceFood(held)) return;
+        // CampfireBlockEntity.placeFood: gameEvent(BLOCK_CHANGE, pos,
+        // Context.of(sourceEntity, getBlockState())).
+        world->GameEvent(Game::GameEventId::BlockChange, pos,
+                         Game::GameEventContext::Of(m_player->GameEventSource(),
+                                                    world->GetBlockState(pos.x, pos.y, pos.z)));
 
         if (m_player->isCreative()) {
             held = before;              // creative never runs the stack down
@@ -3284,6 +3945,10 @@ namespace Server {
                 if (applied) sign->SetText(slot, text);
             }
             if (!applied) return;
+            // SignBlock.useItemOn: gameEvent(BLOCK_CHANGE, sign pos,
+            // Context.of(player, sign state)).
+            world->GameEvent(Game::GameEventId::BlockChange, pending->pos,
+                             Game::GameEventContext::Of(m_player->GameEventSource(), state));
             if (!m_player->isCreative()) {
                 held.count -= 1;
                 if (held.count <= 0) held.Clear();
@@ -3385,6 +4050,113 @@ namespace Server {
         const Game::ContainerClickResult result = m_player->closeContainerMenu();
         for (const auto& extra : result.extraDrops) DropItemFromPlayer(extra);
         m_merchantEntityId = -1;
+        SendInventoryFull();
+        return true;
+    }
+
+    bool PlayerSession::CloseVehicleMenuIfInvalid() {
+        if (m_vehicleMenuEntityId < 0 || !m_player) return false;
+        IntegratedServer* server = g_integratedServer.get();
+        ServerLevel* level = server ? server->GetLevel(Game::DimensionFromRaw(m_vehicleMenuDimension)) : nullptr;
+        MobManager* mobs = level ? level->Mobs() : nullptr;
+        auto* vehicle = mobs ? dynamic_cast<Game::VehicleEntity*>(mobs->Find(m_vehicleMenuEntityId)) : nullptr;
+        PlayerEntityView* view = server ? server->GetPlayerEntityView(m_connectionId) : nullptr;
+
+        const bool stillOpen = m_player->hasOpenContainerMenu() &&
+                               static_cast<const void*>(&m_player->container()) == m_vehicleMenu;
+        if (stillOpen) {
+            // MC ContainerEntity.isChestVehicleStillValid.
+            Game::VehicleContainer* container = vehicle ? vehicle->GetVehicleContainer() : nullptr;
+            if (container && view && GetDimensionId() == m_vehicleMenuDimension &&
+                container->IsChestVehicleStillValid(*view)) {
+                return false;
+            }
+        }
+        // The menu is gone (closed by the player or replaced), or it must go:
+        // MC Container.stopOpen — CONTAINER_CLOSE at the vehicle.
+        if (vehicle && view && !vehicle->IsRemoved()) vehicle->StopOpenContainer(*view);
+        m_vehicleMenuEntityId = -1;
+        m_vehicleMenu = nullptr;
+        if (!stillOpen) return false;   // nothing of ours to close any more
+        const Game::ContainerClickResult result = m_player->closeContainerMenu();
+        for (const auto& extra : result.extraDrops) DropItemFromPlayer(extra);
+        SendInventoryFull();
+        return true;
+    }
+
+    void PlayerSession::OpenMountMenu(int32_t mountId) {
+        if (!m_player || !m_connection) return;
+        const int8_t dim = static_cast<int8_t>(GetDimensionId());
+        // The mount, looked up afresh on every use: the menu never holds the
+        // mob, so one that dies or unloads under an open screen is simply
+        // gone until the next stillValid check closes it.
+        const auto resolve = [dim, mountId]() -> Game::Mob* {
+            IntegratedServer* server = g_integratedServer.get();
+            ServerLevel* level = server ? server->GetLevel(Game::DimensionFromRaw(dim)) : nullptr;
+            MobManager* mobs = level ? level->Mobs() : nullptr;
+            Game::Mob* mob = mobs ? mobs->Find(mountId) : nullptr;
+            return mob && !mob->IsRemoved() ? mob : nullptr;
+        };
+        Game::Mob* mount = resolve();
+        if (!mount || !mount->GetMountInventory()) return;
+
+        // MC openHorseInventory: `if (containerMenu != inventoryMenu)
+        // closeContainer()` — the old menu's removed() hands its grid back.
+        if (m_player->hasOpenContainerMenu()) {
+            const Game::ContainerClickResult closed = m_player->closeContainerMenu();
+            for (const auto& extra : closed.extraDrops) DropItemFromPlayer(extra);
+        }
+
+        // nextContainerCounter, then the packet, then the menu (the columns
+        // as the mount reports them now).
+        const int columns = std::max(0, mount->GetInventoryColumns());
+        auto menu = std::make_unique<Game::MountInventoryMenu>(
+            &m_player->getInventory(), resolve, Game::MountInventoryMenu::KindFor(mount->GetType()), columns,
+            /*serverSide=*/true);
+        menu->creative = m_player->getGameMode() == GameMode::CREATIVE;
+        m_menuIsBlockBacked = false;
+        m_merchantEntityId  = -1;
+        m_player->openContainerMenu(std::move(menu), Game::MenuType::MountInventory);
+        m_mountMenuEntityId  = mountId;
+        m_mountMenuDimension = dim;
+        m_mountMenu          = &m_player->container();
+
+        Network::MountScreenOpenS2CPacket open;
+        open.fullContainerId  = m_player->container().containerId;
+        open.containerId      = static_cast<uint8_t>(open.fullContainerId & 0xFFu);
+        open.inventoryColumns = columns;
+        open.entityId         = mountId;
+        m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::MountScreenOpenS2C),
+                                 Network::Serialization::Serialize(open));
+        SendInventoryFull();
+    }
+
+    bool PlayerSession::CloseMountMenuIfInvalid() {
+        if (m_mountMenuEntityId < 0 || !m_player) return false;
+        const bool stillOpen = m_player->hasOpenContainerMenu() &&
+                               static_cast<const void*>(&m_player->container()) == m_mountMenu;
+        if (stillOpen) {
+            auto* menu = dynamic_cast<Game::MountInventoryMenu*>(&m_player->container());
+            Game::Mob* mount = menu ? menu->Mount() : nullptr;
+            IntegratedServer* server = g_integratedServer.get();
+            PlayerEntityView* view = server ? server->GetPlayerEntityView(m_connectionId) : nullptr;
+            // stillValid: !hasInventoryChanged(mountContainer) &&
+            // mountContainer.stillValid(player) (a SimpleContainer: true) &&
+            // mount.isAlive() && player.isWithinEntityInteractionRange(mount,
+            // 4.0) — the eye to the mount's box within the entity reach
+            // (ENTITY_INTERACTION_RANGE 3) plus 4.
+            constexpr double kReach = 3.0 + 4.0;
+            if (menu && mount && view && GetDimensionId() == m_mountMenuDimension &&
+                !menu->HasInventoryChanged() && mount->IsAlive() &&
+                mount->GetAABBd().DistanceToSqr(view->GetEyePosition()) < kReach * kReach) {
+                return false;
+            }
+        }
+        m_mountMenuEntityId = -1;
+        m_mountMenu = nullptr;
+        if (!stillOpen) return false;   // closed by the player or replaced
+        const Game::ContainerClickResult result = m_player->closeContainerMenu();
+        for (const auto& extra : result.extraDrops) DropItemFromPlayer(extra);
         SendInventoryFull();
         return true;
     }
@@ -3624,8 +4396,9 @@ namespace Server {
         auto* server = g_integratedServer.get();
         ServerLevel* level = server
             ? server->GetLevel(Game::DimensionFromRaw(GetDimensionId())) : nullptr;
-        // Level.isDarkOutside: skyDarken >= 4 (BedRule.Rule.WHEN_DARK). A
-        // thunderstorm darkens the same number in vanilla; no weather here.
+        // Level.isDarkOutside: skyDarken >= 4 (BedRule.Rule.WHEN_DARK). The
+        // weather darkens it (World::SkyDarkenFor): a full thunderstorm
+        // lets a player sleep at noon, plain rain does not.
         const Game::DimensionId dimension = Game::DimensionFromRaw(GetDimensionId());
         const Game::BedRule rule = Game::DimensionBedRule(dimension, state.Block());
         const bool darkOutside = level && level->MobLevel() && level->MobLevel()->GetSkyDarken() >= 4;
@@ -3716,6 +4489,10 @@ namespace Server {
                 return;
             }
         }
+
+        // LivingEntity.startSleeping: `if (this.isPassenger()) stopRiding()`
+        // — off a cushion first.
+        if (m_player->isPassenger()) PlayerRiding::StopRiding(*this);
 
         // LivingEntity.startSleeping: onto the bed (setPosToBed — the mattress
         // top plus 0.125), OCCUPIED on the pair (MC sets the head and
@@ -3880,6 +4657,39 @@ namespace Server {
         // removed → stopOpen runs before the new one opens).
         StopChestLids();
 
+        // MC ChestBlock / EnderChestBlock / BarrelBlock / ShulkerBoxBlock
+        // .useWithoutItem, and ContainerEntity.interactWithContainerVehicle
+        // (the chest boat / minecart, the hopper minecart): opening one
+        // angers the idle piglins within 16 blocks that can see the opener
+        // (PiglinAi.angerNearbyPiglins(…, true)) — the bastion's loot guard.
+        // A double chest opens the 9x6 menu.
+        {
+            bool guardedContainer = false;
+            if (pending->entityId >= 0) {
+                guardedContainer = pending->type == Game::MenuType::Generic9x3 ||
+                                   pending->type == Game::MenuType::Hopper;
+            } else if (pending->type == Game::MenuType::Generic9x3 ||
+                       pending->type == Game::MenuType::Generic9x6) {
+                if (Game::World* world = SessionWorld()) {
+                    const Game::BlockID opened = world->GetBlock(pending->pos.x, pending->pos.y, pending->pos.z);
+                    const std::string& slug = Game::BlockRegistry::Get(opened).registrySlug;
+                    guardedContainer =
+                        opened == Game::BlockID::EnderChest || opened == Game::BlockID::Barrel ||
+                        slug.find("chest") != std::string::npos ||          // chest, trapped, copper chests
+                        slug.find("shulker_box") != std::string::npos;
+                }
+            }
+            if (guardedContainer) {
+                if (IntegratedServer* server = g_integratedServer.get()) {
+                    ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+                    ServerLevelBridge* bridge = level ? level->MobLevel() : nullptr;
+                    if (PlayerEntityView* view = bridge ? bridge->GetPlayerView(GetConnectionId()) : nullptr) {
+                        Game::PiglinAi::AngerNearbyPiglins(*bridge, *view, /*onlyIfTheySeeThePlayer=*/true);
+                    }
+                }
+            }
+        }
+
         // Block-backed menus need the container living at the clicked cell.
         // MC gets there via state.getMenuProvider(level, pos), which resolves
         // the block entity; ours is the same lookup the placement path uses.
@@ -3976,8 +4786,51 @@ namespace Server {
         // "the first right-click does nothing, the second works".
         m_hasMenuPartner = false;
 
+        // A mount's screen (MC openHorseInventory / openNautilusInventory) —
+        // its own packet, not OpenScreenS2C.
+        if (pending->type == Game::MenuType::MountInventory) {
+            OpenMountMenu(pending->entityId);
+            return;
+        }
+
         std::unique_ptr<Game::AbstractContainerMenu> menu;
         std::string title;
+        // The menu a vehicle's container asked for (ContainerEntity
+        // .interactWithContainerVehicle → player.openMenu(this)).
+        if (pending->entityId >= 0 && pending->type != Game::MenuType::Merchant) {
+            IntegratedServer* server = g_integratedServer.get();
+            const int8_t dim = static_cast<int8_t>(GetDimensionId());
+            ServerLevel* level = server ? server->GetLevel(Game::DimensionFromRaw(dim)) : nullptr;
+            MobManager* mobs = level ? level->Mobs() : nullptr;
+            auto* vehicle = mobs ? dynamic_cast<Game::VehicleEntity*>(mobs->Find(pending->entityId)) : nullptr;
+            Game::VehicleContainer* container = vehicle && !vehicle->IsRemoved() ? vehicle->GetVehicleContainer()
+                                                                                 : nullptr;
+            if (!container) return;
+            // MC createMenu → unpackChestVehicleLootTable(player) first.
+            container->UnpackChestVehicleLootTable(m_player->getLuck());
+            if (pending->type == Game::MenuType::Hopper) {
+                menu = std::make_unique<Game::ChestMenu>(&m_player->getInventory(), container, 1, 5);
+            } else {
+                pending->type = Game::MenuType::Generic9x3;
+                menu = std::make_unique<Game::ChestMenu>(&m_player->getInventory(), container, 3);
+            }
+            // The title: a custom name, else the entity type's name.
+            title = Game::EntityDisplayName(*vehicle, vehicle->Level());
+            m_menuIsBlockBacked = false;
+            m_merchantEntityId  = -1;
+            m_player->openContainerMenu(std::move(menu), pending->type);
+            m_vehicleMenuEntityId  = pending->entityId;
+            m_vehicleMenuDimension = dim;
+            m_vehicleMenu          = &m_player->container();
+            Network::OpenScreenS2CPacket open;
+            open.containerId = m_player->container().containerId;
+            open.menuType    = pending->type;
+            open.title       = title;
+            m_connection->SendPacket(static_cast<uint8_t>(Network::PacketId::OpenScreenS2C),
+                                     Network::Serialization::Serialize(open));
+            SendInventoryFull();
+            return;
+        }
         switch (pending->type) {
             case Game::MenuType::Crafting:
                 menu  = std::make_unique<Game::CraftingMenu>(&m_player->getInventory());
@@ -4242,6 +5095,75 @@ namespace Server {
                    m_player->container().containerId);
     }
 
+    namespace {
+        // A player's bounding box as it stands NOW — the live ServerPlayer,
+        // not the level's PlayerEntityView, which is re-synced once a tick
+        // and so can hold a player where they stood before this tick's move
+        // packets. MC Player.getDefaultDimensions by pose: 0.6 x 1.8
+        // standing, 1.5 crouching (the engine's PlayerPhysics uses 1.49, and
+        // the client's prediction reads that, so the two agree), 0.2 x 0.2
+        // asleep; a morph wears its mob's box. All times the player's scale.
+        Game::AABBd LivePlayerBox(const ServerPlayer& player) {
+            using Game::PlayerPhysics;
+            float width  = PlayerPhysics::WIDTH;
+            float height = PlayerPhysics::HEIGHT_STANDING;
+            if (!Game::Morph::IsNone(player.getMorph())) {
+                const Game::Morph::Dims dims = Game::Morph::DimsOf(player.getMorph());
+                width  = dims.width;
+                height = dims.height;
+            } else if (player.isSleeping()) {
+                width = height = 0.2f;
+            } else if (player.IsSneaking()) {
+                height = PlayerPhysics::HEIGHT_SNEAKING;
+            }
+            const double hw = 0.5 * static_cast<double>(width * player.getScale());
+            const double h  = static_cast<double>(height * player.getScale());
+            const glm::dvec3 p = player.getPosition();
+            return Game::AABBd::FromMinMax(p - glm::dvec3(hw, 0.0, hw), p + glm::dvec3(hw, h, hw));
+        }
+
+        // MC CollisionGetter.isUnobstructed(state, pos, placementContext),
+        // gathered on the server: the level's entities (its mob manager —
+        // armor stands, primed TNT, falling blocks and end crystals ride
+        // there too) and then every player standing in this level, from the
+        // live sessions rather than the level's once-a-tick views.
+        bool IsPlacementUnobstructed(Game::World& world, Game::BlockState state, const glm::ivec3& pos) {
+            const Game::BlockRegistry::BlockShapeSet shape = Game::PlacementCollisionShape(state);
+            if (shape.count == 0) return true;
+            if (const Game::EntityLevel* entities = world.Entities()) {
+                if (Game::EntitiesObstructPlacement(*entities, shape, pos, /*skipPlayers=*/true)) {
+                    return false;
+                }
+            }
+            IntegratedServer* server = g_integratedServer.get();
+            PlayerSessionManager* sessions = server ? server->GetSessionManager() : nullptr;
+            if (!sessions) return true;
+            for (const auto& session : sessions->GetAllSessions()) {
+                if (!session) continue;
+                const ServerPlayer* player = session->GetPlayer();
+                if (!player) continue;
+                // getEntities(null, …) is NO_SPECTATORS.
+                if (player->isSpectator()) continue;
+                if (Game::DimensionFromRaw(session->GetDimensionId()) != world.GetDimension()) continue;
+                if (Game::PlacementShapeOverlaps(shape, pos, LivePlayerBox(*player))) return false;
+            }
+            return true;
+        }
+    } // namespace
+
+    Game::UseResult PlayerSession::BindLeashedMobsToFence(const glm::ivec3& fencePos) {
+        // MC LeadItem.bindPlayerMobs(player, level, pos), on this session's
+        // level with this player's view as the holder the mobs name.
+        IntegratedServer* server = g_integratedServer.get();
+        if (!server) return Game::UseResult::Pass;
+        ServerLevel* level = server->GetLevel(Game::DimensionFromRaw(GetDimensionId()));
+        ServerLevelBridge* bridge = level ? level->MobLevel() : nullptr;
+        if (!bridge) return Game::UseResult::Pass;
+        PlayerEntityView* view = bridge->GetPlayerView(GetConnectionId());
+        if (!view) return Game::UseResult::Pass;
+        return Game::Leash::BindPlayerMobs(*view, *bridge, fencePos);
+    }
+
     void PlayerSession::HandleUseItemOn(const Network::UseItemOnC2SPacket& packet) {
         // === 1. Thread safety & basic validation ===
         ASSERT_SERVER_THREAD();
@@ -4415,25 +5337,43 @@ namespace Server {
         const Game::Item&   heldItem      = Game::ItemRegistry::Get(heldStack.itemId);
         const bool isMainHand             = (packet.hand == 0);
         const bool isCreative             = (m_player->getGameMode() == Server::GameMode::CREATIVE);
-        // const bool isSpectator         = (m_player->getGameMode() == Server::GameMode::SPECTATOR);
 
         // (void)clickedBlkId; — kept for future feature-flag check:
         //   if (!IsBlockFeatureEnabled(clickedBlkId)) { ResyncAndAck(...); return; }
 
-        // TODO(spectator): if (isSpectator) {
-        //     auto provider = clickedBlock.menuProvider;
-        //     if (provider) { m_player->openMenu(provider); AckInteraction(true); return; }
-        //     AckInteraction(false); return;
-        // }
-        // (Spectators today fall through to the regular dispatch — same as if SURVIVAL —
-        // which is harmless because they can't actually mutate the world via SetBlock
-        // gating elsewhere. Revisit once we have menu providers.)
+        // MC useItemOn's SPECTATOR branch: the block's menu provider opens
+        // (FlushPendingMenuOpen, right after this handler) or its portal
+        // takes the spectator through — CONSUME either way — and anything
+        // else is a PASS. Nothing else a click does applies to a spectator.
+        if (m_player->getGameMode() == Server::GameMode::SPECTATOR) {
+            const bool consumed = Spectator::UseItemOn(*this, *world, clicked);
+            if (consumed) AckInteraction(packet.sequence, true);
+            else          ResyncAndAck(clicked, clicked, packet.sequence);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
 
         // MC: `suppressUsingBlock = isSecondaryUseActive() && haveSomethingInOurHands`
         //  — sneaking + something in hand → skip block-use, run item.useOn directly.
         const bool sneaking               = m_player->IsSneaking();
         const bool somethingInHands       = !heldStack.IsEmpty();
-        const bool suppressBlockUse       = sneaking && somethingInHands;
+
+        // MC PlaceOnWaterBlockItem (lily pad, frogspawn): useOn is PASS, so a
+        // click never places one where the crosshair is. The client follows
+        // up with the item's `use` — a SOURCE_ONLY clip placed on the cell
+        // above what it hit — and sends that as a second UseItemOn marked
+        // `fromUse`, which is BlockItem.useOn and nothing else: no block
+        // reacts to it. Only a place-on-water item may send one.
+        const Game::BlockID heldBlockForUse =
+            Game::ItemRegistry::IsBlockItem(heldStack.itemId)
+                ? Game::ItemRegistry::ToBlock(heldStack.itemId) : Game::BlockID::Air;
+        const bool placesOnWater = Game::IsPlaceOnWaterBlock(heldBlockForUse);
+        if (packet.fromUse && !placesOnWater) {
+            AckInteraction(packet.sequence, false);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+        const bool suppressBlockUse       = (sneaking && somethingInHands) || packet.fromUse;
 
         if (!suppressBlockUse) {
             if (clickedBlock.useItemOn) {
@@ -4472,6 +5412,21 @@ namespace Server {
             }
         }
 
+        // ── Leads: MC FenceBlock.useWithoutItem → LeadItem.bindPlayerMobs ──
+        // A #fences block has no useItemOn, so its useWithoutItem runs for the
+        // main hand whatever it holds: every mob this player leads within the
+        // fence's 32-box is tied to the fence's knot. Server-side for the
+        // painting's reason — it adds an entity. The client predicted nothing
+        // it would keep (FenceBlock's client answer is PASS, so a block in
+        // hand was predicted placed); the resync puts both cells back.
+        if (!suppressBlockUse && isMainHand && Game::IsFenceBlock(clickedBlkId)) {
+            if (Game::ConsumesAction(BindLeashedMobsToFence(clicked))) {
+                ResyncAndAck(clicked, context.getPlacementPos(), packet.sequence);
+                m_lastInteractionSequence = packet.sequence;
+                return;
+            }
+        }
+
         // ── End crystal (MC EndCrystalItem.useOn) ─────────────────────────
         // Lives here rather than in ItemBehaviors because placing one spawns
         // an ENTITY into this session's level and pokes the dragon fight —
@@ -4493,6 +5448,19 @@ namespace Server {
         // Server-side for the armor stand's reason: it adds an entity.
         if (!heldStack.IsEmpty() && heldStack.itemId == Game::Items::Painting) {
             const bool placed = server->PlacePaintingFromUse(*this, hit, heldStack);
+            if (placed && !isCreative) {
+                heldStack.count -= 1;
+                if (heldStack.count <= 0) heldStack.Clear();
+            }
+            AckInteraction(packet.sequence, placed);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+
+        // ── Cushions (MC CushionItem.useOn) ───────────────────────────────
+        // Server-side for the armor stand's reason: it adds an entity.
+        if (!heldStack.IsEmpty() && Game::Cushion::IsCushionItem(heldStack.itemId)) {
+            const bool placed = server->PlaceCushionFromUse(*this, hit, heldStack, interactionEye);
             if (placed && !isCreative) {
                 heldStack.count -= 1;
                 if (heldStack.count <= 0) heldStack.Clear();
@@ -4525,6 +5493,18 @@ namespace Server {
             AckInteraction(packet.sequence, placed);
             m_lastInteractionSequence = packet.sequence;
             return;
+        }
+
+        // MC LeadItem.useOn: on a #fences block, bindPlayerMobs — what a
+        // sneaking player (whose sneak skipped the fence's own use) gets.
+        if (!heldStack.IsEmpty() && heldStack.itemId == Game::Items::Lead &&
+            Game::IsFenceBlock(clickedBlkId)) {
+            const Game::UseResult r = BindLeashedMobsToFence(clicked);
+            if (Game::ConsumesAction(r)) {
+                ResyncAndAck(clicked, context.getPlacementPos(), packet.sequence);
+                m_lastInteractionSequence = packet.sequence;
+                return;
+            }
         }
 
         // Item.useOn — the item acts on the targeted block (FlintAndSteel,
@@ -4580,6 +5560,15 @@ namespace Server {
             }
         }
 
+        // PlaceOnWaterBlockItem.useOn → PASS: a plain click with a lily pad or
+        // frogspawn places nothing here (see `placesOnWater` above); the
+        // client's `fromUse` follow-up is the placement.
+        if (placesOnWater && !packet.fromUse) {
+            AckInteraction(packet.sequence, false);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
+
         // === 6. BlockItem placement fallback (existing behaviour) ===
 
         // Get block to place from player's hand
@@ -4606,9 +5595,63 @@ namespace Server {
                     return;
                 }
             }
+            // Minecraft.startUseItem's loop then gives the OFF_HAND its own
+            // gameMode.useItemOn: the clicked block reacts to whatever the
+            // offhand holds — nothing, usually. That is how a lit candle or
+            // candle cake goes out when clicked with an axe, a sword or a
+            // stick (CandleBlock.useItemOn: `itemStack.isEmpty()` — the EMPTY
+            // offhand's stack), while a block item (placed above, and done)
+            // or flint and steel (its useOn succeeded or failed, and done)
+            // never gets this far. Off hand: TRY_WITH_EMPTY_HAND does not
+            // reach useWithoutItem (ServerPlayerGameMode: MAIN_HAND only).
+            {
+                Game::ItemStack& offhand = m_player->getItemInHand(1);
+                const bool offSuppress = sneaking && (somethingInHands || !offhand.IsEmpty());
+                if (!offSuppress && clickedBlock.useItemOn &&
+                    world->GetBlock(clicked.x, clicked.y, clicked.z) == clickedBlkId) {
+                    const Game::UseResult r = clickedBlock.useItemOn(offhand, world, clicked, m_player,
+                                                                     /*hand=*/1, hit);
+                    if (Game::ConsumesAction(r)) {
+                        AckInteraction(packet.sequence, true);
+                        m_lastInteractionSequence = packet.sequence;
+                        return;
+                    }
+                }
+            }
+            // The OFF_HAND's useItemOn continues past the block into the
+            // held item's own useOn (ServerPlayerGameMode.useItemOn) — a
+            // firework rocket in the off hand launches from the clicked face.
+            {
+                Game::ItemStack& offhand = m_player->getItemInHand(1);
+                const Game::Item& offItem = Game::ItemRegistry::Get(offhand.itemId);
+                if (!offhand.IsEmpty() && offItem.useOn &&
+                    offhand.itemId == Game::Items::FireworkRocket) {
+                    Game::UseOnContext offContext(world, m_player, /*hand=*/1, hit);
+                    offContext.playerYaw   = m_player->getYaw();
+                    offContext.playerPitch = m_player->getPitch();
+                    const Game::ItemStack before = offhand;
+                    const Game::UseResult r = offItem.useOn(offContext, offhand);
+                    if (m_player->isCreative()) {
+                        // As the main hand's: the count comes back.
+                        if (offhand.IsEmpty()) offhand = before;
+                        else                   offhand.count = before.count;
+                    }
+                    if (!Game::ItemStacksMatch(before, offhand)) m_player->markSlotDirty(m_player->handSlotIndex(1));
+                    if (Game::ConsumesAction(r) || r == Game::UseResult::Fail) {
+                        AckInteraction(packet.sequence, Game::ConsumesAction(r));
+                        m_lastInteractionSequence = packet.sequence;
+                        return;
+                    }
+                }
+            }
             {
                 const Game::ItemStack& offhand = m_player->getItemInHand(1);
-                if (!offhand.IsEmpty() && Game::GetUseDuration(offhand) > 0) {
+                // (A fishing rod too: FishingRodItem.use casts from either
+                // hand, and MC's hand loop reaches the off hand's use; and a
+                // firework rocket, whose use boosts a glider from either.)
+                if (!offhand.IsEmpty() && (Game::GetUseDuration(offhand) > 0 ||
+                                           offhand.itemId == Game::Items::FishingRod ||
+                                           offhand.itemId == Game::Items::FireworkRocket)) {
                     DispatchUseItem(1);
                     AckInteraction(packet.sequence, true);
                     m_lastInteractionSequence = packet.sequence;
@@ -4736,8 +5779,18 @@ namespace Server {
         // the state already there, so a clump never re-orients as you add to it.
         bool growInPlace = false;
         Game::BlockState grownState;
-        if (Game::IsSegmentedBlock(targetBlockId) && targetBlockId == blockToPlace) {
-            const Game::BlockState grown = Game::SegmentGrownState(targetBlockState);
+        // The same `state.is(this)` branch for candles (CANDLES), sea
+        // pickles (PICKLES) and turtle eggs (EGGS) — StackedPlacementState
+        // covers all of them, keeping LIT / WATERLOGGED / HATCH as they are.
+        if (Game::StackedPlacementState(targetBlockState, blockToPlace, grownState)) {
+            growInPlace = true;
+        }
+        // MC SnowLayerBlock.getStateForPlacement, same shape: a snow layer
+        // already in the resolved cell takes one more layer (at most 8),
+        // `state.setValue(LAYERS, min(8, layers + 1))`. canBeReplaced above is
+        // what let the resolved cell be the existing pile.
+        if (targetBlockId == Game::BlockID::SnowLayer && blockToPlace == Game::BlockID::SnowLayer) {
+            const Game::BlockState grown = Game::SnowLayer::GrownState(targetBlockState);
             if (grown != targetBlockState) {
                 grownState  = grown;
                 growInPlace = true;
@@ -4814,43 +5867,13 @@ namespace Server {
         }
 
         // === 8. Collision check with entities ===
-        
-        // Check if any players are in the target block space
-        // TODO: Get all players from PlayerSessionManager
-        // Where the player stands IN THE WORLD BEING EDITED: their own feet,
-        // or their image through the portal they are reaching through
-        // (the interaction eye is that image's eye).
-        const glm::dvec3 playerPosDouble = interactionEye - glm::dvec3(0.0, m_player->getEyeHeight(), 0.0);
-        glm::vec3 playerCollisionPos = glm::vec3(playerPosDouble.x, playerPosDouble.y, playerPosDouble.z);
-        glm::vec3 blockCenter = glm::vec3(targetPos) + glm::vec3(0.5f, 0.5f, 0.5f);
-        
-        // Simple AABB check - player is 0.6x1.8x0.6, block is 1x1x1.
         //
-        // Skipped entirely for blocks MC declares `.noCollision()`. Vanilla's
-        // gate is `level.isUnobstructed(state, pos, CollisionContext.empty())`
-        // (BlockItem.java), which tests the block's COLLISION shape — empty for
-        // flowers, grass and leaf litter, so those always place. Without this
-        // you can't add a segment to the clump you're standing on, or put a
-        // flower down at your own feet.
-        bool playerCollides = false;
-        const float bodyHalfWidth = 0.3f * m_player->getScale();
-        const float bodyHeight    = 1.8f * m_player->getScale();
-        if (Game::BlockRegistry::HasCollision(blockToPlace) &&
-            std::abs(playerCollisionPos.x - blockCenter.x) < 0.5f + bodyHalfWidth &&
-            std::abs(playerCollisionPos.z - blockCenter.z) < 0.5f + bodyHalfWidth &&
-            playerCollisionPos.y < targetPos.y + 1.0f &&
-            playerCollisionPos.y + bodyHeight > targetPos.y) {
-            playerCollides = true;
-        }
-        
-        if (playerCollides) {
-            Log::Debug("HandleUseItemOn: Player collides with placement at (%d,%d,%d)", targetPos.x, targetPos.y, targetPos.z);
-            failPlacement(targetPos);
-            return;
-        }
-        
-        // TODO: Check collision with other entities
-        
+        // MC BlockItem.canPlace's `level.isUnobstructed(state, pos, context)`
+        // needs the FINAL placement state (a grown clump, a slab's half, a
+        // snow pile's height — SnowLayerBlock collides one layer below its
+        // top), so it runs after step 9 computes it: see
+        // IsPlacementUnobstructed below the second survival gate.
+
         // === 9. Mutate the world ===
 
         // MC Block.getStateForPlacement, applied through one shared table (see
@@ -4932,6 +5955,20 @@ namespace Server {
             return;
         }
 
+        // MC BlockItem.canPlace, second half: level.isUnobstructed(state, pos,
+        // placementContext(player)). The placed state's collision shape must
+        // not overlap any entity that blocksBuilding — this player, every
+        // other player in this level, the mobs, armor stands, primed TNT —
+        // which is what stops a block being dropped onto someone to trap
+        // them. The client asks the same question before it predicts, so a
+        // refused placement never flashes in.
+        if (!IsPlacementUnobstructed(*world, placedState, targetPos)) {
+            Log::Debug("HandleUseItemOn: Placement at (%d,%d,%d) obstructed by an entity",
+                       targetPos.x, targetPos.y, targetPos.z);
+            failPlacement(targetPos);
+            return;
+        }
+
         bool changed = world->SetBlock(
             targetPos.x, targetPos.y, targetPos.z,
             blockToPlace,
@@ -4959,6 +5996,11 @@ namespace Server {
                                  Game::SoundSource::Blocks, (soundType.volume + 1.0f) / 2.0f,
                                  soundType.pitch * 0.8f);
             }
+            // MC BlockItem.place:90 — gameEvent(BLOCK_PLACE, pos,
+            // Context.of(player, placedState)).
+            world->GameEvent(Game::GameEventId::BlockPlace, targetPos,
+                             Game::GameEventContext::Of(m_player->GameEventSource(),
+                                                        world->GetBlockState(targetPos.x, targetPos.y, targetPos.z)));
         }
         if (placingDoor) {
             // MC DoorBlock.setPlacedBy: the upper half goes in above.
@@ -4986,11 +6028,13 @@ namespace Server {
         // partner is still typed SINGLE and has to be told (MC does this
         // through updateShape on the neighbour). Skipping it leaves the older
         // chest rendering and opening alone while the new one claims a pair.
-        if (blockToPlace == Game::BlockID::Chest ||
-            blockToPlace == Game::BlockID::TrappedChest) {
+        if (Game::IsChestBlock(blockToPlace)) {
             if (const auto partner = ChestPartnerCell(placedState, targetPos)) {
                 const bool selfIsLeft = placedState.GetValueByName("type") == "left";
-                SetChestType(*world, *partner, selfIsLeft ? "right" : "left");
+                // A copper partner takes the new chest's block too: the pair
+                // is the least oxidized of the two (see
+                // CopperChestLeastOxidizedState).
+                SetChestType(*world, *partner, selfIsLeft ? "right" : "left", blockToPlace);
             }
         }
         
@@ -5358,18 +6402,33 @@ namespace Server {
         IntegratedServer* server = g_integratedServer.get();
         Game::World* world = SessionWorld();
 
-        // :291-292 spectator → PASS. (No spectator interaction support — same
-        // fallthrough note as HandleUseItemOn's dispatch.)
-        // :293-294 cooldown check omitted — no cooldown system (excluded).
+        // :291-292 spectator → PASS.
+        if (m_player->getGameMode() == Server::GameMode::SPECTATOR) return Game::UseResult::Pass;
 
         Game::ItemStack& stack = m_player->getItemInHand(hand);
+        // :293-294 — an item whose cooldown group is resting does nothing.
+        if (m_player->getCooldowns().IsOnCooldown(stack)) return Game::UseResult::Pass;
+
         const int oldCount = stack.count;                       // :296
         const int oldDamage = Game::GetDamageValue(stack);      // :297
+
+        // MC ItemStack.use: `stackBeforeUse = copy()`, and whether the use is
+        // instant (getUseDuration <= 0) — only an instant, successful use
+        // applies the USE_COOLDOWN here (a held use applies it on finish).
+        const Game::ItemStack stackBeforeUse = stack;
+        const bool isInstantlyUsed = Game::GetUseDuration(stack) <= 0;
 
         const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
         const Game::UseResult result =
             item.use ? item.use(world, m_player, hand, stack)
                      : Game::Item_DefaultUse(world, m_player, hand, stack);
+
+        // ItemStack.use → applyAfterUseComponentSideEffects: UseCooldown
+        // .apply(stackBeforeUsing, player) on an instant Success (the wind
+        // charge's 10 ticks, the ender pearl's 20).
+        if (isInstantlyUsed && Game::ConsumesAction(result)) {
+            Game::ApplyUseCooldown(m_player->getCooldowns(), stackBeforeUse);
+        }
 
         // :299-305 — resultStack. Our callbacks mutate the hand stack in
         // place (BlockInteraction.hpp:44-51 documents the equivalence with
@@ -5431,7 +6490,8 @@ namespace Server {
 
             case Network::PlayerAction::SWAP_ITEM_WITH_OFFHAND: {
                 // :1214-1220 — swap main-hand (selected hotbar) and offhand
-                // stacks, then stopUsingItem.
+                // stacks, then stopUsingItem. Not for a spectator.
+                if (m_player->getGameMode() == GameMode::SPECTATOR) return;
                 auto& inv = m_player->getInventory();
                 const int mainIdx = m_player->handSlotIndex(0);
                 const int offIdx  = m_player->handSlotIndex(1);
@@ -5448,7 +6508,9 @@ namespace Server {
             case Network::PlayerAction::DROP_ALL_ITEMS: {
                 // MC ServerPlayer.drop(all) → Inventory.removeFromSelected →
                 // LivingEntity.drop: take the items OUT of the hand and throw
-                // them into the world along the look direction.
+                // them into the world along the look direction. Never a
+                // spectator's (:1224/:1230 `!isSpectator()`).
+                if (m_player->getGameMode() == GameMode::SPECTATOR) return;
                 Game::ItemStack& held = m_player->getItemInHand(0);
                 if (held.IsEmpty()) return;
 
@@ -5479,8 +6541,37 @@ namespace Server {
                 return;
 
             case Network::PlayerAction::STAB:
-                // No combat system.
+                // :1343-1358 — a spear's jab: not for a spectator, not before
+                // a full attack charge (cannotAttackWithItem(item, 5)), then
+                // PiercingWeapon.attack with the main hand.
+                Game::WeaponItems::Stab(*m_player);
                 return;
+
+            case Network::PlayerAction::OPEN_VEHICLE_INVENTORY: {
+                // MC handlePlayerCommand OPEN_INVENTORY: the vehicle's
+                // openCustomInventoryScreen — a chest boat's chest, with
+                // CONTAINER_OPEN (AbstractChestBoat.openCustomInventoryScreen).
+                Game::Entity* vehicle = PlayerRiding::VehicleOf(*this);
+                auto* boat = dynamic_cast<Game::Boat*>(vehicle);
+                PlayerEntityView* view = g_integratedServer ? g_integratedServer->GetPlayerEntityView(m_connectionId)
+                                                            : nullptr;
+                // A mount with an inventory screen (MC HasCustomInventory-
+                // Screen: the horse family, the llamas, the camels, the
+                // nautili) opens its own — AbstractHorse / AbstractNautilus
+                // .openCustomInventoryScreen decides whether it will.
+                if (auto* mount = dynamic_cast<Game::Mob*>(vehicle);
+                    !boat && mount && view && mount->HasCustomInventoryScreen()) {
+                    mount->OpenCustomInventoryScreen(*view);
+                    FlushPendingMenuOpen();
+                    return;
+                }
+                if (!boat || !boat->IsChest() || !view || !boat->Level()) return;
+                if (boat->Level()->OpenContainerEntityMenu(*view, *boat)) {
+                    FlushPendingMenuOpen();
+                    boat->GameEvent(Game::GameEventId::ContainerOpen, view);
+                }
+                return;
+            }
 
             case Network::PlayerAction::STOP_SLEEPING:
                 // MC ServerGamePacketListenerImpl.handlePlayerCommand

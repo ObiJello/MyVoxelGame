@@ -135,8 +135,28 @@ namespace Render {
         // Returns true if an index upload was issued (for profiling).
         // See mesh/TranslucentSort.hpp for why sorting is load-bearing here.
         bool ResortTranslucentSection(::Game::Math::ChunkPos chunkPos, int sectionY,
-                                      const glm::vec3& cameraPos,
+                                      const glm::dvec3& cameraPos,
                                       bool blockPosChanged, bool isNearby);
+
+        // MC SectionRenderDispatcher.setCameraPosition: the camera this
+        // level's translucent layers are drawn from, which the mesh workers
+        // sort a freshly built section against (NOT the player's feet — a
+        // section rebuilt while the player stands still is never re-sorted,
+        // so its first order is the one on screen).
+        void SetTranslucentSortCamera(const glm::dvec3& cameraPos);
+
+        // A SECONDARY view's own back-to-front order for one section (a
+        // portal view of this level, a face capture, the shadow view): the
+        // section's quads sorted for `cameraPos` as absolute uint32 indices
+        // over its slab's VBO, written to `outIndices` and NOWHERE else. The
+        // section's shared index range belongs to the player's view — a
+        // second view re-sorting it in place rewrote the order the main
+        // view's already-recorded draws read (the still-camera flicker with
+        // portals in view). False when the section has no translucent quads
+        // or its counts disagree (the caller then draws the shared order).
+        bool BuildViewSortedTranslucentIndices(::Game::Math::ChunkPos chunkPos, int sectionY,
+                                               const glm::dvec3& cameraPos,
+                                               std::vector<uint32_t>& outIndices);
 
         // Callback receives (const SectionKey&, const GPUSectionData*)
         // Iterates m_gpuData directly — it only contains sections with geometry
@@ -450,6 +470,13 @@ namespace Render {
 
     // Player position updates
     void SetClientMeshPlayerPosition(const glm::vec3& position);
+
+    // Once a frame, before scheduling: re-measure the routes through every
+    // portal the viewer (eye at `eye`, in the ACTIVE level) could look
+    // through and publish each level's mesh priority field (MeshPriority.hpp)
+    // — the far side of a portal beside the player then meshes with the
+    // sections beside the player, in this level and in a portal's other one.
+    void UpdateMeshPortalRoutes(const glm::dvec3& eye);
 
     // Mesh scheduling
     void CancelClientMeshJobs(::Game::Math::ChunkPos chunkPos);

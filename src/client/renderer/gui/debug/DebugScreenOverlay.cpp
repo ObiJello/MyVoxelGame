@@ -375,7 +375,7 @@ namespace Render::DebugScreen {
         m_profilerPieChart.SetBottomOffset(10);
         if (ShowFpsCharts()) {
             const int maxWidth = scaledScreenWidth / 2;
-            m_fpsChart.SetFramerateLimit(ctx.maxFps);
+            m_fpsChart.SetFramerateLimit(ctx.maxFpsOption);   // MC FpsDebugChart: options.framerateLimit
             m_fpsChart.Render(g, 0, m_fpsChart.GetWidth(maxWidth), scaledScreenHeight);
             if (m_tickTimeLogger.Size() > 0) {
                 if (Server::g_integratedServer) {

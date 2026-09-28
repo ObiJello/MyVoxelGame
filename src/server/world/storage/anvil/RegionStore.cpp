@@ -28,6 +28,12 @@ namespace Game::Anvil {
         return dir / ("r." + std::to_string(rx) + "." + std::to_string(rz) + ".mca");
     }
 
+    AnvilRegion* RegionStore::Find(DimensionId dim, RegionKind kind, int rx, int rz) const {
+        const Key key{dim, kind, static_cast<int32_t>(rx), static_cast<int32_t>(rz)};
+        auto it = m_open.find(key);
+        return it != m_open.end() ? it->second.region.get() : nullptr;
+    }
+
     AnvilRegion* RegionStore::Get(DimensionId dim, RegionKind kind, int rx, int rz,
                                   std::string& error, bool createIfMissing) {
         error.clear();

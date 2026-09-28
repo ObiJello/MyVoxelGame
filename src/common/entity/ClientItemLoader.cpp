@@ -179,6 +179,8 @@ namespace Game {
                             // only the fallback. Item::ResolveLayerTint.
                             if (tt == "potion") out.layerTintKinds.back() = ItemTintKind::Potion;
                             if (tt == "dye")    out.layerTintKinds.back() = ItemTintKind::Dye;
+                            if (tt == "map_color") out.layerTintKinds.back() = ItemTintKind::MapColor;
+                            if (tt == "firework")  out.layerTintKinds.back() = ItemTintKind::Firework;
                             if (tt == "grass" || tt == "foliage") {
                                 const auto num = [&](const char* k, float dflt) {
                                     auto f = t.find(k);

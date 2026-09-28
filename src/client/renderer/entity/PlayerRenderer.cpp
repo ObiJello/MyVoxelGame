@@ -42,6 +42,54 @@ namespace Render {
             }
         }
 
+        // MC LivingEntityRenderer.setupRotations while fall-flying: the body
+        // tipped forward about its own side axis by (90 + xRot), eased in
+        // over the glide's first ten ticks (fallFlyTicks² / 100), so the
+        // figure lies along where it looks.
+        void GlideStickFigure(std::vector<StickVertex>& verts, size_t begin,
+                              const glm::vec3& feet, float bodyYawDeg, float pitchDeg,
+                              float fallFlyTicks) {
+            if (fallFlyTicks <= 0.0f) return;
+            const float ease = std::clamp(fallFlyTicks * fallFlyTicks / 100.0f, 0.0f, 1.0f);
+            const float angle = ease * (90.0f + pitchDeg);
+            if (angle == 0.0f) return;
+            const glm::vec3 forward = Game::Mth::HorizontalViewVector(bodyYawDeg);
+            // Up turned toward forward: about up × forward.
+            const glm::vec3 axis = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), forward));
+            const glm::mat4 rot = glm::rotate(glm::mat4(1.0f), glm::radians(angle), axis);
+            for (size_t i = begin; i < verts.size(); ++i) {
+                const glm::vec3 p(verts[i].x, verts[i].y, verts[i].z);
+                const glm::vec3 q = feet + glm::vec3(rot * glm::vec4(p - feet, 1.0f));
+                verts[i].x = q.x;
+                verts[i].y = q.y;
+                verts[i].z = q.z;
+            }
+        }
+
+        // MC LivingEntityRenderer.setupRotations while isAutoSpinAttack (a
+        // riptide): the body laid along the look — rotateX(-90 - xRot) in
+        // the body's frame — and spun about its own long axis,
+        // rotateY(ageInTicks * -75). The spin comes first in vertex order
+        // (it sits innermost on MC's pose stack), about world up; then the
+        // tip, about the body's side axis (the glide's).
+        void SpinStickFigure(std::vector<StickVertex>& verts, size_t begin,
+                             const glm::vec3& feet, float bodyYawDeg, float pitchDeg,
+                             float ageInTicks) {
+            const glm::vec3 forward = Game::Mth::HorizontalViewVector(bodyYawDeg);
+            const glm::vec3 side = glm::normalize(glm::cross(glm::vec3(0.0f, 1.0f, 0.0f), forward));
+            const glm::mat4 tip  = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f + pitchDeg), side);
+            const glm::mat4 spin = glm::rotate(glm::mat4(1.0f), glm::radians(ageInTicks * -75.0f),
+                                               glm::vec3(0.0f, 1.0f, 0.0f));
+            const glm::mat4 rot = tip * spin;
+            for (size_t i = begin; i < verts.size(); ++i) {
+                const glm::vec3 p(verts[i].x, verts[i].y, verts[i].z);
+                const glm::vec3 q = feet + glm::vec3(rot * glm::vec4(p - feet, 1.0f));
+                verts[i].x = q.x;
+                verts[i].y = q.y;
+                verts[i].z = q.z;
+            }
+        }
+
         void ToppleStickFigure(std::vector<StickVertex>& verts, size_t begin,
                                const glm::vec3& feet, float bodyYawDeg,
                                float flipDeg) {
@@ -264,7 +312,8 @@ void main() {
     }
 
     void PlayerRenderer::SubmitFigures(const glm::mat4& mvp, const glm::vec3& cameraPos,
-                                       const glm::vec4& clipPlane, bool glowing, bool drawBody) {
+                                       const glm::vec4& clipPlane, bool glowing, bool drawBody,
+                                       bool translucent) {
         // Which set, and where in it — see EntityFrame.hpp.
         if (m_frameCursor.Advance()) {
             m_lineCursor = 0;
@@ -289,7 +338,7 @@ void main() {
             PipelineState triState;
             triState.depthTestEnabled  = true;
             triState.depthWriteEnabled = true;
-            triState.blendEnabled      = false;
+            triState.blendEnabled      = translucent;   // MC itemEntityTranslucentCull
             triState.cullMode          = CullMode::Back;       // only show front-facing tris
             triState.frontFace         = FrontFace::CounterClockwise;
             triState.primitiveType     = PrimitiveType::Triangles;
@@ -340,7 +389,7 @@ void main() {
                 PipelineState stripState;
                 stripState.depthTestEnabled  = true;
                 stripState.depthWriteEnabled = true;
-                stripState.blendEnabled      = false;
+                stripState.blendEnabled      = translucent;
                 stripState.cullMode          = CullMode::None;        // strips face camera; both sides visible
                 stripState.primitiveType     = PrimitiveType::Triangles;
                 g_renderBackend->SetPipelineState(stripState);
@@ -391,6 +440,8 @@ void main() {
         m_glowTriVerts.clear();
         m_outlineOnlyLineVerts.clear();
         m_outlineOnlyTriVerts.clear();
+        m_translucentLineVerts.clear();
+        m_translucentTriVerts.clear();
         const bool collectingOutline = EntityOutline::Get().Collecting();
         m_lineVerts.reserve(players.size() * 36);
         // Ring: 64 segs * 6 verts = 384, smile: 32 * 6 = 192, disc: 16 * 3 = 48 → ~624/player.
@@ -404,15 +455,30 @@ void main() {
             // MC LivingEntityRenderer.submit: an INVISIBLE body is not drawn
             // (the stick figure has no layers to keep) — unless it GLOWS,
             // when its outline alone is (the outline render type).
-            const bool glowing = collectingOutline && rp.effects.Glowing();
+            // A spectator (drawn at all only for a spectator viewer — the
+            // server marks them invisible to everyone else) is MC's
+            // translucent floating head: PlayerModel shows only head and hat
+            // when isSpectator, and the body is INVISIBLE (ServerPlayer
+            // .updateInvisibilityStatus), which a spectator viewer sees
+            // through LivingEntityRenderer's forceTransparent. A spectator
+            // viewer sees any other INVISIBLE player the same way, whole.
+            const bool spectatorHead = rp.IsSpectator();
+            const bool glowing = collectingOutline && (rp.effects.Glowing() ||
+                                                       (m_outlinePlayers && !spectatorHead));
             const bool bodyInvisible = rp.effects.Invisible();
-            if (bodyInvisible && !glowing) continue;
+            const bool translucent = spectatorHead || (bodyInvisible && m_viewerSeesInvisible);
+            if (bodyInvisible && !glowing && !translucent) continue;
             // Which batch the figure joins: drawn, drawn and outlined, or
-            // outlined only.
-            std::vector<StickVertex>& lineOut = !glowing ? m_lineVerts
+            // outlined only — or the translucent batch (the head alone for a
+            // spectator: its lines are built and dropped).
+            std::vector<StickVertex>& lineOut = spectatorHead ? m_scratchLineVerts
+                                              : translucent ? m_translucentLineVerts
+                                              : !glowing ? m_lineVerts
                                               : (bodyInvisible ? m_outlineOnlyLineVerts : m_glowLineVerts);
-            std::vector<StickVertex>& triOut  = !glowing ? m_triVerts
+            std::vector<StickVertex>& triOut  = translucent ? m_translucentTriVerts
+                                              : !glowing ? m_triVerts
                                               : (bodyInvisible ? m_outlineOnlyTriVerts : m_glowTriVerts);
+            if (spectatorHead) m_scratchLineVerts.clear();
             ++m_tally.inLevel;
             // ── Sub-tick interpolation. Mirrors MC Entity.getPosition(partialTick)
             // (Entity.java:1955-1960), Entity.getYRot(partialTick) (:1918, uses
@@ -526,10 +592,27 @@ void main() {
                 }
             }
 
+            // MC HumanoidModel's isPassenger pose while seated (a cushion).
+            const bool sitting = rp.vehicleId != 0 && !rp.sleepingPos;
+            if (sitting) crouching = false;
             color = LightFigureColor(color, renderPos, rp.scale, crouching);
+            if (translucent) color.a = 38;   // ARGB 0x26FFFFFF, MC's forceTransparent tint
             BuildStickFigure(lineOut, triOut, triOut, renderFeet,
-                             headYaw, bodyYaw, pitch, crouching, color);
+                             headYaw, bodyYaw, pitch, crouching, color, sitting);
 
+            // An elytra glide lays the figure along its flight — unless it
+            // riptides, whose spin takes over (AvatarRenderer).
+            if (rp.fallFlying && !rp.sleepingPos && !rp.autoSpinAttack) {
+                const float ticks = static_cast<float>(rp.fallFlyTicks) + partialTick;
+                GlideStickFigure(lineOut, lineBegin, renderFeet, bodyYaw, pitch, ticks);
+                GlideStickFigure(triOut,  triBegin,  renderFeet, bodyYaw, pitch, ticks);
+            }
+            // A riptide spins the figure along its look.
+            if (rp.autoSpinAttack && !rp.sleepingPos && rp.deathTime <= 0) {
+                const float age = static_cast<float>(rp.tickCount) + partialTick;
+                SpinStickFigure(lineOut, lineBegin, renderFeet, bodyYaw, pitch, age);
+                SpinStickFigure(triOut,  triBegin,  renderFeet, bodyYaw, pitch, age);
+            }
             // The corpse falls over (or the sleeper lies down). Applied to
             // just this player's slice of the batch, which is why the two
             // offsets above are taken first.
@@ -560,6 +643,16 @@ void main() {
             std::swap(m_lineVerts, m_outlineOnlyLineVerts);
             std::swap(m_triVerts, m_outlineOnlyTriVerts);
         }
+        // The translucent figures (spectator heads, invisible bodies a
+        // spectator sees), blended, after everything opaque.
+        if (!m_translucentLineVerts.empty() || !m_translucentTriVerts.empty()) {
+            std::swap(m_lineVerts, m_translucentLineVerts);
+            std::swap(m_triVerts, m_translucentTriVerts);
+            SubmitFigures(mvp, renderEye, clipPlane, /*glowing=*/false, /*drawBody=*/true,
+                          /*translucent=*/true);
+            std::swap(m_lineVerts, m_translucentLineVerts);
+            std::swap(m_triVerts, m_translucentTriVerts);
+        }
 
         // Restore default
         PipelineState defaultState;
@@ -579,7 +672,11 @@ void main() {
                                       const glm::dvec4& worldClipPlane,
                                       float deathFlipDeg,
                                       bool glowing,
-                                      bool drawBody) {
+                                      bool drawBody,
+                                      bool isSitting,
+                                      bool spectatorHead,
+                                      float fallFlyTicks,
+                                      float spinAttackAgeTicks) {
         PROFILE_ZONE_N("PlayerRenderSingle");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
@@ -602,9 +699,23 @@ void main() {
         PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
         // The light where the body stands — the caller's `position`, not
         // where a portal model carries it (MC lights a ghost by its entity).
+        if (isSitting) isCrouching = false;
         color = LightFigureColor(color, position, 1.0f, isCrouching);
+        // A spectator's own body in third person: the translucent head alone
+        // (PlayerModel with isSpectator, drawn with forceTransparent — the
+        // viewer is a spectator too).
+        if (spectatorHead) color.a = 38;
         BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderFeet,
-                         headYaw, bodyYaw, pitch, isCrouching, color);
+                         headYaw, bodyYaw, pitch, isCrouching, color, isSitting);
+        if (spectatorHead) m_lineVerts.clear();
+        if (fallFlyTicks > 0.0f && spinAttackAgeTicks < 0.0f) {
+            GlideStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, pitch, fallFlyTicks);
+            GlideStickFigure(m_triVerts,  0, renderFeet, bodyYaw, pitch, fallFlyTicks);
+        }
+        if (spinAttackAgeTicks >= 0.0f && deathFlipDeg == 0.0f) {
+            SpinStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, pitch, spinAttackAgeTicks);
+            SpinStickFigure(m_triVerts,  0, renderFeet, bodyYaw, pitch, spinAttackAgeTicks);
+        }
         ToppleStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, deathFlipDeg);
         ToppleStickFigure(m_triVerts,  0, renderFeet, bodyYaw, deathFlipDeg);
 
@@ -649,7 +760,7 @@ void main() {
         const glm::vec3 cameraPos = glm::vec3(glm::inverse(view)[3]);
         const bool outline = glowing && EntityOutline::Get().Collecting();
         if (!drawBody && !outline) return;
-        SubmitFigures(projection * view, cameraPos, clipPlane, outline, drawBody);
+        SubmitFigures(projection * view, cameraPos, clipPlane, outline, drawBody, spectatorHead);
     }
 
     namespace {

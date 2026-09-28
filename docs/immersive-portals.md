@@ -78,6 +78,28 @@ used to ask "is the session in this dimension" asks `LoadsDimension` /
 `IsWatching(dim, chunk)` / `HasSentChunk(dim, chunk)` instead, and
 `ServerConnection::SendPacketIn(dim, …)` scopes every positional packet.
 
+**Portal-aware order** (`src/common/portal/PortalRoute.hpp`). Loaders decide
+*which* chunks load; the order they are sent and meshed in counts distance
+through the portals the eye can look through: `|eye − S| + |T(S) − X| / scale`
+(S = nearest point of the surface, in front of it, within 8 chunks; 256 for
+global surfaces), minimised with the direct distance. The server builds the
+routes with the loaders (`ComputeChunkLoaders(session, &routes)` →
+`PlayerSession::SetSendRoutes`, one level of indirect portals, vanilla gun
+pairs too; deduped per far chunk, routes dominated by the direct distance
+dropped) and `SendNextChunks` sorts by `SendPriorityDistance`. Loading goes
+in the same order: every route is a `Threading::ChunkLoadAnchor` (bias = the
+walk to the surface) for the disk-read buckets and the generation backlog,
+computed from the pass's NEW loaders before the tracking diff files its
+requests; a newly appearing anchor re-files the queued disk reads once. The client
+publishes a per-level field each frame (`Render::UpdateMeshPortalRoutes`,
+candidates cached on the eye's section + `ClientImmersivePortals::Revision`)
+that both the scheduler's sort and `ClientWorkerPool::PollNearestLocked`
+use (`MeshPriority.hpp`). `LevelLoadTracker` also waits (≤ 3 s past the
+player's own section) for the far-side sections behind in-view portals within
+24 blocks. Logs: `[ChunkOrder] … route …` / `first batch, portal-routed chunks`
+and a one-shot `[MeshOrder]` per level after a load, `[LevelLoadTracker]
+… portal-view section(s) ready`.
+
 ### Rendering — `src/client/renderer/portal/ImmersivePortalRenderer.hpp`
 
 `Render(...)` takes a `LevelRenderFn` (PlatformMain's `renderLevelView`)
@@ -166,6 +188,20 @@ stay idle; the gun's own renderer draws the rim per level (also inside portal
 views), the particle system draws its sparks, and the teleport flash, floor
 exit fling and arrival rules are applied by the immersive paths. Gun pairs and
 the gun item persist (`data/portal_gun.json`, the item's instance id component).
+
+A pair lives as long as its gun (`src/server/portal/PortalGunTracker.hpp`):
+each pair saves where its gun was last confirmed (a player, a dropped item, a
+container, an entity, or stored with an unloaded chunk), the tracker re-checks
+that spot every 10 ticks, and a gun gone from a live spot that a census of
+everything live cannot find twice running — or a dropped gun destroyed
+outright — closes the pair with the normal close burst. Offline players and
+unloaded chunks never close a pair. Once per world a background sweep
+byte-scans every saved chunk and `.dat` file for the gun-id tag and closes
+pairs whose gun exists nowhere (`orphanSweep` in `portal_gun.json`;
+`/portalgun sweep` re-runs it). A creative clone or palette stack is a new
+gun: its id is stripped server-side. `/portalgun list | close
+<player>|all|gun <id> | sweep` is the operator control.
+
 See the parity sheet (artifact "Immersive Portals Parity") for the full
 feature status and test walk.
 

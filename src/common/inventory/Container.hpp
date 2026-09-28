@@ -50,7 +50,9 @@ namespace Game {
                                  const ItemStack& /*stack*/) const { return true; }
 
         // MC Container.removeItem(slot, count): split `count` off the slot.
-        ItemStack RemoveItem(int slot, int count) {
+        // Virtual, as in MC: a one-slot container (the jukebox's
+        // ContainerSingleItem) answers with its own splitTheItem.
+        virtual ItemStack RemoveItem(int slot, int count) {
             ItemStack& current = GetItem(slot);
             if (current.IsEmpty() || count <= 0) return ItemStack{};
             ItemStack taken = current;

@@ -416,7 +416,7 @@ namespace Client {
                         c.Stop();
                     }
                 });
-            });
+            }, instance->GetStartOffsetSeconds());
         }
 
         if (instance->IsTickable()) m_tickingSounds.push_back(instance);

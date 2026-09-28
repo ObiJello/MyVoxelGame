@@ -5,10 +5,9 @@
 // long random cooldown, an unprovoked) nautilus rams its target in a straight
 // line, dealing attack damage plus a speed-scaled knockback.
 //
-// The taming/riding half of AbstractNautilus (TamableAnimal, saddle dashes,
-// the rider's water-breathing aura, the shell inventory) is SKIPPED with the
-// item and riding-input systems; ZombieNautilusAi reuses the target finder
-// and the charge from here.
+// A tame nautilus neither picks nor keeps a target (its taming and riding
+// live on AbstractNautilus); ZombieNautilusAi reuses the target finder, the
+// temptations and the charge from here.
 #pragma once
 
 #include "common/entity/ai/brain/Brain.hpp"
@@ -37,8 +36,9 @@ namespace Game {
         LivingEntity* FindNearestValidAttackTarget(Mob& mob);
 
         // MC ai/behavior/ChargeAttack, parameterised on the two variants'
-        // speeds (0.6 nautilus, 0.5 zombie nautilus).
-        BehaviorPtr MakeChargeAttack(float speed);
+        // speeds (0.6 nautilus, 0.5 zombie nautilus) and charge sounds
+        // (NAUTILUS_DASH / ZOMBIE_NAUTILUS_DASH).
+        BehaviorPtr MakeChargeAttack(float speed, const char* chargeSound);
 
     } // namespace NautilusAi
 

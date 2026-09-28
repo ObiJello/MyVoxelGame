@@ -337,8 +337,25 @@ namespace Game {
     // when MC named Player.class.
     LivingEntity* AvoidEntityGoal::FindThreat(EntityLevel& level) const {
         if (m_avoidsPlayers) {
-            return level.GetNearestPlayer(m_mob->position.x, m_mob->position.y,
-                                          m_mob->position.z, m_maxDistance);
+            if (!m_filtersThreats) {
+                return level.GetNearestPlayer(m_mob->position.x, m_mob->position.y,
+                                              m_mob->position.z, m_maxDistance);
+            }
+            // The filtered form: GetNearestPlayer's candidates (alive, not
+            // spectating, within range), each through AcceptsThreat.
+            std::vector<LivingEntity*> players;
+            level.GetPlayers(players);
+            LivingEntity* best = nullptr;
+            double bestDistSq = static_cast<double>(m_maxDistance) * m_maxDistance;
+            for (LivingEntity* p : players) {
+                if (!p || !p->IsAlive() || p->IsSpectator()) continue;
+                const double d = m_mob->DistanceToSqr(*p);
+                if (d >= bestDistSq) continue;
+                if (!AcceptsThreat(*p)) continue;
+                best = p;
+                bestDistSq = d;
+            }
+            return best;
         }
         AABB box = m_mob->GetAABB();
         box.min -= glm::vec3(m_maxDistance, 3.0f, m_maxDistance);
@@ -359,6 +376,7 @@ namespace Game {
             if (!living || !living->IsAlive()) continue;
             const double d = m_mob->DistanceToSqr(*living);
             if (d > static_cast<double>(m_maxDistance) * m_maxDistance) continue;
+            if (m_filtersThreats && !AcceptsThreat(*living)) continue;
             if (!best || d < bestDistSq) { best = living; bestDistSq = d; }
         }
         return best;
@@ -408,12 +426,13 @@ namespace Game {
     }
 
     bool RangedBowAttackGoal::CanUse() {
-        // MC also requires isHolding(BOW); this port's shooter always has one.
-        return m_mob->GetTarget() != nullptr;
+        // MC: a target and isHoldingBow (mob.isHolding(Items.BOW) — either
+        // hand).
+        return m_mob->GetTarget() != nullptr && m_mob->IsHoldingItem(Items::Bow);
     }
 
     bool RangedBowAttackGoal::CanContinueToUse() {
-        return CanUse() || !m_mob->GetNavigation().IsDone();
+        return (CanUse() || !m_mob->GetNavigation().IsDone()) && m_mob->IsHoldingItem(Items::Bow);
     }
 
     void RangedBowAttackGoal::Start() {

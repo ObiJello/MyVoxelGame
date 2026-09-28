@@ -107,7 +107,14 @@ namespace Server {
     } // namespace
 
     void FillBiomeCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("fillbiome", FillBiomeCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC FillBiomeCommand: <from> <to> <biome> [replace <filter>].
+        dispatcher.RegisterCommand("fillbiome", FillBiomeCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("from", Cmd::Arg::BlockPos)
+                .Then(Cmd::Argument("to", Cmd::Arg::BlockPos)
+                    .Then(Cmd::Argument("biome", Cmd::Arg::Biome).Executes()
+                        .Then(Cmd::Literal("replace")
+                            .Then(Cmd::Argument("filter", Cmd::Arg::BiomeOrTag).Executes()))))));
     }
 
     FillBiomeCommand::Result FillBiomeCommand::Fill(ServerLevel& level, const glm::ivec3& rawFrom,

@@ -475,6 +475,112 @@ namespace Game::EnchantmentHelper {
                                                                &EnchantmentEffectComponents::projectilePiercing)));
     }
 
+    float GetFishingTimeReduction(EntityLevel& level, const ItemStack& rod, Entity& fisher) {
+        // Enchantment.modifyFishingTimeReduction → modifyEntityFilteredValue.
+        return std::max(0.0f, ModifyEntityFiltered(level, rod, fisher, 0.0f,
+                                                   &EnchantmentEffectComponents::fishingTimeReduction));
+    }
+
+    int GetFishingLuckBonus(EntityLevel& level, const ItemStack& rod, Entity& fisher) {
+        // MutableFloat.intValue() truncates toward zero, then max(0, ...).
+        return std::max(0, static_cast<int>(ModifyEntityFiltered(level, rod, fisher, 0.0f,
+                                                                 &EnchantmentEffectComponents::fishingLuckBonus)));
+    }
+
+    float ModifyCrossbowChargingTime(const ItemStack& crossbow, float seconds) {
+        // runIterationOnItem → modifyUnfilteredValue(CROSSBOW_CHARGE_TIME).
+        // The holder's random only feeds the binomial/random value effects,
+        // which no charge-time component uses; a local stream keeps the
+        // call side-free of any level.
+        static thread_local JavaRandom random(0x51C4A26EL);
+        float value = seconds;
+        ForEachOnItem(crossbow, [&](EnchantmentId, int enchantmentLevel, const Definition& d) {
+            if (d.effects.crossbowChargeTime) {
+                value = d.effects.crossbowChargeTime->Process(enchantmentLevel, random, value);
+            }
+        });
+        return std::max(0.0f, value);
+    }
+
+    std::string CrossbowChargingStartSound(const ItemStack& crossbow) {
+        // getHighestLevel: the highest-level enchantment carrying the list,
+        // then list.get(min(level, size) - 1).
+        const std::vector<std::string>* best = nullptr;
+        int bestLevel = 0;
+        ForEachOnItem(crossbow, [&](EnchantmentId, int enchantmentLevel, const Definition& d) {
+            if (d.effects.crossbowChargingSounds.empty()) return;
+            if (!best || enchantmentLevel > bestLevel) {
+                best = &d.effects.crossbowChargingSounds;
+                bestLevel = enchantmentLevel;
+            }
+        });
+        if (!best || bestLevel <= 0) return {};
+        const size_t index = static_cast<size_t>(std::min<int>(bestLevel, static_cast<int>(best->size())) - 1);
+        std::string sound = (*best)[index];
+        if (sound.rfind("minecraft:", 0) == 0) sound.erase(0, 10);
+        return sound;
+    }
+
+    float GetTridentSpinAttackStrength(const ItemStack& trident) {
+        // runIterationOnItem → modifyUnfilteredValue(TRIDENT_SPIN_ATTACK_
+        // STRENGTH) from 0. Riptide's is a plain linear add; the random only
+        // feeds random value effects, which none of this component uses —
+        // a local stream keeps it callable on the client, which predicts
+        // the launch.
+        static thread_local JavaRandom random(0x7A1D3E57L);
+        float value = 0.0f;
+        ForEachOnItem(trident, [&](EnchantmentId, int enchantmentLevel, const Definition& d) {
+            if (d.effects.tridentSpinAttackStrength) {
+                value = d.effects.tridentSpinAttackStrength->Process(enchantmentLevel, random, value);
+            }
+        });
+        return value;
+    }
+
+    int GetTridentReturnToOwnerAcceleration(EntityLevel& level, const ItemStack& trident, Entity& entity) {
+        // modifyTridentReturnToOwnerAcceleration → modifyEntityFilteredValue
+        // from 0, then max(0, intValue()).
+        return std::max(0, static_cast<int>(ModifyEntityFiltered(level, trident, entity, 0.0f,
+                                                                  &EnchantmentEffectComponents::tridentReturnAcceleration)));
+    }
+
+    std::string TridentSound(const ItemStack& trident) {
+        // pickHighestLevel(stack, TRIDENT_SOUND): the highest-level
+        // enchantment carrying the list, list.get(min(level, size) - 1).
+        const std::vector<std::string>* best = nullptr;
+        int bestLevel = 0;
+        ForEachOnItem(trident, [&](EnchantmentId, int enchantmentLevel, const Definition& d) {
+            if (d.effects.tridentSound.empty()) return;
+            if (!best || enchantmentLevel > bestLevel) {
+                best = &d.effects.tridentSound;
+                bestLevel = enchantmentLevel;
+            }
+        });
+        if (!best || bestLevel <= 0) return {};
+        const size_t index = static_cast<size_t>(std::min<int>(bestLevel, static_cast<int>(best->size())) - 1);
+        std::string sound = (*best)[index];
+        if (sound.rfind("minecraft:", 0) == 0) sound.erase(0, 10);
+        return sound;
+    }
+
+    void DoPostPiercingAttackEffects(EntityLevel& level, LivingEntity& entity) {
+        // MC doPostPiercingAttackEffects: runIterationOnEquipment(entity,
+        // enchantment.doPostPiercingAttack(level, lvl, item, entity)) — each
+        // post_piercing_attack effect whose requirements hold for the entity
+        // (entityContext), applied at the entity's position (Lunge: the item
+        // wear, the hunger, the forward impulse and its sound).
+        if (level.IsClientSide()) return;
+        ForEachOnEquipment(EnchantmentEquipment::Of(entity),
+                           [&](EnchantmentId, int enchantmentLevel, const Definition& d,
+                               const EnchantedItemInUse& item) {
+            if (d.effects.postPiercingAttack.empty()) return;
+            const EnchantmentContext ctx = EntityContext(level, enchantmentLevel, entity, entity.position);
+            for (const ConditionalEntityEffect& e : d.effects.postPiercingAttack) {
+                if (e.Matches(ctx)) e.effect.Apply(level, enchantmentLevel, item, entity, entity.position);
+            }
+        });
+    }
+
     bool IsImmuneToDamage(EntityLevel& level, LivingEntity& victim, const DamageSourceInfo& source,
                           const EnchantmentEquipment& equipment) {
         bool immune = false;

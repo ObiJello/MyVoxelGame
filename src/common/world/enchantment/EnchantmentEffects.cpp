@@ -9,6 +9,7 @@
 #include "common/entity/LightningBolt.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
@@ -16,6 +17,7 @@
 #include "common/world/level/Explosion.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/tags/DataTags.hpp"
 
 #include <nlohmann/json.hpp>
@@ -268,6 +270,8 @@ namespace Game {
             if (type == "on_fire" || type == "in_fire") return MobDamageSource::Fire;
             if (type == "explosion" || type == "player_explosion") return MobDamageSource::Explosion;
             if (type == "player_attack") return MobDamageSource::PlayerAttack;
+            if (type == "mace_smash")    return MobDamageSource::MaceSmash;
+            if (type == "spear")         return MobDamageSource::Spear;
             if (type == "mob_attack")    return MobDamageSource::MobAttack;
             return MobDamageSource::Generic;
         }
@@ -291,9 +295,16 @@ namespace Game {
         f.inWater       = e.IsInWater();
         f.baby          = e.IsBaby();
         f.hasVehicle    = e.GetVehicle() != nullptr;
+        f.fallFlying    = e.IsFallFlying();
         if (const LivingEntity* living = e.AsLiving()) {
             f.crouching = living->IsDiscrete();
             f.swimming  = living->IsSwimming();
+            if (e.IsPlayer()) {
+                // PlayerPredicate's game mode: spectator and creative from
+                // the abilities, adventure for a player who may not build.
+                f.gameMode  = e.IsSpectator() ? 3 : e.IsCreative() ? 1 : e.MayBuild() ? 0 : 2;
+                f.foodLevel = living->GetFoodLevel();
+            }
         }
         return f;
     }
@@ -400,6 +411,14 @@ namespace Game {
             if (!movementAffectedBy[0].Matches(ctx, on)) return false;
         }
         if (periodicTick > 0 && f.tickCount % periodicTick != 0) return false;
+        if (playerPredicate) {
+            if (f.gameMode < 0) return false;   // not a player
+            if (!gameModes.empty() &&
+                std::find(gameModes.begin(), gameModes.end(), f.gameMode) == gameModes.end()) {
+                return false;
+            }
+            if (!foodLevel.Matches(static_cast<double>(f.foodLevel))) return false;
+        }
         if (!vehicle.empty()) {
             // EntityPredicate.matches(level, pos, null) is false: no vehicle,
             // no match — `"vehicle": {}` asks "is riding anything".
@@ -450,6 +469,33 @@ namespace Game {
                 p.periodicTick = value.get<int>();
             } else if (key == "vehicle") {
                 p.vehicle.push_back(Parse(value));
+            } else if (key == "type_specific" && value.is_object() &&
+                       StripDefaultNamespace(value.value("type", std::string())) == "player") {
+                // PlayerPredicate: the game modes and the food bounds are
+                // read; anything else it can ask (stats, recipes,
+                // advancements, looking_at, input) is not modelled.
+                p.playerPredicate = true;
+                for (const auto& [pk, pv] : value.items()) {
+                    if (pk == "type") continue;
+                    if (pk == "gamemode") {
+                        const auto addMode = [&p](const nlohmann::json& m) {
+                            if (!m.is_string()) return;
+                            const std::string name = m.get<std::string>();
+                            if (name == "survival")       p.gameModes.push_back(0);
+                            else if (name == "creative")  p.gameModes.push_back(1);
+                            else if (name == "adventure") p.gameModes.push_back(2);
+                            else if (name == "spectator") p.gameModes.push_back(3);
+                        };
+                        if (pv.is_array()) { for (const auto& m : pv) addMode(m); } else addMode(pv);
+                    } else if (pk == "food" && pv.is_object()) {
+                        for (const auto& [fk, fv] : pv.items()) {
+                            if (fk == "level") p.foodLevel = DoubleBounds::Parse(fv);
+                            else p.unsupported = true;   // saturation
+                        }
+                    } else {
+                        p.unsupported = true;
+                    }
+                }
             } else {
                 // type_specific, equipment, effects, nbt, stepping_on,
                 // distance, passenger, team, slots, components ...
@@ -557,10 +603,10 @@ namespace Game {
             case Type::EnchantmentActiveCheck:
                 return ctx.enchantmentActive >= 0 && (ctx.enchantmentActive != 0) == active;
             case Type::WeatherCheck:
-                // Only `thundering` is answerable: no level here exposes rain
-                // on its own.
-                if (raining) return false;
-                if (thundering) return ctx.level && ctx.level->IsThundering() == *thundering;
+                // MC WeatherCheck.test: each present field must match
+                // level.isRaining() / level.isThundering().
+                if (raining && !(ctx.level && ctx.level->IsRaining() == *raining)) return false;
+                if (thundering && !(ctx.level && ctx.level->IsThundering() == *thundering)) return false;
                 return true;
             case Type::LocationCheck:
                 return location.Matches(ctx, ctx.origin + glm::dvec3(offset));
@@ -792,13 +838,19 @@ namespace Game {
                 p.fire = createFire;
                 // SimpleExplosionDamageCalculator(explodesBlocks, damagesEntities
                 // = damage_type present, knockbackMultiplier, immuneBlocks).
+                p.simpleCalculator = true;
+                p.windChargeImmuneBlocks = windChargeImmuneBlocks;
+                // Engine rule (deliberate deviation from MC, which pushes
+                // them): the blast spares the wielder's own tamed pets —
+                // Wind Burst is vanilla's only explode effect.
+                p.sparePetsOf = &entity;
                 p.damageEntities = !damageType.empty();
                 p.knockbackMultiplier = hasKnockbackMultiplier
                     ? knockbackMultiplier.Calculate(enchantmentLevel) : 1.0f;
-                // The engine's blast visual is the vanilla explosion pair; an
-                // effect naming other particles (a wind burst's gusts, which
-                // have no particle system here) goes without it.
-                p.spawnVisual = vanillaExplosionParticles;
+                // The small/large pair (Wind Burst's gusts) and the debris
+                // list (empty unless the effect names one).
+                p.particles = static_cast<ExplosionParticles>(explosionParticles);
+                p.blockParticles = explosionBlockParticles;
                 if (!explosionSound.empty()) p.explosionSound = explosionSound.c_str();
                 Explode(level, p);
                 return;
@@ -811,6 +863,30 @@ namespace Game {
                     living->CauseFoodExhaustion(a.Calculate(enchantmentLevel));
                 }
                 return;
+
+            case Type::ApplyImpulse: {
+                // ApplyEntityImpulse.apply: the direction turned by the look
+                // quaternion (rotationY(-yRot).rotateX(xRot)), scaled per axis
+                // and by the magnitude, added to the motion. A player's view
+                // sends it to its client as a motion packet (MC's
+                // ClientboundSetEntityMotionPacket); then the post-impulse
+                // grace (10 ticks) so the launch forgives its own fall.
+                const double xr = static_cast<double>(entity.xRot) * 0.017453292519943295;
+                const double yr = -static_cast<double>(entity.yRot) * 0.017453292519943295;
+                const glm::dvec3 dv = impulseDirection;
+                // rotateX(xr): y' = y cos - z sin, z' = y sin + z cos.
+                const glm::dvec3 rx(dv.x, dv.y * std::cos(xr) - dv.z * std::sin(xr),
+                                    dv.y * std::sin(xr) + dv.z * std::cos(xr));
+                // rotationY(yr): x' = x cos + z sin, z' = -x sin + z cos.
+                const glm::dvec3 ry(rx.x * std::cos(yr) + rx.z * std::sin(yr), rx.y,
+                                    -rx.x * std::sin(yr) + rx.z * std::cos(yr));
+                const glm::dvec3 impulse = ry * impulseScale * static_cast<double>(a.Calculate(enchantmentLevel));
+                entity.AddDeltaMovement(impulse);
+                if (LivingEntity* living = entity.AsLiving()) {
+                    living->GetImpulseContext().ApplyPostImpulseGraceTime(10);
+                }
+                return;
+            }
 
             case Type::ReplaceDisk: {
                 ILevelWrite* blocks = level.MutableBlocks();
@@ -832,20 +908,48 @@ namespace Game {
                             if (dx * dx + dz * dz >= distSq) continue;
                             const glm::ivec3 pos(x, y, z);
                             if (!diskPredicate.empty() && !TestBlockPredicate(diskPredicate[0], level, pos)) continue;
-                            // setBlockAndUpdate (UPDATE_ALL). The block_place
-                            // game event has no vibration system to reach.
-                            blocks->SetBlock(x, y, z, diskState, World::UpdateFlags::All);
+                            // setBlockAndUpdate (UPDATE_ALL), and on success
+                            // triggerGameEvent: gameEvent(entity, event, pos)
+                            // (Frost Walker's block_place).
+                            if (blocks->SetBlock(x, y, z, diskState, World::UpdateFlags::All) &&
+                                diskGameEvent >= 0) {
+                                blocks->GameEvent(&entity, static_cast<GameEventId>(diskGameEvent), pos);
+                            }
                         }
                     }
                 }
                 return;
             }
 
-            case Type::SpawnParticles:
-                // SpawnParticlesEffect is a server → client particle burst
-                // (the soul speed wisps); this engine has no particle packet
-                // for it, so the server has nothing to send.
+            case Type::SpawnParticles: {
+                // MC SpawnParticlesEffect.apply: one direct particle (count
+                // 0) placed by the position sources over the entity's box and
+                // pushed by its known movement (the soul speed wisps).
+                JavaRandom& random = level.Random();
+                const glm::dvec3 movement = entity.GetKnownMovement();
+                const float bbWidth = entity.GetBbWidth();
+                const float bbHeight = entity.GetBbHeight();
+                const auto coordinate = [&random](const ParticlePosition& src, double pos, double center, float span) {
+                    const double base = src.boundingBox
+                        ? center + (random.NextDouble() - 0.5) * static_cast<double>(span * src.scale)
+                        : pos;
+                    return base + static_cast<double>(src.offset);
+                };
+                const auto velocityOf = [&random](const ParticleVelocity& src, double move) {
+                    return move * static_cast<double>(src.movementScale) +
+                           static_cast<double>(SampleFloat(random, src.baseMin, src.baseMax, src.baseUniform));
+                };
+                const double x = coordinate(particleHPos, position.x, position.x, bbWidth);
+                const double y = coordinate(particleVPos, position.y, position.y + bbHeight / 2.0f, bbHeight);
+                const double z = coordinate(particleHPos, position.z, position.z, bbWidth);
+                const double xd = velocityOf(particleHVel, movement.x);
+                const double yd = velocityOf(particleVVel, movement.y);
+                const double zd = velocityOf(particleHVel, movement.z);
+                const double speed = SampleFloat(random, particleSpeedMin, particleSpeedMax, particleSpeedUniform);
+                level.SendParticles(ParticleOptions(static_cast<ParticleKind>(particleKind)), x, y, z, 0, xd, yd, zd,
+                                    speed);
                 return;
+            }
 
             case Type::Attribute:
             case Type::Unsupported:
@@ -945,9 +1049,20 @@ namespace Game {
                 if (!j.contains(key) || !j[key].is_object()) return std::string();
                 return j[key].value("type", std::string());
             };
-            e.vanillaExplosionParticles =
-                StripDefaultNamespace(particleType("small_particle")) == "explosion" &&
-                StripDefaultNamespace(particleType("large_particle")) == "explosion_emitter";
+            const std::string smallParticle(StripDefaultNamespace(particleType("small_particle")));
+            const std::string largeParticle(StripDefaultNamespace(particleType("large_particle")));
+            e.explosionParticles =
+                (smallParticle == "gust_emitter_small" || largeParticle == "gust_emitter_large")
+                    ? static_cast<uint8_t>(ExplosionParticles::Gust)
+                    : static_cast<uint8_t>(ExplosionParticles::Vanilla);
+            // ExplodeEffect's block_particles defaults to an empty list.
+            e.explosionBlockParticles = j.contains("block_particles") && j["block_particles"].is_array() &&
+                                        !j["block_particles"].empty();
+            if (j.contains("immune_blocks") && j["immune_blocks"].is_string()) {
+                const std::string immune = j["immune_blocks"].get<std::string>();
+                e.windChargeImmuneBlocks = immune == "#minecraft:blocks_wind_charge_explosions" ||
+                                           immune == "#blocks_wind_charge_explosions";
+            }
             if (j.contains("offset") && j["offset"].is_array() && j["offset"].size() == 3) {
                 for (int i = 0; i < 3; ++i) {
                     if (j["offset"][i].is_number()) e.explodeOffset[i] = j["offset"][i].get<double>();
@@ -968,15 +1083,64 @@ namespace Game {
                     e.hasDiskState = ReadBlockStateJson(provider["state"], e.diskState);
                 }
             }
+            if (j.contains("trigger_game_event") && j["trigger_game_event"].is_string()) {
+                if (const auto event = GameEvents::FromName(j["trigger_game_event"].get<std::string>())) {
+                    e.diskGameEvent = static_cast<int16_t>(*event);
+                }
+            }
             if (!e.hasDiskState) e.type = Type::Unsupported;
         } else if (type == "spawn_particles") {
-            e.type = Type::SpawnParticles;
+            // Only a plain particle type is read; one that needs options
+            // (dust colours, a block state) stays Unsupported.
+            e.type = Type::Unsupported;
+            if (j.contains("particle") && j["particle"].is_object()) {
+                const std::string name = j["particle"].value("type", std::string());
+                if (const auto kind = ParticleTypes::FromName(name);
+                    kind && ParticleTypes::Get(*kind).shape == ParticleTypes::OptionsShape::Simple) {
+                    e.type = Type::SpawnParticles;
+                    e.particleKind = static_cast<uint8_t>(*kind);
+                }
+            }
+            const auto readPos = [&j](const char* key, EnchantmentEntityEffect::ParticlePosition& out) {
+                if (!j.contains(key) || !j[key].is_object()) return;
+                const auto& p = j[key];
+                out.boundingBox = StripDefaultNamespace(p.value("type", std::string())) == "in_bounding_box";
+                out.offset = p.value("offset", 0.0f);
+                out.scale = p.value("scale", 1.0f);
+            };
+            const auto readVel = [&j](const char* key, EnchantmentEntityEffect::ParticleVelocity& out) {
+                if (!j.contains(key) || !j[key].is_object()) return;
+                const auto& v = j[key];
+                out.movementScale = v.value("movement_scale", 0.0f);
+                if (v.contains("base")) ReadFloatProvider(v["base"], out.baseMin, out.baseMax, out.baseUniform);
+            };
+            readPos("horizontal_position", e.particleHPos);
+            readPos("vertical_position", e.particleVPos);
+            readVel("horizontal_velocity", e.particleHVel);
+            readVel("vertical_velocity", e.particleVVel);
+            if (j.contains("speed")) {
+                ReadFloatProvider(j["speed"], e.particleSpeedMin, e.particleSpeedMax, e.particleSpeedUniform);
+            }
         } else if (type == "attribute" && locationBased) {
             e.type = EnchantmentAttributeEffect::Parse(j, e.attribute) ? Type::Attribute : Type::Unsupported;
         }
-        // apply_impulse (the spear's lunge), replace_block,
-        // set_block_properties and run_function stay Unsupported: nothing in
-        // this engine can reach them (no spear, no functions).
+        else if (type == "apply_impulse") {
+            // ApplyEntityImpulse(direction, coordinate_scale, magnitude).
+            const auto readVec = [&j](const char* key, glm::dvec3& out) {
+                if (!j.contains(key) || !j[key].is_array() || j[key].size() != 3) return false;
+                for (int i = 0; i < 3; ++i) {
+                    if (!j[key][i].is_number()) return false;
+                    out[i] = j[key][i].get<double>();
+                }
+                return true;
+            };
+            const bool ok = readVec("direction", e.impulseDirection) &&
+                            readVec("coordinate_scale", e.impulseScale) &&
+                            ReadLevelBased(j, "magnitude", e.a);
+            e.type = ok ? Type::ApplyImpulse : Type::Unsupported;
+        }
+        // replace_block, set_block_properties and run_function stay
+        // Unsupported: nothing in vanilla's data reaches them.
         return e;
     }
 

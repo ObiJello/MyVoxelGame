@@ -26,10 +26,13 @@ namespace Network {
         // it had); otherwise an update to a chunk it already holds.
         bool groundUpContinuous = true;
         uint64_t modStamp = 0;   // Chunk::modStamp at send time (retention cache key)
-        // Built on the network I/O thread right after decoding (see
+        // Built on the client's chunk decode threads right after decoding (see
         // Client::ClientChunkManager::PrebuildChunk); the main thread adopts it
         // with a pointer swap instead of unpacking 48 containers per chunk.
         mutable std::shared_ptr<Game::Chunk> prebuilt;
+        // Client-side only, never serialised: how long decoding this packet
+        // took on the decode thread (the batch-rate estimator's decode stage).
+        mutable double decodeNanos = 0.0;
 
         // NO SECTION BITMASK. MC removed `primaryBitMask` when it moved to
         // 3D biomes: ClientboundLevelChunkPacketData.extractChunkData:81 is
@@ -161,7 +164,7 @@ namespace Network {
             } else if (c.bits > 0) {
                 buffer.WriteVarInt(0);   // global: explicit empty palette
             }
-            for (uint64_t w : c.words) buffer.WriteLong(w);
+            buffer.WriteLongs(c.words.data(), c.words.size());
         }
 
         // `entryCount` is what makes the length prefix unnecessary: the word
@@ -203,8 +206,8 @@ namespace Network {
             const int perLong = 64 / c.bits;
             const size_t words = static_cast<size_t>((entryCount + perLong - 1) / perLong);
             if (reader.Remaining() < words * sizeof(uint64_t)) return false;
-            c.words.reserve(words);
-            for (size_t i = 0; i < words; ++i) c.words.push_back(reader.ReadLong());
+            c.words.resize(words);
+            reader.ReadLongs(c.words.data(), words);
             return true;
         }
 

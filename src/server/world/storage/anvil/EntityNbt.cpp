@@ -1,17 +1,25 @@
 // File: src/server/world/storage/anvil/EntityNbt.cpp
 #include "server/world/storage/anvil/EntityNbt.hpp"
+#include "common/entity/MountInventory.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
 #include "common/entity/EndCrystal.hpp"
 #include "common/entity/ArmorStand.hpp"
 #include "common/entity/decoration/Painting.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/OminousItemSpawner.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "common/entity/vehicle/Boat.hpp"
+#include "common/entity/vehicle/Minecart.hpp"
+#include "common/world/block/entity/SpawnerBlockEntity.hpp"
+#include "server/world/storage/anvil/SpawnerNbt.hpp"
 #include "common/entity/decoration/PaintingVariants.hpp"
 #include "common/world/block/FallingBlock.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 #include "server/world/storage/anvil/VillagerNbt.hpp"
 #include "common/entity/npc/Villager.hpp"
+#include "common/entity/npc/WanderingTrader.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/entity/Animal.hpp"
@@ -26,12 +34,17 @@
 #include "common/entity/TamableAnimal.hpp"
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
+#include "server/world/storage/anvil/VibrationNbt.hpp"
+#include "common/entity/ai/brain/Brain.hpp"
+#include "common/world/level/DimensionId.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/entity/mobs/Monsters.hpp"
+#include "common/entity/mobs/Pillager.hpp"
+#include "common/entity/raid/Raider.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
 
@@ -40,6 +53,7 @@
 #include "common/entity/projectile/Arrow.hpp"
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
+#include "common/entity/projectile/FireworkRocket.hpp"
 #include "common/entity/projectile/HurtingProjectile.hpp"
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/projectile/ShulkerBullet.hpp"
@@ -49,6 +63,7 @@
 #include "common/data/DataComponents.hpp"
 #include "common/entity/ModMobNbt.hpp"
 
+#include <optional>
 #include <string>
 #include <unordered_map>
 
@@ -73,13 +88,25 @@ namespace Game::Anvil {
             return std::dynamic_pointer_cast<Tag>(t);
         }
 
+        // MC NumericTag.doubleValue: any numeric element reads (a hand-typed
+        // /summon {Motion:[0,1,0]} is a list of ints); anything else is 0.
+        double NumberOf(const ::World::NBTTagPtr& t) {
+            if (!t) return 0.0;
+            switch (t->type) {
+                case ::World::NBTTagType::TAG_Byte:   return static_cast<::World::NBTTagByte&>(*t).value;
+                case ::World::NBTTagType::TAG_Short:  return static_cast<::World::NBTTagShort&>(*t).value;
+                case ::World::NBTTagType::TAG_Int:    return static_cast<::World::NBTTagInt&>(*t).value;
+                case ::World::NBTTagType::TAG_Long:   return static_cast<double>(static_cast<::World::NBTTagLong&>(*t).value);
+                case ::World::NBTTagType::TAG_Float:  return static_cast<::World::NBTTagFloat&>(*t).value;
+                case ::World::NBTTagType::TAG_Double: return static_cast<::World::NBTTagDouble&>(*t).value;
+                default:                              return 0.0;
+            }
+        }
+
         bool ReadDoubleList(const CT& tag, const char* key, glm::dvec3& out) {
             auto list = As<LT>(tag.GetTag(key));
             if (!list || list->value.size() != 3) return false;
-            for (int i = 0; i < 3; ++i) {
-                auto d = As<::World::NBTTagDouble>(list->value[i]);
-                out[i] = d ? d->value : 0.0;
-            }
+            for (int i = 0; i < 3; ++i) out[i] = NumberOf(list->value[i]);
             return true;
         }
 
@@ -202,10 +229,7 @@ namespace Game::Anvil {
             if (ReadDoubleList(tag, "Pos", v))    e.position = v;
             if (ReadDoubleList(tag, "Motion", v)) e.velocity = v;
             if (auto rot = As<LT>(tag.GetTag("Rotation")); rot && rot->value.size() == 2) {
-                auto f = [&](int i) {
-                    auto t = As<::World::NBTTagFloat>(rot->value[i]);
-                    return t ? t->value : 0.0f;
-                };
+                auto f = [&](int i) { return static_cast<float>(NumberOf(rot->value[i])); };
                 e.yRot = f(0);
                 e.xRot = f(1);
                 e.yRotO = e.yRot;
@@ -302,12 +326,14 @@ namespace Game::Anvil {
 
         // ── attributes ──────────────────────────────────────────────────────
         //
-        // AttributeInstance.Packed: {id, base, modifiers?}. Only BASE values
-        // are written. Modifiers are deliberately omitted, and that is not a
-        // shortcut: every modifier this engine creates is transient and rebuilt
-        // by the thing that owns it — SetBaby re-derives the baby speed bonus,
-        // RestoreEffects re-applies each potion's, taming re-applies the wolf's
-        // health bump. Writing them would double them on the next load.
+        // AttributeInstance.Packed: {id, base, modifiers?}. BASE values, plus
+        // only the permanent modifiers nothing rebuilds (kPersistentModifiers
+        // below: finalizeSpawn's random rolls, the leader zombie's bonus).
+        // Every other modifier is transient and rebuilt by the thing that owns
+        // it — SetBaby re-derives the baby speed bonus, RestoreEffects
+        // re-applies each potion's, taming re-applies the wolf's health bump,
+        // Mob::SetEquipment the worn gear's. Writing those would double them
+        // on the next load.
         //
         // EVERY registered attribute is written, including one sitting at the
         // registry default. That is vanilla's AttributeMap.pack(), and it is
@@ -315,6 +341,62 @@ namespace Game::Anvil {
         // names, so skipping a default-valued row would restore whatever the
         // CONSTRUCTOR chose instead of what was saved. A zombie whose speed
         // was raised to the registry default would come back at 0.23.
+        // The PERMANENT modifiers — the ones nothing rebuilds on load, so
+        // MC's AttributeInstance.pack writes them ("modifiers": [{id, amount,
+        // operation}]): finalizeSpawn's random rolls and the zombie family's
+        // leader / reinforcement charges. Everything else stays transient
+        // (see above). MC shares one id across attributes (the leader bonus
+        // sits on both health and reinforcements); the engine keys them
+        // apart, so the table maps (attribute, engine id) <-> MC id.
+        struct PersistentModifierName {
+            ModifierId  id;
+            Attribute   attribute;
+            const char* mcId;
+        };
+        constexpr PersistentModifierName kPersistentModifiers[] = {
+            { ModifierId::RandomSpawnBonus,        Attribute::FollowRange,         "minecraft:random_spawn_bonus" },
+            { ModifierId::RandomSpawnBonus,        Attribute::KnockbackResistance, "minecraft:random_spawn_bonus" },
+            { ModifierId::ZombieRandomKnockback,   Attribute::FollowRange,         "minecraft:zombie_random_spawn_bonus" },
+            { ModifierId::ZombieLeaderHealth,      Attribute::MaxHealth,           "minecraft:leader_zombie_bonus" },
+            { ModifierId::ZombieLeaderReinf,       Attribute::SpawnReinforcements, "minecraft:leader_zombie_bonus" },
+            { ModifierId::ZombieSpawnReinf,        Attribute::SpawnReinforcements, "minecraft:reinforcement_caller_charge" },
+            { ModifierId::ZombieReinfCalleeCharge, Attribute::SpawnReinforcements, "minecraft:reinforcement_callee_charge" },
+        };
+
+        const char* PersistentModifierMcId(Attribute attribute, uint32_t id) {
+            for (const auto& row : kPersistentModifiers) {
+                if (row.attribute == attribute && static_cast<uint32_t>(row.id) == id) return row.mcId;
+            }
+            return nullptr;
+        }
+
+        bool PersistentModifierFromMcId(Attribute attribute, std::string_view mcId, ModifierId& out) {
+            const std::string_view bare = StripNamespace(mcId);
+            for (const auto& row : kPersistentModifiers) {
+                if (row.attribute == attribute && StripNamespace(row.mcId) == bare) {
+                    out = row.id;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // MC AttributeModifier.Operation serialized names.
+        const char* OperationName(AttributeOperation op) {
+            switch (op) {
+                case AttributeOperation::AddValue:           return "add_value";
+                case AttributeOperation::AddMultipliedBase:  return "add_multiplied_base";
+                case AttributeOperation::AddMultipliedTotal: return "add_multiplied_total";
+            }
+            return "add_value";
+        }
+
+        AttributeOperation OperationFromName(std::string_view name) {
+            if (name == "add_multiplied_base")  return AttributeOperation::AddMultipliedBase;
+            if (name == "add_multiplied_total") return AttributeOperation::AddMultipliedTotal;
+            return AttributeOperation::AddValue;
+        }
+
         void WriteAttributes(Nbt::Writer& w, const LivingEntity& l) {
             const auto& all = l.Attributes().All();
             if (all.empty()) return;
@@ -325,6 +407,23 @@ namespace Game::Anvil {
                 w.ListCompoundBegin(list);
                 w.String("id",   std::string(kNamespace) + std::string(def.name));
                 w.Double("base", inst.GetBaseValue());
+                bool anyPersistent = false;
+                for (const AttributeModifier& mod : inst.Modifiers()) {
+                    if (PersistentModifierMcId(inst.GetAttribute(), mod.id)) { anyPersistent = true; break; }
+                }
+                if (anyPersistent) {
+                    auto mods = w.BeginList("modifiers", Nbt::TagType::Compound);
+                    for (const AttributeModifier& mod : inst.Modifiers()) {
+                        const char* mcId = PersistentModifierMcId(inst.GetAttribute(), mod.id);
+                        if (!mcId) continue;
+                        w.ListCompoundBegin(mods);
+                        w.String("id", mcId);
+                        w.Double("amount", mod.amount);
+                        w.String("operation", OperationName(mod.operation));
+                        w.ListCompoundEnd(mods);
+                    }
+                    w.EndList(mods);
+                }
                 w.ListCompoundEnd(list);
             }
             w.EndList(list);
@@ -355,7 +454,185 @@ namespace Game::Anvil {
                 // apply() ignores unknown ids the same way.
                 if (!l.Attributes().Has(attr)) continue;
                 l.Attributes().SetBaseValue(attr, c->GetValue<double>("base", 0.0));
+                // The permanent modifiers (see kPersistentModifiers); any
+                // other id MC wrote is one this engine rebuilds itself.
+                if (auto mods = As<LT>(c->GetTag("modifiers"))) {
+                    for (const auto& modElem : mods->value) {
+                        auto m = As<CT>(modElem);
+                        if (!m) continue;
+                        ModifierId id{};
+                        if (!PersistentModifierFromMcId(attr, m->GetValue<std::string>("id", ""), id)) continue;
+                        l.Attributes().RemoveModifier(attr, id);
+                        l.Attributes().AddModifier(attr, AttributeModifier{
+                            static_cast<uint32_t>(id), m->GetValue<double>("amount", 0.0),
+                            OperationFromName(m->GetValue<std::string>("operation", "add_value")) });
+                    }
+                }
             }
+        }
+
+        // ── Allay (MC Allay.addAdditionalSaveData / its Brain memories) ─────
+
+        // MC's four allay memories with a codec (MemoryModuleType.register(
+        // id, codec)): liked_player (UUID), liked_noteblock (GlobalPos),
+        // liked_noteblock_cooldown_ticks and item_pickup_cooldown_ticks
+        // (Codec.INT). None is set with an expiry, so no "ttl".
+        void WriteAllayBrain(Nbt::Writer& w, const Allay& allay) {
+            w.BeginCompound("Brain");
+            w.BeginCompound("memories");
+            if (const auto& liked = allay.GetLikedPlayerUuid()) {
+                w.BeginCompound("minecraft:liked_player");
+                WriteUuid(w, "value", *liked);
+                w.EndCompound();
+            }
+            if (const Brain* brain = allay.GetBrain()) {
+                if (const auto pos = brain->GetBlockPos(MemoryModule::LikedNoteblockPosition)) {
+                    const EntityLevel* level = allay.Level();
+                    const DimensionId dim = level ? level->Dimension() : DimensionId::Overworld;
+                    w.BeginCompound("minecraft:liked_noteblock");
+                    w.BeginCompound("value");
+                    const int32_t p[3] = { pos->x, pos->y, pos->z };
+                    w.IntArray("pos", p, 3);
+                    w.String("dimension", DimensionRegistryName(dim));
+                    w.EndCompound();
+                    w.EndCompound();
+                }
+                const auto writeInt = [&](MemoryModule m, const char* id) {
+                    if (const auto v = brain->GetInt(m)) {
+                        w.BeginCompound(id);
+                        w.Int("value", *v);
+                        w.EndCompound();
+                    }
+                };
+                writeInt(MemoryModule::LikedNoteblockCooldownTicks, "minecraft:liked_noteblock_cooldown_ticks");
+                writeInt(MemoryModule::ItemPickupCooldownTicks,     "minecraft:item_pickup_cooldown_ticks");
+            }
+            w.EndCompound();
+            w.EndCompound();
+        }
+
+        void ReadAllayBrain(const CT& tag, Allay& allay) {
+            auto brainTag = As<CT>(tag.GetTag("Brain"));
+            auto memories = brainTag ? As<CT>(brainTag->GetTag("memories")) : nullptr;
+            if (!memories) return;
+            if (auto liked = As<CT>(memories->GetTag("minecraft:liked_player"))) {
+                Uuid uuid{};
+                if (ReadUuid(*liked, "value", uuid)) allay.SetLikedPlayerUuid(uuid);
+            }
+            Brain* brain = allay.GetBrain();
+            if (!brain) return;
+            if (auto entry = As<CT>(memories->GetTag("minecraft:liked_noteblock"))) {
+                auto value = As<CT>(entry->GetTag("value"));
+                auto pos = value ? As<::World::NBTTagIntArray>(value->GetTag("pos")) : nullptr;
+                const EntityLevel* level = allay.Level();
+                const DimensionId here = level ? level->Dimension() : DimensionId::Overworld;
+                const auto dim = value ? DimensionFromRegistryName(value->GetValue<std::string>("dimension", ""))
+                                       : std::nullopt;
+                // A noteblock in another dimension can never be deposited
+                // at (GlobalPos.isCloseEnough fails): MC's getter drops it.
+                if (pos && pos->value.size() == 3 && (!dim || *dim == here)) {
+                    brain->SetMemory(MemoryModule::LikedNoteblockPosition,
+                                     glm::ivec3(pos->value[0], pos->value[1], pos->value[2]));
+                }
+            }
+            const auto readInt = [&](MemoryModule m, const char* id) {
+                if (auto entry = As<CT>(memories->GetTag(id))) {
+                    if (entry->HasTag("value")) {
+                        brain->SetMemory(m, static_cast<int>(NumberOf(entry->GetTag("value"))));
+                    }
+                }
+            };
+            readInt(MemoryModule::LikedNoteblockCooldownTicks, "minecraft:liked_noteblock_cooldown_ticks");
+            readInt(MemoryModule::ItemPickupCooldownTicks,     "minecraft:item_pickup_cooldown_ticks");
+        }
+
+        // MC Allay.addAdditionalSaveData: InventoryCarrier's "Inventory"
+        // (SimpleContainer.storeAsItemList — empties skipped), the vibration
+        // listener's Data ("listener": event, selector, event_delay), and
+        // "DuplicationCooldown", and the held item as Mob's EntityEquipment
+        // ("equipment": {mainhand}).
+        // MC InventoryCarrier.writeInventoryToTag / readInventoryFromTag —
+        // "Inventory", SimpleContainer.storeAsItemList (empties skipped) /
+        // fromItemList (filled in order). The piglin's and pillager's
+        // pockets.
+        void WriteCarrierInventory(Nbt::Writer& w, const SimpleContainer& inv) {
+            auto list = w.BeginList("Inventory", Nbt::TagType::Compound);
+            for (int i = 0; i < inv.GetContainerSize(); ++i) {
+                const ItemStack& stack = inv.GetItem(i);
+                if (stack.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, stack);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+
+        void ReadCarrierInventory(const CT& tag, SimpleContainer& inv) {
+            for (int i = 0; i < inv.GetContainerSize(); ++i) inv.SetItem(i, ItemStack{});
+            auto list = As<LT>(tag.GetTag("Inventory"));
+            if (!list) return;
+            int slot = 0;
+            for (const auto& elem : list->value) {
+                if (slot >= inv.GetContainerSize()) break;
+                auto c = As<CT>(elem);
+                if (!c) continue;
+                const ItemStack stack = ReadItemStack(*c);
+                if (stack.IsEmpty()) continue;
+                inv.SetItem(slot++, stack);
+            }
+        }
+
+        void WriteAllayData(Nbt::Writer& w, const Allay& allay) {
+            auto list = w.BeginList("Inventory", Nbt::TagType::Compound);
+            const SimpleContainer& inv = allay.GetInventory();
+            for (int i = 0; i < inv.GetContainerSize(); ++i) {
+                const ItemStack& stack = inv.GetItem(i);
+                if (stack.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, stack);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+
+            WriteVibrationData(w, "listener", allay.SavedVibrationData());
+
+            w.Long("DuplicationCooldown", allay.GetDuplicationCooldown());
+
+            if (!allay.GetMainHandItem().IsEmpty()) {
+                w.BeginCompound("equipment");
+                w.BeginCompound("mainhand");
+                WriteItemStackBody(w, allay.GetMainHandItem());
+                w.EndCompound();
+                w.EndCompound();
+            }
+        }
+
+        void ReadAllayData(const CT& tag, Allay& allay) {
+            SimpleContainer& inv = allay.GetInventory();
+            for (int i = 0; i < inv.GetContainerSize(); ++i) inv.SetItem(i, ItemStack{});
+            if (auto list = As<LT>(tag.GetTag("Inventory"))) {
+                int slot = 0;
+                for (const auto& elem : list->value) {
+                    if (slot >= inv.GetContainerSize()) break;
+                    auto c = As<CT>(elem);
+                    if (!c) continue;
+                    const ItemStack stack = ReadItemStack(*c);
+                    if (stack.IsEmpty()) continue;
+                    inv.SetItem(slot++, stack);
+                }
+            }
+
+            allay.SetVibrationData(ReadVibrationData(tag, "listener"));
+
+            // MC reads getIntOr("DuplicationCooldown", 0) of a Long tag.
+            allay.SetDuplicationCooldown(static_cast<int64_t>(NumberOf(tag.GetTag("DuplicationCooldown"))));
+
+            if (auto equipment = As<CT>(tag.GetTag("equipment"))) {
+                if (auto main = As<CT>(equipment->GetTag("mainhand"))) {
+                    allay.SetMainHandItem(ReadItemStack(*main));
+                }
+            }
+            ReadAllayBrain(tag, allay);
         }
 
         void WriteLiving(Nbt::Writer& w, const LivingEntity& l) {
@@ -364,6 +641,21 @@ namespace Game::Anvil {
             w.Short("DeathTime", static_cast<int16_t>(l.deathTime));
             w.Int  ("HurtByTimestamp", static_cast<int32_t>(l.GetLastHurtByMobTimestamp()));
             w.Float("AbsorptionAmount", l.GetAbsorptionAmount());
+            // Engine extras (vanilla ignores them): the head and body yaw
+            // vanilla drops on save — see ReadLiving.
+            w.Float("obey_head_yaw", l.yHeadRot);
+            w.Float("obey_body_yaw", l.yBodyRot);
+            // The limb swing (WalkAnimationState) and the animation age, for
+            // the same reason: a mob left mid-stride or mid-flap comes back
+            // in that pose. Only when there is something to keep.
+            if (l.walkAnimation.speed != 0.0f || l.walkAnimation.speedOld != 0.0f ||
+                l.walkAnimation.position != 0.0f) {
+                w.Float("obey_walk_pos",       l.walkAnimation.position);
+                w.Float("obey_walk_speed",     l.walkAnimation.speed);
+                w.Float("obey_walk_speed_old", l.walkAnimation.speedOld);
+                w.Float("obey_walk_scale",     l.walkAnimation.positionScale);
+            }
+            if (l.viewAge >= 0) w.Int("obey_view_age", l.viewAge + l.tickCount);
             WriteAttributes(w, l);
             w.Bool ("FallFlying", false);
             if (!l.LastHurtByMobRef().Empty()) {
@@ -380,6 +672,8 @@ namespace Game::Anvil {
             // The villager saves its claims (home, job site, bell) there.
             if (const auto* villager = dynamic_cast<const Villager*>(&l)) {
                 WriteVillagerBrain(w, *villager);
+            } else if (const auto* allay = dynamic_cast<const Allay*>(&l)) {
+                WriteAllayBrain(w, *allay);
             } else {
                 w.BeginCompound("Brain");
                 w.BeginCompound("memories");
@@ -413,6 +707,27 @@ namespace Game::Anvil {
             // through it would re-run every effect's arrival side effects.
             // RestoreEffects still re-applies the attribute MODIFIERS, which a
             // bare assignment would drop.
+            // Head and body yaw. MC Entity.load snaps both to the saved yRot
+            // (setYHeadRot / setYBodyRot) — it saves only Rotation. Missing
+            // here, a loaded mob came back with its head and body at 0
+            // (facing south) whatever way it was facing, and the join
+            // transition's hold showed that until the AI turned them back.
+            // On top of vanilla's snap, the engine keeps the real angles
+            // (obey_* extras, which vanilla ignores): a dog looking over its
+            // shoulder when the world was left looks there again on rejoin,
+            // as the last-world panorama shows it.
+            l.yHeadRot = l.yHeadRotO = tag.GetValue<float>("obey_head_yaw", l.yRot);
+            l.yBodyRot = l.yBodyRotO = tag.GetValue<float>("obey_body_yaw", l.yRot);
+            if (tag.HasTag("obey_walk_pos")) {
+                l.walkAnimation.position      = tag.GetValue<float>("obey_walk_pos", 0.0f);
+                l.walkAnimation.speed         = tag.GetValue<float>("obey_walk_speed", 0.0f);
+                l.walkAnimation.speedOld      = tag.GetValue<float>("obey_walk_speed_old", 0.0f);
+                l.walkAnimation.positionScale = tag.GetValue<float>("obey_walk_scale", 1.0f);
+            }
+            if (tag.HasTag("obey_view_age")) {
+                l.viewAge = std::max(0, tag.GetValue<int32_t>("obey_view_age", 0) - l.tickCount);
+            }
+
             if (auto list = As<LT>(tag.GetTag("active_effects"))) {
                 std::vector<MobEffectInstance> restored;
                 restored.reserve(list->value.size());
@@ -445,16 +760,141 @@ namespace Game::Anvil {
 
         // ── Mob ─────────────────────────────────────────────────────────────
 
+        // The types that write their own "equipment" compound (their own
+        // storage — the allay's held item, the wolf's armour, the stand's six
+        // slots); the Mob tier's generic equipment stays out of their tags.
+        bool HasOwnEquipmentTag(EntityTypeId type) {
+            return type == EntityTypeId::Allay || type == EntityTypeId::Wolf || type == EntityTypeId::ArmorStand;
+        }
+
+        // MC EquipmentSlot.CODEC names, by ordinal — the humanoid six.
+        constexpr const char* kHumanoidSlotNames[Mob::kEquipmentSlotCount] = {
+            "mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle"
+        };
+
+        // MC Mob.addAdditionalSaveData's equipment half: EntityEquipment.CODEC
+        // ("equipment", one compound per non-empty slot) and DropChances.CODEC
+        // ("drop_chances", only the slots off the 0.085 default).
+        void WriteMobEquipment(Nbt::Writer& w, const Mob& m) {
+            if (HasOwnEquipmentTag(m.GetType())) return;
+            if (m.HasAnyEquipment()) {
+                w.BeginCompound("equipment");
+                for (int i = 0; i < Mob::kEquipmentSlotCount; ++i) {
+                    const ItemStack& stack = m.GetEquipment(static_cast<EquipmentSlot>(i));
+                    if (stack.IsEmpty()) continue;
+                    w.BeginCompound(kHumanoidSlotNames[i]);
+                    WriteItemStackBody(w, stack);
+                    w.EndCompound();
+                }
+                w.EndCompound();
+            }
+            bool anyChance = false;
+            for (int i = 0; i < Mob::kEquipmentSlotCount; ++i) {
+                if (m.GetEquipmentDropChance(static_cast<EquipmentSlot>(i)) != Mob::kDefaultEquipmentDropChance) {
+                    anyChance = true;
+                }
+            }
+            if (anyChance) {
+                w.BeginCompound("drop_chances");
+                for (int i = 0; i < Mob::kEquipmentSlotCount; ++i) {
+                    const float chance = m.GetEquipmentDropChance(static_cast<EquipmentSlot>(i));
+                    if (chance != Mob::kDefaultEquipmentDropChance) w.Float(kHumanoidSlotNames[i], chance);
+                }
+                w.EndCompound();
+            }
+        }
+
+        void ReadMobEquipment(const CT& tag, Mob& m) {
+            if (HasOwnEquipmentTag(m.GetType())) return;
+            if (auto equipment = As<CT>(tag.GetTag("equipment"))) {
+                for (int i = 0; i < Mob::kEquipmentSlotCount; ++i) {
+                    if (auto stack = As<CT>(equipment->GetTag(kHumanoidSlotNames[i]))) {
+                        m.SetEquipment(static_cast<EquipmentSlot>(i), ReadItemStack(*stack));
+                    }
+                }
+            } else {
+                // Pre-1.21.5 saves: HandItems [main, off], ArmorItems
+                // [feet, legs, chest, head].
+                const auto readList = [&](const char* key, std::initializer_list<EquipmentSlot> slots) {
+                    auto list = As<LT>(tag.GetTag(key));
+                    if (!list) return;
+                    size_t i = 0;
+                    for (const EquipmentSlot slot : slots) {
+                        if (i >= list->value.size()) break;
+                        if (auto stack = As<CT>(list->value[i])) m.SetEquipment(slot, ReadItemStack(*stack));
+                        ++i;
+                    }
+                };
+                readList("HandItems", { EquipmentSlot::MAINHAND, EquipmentSlot::OFFHAND });
+                readList("ArmorItems", { EquipmentSlot::FEET, EquipmentSlot::LEGS,
+                                         EquipmentSlot::CHEST, EquipmentSlot::HEAD });
+                // The older mount keys the 1.21.5 datafixer folds into
+                // "equipment": body_armor_item (1.20.5+), a horse's
+                // ArmorItem / SaddleItem, a llama's DecorItem, a pig's or
+                // strider's Saddle flag.
+                if (auto body = As<CT>(tag.GetTag("body_armor_item"))) {
+                    m.SetEquipment(EquipmentSlot::BODY, ReadItemStack(*body));
+                } else if (auto armor = As<CT>(tag.GetTag("ArmorItem"))) {
+                    m.SetEquipment(EquipmentSlot::BODY, ReadItemStack(*armor));
+                } else if (auto decor = As<CT>(tag.GetTag("DecorItem"))) {
+                    m.SetEquipment(EquipmentSlot::BODY, ReadItemStack(*decor));
+                }
+                if (auto saddle = As<CT>(tag.GetTag("SaddleItem"))) {
+                    m.SetEquipment(EquipmentSlot::SADDLE, ReadItemStack(*saddle));
+                } else if (tag.HasTag("Saddle") && NumberOf(tag.GetTag("Saddle")) != 0.0) {
+                    m.SetEquipment(EquipmentSlot::SADDLE, ItemStack(Items::Saddle, 1));
+                }
+            }
+            if (auto chances = As<CT>(tag.GetTag("drop_chances"))) {
+                for (int i = 0; i < Mob::kEquipmentSlotCount; ++i) {
+                    if (chances->HasTag(kHumanoidSlotNames[i])) {
+                        m.SetEquipmentDropChance(static_cast<EquipmentSlot>(i),
+                                                 chances->GetValue<float>(kHumanoidSlotNames[i],
+                                                                          Mob::kDefaultEquipmentDropChance));
+                    }
+                }
+            } else {
+                const auto readChances = [&](const char* key, std::initializer_list<EquipmentSlot> slots) {
+                    auto list = As<LT>(tag.GetTag(key));
+                    if (!list) return;
+                    size_t i = 0;
+                    for (const EquipmentSlot slot : slots) {
+                        if (i >= list->value.size()) break;
+                        if (auto f = As<::World::NBTTagFloat>(list->value[i])) m.SetEquipmentDropChance(slot, f->value);
+                        ++i;
+                    }
+                };
+                readChances("HandDropChances", { EquipmentSlot::MAINHAND, EquipmentSlot::OFFHAND });
+                readChances("ArmorDropChances", { EquipmentSlot::FEET, EquipmentSlot::LEGS,
+                                                  EquipmentSlot::CHEST, EquipmentSlot::HEAD });
+            }
+        }
+
         void WriteMobLayer(Nbt::Writer& w, const Mob& m) {
             w.Bool("CanPickUpLoot",       m.CanPickUpLoot());
             w.Bool("PersistenceRequired", m.IsPersistenceRequired());
             w.Bool("LeftHanded",          m.IsLeftHanded());
+            WriteMobEquipment(w, m);
             if (m.IsNoAi()) w.Bool("NoAI", true);
             if (m.HasHome()) {
                 w.Int("home_radius", m.GetHomeRadius());
                 const glm::ivec3 home = m.GetHomePosition();
                 const int32_t pos[3] = {home.x, home.y, home.z};
                 w.IntArray("home_pos", pos, 3);
+            }
+            // MC Mob.addAdditionalSaveData → writeLeashData: "leash" is the
+            // holder's {UUID} or, for a fence knot (never saved itself), the
+            // fence's [x, y, z] — LeashData.CODEC's xor.
+            if (m.IsLeashable()) {
+                const Leash::HolderRef ref = m.GetLeashSaveRef();
+                if (ref.knotPos) {
+                    const int32_t knot[3] = {ref.knotPos->x, ref.knotPos->y, ref.knotPos->z};
+                    w.IntArray("leash", knot, 3);
+                } else if (ref.uuid) {
+                    w.BeginCompound("leash");
+                    WriteUuid(w, "UUID", *ref.uuid);
+                    w.EndCompound();
+                }
             }
         }
 
@@ -466,6 +906,7 @@ namespace Game::Anvil {
             // Load-bearing: without it a mob that was saved because a player
             // built a farm around it distance-despawns on the tick it loads.
             m.SetPersistenceRequired(tag.GetValue<int8_t>("PersistenceRequired", 0) != 0);
+            ReadMobEquipment(tag, m);
 
             // Radius BEFORE position — MC only reads home_pos when the radius
             // is non-negative, so the other order discards the position.
@@ -476,6 +917,21 @@ namespace Game::Anvil {
                     m.SetHomeTo(glm::ivec3(arr->value[0], arr->value[1], arr->value[2]),
                                 m.GetHomeRadius());
                 }
+            }
+
+            // MC readLeashData: the reference waits for the next tickLeash,
+            // which finds the holder (or remakes the knot) — or, 100 ticks
+            // on, drops the lead.
+            if (m.IsLeashable()) {
+                Leash::HolderRef ref;
+                const ::World::NBTTagPtr leash = tag.GetTag("leash");
+                if (auto compound = As<CT>(leash)) {
+                    Uuid uuid{};
+                    if (ReadUuid(*compound, "UUID", uuid)) ref.uuid = uuid;
+                } else if (auto arr = As<::World::NBTTagIntArray>(leash); arr && arr->value.size() == 3) {
+                    ref.knotPos = glm::ivec3(arr->value[0], arr->value[1], arr->value[2]);
+                }
+                m.SetDelayedLeashRef(ref);
             }
         }
 
@@ -529,6 +985,10 @@ namespace Game::Anvil {
                 t.SetTame(false, true);
             }
             t.SetOrderedToSit(tag.GetValue<int8_t>("Sitting", 0) != 0);
+            // MC TamableAnimal.readAdditionalSaveData: setInSittingPose(
+            // orderedToSit) — a pet saved sitting loads sitting, instead of
+            // standing up for the tick before SitWhenOrderedToGoal runs.
+            t.SetInSittingPose(t.IsOrderedToSit());
         }
 
         // NeutralMob.addPersistentAngerSaveData. Vanilla writes the ABSOLUTE
@@ -665,14 +1125,32 @@ namespace Game::Anvil {
                 WriteItemStackBody(w, a.GetFiredFromWeapon());
                 w.EndCompound();
             }
+            // MC AbstractArrow: PierceLevel (a Piercing crossbow's) and the
+            // SoundEvent (a crossbow's CROSSBOW_HIT; the type's default
+            // otherwise).
+            w.Byte  ("PierceLevel", static_cast<int8_t>(a.GetPierceLevel()));
+            {
+                std::string sound = a.HitSoundEvent();
+                if (sound.find(':') == std::string::npos) sound = "minecraft:" + sound;
+                w.String("SoundEvent", sound);
+            }
             // Engine-only: vanilla re-derives its equivalent from inGround.
             // Without it a trident that has already dealt its damage becomes
             // able to hit again on the tick it loads.
             w.Int   ("obey_in_ground_time", a.GetInGroundTime());
-            // MC Arrow's potion lives on its pickup stack ("item"). Written
-            // only for a tipped shot — a plain arrow's item is the default
-            // vanilla assumes when the key is absent.
-            if (!a.GetPotionContents().IsEmpty() && a.GetType() == EntityTypeId::Arrow) {
+            // MC AbstractArrow: "pickup" (the Pickup ordinal).
+            w.Byte  ("pickup", static_cast<int8_t>(a.GetPickup()));
+            // MC Arrow's potion lives on its pickup stack ("item"). A
+            // trident's item is the thrown trident itself (its enchantments,
+            // its wear); an arrow's is written for a tipped shot — a plain
+            // arrow's item is the default vanilla assumes when the key is
+            // absent.
+            if (a.GetType() == EntityTypeId::Trident) {
+                const ItemStack pickup = a.GetPickupItem();
+                w.BeginCompound("item");
+                WriteItemStackBody(w, pickup);
+                w.EndCompound();
+            } else if (!a.GetPotionContents().IsEmpty() && a.GetType() == EntityTypeId::Arrow) {
                 // A bow-fired tipped arrow carries a tipped_arrow (whose
                 // default scale is the 0.125); a stray's or bogged's carries
                 // a plain arrow with the effect added (scale 1.0).
@@ -696,13 +1174,227 @@ namespace Game::Anvil {
             a.SetBaseDamage  (tag.GetValue<double>("damage", Arrow::kArrowBaseDamage));
             a.SetInGroundTime(tag.GetValue<int32_t>("obey_in_ground_time", 0));
             a.SetCritArrow   (tag.GetValue<int8_t>("crit", 0) != 0);
+            a.SetPierceLevel (tag.GetValue<int8_t>("PierceLevel", 0) & 0xFF);
+            {
+                std::string sound = tag.GetValue<std::string>("SoundEvent", "");
+                if (sound.rfind("minecraft:", 0) == 0) sound.erase(0, 10);
+                // The type's own default needs no override.
+                if (!sound.empty() && sound != a.HitSoundEvent()) a.SetSoundEvent(sound);
+            }
             if (auto weapon = As<CT>(tag.GetTag("weapon"))) {
                 const ItemStack launcher = ReadItemStack(*weapon);
                 if (!launcher.IsEmpty()) a.SetFiredFromWeapon(launcher);
             }
+            {
+                const int pickup = tag.GetValue<int8_t>("pickup", 0);
+                a.SetPickup(pickup == 1 ? Arrow::Pickup::Allowed
+                          : pickup == 2 ? Arrow::Pickup::CreativeOnly : Arrow::Pickup::Disallowed);
+            }
             if (auto item = As<CT>(tag.GetTag("item"))) {
                 const ItemStack pickup = ReadItemStack(*item);
-                if (!pickup.IsEmpty()) a.SetPotionFromPickupStack(pickup);
+                if (!pickup.IsEmpty()) {
+                    if (auto* trident = dynamic_cast<ThrownTrident*>(&a)) {
+                        // ThrownTrident.readAdditionalSaveData: ID_LOYALTY
+                        // re-read off the item.
+                        trident->SetTridentItem(pickup);
+                    } else {
+                        a.SetPickupItemStack(pickup);
+                        a.SetPotionFromPickupStack(pickup);
+                    }
+                }
+            }
+        }
+
+        // ── Boats and minecarts ─────────────────────────────────────────────
+        //
+        // MC ContainerEntity.addChestVehicleSaveData: an unrolled loot table
+        // INSTEAD of the items (seed only when non-zero), else
+        // ContainerHelper.saveAllItems ("Items", each with its "Slot").
+        void WriteChestVehicle(Nbt::Writer& w, const VehicleContainer& c) {
+            if (c.HasContainerLootTable()) {
+                w.String("LootTable", c.GetContainerLootTable());
+                if (c.GetContainerLootTableSeed() != 0) w.Long("LootTableSeed", c.GetContainerLootTableSeed());
+                return;
+            }
+            auto list = w.BeginList("Items", Nbt::TagType::Compound);
+            const std::vector<ItemStack>& items = c.Items();
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (items[i].IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, items[i], static_cast<int>(i));
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+
+        // MC ContainerEntity.readChestVehicleSaveData.
+        void ReadChestVehicle(const CT& tag, VehicleContainer& c) {
+            c.ClearItemStacks();
+            const std::string lootTable = tag.GetValue<std::string>("LootTable", "");
+            const int64_t seed = tag.HasTag("LootTableSeed")
+                ? static_cast<int64_t>(NumberOf(tag.GetTag("LootTableSeed"))) : 0;
+            c.SetContainerLootTable(lootTable, seed);
+            if (!lootTable.empty()) return;
+            auto list = As<LT>(tag.GetTag("Items"));
+            if (!list) return;
+            std::vector<ItemStack>& items = c.Items();
+            for (const auto& elem : list->value) {
+                auto item = As<CT>(elem);
+                if (!item) continue;
+                // ContainerHelper.loadAllItems: "Slot" & 255, in range only.
+                const int slot = static_cast<int>(NumberOf(item->GetTag("Slot"))) & 255;
+                if (slot < 0 || slot >= static_cast<int>(items.size())) continue;
+                items[static_cast<size_t>(slot)] = ReadItemStack(*item);
+            }
+        }
+
+        // MC AbstractChestedHorse.addAdditionalSaveData: "ChestedHorse", and
+        // while chested the inventory as "Items" (ItemStackWithSlot — each
+        // with its "Slot"). The donkey, the mule and the llamas.
+        void WriteMountChest(Nbt::Writer& w, const Mob& mob) {
+            const MountInventory* inventory = mob.GetMountInventory();
+            if (!inventory || !inventory->CanCarryChest()) return;
+            w.Bool("ChestedHorse", inventory->HasChest());
+            if (!inventory->HasChest()) return;
+            auto list = w.BeginList("Items", Nbt::TagType::Compound);
+            const SimpleContainer& items = inventory->Container();
+            for (int i = 0; i < items.GetContainerSize(); ++i) {
+                const ItemStack& stack = items.GetItem(i);
+                if (stack.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, stack, i);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+
+        // MC AbstractChestedHorse.readAdditionalSaveData: setChest, then
+        // createInventory (at the columns the mob now reports — a llama's
+        // strength is read first), then the "Items" whose slot fits.
+        void ReadMountChest(const CT& tag, Mob& mob) {
+            MountInventory* inventory = mob.GetMountInventory();
+            if (!inventory || !inventory->CanCarryChest()) return;
+            inventory->SetChest(tag.GetValue<int8_t>("ChestedHorse", 0) != 0);
+            mob.CreateMountInventory();
+            if (!inventory->HasChest()) return;
+            auto list = As<LT>(tag.GetTag("Items"));
+            if (!list) return;
+            SimpleContainer& items = inventory->Container();
+            for (const auto& elem : list->value) {
+                auto item = As<CT>(elem);
+                if (!item) continue;
+                // ItemStackWithSlot.isValidInContainer: 0 <= slot < size.
+                const int slot = static_cast<int>(NumberOf(item->GetTag("Slot"))) & 255;
+                if (slot < 0 || slot >= items.GetContainerSize()) continue;
+                items.SetItem(slot, ReadItemStack(*item));
+            }
+        }
+
+        // MC AbstractBoat / AbstractMinecart (+ subclasses)
+        // addAdditionalSaveData — the layers above (Entity, and the Mob layer
+        // that carries a boat's "leash") already wrote the rest.
+        void WriteVehicleLayer(Nbt::Writer& w, const VehicleEntity& v) {
+            if (const auto* boat = dynamic_cast<const Boat*>(&v)) {
+                if (const VehicleContainer* c = boat->Container()) WriteChestVehicle(w, *c);
+                return;
+            }
+            const auto* cart = dynamic_cast<const AbstractMinecart*>(&v);
+            if (!cart) return;
+            if (cart->HasCustomDisplayBlockState()) {
+                WriteBlockStateCompound(w, "DisplayState", cart->CustomDisplayBlockState());
+            }
+            if (cart->GetDisplayOffset() != cart->GetDefaultDisplayOffset()) {
+                w.Int("DisplayOffset", cart->GetDisplayOffset());
+            }
+            w.Bool("FlippedRotation", cart->IsFlipped());
+            w.Bool("HasTicked", cart->FirstTickFlag());
+            if (const auto* container = dynamic_cast<const MinecartContainerBase*>(cart)) {
+                WriteChestVehicle(w, container->Container());
+            }
+            if (const auto* hopper = dynamic_cast<const MinecartHopper*>(cart)) {
+                w.Bool("Enabled", hopper->IsEnabled());
+            } else if (const auto* furnace = dynamic_cast<const MinecartFurnace*>(cart)) {
+                w.Double("PushX", furnace->GetPush().x);
+                w.Double("PushZ", furnace->GetPush().z);
+                w.Short("Fuel", static_cast<int16_t>(furnace->GetFuel()));
+            } else if (const auto* tnt = dynamic_cast<const MinecartTNT*>(cart)) {
+                w.Int("fuse", tnt->GetFuse());
+                if (tnt->ExplosionPowerBase() != MinecartTNT::kDefaultExplosionPowerBase) {
+                    w.Float("explosion_power", tnt->ExplosionPowerBase());
+                }
+                if (tnt->ExplosionSpeedFactor() != MinecartTNT::kDefaultExplosionSpeedFactor) {
+                    w.Float("explosion_speed_factor", tnt->ExplosionSpeedFactor());
+                }
+            } else if (const auto* spawner = dynamic_cast<const MinecartSpawner*>(cart)) {
+                WriteSpawner(w, spawner->Spawner());
+            } else if (const auto* command = dynamic_cast<const MinecartCommandBlock*>(cart)) {
+                // MC BaseCommandBlock.save (the name is the entity's own
+                // CustomName, written by the Entity layer).
+                w.String("Command", command->GetCommand());
+                w.Int("SuccessCount", command->GetSuccessCount());
+                w.Bool("TrackOutput", command->TrackOutput());
+                if (command->TrackOutput() && !command->GetLastOutput().empty()) {
+                    // ComponentSerialization.CODEC: a plain-text component.
+                    w.String("LastOutput", command->GetLastOutput());
+                }
+                w.Bool("UpdateLastExecution", command->UpdateLastExecution());
+                if (command->UpdateLastExecution() && command->GetLastExecution() != -1) {
+                    w.Long("LastExecution", command->GetLastExecution());
+                }
+            }
+        }
+
+        // The readAdditionalSaveData twins.
+        void ReadVehicleLayer(const CT& tag, VehicleEntity& v) {
+            if (auto* boat = dynamic_cast<Boat*>(&v)) {
+                if (VehicleContainer* c = boat->Container()) ReadChestVehicle(tag, *c);
+                return;
+            }
+            auto* cart = dynamic_cast<AbstractMinecart*>(&v);
+            if (!cart) return;
+            BlockState display{};
+            if (ReadBlockStateCompound(tag, "DisplayState", display)) {
+                cart->SetCustomDisplayBlockState(display);
+            } else {
+                cart->SetCustomDisplayBlockState(std::nullopt);
+            }
+            cart->SetDisplayOffset(tag.HasTag("DisplayOffset")
+                ? static_cast<int>(NumberOf(tag.GetTag("DisplayOffset"))) : cart->GetDefaultDisplayOffset());
+            cart->SetFlipped(tag.HasTag("FlippedRotation") && NumberOf(tag.GetTag("FlippedRotation")) != 0.0);
+            cart->SetFirstTickFlag(tag.HasTag("HasTicked") && NumberOf(tag.GetTag("HasTicked")) != 0.0);
+            if (auto* container = dynamic_cast<MinecartContainerBase*>(cart)) {
+                ReadChestVehicle(tag, container->Container());
+            }
+            if (auto* hopper = dynamic_cast<MinecartHopper*>(cart)) {
+                hopper->SetEnabled(!tag.HasTag("Enabled") || NumberOf(tag.GetTag("Enabled")) != 0.0);
+            } else if (auto* furnace = dynamic_cast<MinecartFurnace*>(cart)) {
+                const double pushX = tag.HasTag("PushX") ? NumberOf(tag.GetTag("PushX")) : 0.0;
+                const double pushZ = tag.HasTag("PushZ") ? NumberOf(tag.GetTag("PushZ")) : 0.0;
+                furnace->SetPush(glm::dvec3(pushX, 0.0, pushZ));
+                furnace->SetFuel(tag.HasTag("Fuel") ? static_cast<int16_t>(NumberOf(tag.GetTag("Fuel"))) : 0);
+            } else if (auto* tnt = dynamic_cast<MinecartTNT*>(cart)) {
+                tnt->SetFuse(tag.HasTag("fuse") ? static_cast<int>(NumberOf(tag.GetTag("fuse"))) : -1);
+                tnt->SetExplosionPowerBase(tag.HasTag("explosion_power")
+                    ? static_cast<float>(NumberOf(tag.GetTag("explosion_power")))
+                    : MinecartTNT::kDefaultExplosionPowerBase);
+                tnt->SetExplosionSpeedFactor(tag.HasTag("explosion_speed_factor")
+                    ? static_cast<float>(NumberOf(tag.GetTag("explosion_speed_factor")))
+                    : MinecartTNT::kDefaultExplosionSpeedFactor);
+            } else if (auto* spawner = dynamic_cast<MinecartSpawner*>(cart)) {
+                spawner->Spawner().MoveCarriedTo(cart->BlockPosition());
+                ReadSpawner(tag, spawner->Spawner());
+            } else if (auto* command = dynamic_cast<MinecartCommandBlock*>(cart)) {
+                command->SetCommand(tag.GetValue<std::string>("Command", ""));
+                command->SetSuccessCount(tag.HasTag("SuccessCount")
+                    ? static_cast<int>(NumberOf(tag.GetTag("SuccessCount"))) : 0);
+                const bool track = !tag.HasTag("TrackOutput") || NumberOf(tag.GetTag("TrackOutput")) != 0.0;
+                command->SetTrackOutput(track);
+                command->SetLastOutput(track ? tag.GetValue<std::string>("LastOutput", "") : std::string());
+                const bool update = !tag.HasTag("UpdateLastExecution") ||
+                                    NumberOf(tag.GetTag("UpdateLastExecution")) != 0.0;
+                command->SetUpdateLastExecution(update);
+                command->SetLastExecution(update && tag.HasTag("LastExecution")
+                    ? static_cast<int64_t>(NumberOf(tag.GetTag("LastExecution"))) : -1);
             }
         }
 
@@ -783,6 +1475,13 @@ namespace Game::Anvil {
 
     // ── mobs ────────────────────────────────────────────────────────────────
 
+    namespace {
+        // The fields of one saved mob, into the compound the caller has open
+        // (a list element for a chunk or a Passengers list, a named compound
+        // for a player's RootVehicle).
+        void WriteMobBody(Nbt::Writer& w, const Mob& mob, const std::string& name);
+    } // namespace
+
     bool WriteMob(Nbt::Writer& w, Nbt::Writer::ListScope& list, const Mob& mob) {
         // Three reasons never to write: the type has no vanilla name, the
         // entity opted out (projectiles until their owners can round-trip),
@@ -792,10 +1491,38 @@ namespace Game::Anvil {
         if (name.empty()) return false;
 
         w.ListCompoundBegin(list);
+        WriteMobBody(w, mob, name);
+        w.ListCompoundEnd(list);
+        return true;
+    }
+
+    bool WriteMobCompound(Nbt::Writer& w, std::string_view key, const Mob& mob) {
+        if (!mob.CanSerialize() || mob.IsRemoved()) return false;
+        const std::string name = EntityName(mob.GetType());
+        if (name.empty()) return false;
+        w.BeginCompound(key);
+        WriteMobBody(w, mob, name);
+        w.EndCompound();
+        return true;
+    }
+
+    namespace {
+    void WriteMobBody(Nbt::Writer& w, const Mob& mob, const std::string& name) {
         w.String("id", name);
         WriteEntityBase(w, mob);
         WriteLiving(w, mob);
         WriteMobLayer(w, mob);
+        // Engine extra (vanilla ignores it): Mob::GetRenderPhase — see
+        // ApplyMobNbt's end.
+        {
+            float phase[Mob::kRenderPhaseMax] = {};
+            const int n = std::min(mob.GetRenderPhase(phase), Mob::kRenderPhaseMax);
+            if (n > 0) {
+                auto list = w.BeginList("obey_render_phase", Nbt::TagType::Float);
+                for (int i = 0; i < n; ++i) w.ListFloat(list, phase[i]);
+                w.EndList(list);
+            }
+        }
 
         if (const auto* ageable = dynamic_cast<const AgeableMob*>(&mob)) WriteAgeableLayer(w, *ageable);
         if (const auto* animal = dynamic_cast<const Animal*>(&mob)) WriteAnimalLayer(w, *animal);
@@ -803,6 +1530,11 @@ namespace Game::Anvil {
         if (const auto* neutral = dynamic_cast<const NeutralMob*>(&mob)) {
             const EntityLevel* level = mob.Level();
             WriteNeutral(w, *neutral, level ? level->GetGameTime() : 0);
+        }
+        // MC Warden.addAdditionalSaveData: the vibration it is hearing
+        // ("listener", VibrationSystem.Data.CODEC).
+        if (const auto* warden = dynamic_cast<const Warden*>(&mob)) {
+            WriteVibrationData(w, "listener", warden->SavedVibrationData());
         }
 
         // Projectiles: super-first, exactly as the vanilla chain emits them.
@@ -814,6 +1546,40 @@ namespace Game::Anvil {
             if (const auto* arrow = dynamic_cast<const Arrow*>(proj)) {
                 WriteArrowLayer(w, *arrow);
             }
+        }
+
+        // MC PatrollingMonster.addAdditionalSaveData: patrol_target
+        // (BlockPos.CODEC, an int array, only when set), PatrolLeader,
+        // Patrolling; Raider's Wave and CanJoinRaid on top (RaidId belongs to
+        // the raid system, which is not ported).
+        if (const auto* patrol = dynamic_cast<const PatrollingMonster*>(&mob)) {
+            if (const auto& target = patrol->GetPatrolTarget()) {
+                const int32_t a[3] = { target->x, target->y, target->z };
+                w.IntArray("patrol_target", a, 3);
+            }
+            w.Bool("PatrolLeader", patrol->IsPatrolLeader());
+            w.Bool("Patrolling", patrol->IsPatrolling());
+            if (const auto* raider = dynamic_cast<const Raider*>(patrol)) {
+                w.Int("Wave", raider->GetWave());
+                w.Bool("CanJoinRaid", raider->CanJoinRaid());
+            }
+        }
+
+        // MC Bucketable "FromBucket" (AbstractFish / Axolotl); the tadpole
+        // (an AbstractFish, fromBucket always true) adds Age / AgeLocked.
+        if (const auto* fish = dynamic_cast<const Fish*>(&mob)) {
+            w.Bool("FromBucket", fish->FromBucket());
+        } else if (const auto* axolotl = dynamic_cast<const Axolotl*>(&mob)) {
+            w.Bool("FromBucket", axolotl->FromBucket());
+        } else if (const auto* tadpole = dynamic_cast<const Tadpole*>(&mob)) {
+            w.Bool("FromBucket", true);
+            w.Int("Age", tadpole->GetAge());
+            w.Bool("AgeLocked", tadpole->IsAgeLocked());
+        }
+
+        // Boats and minecarts (common/entity/vehicle).
+        if (IsVehicleEntityType(mob.GetType())) {
+            if (const auto* vehicle = dynamic_cast<const VehicleEntity*>(&mob)) WriteVehicleLayer(w, *vehicle);
         }
 
         // Per-type extras. Only types whose state has a real setter appear
@@ -846,6 +1612,13 @@ namespace Game::Anvil {
             case EntityTypeId::Pig:
                 if (const auto* p = dynamic_cast<const Pig*>(&mob)) {
                     w.String("variant", TemperatureVariantId(p->GetVariantByte()));
+                }
+                break;
+            // MC MushroomCow.addAdditionalSaveData: "Type" (Variant.CODEC —
+            // "red" / "brown").
+            case EntityTypeId::Mooshroom:
+                if (const auto* m = dynamic_cast<const Mooshroom*>(&mob)) {
+                    w.String("Type", m->GetVariant() == Mooshroom::Variant::Brown ? "brown" : "red");
                 }
                 break;
             case EntityTypeId::Slime:
@@ -890,6 +1663,10 @@ namespace Game::Anvil {
             case EntityTypeId::Villager:
                 if (const auto* v = dynamic_cast<const Villager*>(&mob)) WriteVillagerNbt(w, *v);
                 break;
+            // MC WanderingTrader (VillagerNbt.hpp).
+            case EntityTypeId::WanderingTrader:
+                if (const auto* t = dynamic_cast<const WanderingTrader*>(&mob)) WriteWanderingTraderNbt(w, *t);
+                break;
             case EntityTypeId::Fox:
                 if (const auto* f = dynamic_cast<const Fox*>(&mob)) {
                     w.Bool  ("Sleeping",  f->IsSleeping());
@@ -897,10 +1674,18 @@ namespace Game::Anvil {
                     w.Bool  ("Crouching", f->IsFoxCrouching());
                     w.String("Type", EnumName(kFoxVariantNames,
                                               static_cast<size_t>(f->GetVariant())));
-                    // "Trusted" is omitted: this engine models no trust list
-                    // (DefendTrustedTargetGoal documents it as permanently
-                    // empty), so an empty list would assert a fact we cannot
-                    // know and would erase a real one on an imported world.
+                    // MC Fox.addAdditionalSaveData: "Trusted", a list of
+                    // int-array UUIDs (EntityReference codec), always written.
+                    {
+                        const std::vector<Uuid> trusted = f->GetTrustedUuids();
+                        auto list = w.BeginList("Trusted", Nbt::TagType::IntArray);
+                        for (const Uuid& uuid : trusted) {
+                            int32_t words[4];
+                            UuidToIntArray(uuid, words);
+                            w.ListIntArray(list, words, 4);
+                        }
+                        w.EndList(list);
+                    }
                 }
                 break;
             case EntityTypeId::Panda:
@@ -927,6 +1712,51 @@ namespace Game::Anvil {
             case EntityTypeId::Cat:
                 if (const auto* c = dynamic_cast<const Cat*>(&mob)) {
                     w.String("variant", EnumName(kCatVariantNames, c->GetVariantByte()));
+                    // MC Cat: DyeColor.LEGACY_ID_CODEC — the ordinal as a byte.
+                    w.Byte("CollarColor", static_cast<int8_t>(c->GetCollarColor()));
+                }
+                break;
+            // MC Wolf.addAdditionalSaveData: CollarColor (legacy byte id),
+            // the coat as "variant", the anger pair (WriteNeutral above) and
+            // "sound_variant"; the BODY slot rides EntityEquipment's
+            // "equipment" compound with its guaranteed drop chance.
+            case EntityTypeId::Wolf:
+                if (const auto* wolf = dynamic_cast<const Wolf*>(&mob)) {
+                    w.Byte("CollarColor", static_cast<int8_t>(wolf->GetCollarColor()));
+                    w.String("variant", std::string("minecraft:") +
+                                            WolfVariants::Name(wolf->GetVariant()));
+                    w.String("sound_variant", std::string("minecraft:") +
+                                                  WolfSoundVariants::Name(wolf->GetSoundVariant()));
+                    if (wolf->IsWearingBodyArmor()) {
+                        w.BeginCompound("equipment");
+                        w.BeginCompound("body");
+                        WriteItemStackBody(w, wolf->GetBodyArmorItem());
+                        w.EndCompound();
+                        w.EndCompound();
+                        // MC DropChances: setItemSlotAndDropWhenKilled's
+                        // guaranteed drop is written as 2.0.
+                        w.BeginCompound("drop_chances");
+                        w.Float("body", 2.0f);
+                        w.EndCompound();
+                    }
+                }
+                break;
+            // MC Llama.addAdditionalSaveData: "Strength".
+            case EntityTypeId::Llama:
+            case EntityTypeId::TraderLlama:
+                if (const auto* llama = dynamic_cast<const Llama*>(&mob)) {
+                    // MC AbstractHorse.addAdditionalSaveData (Llama extends it).
+                    w.Int ("Temper", llama->GetTemper());
+                    w.Bool("Tame",   llama->IsTamed());
+                    WriteRef(w, "Owner", llama->OwnerRef());
+                    w.Int("Strength", llama->GetStrength());
+                    // MC Llama.Variant.LEGACY_CODEC — the id as an int.
+                    w.Int("Variant", static_cast<int32_t>(llama->GetVariant()));
+                    WriteMountChest(w, *llama);
+                }
+                // MC TraderLlama.addAdditionalSaveData.
+                if (const auto* trader = dynamic_cast<const TraderLlama*>(&mob)) {
+                    w.Int("DespawnDelay", trader->GetDespawnDelay());
                 }
                 break;
             case EntityTypeId::Turtle:
@@ -944,10 +1774,30 @@ namespace Game::Anvil {
             case EntityTypeId::ZombieHorse:
                 if (const auto* h = dynamic_cast<const AbstractHorse*>(&mob)) {
                     w.Bool("EatingHaystack", h->IsEating());
+                    w.Bool("Bred",           h->IsBred());
                     w.Int ("Temper",         h->GetTemper());
                     // NOT the TamableAnimal "Tame" — AbstractHorse owns its
                     // own tamed flag and does not use that mixin.
                     w.Bool("Tame",           h->IsTamedHorse());
+                    // MC EntityReference.store(owner, output, "Owner").
+                    WriteRef(w, "Owner", h->OwnerRef());
+                    // AbstractChestedHorse (the donkey, the mule).
+                    WriteMountChest(w, *h);
+                }
+                // MC Horse.addAdditionalSaveData: "Variant" = variant | markings << 8.
+                if (const auto* horse = dynamic_cast<const Horse*>(&mob)) {
+                    w.Int("Variant", horse->GetTypeVariant());
+                }
+                // MC SkeletonHorse.addAdditionalSaveData.
+                if (const auto* s = dynamic_cast<const SkeletonHorse*>(&mob)) {
+                    w.Bool("SkeletonTrap",    s->IsTrap());
+                    w.Int ("SkeletonTrapTime", s->GetTrapTime());
+                }
+                break;
+            case EntityTypeId::HappyGhast:
+                // MC HappyGhast.addAdditionalSaveData.
+                if (const auto* g = dynamic_cast<const HappyGhast*>(&mob)) {
+                    w.Int("still_timeout", g->GetServerStillTimeout());
                 }
                 break;
             case EntityTypeId::Bat:
@@ -973,6 +1823,7 @@ namespace Game::Anvil {
             case EntityTypeId::Dolphin:
                 if (const auto* d = dynamic_cast<const Dolphin*>(&mob)) {
                     w.Int("Moistness", d->GetMoistness());
+                    w.Bool("GotFish", d->GotFish());
                 }
                 break;
             case EntityTypeId::Pufferfish:
@@ -980,7 +1831,24 @@ namespace Game::Anvil {
                     w.Int("PuffState", p->GetPuffState());
                 }
                 break;
+            case EntityTypeId::TropicalFish:
+                // MC TropicalFish.addAdditionalSaveData: "Variant", the
+                // packed int (Variant.CODEC = Codec.INT).
+                if (const auto* t = dynamic_cast<const TropicalFish*>(&mob)) {
+                    w.Int("Variant", t->GetPackedVariant());
+                }
+                break;
+            case EntityTypeId::Salmon:
+                // MC Salmon.addAdditionalSaveData: "type", the size's name.
+                if (const auto* sal = dynamic_cast<const Salmon*>(&mob)) {
+                    w.String("type", Salmon::SizeName(sal->GetSize()));
+                }
+                break;
+            case EntityTypeId::Allay:
+                if (const auto* a = dynamic_cast<const Allay*>(&mob)) WriteAllayData(w, *a);
+                break;
             case EntityTypeId::Camel:
+            case EntityTypeId::CamelHusk:   // MC CamelHusk extends Camel
                 if (const auto* c = dynamic_cast<const Camel*>(&mob)) {
                     w.Long("LastPoseTick", c->GetLastPoseChangeTick());
                 }
@@ -991,6 +1859,13 @@ namespace Game::Anvil {
                     w.Int("Variant", static_cast<int32_t>(a->GetVariant()));
                 }
                 break;
+            // MC Parrot.addAdditionalSaveData: "Variant" through
+            // Parrot.Variant.LEGACY_CODEC — the int id.
+            case EntityTypeId::Parrot:
+                if (const auto* p = dynamic_cast<const Parrot*>(&mob)) {
+                    w.Int("Variant", static_cast<int32_t>(p->GetVariant()));
+                }
+                break;
             case EntityTypeId::Armadillo:
                 if (const auto* a = dynamic_cast<const Armadillo*>(&mob)) {
                     w.String("state", EnumName(kArmadilloStateNames,
@@ -999,6 +1874,9 @@ namespace Game::Anvil {
                 break;
             case EntityTypeId::Creeper:
                 if (const auto* c = dynamic_cast<const Creeper*>(&mob)) {
+                    // MC Creeper.addAdditionalSaveData: "powered" (the
+                    // charged flag), "Fuse", "ExplosionRadius", "ignited".
+                    w.Bool("powered", c->IsPowered());
                     w.Bool("ignited", c->IsIgnited());
                 }
                 break;
@@ -1099,6 +1977,28 @@ namespace Game::Anvil {
                     if (const PaintingVariant* v = p->Variant()) w.String("variant", v->id);
                 }
                 break;
+            case EntityTypeId::Cushion:
+                if (const auto* c = dynamic_cast<const Cushion*>(&mob)) {
+                    // MC Cushion.addAdditionalSaveData: BlockAttachedEntity's
+                    // "block_pos" (BlockPos.CODEC), then "color"
+                    // (DyeColor.CODEC — the name).
+                    const int32_t cell[3] = { c->GetBlockPos().x, c->GetBlockPos().y, c->GetBlockPos().z };
+                    w.IntArray("block_pos", cell, 3);
+                    w.String("color", Cushion::ColorName(c->GetColor()));
+                }
+                break;
+            case EntityTypeId::OminousItemSpawner:
+                if (const auto* o = dynamic_cast<const OminousItemSpawner*>(&mob)) {
+                    // MC OminousItemSpawner.addAdditionalSaveData: "item"
+                    // when it still holds one, then "spawn_item_after_ticks".
+                    if (!o->GetItem().IsEmpty()) {
+                        w.BeginCompound("item");
+                        WriteItemStackBody(w, o->GetItem());
+                        w.EndCompound();
+                    }
+                    w.Long("spawn_item_after_ticks", o->GetSpawnItemAfterTicks());
+                }
+                break;
             case EntityTypeId::ItemFrame:
             case EntityTypeId::GlowItemFrame:
                 if (const auto* f = dynamic_cast<const ItemFrame*>(&mob)) {
@@ -1186,12 +2086,26 @@ namespace Game::Anvil {
                     w.Bool("CannotHunt", !p->CanHunt());
                     w.Bool("IsImmuneToZombification", p->IsImmuneToZombification());
                     w.Int ("TimeInOverworld", p->GetTimeInOverworld());
+                    WriteCarrierInventory(w, p->GetInventory());
+                }
+                break;
+            case EntityTypeId::Pillager:
+                if (const auto* p = dynamic_cast<const Pillager*>(&mob)) {
+                    WriteCarrierInventory(w, p->GetInventory());
                 }
                 break;
             case EntityTypeId::PiglinBrute:
                 if (const auto* p = dynamic_cast<const PiglinBrute*>(&mob)) {
                     w.Bool("IsImmuneToZombification", p->IsImmuneToZombification());
                     w.Int ("TimeInOverworld", p->GetTimeInOverworld());
+                }
+                break;
+            // MC Hoglin.addAdditionalSaveData.
+            case EntityTypeId::Hoglin:
+                if (const auto* h = dynamic_cast<const Hoglin*>(&mob)) {
+                    w.Bool("IsImmuneToZombification", h->IsImmuneToZombification());
+                    w.Int ("TimeInOverworld", h->GetTimeInOverworld());
+                    w.Bool("CannotBeHunted", h->CannotBeHunted());
                 }
                 break;
             case EntityTypeId::Zoglin:
@@ -1241,6 +2155,19 @@ namespace Game::Anvil {
                     w.BeginCompound("Item");
                     WriteItemStackBody(w, p->GetItem());
                     w.EndCompound();
+                }
+                break;
+            case EntityTypeId::FireworkRocket:
+                // MC FireworkRocketEntity.addAdditionalSaveData: Life,
+                // LifeTime, FireworksItem, ShotAtAngle. (The attachment is
+                // synched data only — a reloaded rocket rides nobody.)
+                if (const auto* r = dynamic_cast<const FireworkRocket*>(&mob)) {
+                    w.Int("Life", r->GetLife());
+                    w.Int("LifeTime", r->GetLifetime());
+                    w.BeginCompound("FireworksItem");
+                    WriteItemStackBody(w, r->GetItem());
+                    w.EndCompound();
+                    w.Bool("ShotAtAngle", r->IsShotAtAngle());
                 }
                 break;
             case EntityTypeId::EyeOfEnder:
@@ -1340,10 +2267,8 @@ namespace Game::Anvil {
             }
             if (opened) w.EndList(riders);
         }
-
-        w.ListCompoundEnd(list);
-        return true;
     }
+    } // namespace
 
     void ApplyMobNbt(const ::World::NBTTagCompound& tag, Mob& mob) {
         // ORDER MATTERS and is MC's read order, not the reverse of the write.
@@ -1378,6 +2303,23 @@ namespace Game::Anvil {
         if (auto* animal = dynamic_cast<Animal*>(&mob)) ReadAnimalLayer(tag, *animal);
         if (auto* tamable = dynamic_cast<TamableAnimal*>(&mob)) ReadTamable(tag, *tamable);
         if (auto* neutral = dynamic_cast<NeutralMob*>(&mob)) ReadNeutral(tag, *neutral);
+        // MC PatrollingMonster / Raider.readAdditionalSaveData (defaults: no
+        // target, false, false, wave 0, false).
+        if (auto* patrol = dynamic_cast<PatrollingMonster*>(&mob)) {
+            std::optional<glm::ivec3> target;
+            if (auto arr = As<::World::NBTTagIntArray>(tag.GetTag("patrol_target"));
+                arr && arr->value.size() == 3) {
+                target = glm::ivec3(arr->value[0], arr->value[1], arr->value[2]);
+            }
+            patrol->RestorePatrolState(target, tag.GetValue<int8_t>("PatrolLeader", 0) != 0,
+                                       tag.GetValue<int8_t>("Patrolling", 0) != 0);
+            if (auto* raider = dynamic_cast<Raider*>(patrol)) {
+                raider->SetWave(tag.GetValue<int32_t>("Wave", 0));
+                raider->SetCanJoinRaid(tag.GetValue<int8_t>("CanJoinRaid", 0) != 0);
+            }
+        }
+        // MC Warden.readAdditionalSaveData: "listener", a fresh Data when absent.
+        if (auto* warden = dynamic_cast<Warden*>(&mob)) warden->SetVibrationData(ReadVibrationData(tag, "listener"));
 
         if (auto* proj = dynamic_cast<Projectile*>(&mob)) {
             ReadProjectileLayer(tag, *proj);
@@ -1386,6 +2328,22 @@ namespace Game::Anvil {
                     tag.GetValue<double>("acceleration_power", 0.1));
             }
             if (auto* arrow = dynamic_cast<Arrow*>(proj)) ReadArrowLayer(tag, *arrow);
+        }
+
+        // MC readAdditionalSaveData: FromBucket (getBooleanOr false); the
+        // tadpole's Age (0) and AgeLocked (false).
+        if (auto* fish = dynamic_cast<Fish*>(&mob)) {
+            fish->SetFromBucket(tag.GetValue<int8_t>("FromBucket", 0) != 0);
+        } else if (auto* axolotl = dynamic_cast<Axolotl*>(&mob)) {
+            axolotl->SetFromBucket(tag.GetValue<int8_t>("FromBucket", 0) != 0);
+        } else if (auto* tadpole = dynamic_cast<Tadpole*>(&mob)) {
+            tadpole->SetAge(tag.GetValue<int32_t>("Age", 0));
+            tadpole->SetAgeLocked(tag.GetValue<int8_t>("AgeLocked", 0) != 0);
+        }
+
+        // Boats and minecarts (common/entity/vehicle).
+        if (IsVehicleEntityType(mob.GetType())) {
+            if (auto* vehicle = dynamic_cast<VehicleEntity*>(&mob)) ReadVehicleLayer(tag, *vehicle);
         }
 
         switch (mob.GetType()) {
@@ -1435,6 +2393,14 @@ namespace Game::Anvil {
                     if (tag.HasTag("variant")) p->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
                 }
                 break;
+            // MC MushroomCow.readAdditionalSaveData: absent or unknown →
+            // Variant.DEFAULT (red).
+            case EntityTypeId::Mooshroom:
+                if (auto* m = dynamic_cast<Mooshroom*>(&mob)) {
+                    m->SetVariant(tag.GetValue<std::string>("Type", "red") == "brown" ? Mooshroom::Variant::Brown
+                                                                                     : Mooshroom::Variant::Red);
+                }
+                break;
             case EntityTypeId::Zombie:
             case EntityTypeId::Husk:
             case EntityTypeId::Drowned:
@@ -1454,6 +2420,9 @@ namespace Game::Anvil {
             case EntityTypeId::Villager:
                 if (auto* v = dynamic_cast<Villager*>(&mob)) ReadVillagerNbt(tag, *v);
                 break;
+            case EntityTypeId::WanderingTrader:
+                if (auto* t = dynamic_cast<WanderingTrader*>(&mob)) ReadWanderingTraderNbt(tag, *t);
+                break;
             case EntityTypeId::Fox:
                 if (auto* f = dynamic_cast<Fox*>(&mob)) {
                     f->SetSleeping   (tag.GetValue<int8_t>("Sleeping", 0) != 0);
@@ -1461,6 +2430,18 @@ namespace Game::Anvil {
                     f->SetIsCrouching(tag.GetValue<int8_t>("Crouching", 0) != 0);
                     f->SetVariant(static_cast<Fox::Variant>(
                         EnumIndex(kFoxVariantNames, tag.GetValue<std::string>("Type", ""))));
+                    // MC readAdditionalSaveData: clearTrusted, then each entry
+                    // through addTrustedEntity.
+                    f->ClearTrusted();
+                    if (auto list = As<LT>(tag.GetTag("Trusted"))) {
+                        for (const auto& elem : list->value) {
+                            auto arr = As<::World::NBTTagIntArray>(elem);
+                            if (!arr || arr->value.size() != 4) continue;
+                            int32_t words[4];
+                            for (int i = 0; i < 4; ++i) words[i] = arr->value[i];
+                            f->AddTrustedUuid(UuidFromIntArray(words));
+                        }
+                    }
                 }
                 break;
             case EntityTypeId::Panda:
@@ -1490,6 +2471,50 @@ namespace Game::Anvil {
                             EnumIndex(kCatVariantNames,
                                       tag.GetValue<std::string>("variant", ""))));
                     }
+                    // MC: `.orElse(DEFAULT_COLLAR_COLOR)` — red when absent.
+                    c->SetCollarColor(static_cast<uint8_t>(
+                        tag.GetValue<int8_t>("CollarColor", static_cast<int8_t>(kDyeColorRed))));
+                }
+                break;
+            case EntityTypeId::Wolf:
+                if (auto* wolf = dynamic_cast<Wolf*>(&mob)) {
+                    // MC readAdditionalSaveData order: variant, CollarColor,
+                    // anger (ReadNeutral above), sound_variant. A key the
+                    // registry does not hold (puglin, or a datapack coat)
+                    // leaves the default, exactly as MC's ifPresent does.
+                    WolfVariants::Variant coat;
+                    if (WolfVariants::FromName(tag.GetValue<std::string>("variant", ""), coat)) {
+                        wolf->SetVariant(coat);
+                    }
+                    wolf->SetCollarColor(static_cast<uint8_t>(
+                        tag.GetValue<int8_t>("CollarColor", static_cast<int8_t>(kDyeColorRed))));
+                    WolfSoundVariants::SoundVariant sound;
+                    if (WolfSoundVariants::FromName(tag.GetValue<std::string>("sound_variant", ""), sound)) {
+                        wolf->SetSoundVariant(sound);
+                    }
+                    if (auto eq = As<CT>(tag.GetTag("equipment"))) {
+                        if (auto body = As<CT>(eq->GetTag("body"))) {
+                            wolf->SetBodyArmorItem(ReadItemStack(*body));
+                        }
+                    }
+                }
+                break;
+            case EntityTypeId::Llama:
+            case EntityTypeId::TraderLlama:
+                if (auto* llama = dynamic_cast<Llama*>(&mob)) {
+                    llama->SetTemper(tag.GetValue<int32_t>("Temper", 0));
+                    llama->SetTamed (tag.GetValue<int8_t>("Tame", 0) != 0);
+                    Uuid owner{};
+                    if (ReadUuid(tag, "Owner", owner)) llama->SetOwnerUuid(owner);
+                    if (tag.HasTag("Strength")) llama->SetStrength(tag.GetValue<int32_t>("Strength", 1));
+                    // MC: Variant.LEGACY_CODEC, else Variant.DEFAULT (creamy).
+                    llama->SetVariant(Llama::VariantById(tag.GetValue<int32_t>("Variant", 0)));
+                    // After the strength: its columns size the chest.
+                    ReadMountChest(tag, *llama);
+                }
+                if (auto* trader = dynamic_cast<TraderLlama*>(&mob)) {
+                    trader->SetDespawnDelay(tag.GetValue<int32_t>("DespawnDelay",
+                                                                  TraderLlama::kDefaultDespawnDelay));
                 }
                 break;
             case EntityTypeId::Turtle:
@@ -1508,8 +2533,28 @@ namespace Game::Anvil {
             case EntityTypeId::ZombieHorse:
                 if (auto* h = dynamic_cast<AbstractHorse*>(&mob)) {
                     h->SetEating    (tag.GetValue<int8_t>("EatingHaystack", 0) != 0);
+                    h->SetBred      (tag.GetValue<int8_t>("Bred", 0) != 0);
                     h->SetTemper    (tag.GetValue<int32_t>("Temper", 0));
                     h->SetTamedHorse(tag.GetValue<int8_t>("Tame", 0) != 0);
+                    Uuid owner{};
+                    if (ReadUuid(tag, "Owner", owner)) h->SetOwnerUuid(owner);
+                    // AbstractChestedHorse (the donkey, the mule).
+                    ReadMountChest(tag, *h);
+                }
+                // MC Horse.readAdditionalSaveData.
+                if (auto* horse = dynamic_cast<Horse*>(&mob)) {
+                    horse->SetTypeVariant(tag.GetValue<int32_t>("Variant", 0));
+                }
+                // MC SkeletonHorse.readAdditionalSaveData.
+                if (auto* s = dynamic_cast<SkeletonHorse*>(&mob)) {
+                    s->SetTrap(tag.GetValue<int8_t>("SkeletonTrap", 0) != 0);
+                    s->SetTrapTime(tag.GetValue<int32_t>("SkeletonTrapTime", 0));
+                }
+                break;
+            case EntityTypeId::HappyGhast:
+                // MC HappyGhast.readAdditionalSaveData.
+                if (auto* g = dynamic_cast<HappyGhast*>(&mob)) {
+                    g->SetServerStillTimeout(tag.GetValue<int32_t>("still_timeout", 0));
                 }
                 break;
             case EntityTypeId::Bat:
@@ -1535,6 +2580,7 @@ namespace Game::Anvil {
             case EntityTypeId::Dolphin:
                 if (auto* d = dynamic_cast<Dolphin*>(&mob)) {
                     d->SetMoistness(tag.GetValue<int32_t>("Moistness", 2400));
+                    d->SetGotFish(tag.GetValue<int8_t>("GotFish", 0) != 0);
                 }
                 break;
             case EntityTypeId::Pufferfish:
@@ -1542,9 +2588,36 @@ namespace Game::Anvil {
                     p->SetPuffState(tag.GetValue<int32_t>("PuffState", 0));
                 }
                 break;
+            case EntityTypeId::TropicalFish:
+                // MC readAdditionalSaveData: "Variant" orElse DEFAULT_VARIANT
+                // (KOB, white, white).
+                // Codec.INT reads any numeric tag (a hand-typed {Variant:5b}).
+                if (auto* t = dynamic_cast<TropicalFish*>(&mob)) {
+                    const ::World::NBTTagPtr v = tag.GetTag("Variant");
+                    t->SetPackedVariant(v
+                        ? static_cast<int32_t>(static_cast<int64_t>(NumberOf(v)))
+                        : TropicalFishVariants::Pack(TropicalFishVariants::kDefaultVariant));
+                }
+                break;
+            case EntityTypeId::Salmon:
+                // MC readAdditionalSaveData: "type" orElse Variant.DEFAULT
+                // (medium); an unknown name is the default too.
+                if (auto* sal = dynamic_cast<Salmon*>(&mob)) {
+                    const int size = Salmon::SizeFromName(tag.GetValue<std::string>("type", "medium"));
+                    sal->SetSize(size >= 0 ? size : Salmon::kMedium);
+                }
+                break;
+            case EntityTypeId::Allay:
+                if (auto* a = dynamic_cast<Allay*>(&mob)) ReadAllayData(tag, *a);
+                break;
             case EntityTypeId::Camel:
+            case EntityTypeId::CamelHusk:   // MC CamelHusk extends Camel
                 if (auto* c = dynamic_cast<Camel*>(&mob)) {
-                    c->SetLastPoseChangeTick(tag.GetValue<int64_t>("LastPoseTick", 0));
+                    // MC Camel.readAdditionalSaveData: a negative tick is a
+                    // seated camel — the pose goes with it.
+                    const int64_t poseTick = tag.GetValue<int64_t>("LastPoseTick", 0);
+                    if (poseTick < 0) c->SetPose(Pose::Sitting);
+                    c->SetLastPoseChangeTick(poseTick);
                 }
                 break;
             case EntityTypeId::Axolotl:
@@ -1552,6 +2625,13 @@ namespace Game::Anvil {
                     const int32_t v = tag.GetValue<int32_t>("Variant", 0);
                     a->SetVariant(static_cast<Axolotl::Variant>(
                         (v >= 0 && v < 5) ? v : 0));
+                }
+                break;
+            // MC Parrot.readAdditionalSaveData: absent → Variant.DEFAULT
+            // (red_blue); an out-of-range id CLAMPs (ByIdMap).
+            case EntityTypeId::Parrot:
+                if (auto* p = dynamic_cast<Parrot*>(&mob)) {
+                    p->SetVariant(Parrot::VariantById(tag.GetValue<int32_t>("Variant", 0)));
                 }
                 break;
             case EntityTypeId::Armadillo:
@@ -1566,6 +2646,7 @@ namespace Game::Anvil {
                 // true value and has no way to un-ignite. Matching it means
                 // never touching the flag for a saved false.
                 if (auto* c = dynamic_cast<Creeper*>(&mob)) {
+                    c->SetPowered(tag.GetValue<int8_t>("powered", 0) != 0);
                     if (tag.GetValue<int8_t>("ignited", 0) != 0) c->Ignite();
                 }
                 break;
@@ -1665,6 +2746,30 @@ namespace Game::Anvil {
                     p->SetDirection(direction);
                 }
                 break;
+            case EntityTypeId::Cushion:
+                if (auto* c = dynamic_cast<Cushion*>(&mob)) {
+                    // MC Cushion.readAdditionalSaveData: "color", WHITE when
+                    // absent or unknown. The cell is Cushion.setPos's from the
+                    // loaded position (MC keeps a "block_pos" within 16
+                    // blocks, which for a cushion is that same cell; nothing
+                    // but spawn protection reads it).
+                    DyeColor color = Cushion::kDefaultColor;
+                    if (!Cushion::ColorFromName(tag.GetValue<std::string>("color", ""), color)) {
+                        color = Cushion::kDefaultColor;
+                    }
+                    c->SetColor(color);
+                    c->SetPos(c->position);
+                }
+                break;
+            case EntityTypeId::OminousItemSpawner:
+                if (auto* o = dynamic_cast<OminousItemSpawner*>(&mob)) {
+                    // MC OminousItemSpawner.readAdditionalSaveData.
+                    ItemStack item;
+                    if (auto stored = As<CT>(tag.GetTag("item"))) item = ReadItemStack(*stored);
+                    o->SetItem(item);
+                    o->SetSpawnItemAfterTicks(tag.GetValue<int64_t>("spawn_item_after_ticks", 0));
+                }
+                break;
             case EntityTypeId::ItemFrame:
             case EntityTypeId::GlowItemFrame:
                 if (auto* f = dynamic_cast<ItemFrame*>(&mob)) {
@@ -1747,6 +2852,14 @@ namespace Game::Anvil {
                     // AbstractPiglin overrides Mob's default to TRUE, so the
                     // Mob layer's read (which defaulted to false) is redone.
                     p->SetCanPickUpLoot(tag.GetValue<int8_t>("CanPickUpLoot", 1) != 0);
+                    ReadCarrierInventory(tag, p->GetInventory());
+                }
+                break;
+            case EntityTypeId::Pillager:
+                if (auto* p = dynamic_cast<Pillager*>(&mob)) {
+                    ReadCarrierInventory(tag, p->GetInventory());
+                    // MC Pillager.readAdditionalSaveData: setCanPickUpLoot(true).
+                    p->SetCanPickUpLoot(true);
                 }
                 break;
             case EntityTypeId::PiglinBrute:
@@ -1755,6 +2868,14 @@ namespace Game::Anvil {
                         tag.GetValue<int8_t>("IsImmuneToZombification", 0) != 0);
                     p->SetTimeInOverworld(tag.GetValue<int32_t>("TimeInOverworld", 0));
                     p->SetCanPickUpLoot(tag.GetValue<int8_t>("CanPickUpLoot", 1) != 0);
+                }
+                break;
+            // MC Hoglin.readAdditionalSaveData.
+            case EntityTypeId::Hoglin:
+                if (auto* h = dynamic_cast<Hoglin*>(&mob)) {
+                    h->SetImmuneToZombification(tag.GetValue<int8_t>("IsImmuneToZombification", 0) != 0);
+                    h->SetTimeInOverworld(tag.GetValue<int32_t>("TimeInOverworld", 0));
+                    h->SetCannotBeHunted(tag.GetValue<int8_t>("CannotBeHunted", 0) != 0);
                 }
                 break;
             case EntityTypeId::Zoglin:
@@ -1802,6 +2923,17 @@ namespace Game::Anvil {
                     if (auto item = As<CT>(tag.GetTag("Item"))) {
                         p->SetItem(ReadItemStack(*item));
                     }
+                }
+                break;
+            case EntityTypeId::FireworkRocket:
+                if (auto* r = dynamic_cast<FireworkRocket*>(&mob)) {
+                    r->SetLife(tag.GetValue<int32_t>("Life", 0));
+                    r->SetLifetime(tag.GetValue<int32_t>("LifeTime", 0));
+                    // FireworksItem, or the default rocket.
+                    ItemStack item;
+                    if (auto stack = As<CT>(tag.GetTag("FireworksItem"))) item = ReadItemStack(*stack);
+                    r->SetItem(item);
+                    r->SetShotAtAngle(tag.GetValue<int8_t>("ShotAtAngle", 0) != 0);
                 }
                 break;
             case EntityTypeId::EyeOfEnder:
@@ -1880,6 +3012,19 @@ namespace Game::Anvil {
         {
             ModNbtTagAdapter modIn(tag);
             mob.LoadModNbt(modIn);
+        }
+
+        // Engine extra, LAST (over whatever the type's own fields set): the
+        // eased animation state (Mob::GetRenderPhase — a wolf's beg tilt and
+        // shake …) the owner's client showed at Save and Quit.
+        if (auto list = As<LT>(tag.GetTag("obey_render_phase"))) {
+            float phase[Mob::kRenderPhaseMax] = {};
+            int n = 0;
+            for (const auto& elem : list->value) {
+                if (n >= Mob::kRenderPhaseMax) break;
+                phase[n++] = static_cast<float>(NumberOf(elem));
+            }
+            if (n > 0) mob.SetRenderPhase(phase, n);
         }
     }
 

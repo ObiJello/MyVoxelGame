@@ -25,6 +25,7 @@
 #include "../core/Frustum.hpp"
 #include <glm/glm.hpp>
 #include <functional>
+#include <vector>
 
 namespace Render {
 
@@ -74,7 +75,50 @@ namespace Render {
         // Draw every portal regardless of the level it is in.
         static constexpr int8_t kAnyDimension = 127;
 
+        // The leave capture's panorama faces (PlatformMain): each face is
+        // drawn as off-axis tiles over several frames, so while they are
+        // drawn the see-through view is built from the TILE's projection
+        // (not a symmetric perspective of the window's aspect) and the rim
+        // animation clock is held at one instant, so a rim that crosses a
+        // tile seam matches on both sides. Null / negative = off.
+        void SetCaptureOverrides(const glm::mat4* baseProjection, double frozenTimeSeconds) {
+            m_captureProjValid = baseProjection != nullptr;
+            if (baseProjection) m_captureProj = *baseProjection;
+            m_captureTime = frozenTimeSeconds;
+        }
+        void ClearCaptureOverrides() { m_captureProjValid = false; m_captureTime = -1.0; }
+
+        // ── Culling ──────────────────────────────────────────────────────
+        // Render skips a portal (its see-through level pass AND its rim)
+        // that cannot show in the view: the camera behind its plane, its
+        // oval's box outside the view frustum, or — with an occlusion
+        // source — every section its box touches missing from that view's
+        // section list (the occlusion BFS did not reach it). Sections the
+        // list never holds (all-air, unloaded) count as visible, so a
+        // portal even partly in view is never skipped.
+        enum class Occlusion : uint8_t {
+            None,          // frustum + back-face only
+            MainView,      // the frame's main view list (ChunkRenderer::IsMainViewSection)
+            CurrentView,   // the list of the chunk pass that ran last (a portal view's own)
+            Snapshot,      // what SnapshotVisibility recorded
+        };
+        // Returns the previous source, for the caller to restore.
+        Occlusion SetOcclusion(Occlusion occlusion) {
+            const Occlusion previous = m_occlusion;
+            m_occlusion = occlusion;
+            return previous;
+        }
+        // Record, from the CURRENT view's section list, which portals it can
+        // show — for a later Render with Occlusion::Snapshot after other
+        // chunk passes (the panorama's immersive pass) replaced the list.
+        void SnapshotVisibility();
+
     private:
+        bool      m_captureProjValid = false;
+        glm::mat4 m_captureProj{1.0f};
+        double    m_captureTime = -1.0;
+        Occlusion m_occlusion = Occlusion::None;
+        std::vector<uint64_t> m_snapshotVisible;   // (gunId << 1) | color, sorted
         // Resources are created once and held for the renderer's lifetime.
         BufferHandle m_vb            = INVALID_BUFFER;
         BufferHandle m_ib            = INVALID_BUFFER;

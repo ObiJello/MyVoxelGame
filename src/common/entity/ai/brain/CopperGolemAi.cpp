@@ -35,18 +35,11 @@ namespace Game {
         constexpr int   kTransportItemVerticalSearchRadius   = 8;
         constexpr int   kTickToStartOnReachedInteraction = 1;
 
-        // MC TRANSPORT_ITEM_SOURCE_BLOCK = BlockTags.COPPER_CHESTS.
-        // DEVIATION: copper chests exist here only as decorative blocks — no
-        // container block entity is registered for them (BlockEntityTypes.cpp
-        // maps the chest BE to Chest/TrappedChest/EnderChest only), so a
-        // copper chest can never hold an item and a COPPER_CHESTS source
-        // predicate would never match a transport target. Until copper chests
-        // become real containers, regular chests serve as BOTH source and
-        // destination (the parity doc's determination): hand-empty still
-        // decides the direction, and the visited-positions bookkeeping keeps
-        // the trips moving between different chests.
+        // MC TRANSPORT_ITEM_SOURCE_BLOCK = BlockTags.COPPER_CHESTS — every
+        // copper chest, waxed or not, whatever its oxidation. Copper chests
+        // are real chest containers (the CHEST block entity type).
         bool IsTransportSourceBlock(BlockID block) {
-            return block == BlockID::Chest || block == BlockID::TrappedChest;
+            return IsCopperChestBlock(block);
         }
 
         // MC TRANSPORT_ITEM_DESTINATION_BLOCK — Blocks.CHEST or TRAPPED_CHEST.
@@ -232,18 +225,20 @@ namespace Game {
                 // unreachable-cooldown path instead.
             }
 
-            bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override {
-                // MC: !body.isLeashed() — no leash system.
-                return true;
+            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
+                // MC: !body.isLeashed().
+                const auto* mob = dynamic_cast<const Mob*>(&body);
+                return !(mob && mob->IsLeashed());
             }
 
             bool CanStillUse(EntityLevel&, LivingEntity& body, int64_t) override {
-                // MC: the cooldown memory empty, !isPanicking(), !isLeashed()
-                // (no leash system).
+                // MC: the cooldown memory empty, !isPanicking(), !isLeashed().
                 const Brain* brain = body.GetBrain();
+                const auto* mob = dynamic_cast<const Mob*>(&body);
                 return brain
                     && !brain->HasMemoryValue(MemoryModule::TransportItemsCooldownTicks)
-                    && !brain->HasMemoryValue(MemoryModule::IsPanicking);
+                    && !brain->HasMemoryValue(MemoryModule::IsPanicking)
+                    && !(mob && mob->IsLeashed());
             }
 
             void Tick(EntityLevel& level, LivingEntity& body, int64_t timestamp) override {

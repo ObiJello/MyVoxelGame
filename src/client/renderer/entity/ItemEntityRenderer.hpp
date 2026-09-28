@@ -16,6 +16,8 @@
 #include <glm/glm.hpp>
 #include <vector>
 
+struct Frustum;   // client/renderer/core/Frustum.hpp (global)
+
 namespace Render {
 
     // Resource pack reload: the block-item meshes carry atlas UVs.
@@ -43,6 +45,17 @@ namespace Render {
                           float ageTicks, float bobOffs,
                           const glm::mat4& projection, const glm::mat4& view,
                           const glm::vec3& cameraPos);
+
+        // MC ItemEntityRenderer.renderMultipleFromCount under a caller's pose
+        // — the vault's display item (VaultRenderer) and the ominous item
+        // spawner: the stack's copies centred at `worldPos`, turned `yRotDeg`
+        // about Y and scaled by `scale` (the item model's display.ground
+        // inside that), with no bob and no hover lift, lit by `light` (a
+        // lightmap colour, EntityEnvironment::LightColor). No cull.
+        void RenderCluster(const Game::ItemStack& stack, const glm::dvec3& worldPos, float yRotDeg,
+                           float scale, const glm::vec3& light,
+                           const glm::mat4& projection, const glm::mat4& view,
+                           const glm::vec3& cameraPos);
 
         struct Tally { int entities = 0, drawn = 0, cullDistance = 0, cullFrustum = 0, cullSection = 0; };
         const Tally& LastTally() const { return m_tally; }
@@ -82,10 +95,24 @@ namespace Render {
         };
         // `renderPos` is render-space (Render::ToRender of the item's
         // interpolated world position); `cameraPos` stays world-space.
+        // A caller-posed draw (RenderCluster): the spin is given, the bob
+        // and hover lift are off, the light is given.
+        struct ClusterPose {
+            float     yRotRad = 0.0f;
+            glm::vec3 light{1.0f};
+        };
         void DrawItem(const Game::ItemStack& stack, const glm::vec3& renderPos,
                       float ageTicks, float bobOffs,
                       const glm::mat4& viewProj, const glm::vec3& cameraPos,
-                      PassState& pass, float scale = 1.0f);
+                      PassState& pass, float scale = 1.0f,
+                      const ClusterPose* cluster = nullptr);
+
+        // MC OminousItemSpawnerRenderer, for every ominous item spawner in
+        // the client's mob store: grows in over its first 50 ticks, spins 40
+        // degrees a tick, full bright. Culled like a dropped item.
+        bool HasOminousItemSpawners() const;
+        void DrawOminousItemSpawners(const glm::mat4& viewProj, const glm::vec3& cameraPos,
+                                     float partialTick, const ::Frustum& frustum, PassState& pass);
 
         bool m_initialized = false;
 

@@ -62,7 +62,13 @@ namespace Server {
     } // namespace
 
     void ReplaceAllCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("replaceall", ReplaceAllCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // <blocks> is a comma list of block predicates ("dirt, #logs");
+        // the radius (the first whole number) ends it.
+        dispatcher.RegisterCommand("replaceall", ReplaceAllCommand::Execute,
+            Cmd::Root().Then(Cmd::Argument("blocks", Cmd::Arg::BlockList)
+                .Then(Cmd::Argument("radius", Cmd::Arg::Integer).Suggests({"4", "8", "16", "32", "64"})
+                    .Then(Cmd::Argument("replacement", Cmd::Arg::Block).Executes()))));
     }
 
     void ReplaceAllCommand::Execute(const CommandSourceStack& source,

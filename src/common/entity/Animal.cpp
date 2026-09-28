@@ -1,5 +1,6 @@
 // File: src/common/entity/Animal.cpp
 #include "common/entity/Animal.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/SoundEvents.hpp"
@@ -55,10 +56,22 @@ namespace Game {
         // counting it itself, so both sides agree on when a baby grows up.
         if (IsEffectiveAi()) {
             // MC ticks forcedAgeTimer client-side, purely for the happy-villager
-            // particles every 4th tick; with no particle system the countdown
-            // runs where the timer lives, and only the timer's zero matters
-            // (AgeUp re-arms it at 40 per feeding).
-            if (m_forcedAgeTimer > 0) --m_forcedAgeTimer;
+            // particles every 4th tick. The timer lives here (AgeUp re-arms it
+            // at 40 per feeding), so the particle is sent from here: one
+            // HAPPY_VILLAGER at getRandomX(1) / getRandomY() + 0.5 /
+            // getRandomZ(1), as a direct (count 0) particle.
+            if (m_forcedAgeTimer > 0) {
+                if (m_forcedAgeTimer % 4 == 0 && m_level) {
+                    JavaRandom& r = m_level->Random();
+                    const double w = static_cast<double>(GetBbWidth());
+                    const double px = position.x + w * (2.0 * r.NextDouble() - 1.0);
+                    const double py = position.y + static_cast<double>(GetBbHeight()) * r.NextDouble() + 0.5;
+                    const double pz = position.z + w * (2.0 * r.NextDouble() - 1.0);
+                    m_level->SendParticles(ParticleOptions(ParticleKind::HappyVillager), false, false, px, py, pz, 0,
+                                           0.0, 0.0, 0.0, 0.0);
+                }
+                --m_forcedAgeTimer;
+            }
 
             // MC AgeableMob.aiStep: a baby counts up only while canAgeUp —
             // an age-locked baby stays exactly where the dandelion put it.

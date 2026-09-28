@@ -1,5 +1,6 @@
 // File: src/client/renderer/entity/model/EntityModels.cpp
 #include "client/renderer/entity/model/EntityModels.hpp"
+#include "common/entity/SpearItem.hpp"
 #include "client/renderer/entity/model/GeneratedEntityModels.hpp"
 #include "client/renderer/entity/model/GeneratedSetupAnim.hpp"
 #include "common/core/Log.hpp"
@@ -258,11 +259,13 @@ namespace Render {
         const float speed = state.walkAnimationSpeed;
 
         // Arms swing at twice the amplitude of legs but at half weight, which
-        // nets out to a slightly smaller arc — MC's `2.0F * speed * 0.5F`.
-        m_rightArm->xRot = std::cos(pos * kSwingFreq + kPi) * 2.0f * speed * 0.5f;
-        m_leftArm->xRot  = std::cos(pos * kSwingFreq) * 2.0f * speed * 0.5f;
-        m_rightLeg->xRot = std::cos(pos * kSwingFreq) * 1.4f * speed;
-        m_leftLeg->xRot  = std::cos(pos * kSwingFreq + kPi) * 1.4f * speed;
+        // nets out to a slightly smaller arc — MC's `2.0F * speed * 0.5F`,
+        // all over state.speedValue (1 but while fall-flying).
+        const float speedValue = state.speedValue > 0.0f ? state.speedValue : 1.0f;
+        m_rightArm->xRot = std::cos(pos * kSwingFreq + kPi) * 2.0f * speed * 0.5f / speedValue;
+        m_leftArm->xRot  = std::cos(pos * kSwingFreq) * 2.0f * speed * 0.5f / speedValue;
+        m_rightLeg->xRot = std::cos(pos * kSwingFreq) * 1.4f * speed / speedValue;
+        m_leftLeg->xRot  = std::cos(pos * kSwingFreq + kPi) * 1.4f * speed / speedValue;
 
         // The hundredth-radian splay stops the legs intersecting exactly when
         // they cross at the top of the swing.
@@ -271,22 +274,120 @@ namespace Render {
         m_rightLeg->zRot =  0.005f;
         m_leftLeg->zRot  = -0.005f;
 
-        // MC branches here on which hand is using an item and on whether the
-        // pose is two-handed. Nothing in this port is left-handed or uses an
-        // item, so both branches collapse to "right arm first, then the left
-        // unless the right's pose already wrote it".
-        PoseRightArm(state);
-        if (!ArmPoseAffectsOffhand(state.rightArmPose)) {
+        // MC isPassenger: the seated pose (a player morph on a cushion).
+        if (state.isPassenger) {
+            m_rightArm->xRot += -0.62831855f;
+            m_leftArm->xRot  += -0.62831855f;
+            m_rightLeg->xRot = -1.4137167f;
+            m_rightLeg->yRot =  0.31415927f;
+            m_rightLeg->zRot =  0.07853982f;
+            m_leftLeg->xRot  = -1.4137167f;
+            m_leftLeg->yRot  = -0.31415927f;
+            m_leftLeg->zRot  = -0.07853982f;
+        }
+
+        // MC's prioritizeArm: the arm using an item first, else — nothing
+        // here is left-handed — the right unless the off hand's pose is
+        // two-handed; the other arm only when the first did not write it.
+        const bool mainIsRight = state.mainArm >= 0.5f;
+        bool rightFirst;
+        if (state.isUsingItem) {
+            rightFirst = (state.useItemHand == 0) == mainIsRight;
+        } else {
+            const ArmPose offPose = mainIsRight ? state.leftArmPose : state.rightArmPose;
+            rightFirst = ArmPoseAffectsOffhand(offPose) ? mainIsRight : !mainIsRight;
+        }
+        if (rightFirst) {
+            PoseRightArm(state);
+            if (!ArmPoseAffectsOffhand(state.rightArmPose)) PoseLeftArm(state);
+        } else {
             PoseLeftArm(state);
+            if (!ArmPoseAffectsOffhand(state.leftArmPose)) PoseRightArm(state);
         }
 
         SetupAttackAnimation(state);
 
-        // Idle sway, applied unconditionally in MC (the SPYGLASS exclusion is
-        // the only exception and nothing here can hold one). It is ADDITIVE, so
-        // it layers over whatever the pose above wrote.
-        BobModelPart(m_rightArm, state.ageInTicks, 1.0f);
-        BobModelPart(m_leftArm, state.ageInTicks, -1.0f);
+        // MC's crouch, after the swing.
+        if (state.isCrouching) {
+            m_body->xRot = 0.5f;
+            m_rightArm->xRot += 0.4f;
+            m_leftArm->xRot  += 0.4f;
+            m_rightLeg->z += 4.0f;
+            m_leftLeg->z  += 4.0f;
+            m_head->y     += 4.2f;
+            m_body->y     += 3.2f;
+            m_leftArm->y  += 3.2f;
+            m_rightArm->y += 3.2f;
+        }
+
+        // Idle sway — ADDITIVE, over whatever the poses wrote — except on an
+        // arm raising a spyglass.
+        if (state.rightArmPose != ArmPose::Spyglass) BobModelPart(m_rightArm, state.ageInTicks, 1.0f);
+        if (state.leftArmPose  != ArmPose::Spyglass) BobModelPart(m_leftArm, state.ageInTicks, -1.0f);
+    }
+
+    namespace {
+        float ClampF(float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); }
+        // MC AnimationUtils.animateCrossbowCharge / animateCrossbowHold.
+        void AnimateCrossbowCharge(ModelPart* rightArm, ModelPart* leftArm, float maxCharge,
+                                   float ticksUsing, bool holdingInRightArm) {
+            ModelPart* holding = holdingInRightArm ? rightArm : leftArm;
+            ModelPart* pulling = holdingInRightArm ? leftArm : rightArm;
+            holding->yRot = holdingInRightArm ? -0.8f : 0.8f;
+            holding->xRot = -0.97079635f;
+            pulling->xRot = holding->xRot;
+            const float useTicks = ClampF(ticksUsing, 0.0f, maxCharge);
+            const float a = maxCharge > 0.0f ? useTicks / maxCharge : 1.0f;
+            pulling->yRot = (0.4f + a * (0.85f - 0.4f)) * (holdingInRightArm ? 1.0f : -1.0f);
+            pulling->xRot = pulling->xRot + a * (-1.5707964f - pulling->xRot);
+        }
+        void AnimateCrossbowHold(ModelPart* rightArm, ModelPart* leftArm, const ModelPart* head,
+                                 bool holdingInRightArm) {
+            ModelPart* holding  = holdingInRightArm ? rightArm : leftArm;
+            ModelPart* shooting = holdingInRightArm ? leftArm : rightArm;
+            holding->yRot  = (holdingInRightArm ? -0.3f : 0.3f) + head->yRot;
+            shooting->yRot = (holdingInRightArm ? 0.6f : -0.6f) + head->yRot;
+            holding->xRot  = -1.5707964f + head->xRot + 0.1f;
+            shooting->xRot = -1.5f + head->xRot;
+        }
+    }
+
+    void HumanoidModel::PoseSpearArm(ModelPart* arm, bool right, const EntityRenderState& state) {
+        // MC SpearAnimations.thirdPersonHandUse: the spear held level, lowered
+        // further in a glide or a swim, clamped — then, while this arm's
+        // spear charges, its KINETIC_WEAPON curve: the raise, the sway, the
+        // lowering and the raise back (UseParams).
+        const float invert = right ? 1.0f : -1.0f;
+        arm->yRot = -0.1f * invert + m_head->yRot;
+        arm->xRot = -1.5707964f + m_head->xRot + 0.8f;
+        if (state.isFallFlying || state.swimAmount > 0.0f) arm->xRot -= 0.9599311f;
+        arm->yRot = 0.017453292f * ClampF(57.295776f * arm->yRot, -60.0f, 60.0f);
+        arm->xRot = 0.017453292f * ClampF(57.295776f * arm->xRot, -120.0f, 30.0f);
+
+        // `!(ticksUsingItem <= 0) && (!isUsingItem ||
+        // useItemHand.asArm(mainArm) == holdingArm)`.
+        const bool mainArmRight = state.mainArm >= 0.5f;
+        const bool usedArmRight = state.useItemHand == 0 ? mainArmRight : !mainArmRight;
+        if (state.ticksUsingItem > 0.0f && (!state.isUsingItem || usedArmRight == right)) {
+            const Game::Spear::SpearDefinition* spear = Game::Spear::Find(
+                static_cast<Game::ItemID>(right ? state.rightArmItem : state.leftArmItem));
+            if (spear) {
+                const Game::Spear::UseParams p =
+                    Game::Spear::UseParams::FromKineticWeapon(spear->kinetic, state.ticksUsingItem);
+                constexpr float kDeg = 0.017453292f;
+                arm->yRot += -invert * p.swayScaleFast * kDeg * p.swayIntensity * 1.0f;
+                arm->zRot += -invert * p.swayScaleSlow * kDeg * p.swayIntensity * 0.5f;
+                arm->xRot += kDeg * (-40.0f * p.raiseProgressStart + 30.0f * p.raiseProgressMiddle +
+                                     -20.0f * p.raiseProgressEnd + 20.0f * p.lowerProgress +
+                                     10.0f * p.raiseBackProgress + 0.6f * p.swayScaleSlow * p.swayIntensity);
+            }
+        }
+    }
+
+    void HumanoidModel::PoseBlockingArm(ModelPart* arm, bool right) {
+        // MC HumanoidModel.poseBlockingArm.
+        arm->xRot = arm->xRot * 0.5f - 0.9424779f + ClampF(m_head->xRot, -1.3962634f, 0.43633232f);
+        arm->yRot = (right ? -30.0f : 30.0f) * kDegToRad + ClampF(m_head->yRot, -0.5235988f, 0.5235988f);
     }
 
     void HumanoidModel::PoseRightArm(const EntityRenderState& state) {
@@ -307,10 +408,37 @@ namespace Render {
                 m_rightArm->xRot = -kPi / 2.0f + m_head->xRot;
                 m_leftArm->xRot  = -kPi / 2.0f + m_head->xRot;
                 break;
+            case ArmPose::Block:
+                PoseBlockingArm(m_rightArm, true);
+                break;
+            case ArmPose::ThrowTrident:
+                m_rightArm->xRot = m_rightArm->xRot * 0.5f - kPi;
+                m_rightArm->yRot = 0.0f;
+                break;
+            case ArmPose::CrossbowCharge:
+                AnimateCrossbowCharge(m_rightArm, m_leftArm, state.maxCrossbowChargeDuration,
+                                      state.ticksUsingItem, true);
+                break;
+            case ArmPose::CrossbowHold:
+                AnimateCrossbowHold(m_rightArm, m_leftArm, m_head, true);
+                break;
+            case ArmPose::Spyglass:
+                m_rightArm->xRot = ClampF(m_head->xRot - 1.9198622f - (state.isCrouching ? 0.2617994f : 0.0f),
+                                          -2.4f, 3.3f);
+                m_rightArm->yRot = m_head->yRot - 0.2617994f;
+                break;
+            case ArmPose::TootHorn:
+                m_rightArm->xRot = ClampF(m_head->xRot, -1.2f, 1.2f) - 1.4835298f;
+                m_rightArm->yRot = m_head->yRot - 0.5235988f;
+                break;
+            case ArmPose::Brush:
+                m_rightArm->xRot = m_rightArm->xRot * 0.5f - 0.62831855f;
+                m_rightArm->yRot = 0.0f;
+                break;
+            case ArmPose::Spear:
+                PoseSpearArm(m_rightArm, true, state);
+                break;
             default:
-                // The remaining MC poses (shield, crossbow, spyglass, spear…)
-                // need items this port does not have. Leaving the walk swing
-                // untouched is what MC's default branch does too.
                 break;
         }
     }
@@ -330,6 +458,36 @@ namespace Render {
                 m_rightArm->xRot = -kPi / 2.0f + m_head->xRot;
                 m_leftArm->xRot  = -kPi / 2.0f + m_head->xRot;
                 break;
+            case ArmPose::Block:
+                PoseBlockingArm(m_leftArm, false);
+                break;
+            case ArmPose::ThrowTrident:
+                m_leftArm->xRot = m_leftArm->xRot * 0.5f - kPi;
+                m_leftArm->yRot = 0.0f;
+                break;
+            case ArmPose::CrossbowCharge:
+                AnimateCrossbowCharge(m_rightArm, m_leftArm, state.maxCrossbowChargeDuration,
+                                      state.ticksUsingItem, false);
+                break;
+            case ArmPose::CrossbowHold:
+                AnimateCrossbowHold(m_rightArm, m_leftArm, m_head, false);
+                break;
+            case ArmPose::Spyglass:
+                m_leftArm->xRot = ClampF(m_head->xRot - 1.9198622f - (state.isCrouching ? 0.2617994f : 0.0f),
+                                         -2.4f, 3.3f);
+                m_leftArm->yRot = m_head->yRot + 0.2617994f;
+                break;
+            case ArmPose::TootHorn:
+                m_leftArm->xRot = ClampF(m_head->xRot, -1.2f, 1.2f) - 1.4835298f;
+                m_leftArm->yRot = m_head->yRot + 0.5235988f;
+                break;
+            case ArmPose::Brush:
+                m_leftArm->xRot = m_leftArm->xRot * 0.5f - 0.62831855f;
+                m_leftArm->yRot = 0.0f;
+                break;
+            case ArmPose::Spear:
+                PoseSpearArm(m_leftArm, false, state);
+                break;
             default:
                 break;
         }
@@ -343,9 +501,10 @@ namespace Render {
         // wind-up is fast and the follow-through drags — the shape of MC's
         // swing. Everything below hangs off this one angle.
         m_body->yRot = std::sin(std::sqrt(attackTime) * kPi * 2.0f) * 0.2f;
-
-        // MC flips the sign for a left-handed attack; every mob here is
-        // right-handed, so the flip is unreachable.
+        // The swinging arm is the main hand's (MC swing.hand().asArm(mainArm));
+        // a left-handed swing twists the body the other way.
+        const bool swingLeft = state.mainArm < 0.5f;
+        if (swingLeft) m_body->yRot *= -1.0f;
         const float ageScale = state.ageScale;
         m_rightArm->z =  std::sin(m_body->yRot) * 5.0f * ageScale;
         m_rightArm->x = -std::cos(m_body->yRot) * 5.0f * ageScale;
@@ -355,17 +514,40 @@ namespace Render {
         m_leftArm->yRot  += m_body->yRot;
         m_leftArm->xRot  += m_body->yRot;
 
+        // SwingAnimationType.STAB (a spear's SWING_ANIMATION):
+        // SpearAnimations.thirdPersonAttackHand — the twist taken back off
+        // the arms, then the thrust: prepare, stab, retract.
+        if (state.swingAnimType >= 1.5f) {
+            m_rightArm->yRot -= m_body->yRot;
+            m_leftArm->yRot  -= m_body->yRot;
+            m_leftArm->xRot  -= m_body->yRot;
+            const auto progress = [](float t, float a, float b) { return ClampF((t - a) / (b - a), 0.0f, 1.0f); };
+            const float p0 = progress(attackTime, 0.0f, 0.05f);
+            const float p1 = progress(attackTime, 0.05f, 0.2f);
+            const float p2 = progress(attackTime, 0.4f, 1.0f);
+            const float prepare = -(std::cos(kPi * p0) - 1.0f) / 2.0f;              // Ease.inOutSine
+            const float attack  = p1 * p1;                                            // Ease.inQuad
+            const float retract = p2 < 0.5f                                           // Ease.inOutExpo
+                ? (p2 == 0.0f ? 0.0f : static_cast<float>(std::pow(2.0, 20.0 * p2 - 10.0) / 2.0))
+                : (p2 == 1.0f ? 1.0f : static_cast<float>((2.0 - std::pow(2.0, -20.0 * p2 + 10.0)) / 2.0));
+            ModelPart* arm = swingLeft ? m_leftArm : m_rightArm;
+            arm->xRot += (90.0f * prepare - 120.0f * attack + 30.0f * retract) * 0.017453292f;
+            return;
+        }
+        if (state.swingAnimType < 0.5f) return;   // SwingAnimationType.NONE
+
         // MC SwingAnimationType.WHACK — the default for any item without a
-        // SWING_ANIMATION component, which is everything this port has.
+        // SWING_ANIMATION component.
         // Ease.outQuart(x) = 1 - (1-x)^4.
         const float e = 1.0f - (1.0f - attackTime) * (1.0f - attackTime)
                              * (1.0f - attackTime) * (1.0f - attackTime);
         const float aa = std::sin(e * kPi);
         const float bb = std::sin(attackTime * kPi) * -(m_head->xRot - 0.7f) * 0.75f;
 
-        m_rightArm->xRot -= aa * 1.2f + bb;
-        m_rightArm->yRot += m_body->yRot * 2.0f;
-        m_rightArm->zRot += std::sin(attackTime * kPi) * -0.4f;
+        ModelPart* attackArm = swingLeft ? m_leftArm : m_rightArm;
+        attackArm->xRot -= aa * 1.2f + bb;
+        attackArm->yRot += m_body->yRot * 2.0f;
+        attackArm->zRot += std::sin(attackTime * kPi) * -0.4f;
     }
 
     // ── ZombieModel ────────────────────────────────────────────────────────
@@ -417,6 +599,25 @@ namespace Render {
 
         BobModelPart(m_rightArm, state.ageInTicks, 1.0f);
         BobModelPart(m_leftArm, state.ageInTicks, -1.0f);
+    }
+
+    bool HumanoidModel::RightHandMatrix(glm::mat4& out) const {
+        if (!m_rightArm) return false;
+        out = m_root.LocalMatrix() * m_rightArm->LocalMatrix();
+        return true;
+    }
+
+    bool HumanoidModel::LeftHandMatrix(glm::mat4& out) const {
+        if (!m_leftArm) return false;
+        out = m_root.LocalMatrix() * m_leftArm->LocalMatrix();
+        return true;
+    }
+
+    bool SkeletonModel::LeftHandMatrix(glm::mat4& out) const {
+        if (!m_leftArm) return false;
+        // SkeletonModel.translateToHand: offset -1 for the left arm.
+        out = m_root.LocalMatrix() * m_leftArm->LocalMatrix(glm::vec3(-1.0f, 0.0f, 0.0f));
+        return true;
     }
 
     bool SkeletonModel::RightHandMatrix(glm::mat4& out) const {
@@ -920,10 +1121,11 @@ namespace Render {
         // right_arm when a mesh nests one (none do today).
         {
             std::vector<const ModelPart*> chain;
+            std::string_view armName = "right_arm";
             const std::function<bool(const ModelPart&)> dfs =
                 [&](const ModelPart& part) -> bool {
                     chain.push_back(&part);
-                    if (part.name == "right_arm") return true;
+                    if (part.name == armName) return true;
                     for (const auto& child : part.children) {
                         if (dfs(*child)) return true;
                     }
@@ -931,6 +1133,9 @@ namespace Render {
                     return false;
                 };
             if (dfs(m_root)) m_rightArmChain = std::move(chain);
+            chain.clear();
+            armName = "left_arm";
+            if (dfs(m_root)) m_leftArmChain = std::move(chain);
 
             // MC SkeletonModel.translateToHand shoves the right arm one pixel
             // outward; every other armed model uses the plain chain.
@@ -1011,6 +1216,19 @@ namespace Render {
         return true;
     }
 
+    bool GeneratedModel::LeftHandMatrix(glm::mat4& out) const {
+        if (m_leftArmChain.empty()) return false;
+        // translateToHand(state, LEFT, …): the same chain to "left_arm",
+        // the skeleton family's shove mirrored (offset -1).
+        const glm::vec3 offset(-m_handOffset.x, m_handOffset.y, m_handOffset.z);
+        out = glm::mat4(1.0f);
+        for (size_t i = 0; i < m_leftArmChain.size(); ++i) {
+            const bool last = (i + 1 == m_leftArmChain.size());
+            out *= m_leftArmChain[i]->LocalMatrix(last ? offset : glm::vec3(0.0f));
+        }
+        return true;
+    }
+
     void GeneratedModel::SetupAnim(const EntityRenderState& state) {
         m_root.ResetPose();
 
@@ -1062,6 +1280,44 @@ namespace Render {
 
     // ── PufferfishModel (mid/big puff stages) ──────────────────────────────
 
+    // ── WolfModel (the wet shake) ─────────────────────────────────────────
+
+    WolfModel::WolfModel(std::string_view slug, std::string_view animSlug)
+        : GeneratedModel(slug, animSlug) {
+        m_body = m_root.Find("body");
+        if (ModelPart* realHead = m_root.Find("real_head")) {
+            // AdultWolfModel (and the classic baby, which keeps its parts).
+            m_head      = realHead;
+            m_upperBody = m_root.Find("upper_body");
+            m_tail      = m_root.Find("real_tail");
+        } else {
+            // BabyWolfModel (26.x): the head and tail parts themselves.
+            m_head = m_root.Find("head");
+            m_tail = m_root.Find("tail");
+        }
+    }
+
+    float WolfModel::BodyRollAngle(float shakeAnim, float offset) {
+        // MC WolfRenderState.getBodyRollAngle, verbatim.
+        float progress = (shakeAnim + offset) / 1.8f;
+        if (progress < 0.0f) progress = 0.0f;
+        else if (progress > 1.0f) progress = 1.0f;
+        return std::sin(progress * 3.1415927f) * std::sin(progress * 3.1415927f * 11.0f) *
+               0.15f * 3.1415927f;
+    }
+
+    void WolfModel::SetupAnim(const EntityRenderState& state) {
+        GeneratedModel::SetupAnim(state);
+        // MC WolfModel.shakeOffWater → the subclass override: body at -0.16;
+        // the head carries the beg tilt plus the roll at 0; the adult's
+        // upper body at -0.08; the tail at -0.2.
+        const float shake = state.shakeAnim;
+        if (m_body) m_body->zRot = BodyRollAngle(shake, -0.16f);
+        if (m_head) m_head->zRot = state.headRollAngle + BodyRollAngle(shake, 0.0f);
+        if (m_upperBody) m_upperBody->zRot = BodyRollAngle(shake, -0.08f);
+        if (m_tail) m_tail->zRot = BodyRollAngle(shake, -0.2f);
+    }
+
     PufferfishModel::PufferfishModel(std::string_view slug)
         // Pass the SMALL puffer's program as animSlug: it targets
         // right_fin/left_fin, which these meshes do not have, so it binds to
@@ -1084,6 +1340,55 @@ namespace Render {
         if (m_leftBlueFin) {
             m_leftBlueFin->zRot =
                 0.2f - 0.4f * std::sin(state.ageInTicks * 0.2f);
+        }
+    }
+
+    // ── TropicalFishModel (A small / B large) ──────────────────────────────
+
+    TropicalFishModel::TropicalFishModel(bool large, float grow) {
+        m_texWidth = 32.0f;
+        m_texHeight = 32.0f;
+        constexpr float kQuarter = 0.7853982f;
+        if (!large) {
+            // MC TropicalFishSmallModel.createBodyLayer.
+            ModelPart* body = m_root.AddChild("body", PartPose::Offset(0.0f, 22.0f, 0.0f));
+            AddBox(body, 0, 0, -1.0f, -1.5f, -3.0f, 2.0f, 3.0f, 6.0f, grow);
+            m_tail = m_root.AddChild("tail", PartPose::Offset(0.0f, 22.0f, 3.0f));
+            AddBox(m_tail, 22, -6, 0.0f, -1.5f, 0.0f, 0.0f, 3.0f, 6.0f, grow);
+            ModelPart* rightFin = m_root.AddChild("right_fin",
+                PartPose::OffsetAndRotation(-1.0f, 22.5f, 0.0f, 0.0f, kQuarter, 0.0f));
+            AddBox(rightFin, 2, 16, -2.0f, -1.0f, 0.0f, 2.0f, 2.0f, 0.0f, grow);
+            ModelPart* leftFin = m_root.AddChild("left_fin",
+                PartPose::OffsetAndRotation(1.0f, 22.5f, 0.0f, 0.0f, -kQuarter, 0.0f));
+            AddBox(leftFin, 2, 12, 0.0f, -1.0f, 0.0f, 2.0f, 2.0f, 0.0f, grow);
+            ModelPart* topFin = m_root.AddChild("top_fin", PartPose::Offset(0.0f, 20.5f, -3.0f));
+            AddBox(topFin, 10, -5, 0.0f, -3.0f, 0.0f, 0.0f, 3.0f, 6.0f, grow);
+        } else {
+            // MC TropicalFishLargeModel.createBodyLayer.
+            ModelPart* body = m_root.AddChild("body", PartPose::Offset(0.0f, 19.0f, 0.0f));
+            AddBox(body, 0, 20, -1.0f, -3.0f, -3.0f, 2.0f, 6.0f, 6.0f, grow);
+            m_tail = m_root.AddChild("tail", PartPose::Offset(0.0f, 19.0f, 3.0f));
+            AddBox(m_tail, 21, 16, 0.0f, -3.0f, 0.0f, 0.0f, 6.0f, 5.0f, grow);
+            ModelPart* rightFin = m_root.AddChild("right_fin",
+                PartPose::OffsetAndRotation(-1.0f, 20.0f, 0.0f, 0.0f, kQuarter, 0.0f));
+            AddBox(rightFin, 2, 16, -2.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, grow);
+            ModelPart* leftFin = m_root.AddChild("left_fin",
+                PartPose::OffsetAndRotation(1.0f, 20.0f, 0.0f, 0.0f, -kQuarter, 0.0f));
+            AddBox(leftFin, 2, 12, 0.0f, 0.0f, 0.0f, 2.0f, 2.0f, 0.0f, grow);
+            ModelPart* topFin = m_root.AddChild("top_fin", PartPose::Offset(0.0f, 16.0f, -3.0f));
+            AddBox(topFin, 20, 11, 0.0f, -4.0f, 0.0f, 0.0f, 4.0f, 6.0f, grow);
+            ModelPart* bottomFin = m_root.AddChild("bottom_fin", PartPose::Offset(0.0f, 22.0f, -3.0f));
+            AddBox(bottomFin, 20, 21, 0.0f, 0.0f, 0.0f, 0.0f, 4.0f, 6.0f, grow);
+        }
+        m_root.ResetPose();
+    }
+
+    void TropicalFishModel::SetupAnim(const EntityRenderState& state) {
+        m_root.ResetPose();
+        // MC TropicalFishSmallModel / LargeModel.setupAnim, verbatim.
+        const float amplitudeMultiplier = state.isInWater ? 1.0f : 1.5f;
+        if (m_tail) {
+            m_tail->yRot = -amplitudeMultiplier * 0.45f * std::sin(0.6f * state.ageInTicks);
         }
     }
 

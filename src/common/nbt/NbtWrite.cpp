@@ -5,9 +5,10 @@
 
 #include "common/core/Log.hpp"
 
+#include "common/core/Deflate.hpp"
+
 #include <algorithm>
 #include <cstring>
-#include <zlib.h>
 
 namespace Game::Nbt {
 
@@ -15,80 +16,27 @@ namespace Game::Nbt {
 
     // ── Compression ─────────────────────────────────────────────────────────
 
-    namespace {
+    // libdeflate (Core::Deflate) for every NBT stream: region chunk saves,
+    // entities, level.dat, player data. The same zlib/gzip formats; ~2.8x
+    // zlib's compression speed and no larger (14,784 chunk bodies,
+    // 2026-09-26). zlib's default level (-1) is 6, as here.
 
-        bool DeflateTo(const std::vector<uint8_t>& in, std::vector<uint8_t>& out,
-                       int level, int windowBits, const char* what) {
-            z_stream s{};
-            if (deflateInit2(&s, level, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-                Log::Error("[Nbt] %s: deflateInit2 failed", what);
-                return false;
-            }
-
-            std::vector<uint8_t> result;
-            result.resize(deflateBound(&s, static_cast<uLong>(in.size())) + 64);
-
-            s.next_in   = const_cast<Bytef*>(in.data());
-            s.avail_in  = static_cast<uInt>(in.size());
-            s.next_out  = result.data();
-            s.avail_out = static_cast<uInt>(result.size());
-
-            const int rc = deflate(&s, Z_FINISH);
-            const size_t produced = result.size() - s.avail_out;
-            deflateEnd(&s);
-
-            if (rc != Z_STREAM_END) {
-                Log::Error("[Nbt] %s: deflate returned %d", what, rc);
-                return false;
-            }
-            result.resize(produced);
-            out = std::move(result);
-            return true;
-        }
-
-    } // namespace
-
-    // 15 + 16 selects a gzip wrapper; plain 15 selects the zlib wrapper.
     bool GzipCompress(const std::vector<uint8_t>& in, std::vector<uint8_t>& out, int level) {
-        return DeflateTo(in, out, level, 15 + 16, "gzip");
+        if (Core::Deflate::Compress(in.data(), in.size(), out, Core::Deflate::Format::Gzip, level)) return true;
+        Log::Error("[Nbt] gzip: compression failed (%zu bytes)", in.size());
+        return false;
     }
 
     bool ZlibCompress(const std::vector<uint8_t>& in, std::vector<uint8_t>& out, int level) {
-        return DeflateTo(in, out, level, 15, "zlib");
+        if (Core::Deflate::Compress(in.data(), in.size(), out, Core::Deflate::Format::Zlib, level)) return true;
+        Log::Error("[Nbt] zlib: compression failed (%zu bytes)", in.size());
+        return false;
     }
 
     bool GzipDecompress(const std::vector<uint8_t>& in, std::vector<uint8_t>& out, size_t maxBytes) {
-        if (in.empty()) return false;
-
-        z_stream s{};
-        // 15 + 32 auto-detects the gzip and zlib wrappers, so this reads both.
-        if (inflateInit2(&s, 15 + 32) != Z_OK) return false;
-
-        std::vector<uint8_t> result(std::min<size_t>(in.size() * 6 + 8192, maxBytes));
-        s.next_in  = const_cast<Bytef*>(in.data());
-        s.avail_in = static_cast<uInt>(in.size());
-
-        size_t produced = 0;
-        for (;;) {
-            if (produced == result.size()) {
-                if (result.size() >= maxBytes) { inflateEnd(&s); return false; }
-                result.resize(std::min(result.size() * 2, maxBytes));
-            }
-            s.next_out  = result.data() + produced;
-            s.avail_out = static_cast<uInt>(result.size() - produced);
-
-            const int rc = inflate(&s, Z_NO_FLUSH);
-            produced = result.size() - s.avail_out;
-            if (rc == Z_STREAM_END) break;
-            // Z_BUF_ERROR with the input exhausted means a truncated stream,
-            // not a small output buffer — treating it as retryable is how the
-            // vendored port spins forever.
-            if (rc != Z_OK) { inflateEnd(&s); return false; }
-        }
-        inflateEnd(&s);
-        result.resize(produced);
-        out = std::move(result);
-        return true;
+        // Either wrapper, by its magic bytes.
+        return !in.empty() &&
+               Core::Deflate::Decompress(in.data(), in.size(), out, maxBytes) == Core::Deflate::Status::Ok;
     }
 
     // ── Writer ──────────────────────────────────────────────────────────────

@@ -16,9 +16,11 @@
 #include "common/data/DataComponents.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/level/WorldMobSpawn.hpp"
 
 #include <random>
@@ -55,10 +57,22 @@ namespace Game {
             ctx.world->PlaySound(nullptr, pos, SoundEvents::GENERIC_SPLASH, SoundSource::Blocks, 1.0f, 1.0f);
             ctx.player->CreateFilledResult(stack, ItemStack(Items::GlassBottle, 1));
             ctx.player->markSlotDirty(ctx.player->handSlotIndex(ctx.hand));
-            // The five SPLASH particles have no system here.
+            // PotionItem.useOn:49 — five SPLASH drops over the top face, sent
+            // from the server (sendParticles, one each at speed 1).
+            if (!ctx.world->IsClientSide()) {
+                if (JavaRandom* random = ctx.world->Random()) {
+                    for (int i = 0; i < 5; ++i) {
+                        const double sx = pos.x + random->NextDouble();
+                        const double sz = pos.z + random->NextDouble();
+                        ctx.world->SendParticles(ParticleOptions(ParticleKind::Splash), sx, pos.y + 1.0, sz, 1,
+                                                 0.0, 0.0, 0.0, 1.0);
+                    }
+                }
+            }
             // PotionItem.useOn:53 — BOTTLE_EMPTY, the same way.
             ctx.world->PlaySound(nullptr, pos, SoundEvents::BOTTLE_EMPTY, SoundSource::Blocks, 1.0f, 1.0f);
-            // GameEvent.FLUID_PLACE — no game-event system.
+            // PotionItem.useOn:54 — gameEvent(null, FLUID_PLACE, pos).
+            ctx.world->GameEvent(static_cast<Entity*>(nullptr), GameEventId::FluidPlace, pos);
             ctx.world->SetBlock(pos.x, pos.y, pos.z, BlockID::Mud, World::UpdateFlags::All);
             return UseResult::Success;
         }

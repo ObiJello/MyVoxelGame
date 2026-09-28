@@ -126,21 +126,87 @@ namespace Game {
     };
 
     // ── Cartography table (MC CartographyTableMenu) ───────────────────────
+    // A filled map (slot 0) and paper / a blank map / a glass pane (slot 1):
+    // zoom out (paper, an unlocked extendable map below scale 4), lock
+    // (glass pane), or clone (blank map → two). The zoom and lock results
+    // carry MAP_POST_PROCESSING; the result slot applies it as the map is
+    // taken (MapItem.onCraftedPostProcess — a new map id). Taking consumes
+    // one of each input and the session plays the take sound at the table.
     class CartographyTableMenu : public ItemCombinerMenu {
     public:
+        static constexpr int MAP_SLOT        = 0;
+        static constexpr int ADDITIONAL_SLOT = 1;
+        static constexpr int RESULT_SLOT     = 2;
+
         explicit CartographyTableMenu(Inventory* playerInventory);
+
+        void OnTakeResult(const ItemStack& taken, ContainerClickResult& result) override;
+        // MC CartographyTableMenu.quickMoveStack.
+        void QuickMoveStack(int slotIndex, ContainerClickResult& result) override;
+        // MC slotsChanged: a result with an input gone is cleared first.
+        void SlotsChanged(ContainerClickResult& result) override;
+
     protected:
         void ComputeResult() override;
         void PlaceInputSlots() override;
     };
 
     // ── Loom (MC LoomMenu) ────────────────────────────────────────────────
+    // A banner (slot 0), a dye (1) and optionally a banner pattern item (2):
+    // the patterns on offer are the pattern item's PROVIDES_BANNER_PATTERNS
+    // tag, or #no_item_required without one; clicking one (ClickMenuButton
+    // with its index) previews the banner with that layer added in the
+    // dye's colour — none once it already has 6 layers. Taking the result
+    // uses one banner and one dye (the pattern item stays) and asks the
+    // session for the take sound. The selection is data slot 0 (-1 = none),
+    // shared by both sides; the list is recomputed on each side from the
+    // same slots.
     class LoomMenu : public ItemCombinerMenu {
     public:
+        static constexpr int BANNER_SLOT  = 0;
+        static constexpr int DYE_SLOT     = 1;
+        static constexpr int PATTERN_SLOT = 2;
+        static constexpr int RESULT_SLOT  = 3;
+        static constexpr int DATA_SELECTED = 0;
+        static constexpr int DATA_COUNT    = 1;
+        // BannerPatternLayers' loom limit (LoomMenu: hasMaxPatterns >= 6).
+        static constexpr int MAX_PATTERNS = 6;
+
         explicit LoomMenu(Inventory* playerInventory);
+
+        // LoomMenu.isPatternItem / isDyeItem / the banner slot's mayPlace.
+        static bool IsBannerItem(const ItemStack& stack);
+        static bool IsDyeItem(const ItemStack& stack);
+        static bool IsPatternItem(const ItemStack& stack);
+
+        const std::vector<std::string>& SelectablePatterns() const { return m_selectablePatterns; }
+        int  SelectedPatternIndex() const { return GetData(DATA_SELECTED); }
+        const ItemStack& BannerInput() const { return Input(BANNER_SLOT); }
+        const ItemStack& DyeInput() const { return Input(DYE_SLOT); }
+        const ItemStack& PatternInput() const { return Input(PATTERN_SLOT); }
+        const ItemStack& ResultItem() const { return Result(); }
+
+        // MC LoomMenu.clickMenuButton.
+        bool ClickMenuButton(int buttonId, bool mayBuild, ContainerClickResult& result) override;
+        void OnTakeResult(const ItemStack& taken, ContainerClickResult& result) override;
+        void QuickMoveStack(int slotIndex, ContainerClickResult& result) override;
+        // The list the screen shows, from the slots as they are now (the
+        // client's copy is fed slot by slot and never recomputes itself):
+        // empty without both a banner and a dye.
+        std::vector<std::string> PatternsOnOffer() const {
+            if (Input(BANNER_SLOT).IsEmpty() || Input(DYE_SLOT).IsEmpty()) return {};
+            return SelectablePatternsFor(Input(PATTERN_SLOT));
+        }
+
     protected:
-        void ComputeResult() override;
+        void ComputeResult() override;   // MC slotsChanged
         void PlaceInputSlots() override;
+
+    private:
+        std::vector<std::string> SelectablePatternsFor(const ItemStack& patternStack) const;
+        void SetupResultSlot(const std::string& pattern);
+
+        std::vector<std::string> m_selectablePatterns;
     };
 
     // ── Smithing table (MC SmithingMenu) ──────────────────────────────────

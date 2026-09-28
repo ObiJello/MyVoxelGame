@@ -2,9 +2,25 @@
 #include "NetworkConnection.hpp"
 #include "PacketTypes.hpp"
 #include "../core/Log.hpp"
+#include "../core/Deflate.hpp"
 #include <algorithm>
 #include <stdexcept>
-#include <zlib.h>
+
+namespace {
+
+    // The compression stage (remote connections only: loopback skips it):
+    // zlib format at level 6, zlib's default, so either end reads the other;
+    // libdeflate (Core::Deflate) is ~2x zlib's deflate and ~4x its inflate.
+    bool DeflateFast(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+        return Core::Deflate::Compress(in.data(), in.size(), out, Core::Deflate::Format::Zlib, 6);
+    }
+
+    // Exactly `outSize` bytes, as the frame header declares.
+    bool InflateFast(const uint8_t* src, size_t n, uint8_t* out, size_t outSize) {
+        return Core::Deflate::DecompressExact(src, n, out, outSize, Core::Deflate::Format::Zlib);
+    }
+
+} // namespace
 
 namespace Network {
 
@@ -141,11 +157,8 @@ namespace Network {
                 EncodeVarInt(0, framed);
                 framed.insert(framed.end(), body.begin(), body.end());
             } else {
-                uLongf bound = compressBound(static_cast<uLong>(body.size()));
-                std::vector<uint8_t> deflated(bound);
-                if (compress2(deflated.data(), &bound, body.data(),
-                              static_cast<uLong>(body.size()), Z_DEFAULT_COMPRESSION) == Z_OK) {
-                    deflated.resize(bound);
+                std::vector<uint8_t> deflated;
+                if (DeflateFast(body, deflated)) {
                     EncodeVarInt(static_cast<uint32_t>(body.size()), framed);
                     framed.insert(framed.end(), deflated.begin(), deflated.end());
                 } else {
@@ -167,6 +180,72 @@ namespace Network {
 
     void NetworkConnection::SendPacket(const RawPacket& packet) {
         SendPacket(packet.header.packetId, packet.payload);
+    }
+
+    NetworkConnection::PreparedPacket NetworkConnection::PreparePacket(uint8_t packetId,
+                                                                       const std::vector<uint8_t>& payload,
+                                                                       int compressionThreshold) {
+        PreparedPacket prepared;
+        prepared.packetId = packetId;
+        prepared.body.reserve(5 + payload.size());
+        EncodeVarInt(static_cast<uint32_t>(packetId), prepared.body);
+        prepared.body.insert(prepared.body.end(), payload.begin(), payload.end());
+        // FrameForWire deflates a body at or above the threshold; an empty
+        // result (compression failed) leaves the strand to do it.
+        if (compressionThreshold >= 0 &&
+            prepared.body.size() >= static_cast<size_t>(compressionThreshold) &&
+            DeflateFast(prepared.body, prepared.deflated)) {
+            prepared.deflatedFor = compressionThreshold;
+        } else {
+            prepared.deflated.clear();
+        }
+        return prepared;
+    }
+
+    void NetworkConnection::SendPrepared(PreparedPacket&& packet) {
+        if (!IsPacketAllowedOutbound(packet.packetId)) {
+            Log::Warning("[%s] Refusing to send packet 0x%02X — not part of the "
+                         "current protocol phase", m_name.c_str(), packet.packetId);
+            return;
+        }
+        if (m_state != ConnectionState::CONNECTED) {
+            Log::Warning("[%s] Attempted to send data on disconnected connection", m_name.c_str());
+            return;
+        }
+        bool startSend = false;
+        const size_t queuedBytes = packet.body.size();
+        {
+            std::lock_guard<std::mutex> lock(m_sendMutex);
+            PendingSend e;
+            e.data = std::move(packet.body);
+            e.deflated = std::move(packet.deflated);
+            e.deflatedFor = packet.deflatedFor;
+            m_sendQueue.push_back(std::move(e));
+            if (!m_sending) {
+                m_sending = true;
+                startSend = true;
+            }
+        }
+        if (startSend) {
+            net::post(m_strand, [self = shared_from_this()]() {
+                self->ProcessSendQueue();
+            });
+        }
+        m_stats.bytesSent.fetch_add(queuedBytes);
+        m_stats.pendingSendBytes.fetch_add(queuedBytes, std::memory_order_relaxed);
+        m_stats.packetsSent.fetch_add(1);
+    }
+
+    std::vector<uint8_t> NetworkConnection::FrameDeflated(size_t bodySize, const std::vector<uint8_t>& deflated) {
+        std::vector<uint8_t> framed;
+        framed.reserve(5 + deflated.size());
+        EncodeVarInt(static_cast<uint32_t>(bodySize), framed);
+        framed.insert(framed.end(), deflated.begin(), deflated.end());
+        std::vector<uint8_t> packet;
+        packet.reserve(5 + framed.size());
+        EncodeVarInt(static_cast<uint32_t>(framed.size()), packet);
+        packet.insert(packet.end(), framed.begin(), framed.end());
+        return packet;
     }
 
     void NetworkConnection::SendRaw(std::vector<uint8_t> data, std::function<void()> onSent) {
@@ -331,14 +410,9 @@ namespace Network {
                     return false;
                 }
                 inflated.resize(uncompressedLength);
-                uLongf out = uncompressedLength;
-                const int rc = uncompress(inflated.data(), &out,
-                                          frame + lenBytes,
-                                          static_cast<uLong>(frameSize - lenBytes));
-                if (rc != Z_OK || out != uncompressedLength) {
-                    Log::Error("[%s] Inflate failed (rc=%d, got %lu of %u)",
-                               m_name.c_str(), rc, static_cast<unsigned long>(out),
-                               uncompressedLength);
+                if (!InflateFast(frame + lenBytes, frameSize - lenBytes, inflated.data(), uncompressedLength)) {
+                    Log::Error("[%s] Inflate failed (%zu compressed bytes, frame declares %u)",
+                               m_name.c_str(), frameSize - lenBytes, uncompressedLength);
                     Disconnect();
                     return false;
                 }
@@ -458,7 +532,12 @@ namespace Network {
         // framed under the old rules, which the peer would then mis-parse.
         for (PendingSend& e : taken) {
             batch->bodyBytes += e.data.size();
-            const std::vector<uint8_t> framed = FrameForWire(e.data);
+            // A deflate prepared for the stream's current threshold is the
+            // one FrameForWire would compute; anything else frames as usual.
+            const bool usePrepared = e.deflatedFor >= 0 && e.deflatedFor == m_compressionThreshold &&
+                                     e.data.size() >= static_cast<size_t>(m_compressionThreshold);
+            const std::vector<uint8_t> framed = usePrepared ? FrameDeflated(e.data.size(), e.deflated)
+                                                            : FrameForWire(e.data);
             batch->bytes.insert(batch->bytes.end(), framed.begin(), framed.end());
             if (e.onSent) batch->onSent = std::move(e.onSent);
         }

@@ -117,6 +117,15 @@ namespace Platform {
         float GetGamma() const { return GetFloat("gamma", 0.5f); }   // MC default 0.5
         void SetGamma(float gamma) { SetFloat("gamma", gamma); }
 
+        // World lighting (engine option, no MC equivalent). OFF fills the
+        // lightmap (Render::Lightmap) with full white, so nothing in the
+        // world is darkened by sky or block light — day or night, caves
+        // included — while ambient occlusion and face shading, which ride
+        // the vertex colour, stay as they are. Read every frame by the
+        // lightmap; applies live. Not part of the graphics presets.
+        bool GetWorldLighting() const { return GetBool("worldLighting", true); }
+        void SetWorldLighting(bool enabled) { SetBool("worldLighting", enabled); }
+
         // ── Graphics preset (MC GraphicsPreset) ─────────────────────────────
         //
         // MC split the old Fast/Fancy/Fabulous mode into a one-shot MACRO
@@ -127,12 +136,13 @@ namespace Platform {
         // the engine ever asks "am I in Fancy mode" — every consumer reads
         // its own option. This is the same design.
         //
-        // The stored key is `graphicsPreset` (fast / fancy / custom). An
+        // The stored key is `graphicsPreset` (fast / fancy / fabulous /
+        // custom). An
         // options.txt from before the split has no such key and reads as
         // CUSTOM, which is exactly what MC's own datafixer does
         // (OptionsSetGraphicsPresetToCustomFix) — the player's individual
         // settings are kept as they are, nothing is re-applied over them.
-        enum class GraphicsPreset { Fast, Fancy, Custom };
+        enum class GraphicsPreset { Fast, Fancy, Fabulous, Custom };
         GraphicsPreset GetGraphicsPreset() const;
         // Write the preset's table into the individual options. Does NOT
         // apply anything to the engine: the caller raises the matching
@@ -161,6 +171,16 @@ namespace Platform {
         }
         void SetCutoutLeaves(bool cutout) { SetBool("cutoutLeaves", cutout); NoteGraphicsOptionChanged(); }
         bool IsFancyGraphics() const { return GetCutoutLeaves(); }
+
+        // MC options.improvedTransparency (26.1: "An experimental approach
+        // that uses screen shaders for drawing weather, clouds, and
+        // particles behind translucent blocks and water. This will impact
+        // GPU performance."). Render::ImprovedTransparency reads it every
+        // frame; applies live. OFF by default and in every existing
+        // options.txt (no key = off); only picking the Fabulous preset, or
+        // the option itself, turns it on.
+        bool GetImprovedTransparency() const { return GetBool("improvedTransparency", false); }
+        void SetImprovedTransparency(bool on) { SetBool("improvedTransparency", on); NoteGraphicsOptionChanged(); }
 
         // The Immersive Portals mod's "reduced portal rendering"
         // (IPGlobal.reducedPortalRendering): portals are drawn only within
@@ -235,6 +255,16 @@ namespace Platform {
         void SetRenderClouds(const std::string& mode) { SetString("renderClouds", mode); NoteGraphicsOptionChanged(); }
 
         int GetCloudRange() const { return GetInt("cloudRange", 128); }
+        // MC options.weatherRadius: the rain / snow columns' and splashes'
+        // radius in blocks, 3..10 (default 10).
+        int GetWeatherRadius() const {
+            const int r = GetInt("weatherRadius", 10);
+            return r < 3 ? 3 : (r > 10 ? 10 : r);
+        }
+        void SetWeatherRadius(int radius) {
+            SetInt("weatherRadius", radius < 3 ? 3 : (radius > 10 ? 10 : radius));
+            NoteGraphicsOptionChanged();
+        }
         void SetCloudRange(int range) { SetInt("cloudRange", range); NoteGraphicsOptionChanged(); }
 
         int GetRenderDistance() const { return std::clamp(GetInt("renderDistance", 12), 2, 32); }

@@ -234,6 +234,11 @@ namespace Client {
         // the head and foot pieces off this index from the entity texture.
         // (The straw bed has a real block model and is not listed.)
         std::vector<glm::ivec3> beds;
+        // Same contract for CAMPFIRES (both kinds): MC ticks every loaded
+        // campfire's CampfireBlockEntity.particleTick on the client — the
+        // smoke column and the smoking food — off this index
+        // (Client::ParticleTicks::TickBlockEntities).
+        std::vector<glm::ivec3> campfires;
 
         ClientChunk(Game::Math::ChunkPos pos) 
             : position(pos), loadTime(std::chrono::steady_clock::now())
@@ -561,6 +566,12 @@ namespace Client {
     public:
         // Schedule mesh builds using snapshots (main thread only) - public for ClientMeshManager
         void ScheduleMeshBuildsWithSnapshots(const glm::vec3& playerPosition);
+        // A view was just handed to the scheduler (ChunkRenderer::
+        // RecordViewForScheduler): its sections are candidates on the NEXT
+        // pass only, so that pass must not be one the idle backoff skips.
+        // Dirty events already cancel the backoff; a new view is the same
+        // kind of news.
+        void WakeMeshScheduler() { m_schedulerSkip = 0; }
 
         // MC RenderSection.hasAllNeighbors — are all 8 surrounding chunk columns
         // loaded? A never-compiled section waits for this before it is meshed.

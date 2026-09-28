@@ -1,15 +1,21 @@
 // File: src/server/entity/MobManager.cpp
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "server/entity/MobManager.hpp"
+#include "common/entity/MountInventory.hpp"
 #include "common/core/Log.hpp"
 #include "server/world/ticketing/ChunkTicketManager.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
+#include "server/entity/PlayerRiding.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/MobEquipment.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/loot/GeneratedMobLoot.hpp"
 #include "common/world/level/GameRules.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/raid/Raider.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/ItemEntity.hpp"
@@ -71,6 +77,10 @@ namespace Server {
         // stay in this level, so the links cannot survive the move.
         leaving->EjectPassengers();
         leaving->StopRiding();
+        // Its lead: MC's changeDimension removes it from the old entity
+        // (removeLeash — no item) while the new one reads the saved
+        // reference and looks for its holder in the new level.
+        leaving->CarryLeashAcrossLevels();
 
         // Announce the departure to everything that might point at it —
         // the same rule as the death sweep (see Entity::HoldsEntityRefs).
@@ -800,6 +810,16 @@ namespace Server {
                 rider->StopRiding();
                 continue;
             }
+            // A player's view: the client simulates the player, so its
+            // "ride tick" is only the seat — the real player's body goes to
+            // it (Server::PlayerRiding; its own ride tick ran in the
+            // session's tick).
+            if (rider->IsPlayer()) {
+                if (auto* view = dynamic_cast<PlayerEntityView*>(rider)) {
+                    PlayerRiding::PositionRider(vehicle, *view);
+                }
+                continue;
+            }
             rider->SetOldPosAndRot();
             ++rider->tickCount;
             rider->RideTick();
@@ -809,6 +829,12 @@ namespace Server {
 
     void MobManager::DropDeathLoot(Game::Mob& mob) {
         if (!m_level) return;
+
+        // MC LivingEntity.die: gameEvent(ENTITY_DIE) BEFORE dropAllDeathLoot.
+        // A sculk catalyst in range (BY_DISTANCE, nearest first) turns the
+        // death's XP into charge and marks it consumed — the orbs below are
+        // then not paid (dropExperience's wasExperienceConsumed gate).
+        mob.GameEvent(Game::GameEventId::EntityDie);
 
         Game::JavaRandom& rng = m_level->Random();
 
@@ -848,7 +874,17 @@ namespace Server {
             // MC dropCustomDeathLoot — the per-mob non-table drops (an
             // enderman's carried block).
             mob.DropCustomDeathLoot(*m_level);
+            // ... and Mob.dropCustomDeathLoot's own half: the worn equipment
+            // (a trial spawner's armoured zombie), by each slot's drop chance.
+            Game::MobEquipment::DropEquipmentOnDeath(mob, killedByPlayer, lootingLevel,
+                                                     killer && killer->IsPlayer());
         }
+        // MC dropAllDeathLoot: dropEquipment(level), ungated.
+        mob.DropEquipment(*m_level);
+        // ... which for a mount (AbstractHorse / AbstractNautilus
+        // .dropEquipment) is its chest's contents, and a chested equine's
+        // chest block (AbstractChestedHorse.dropEquipment).
+        Game::MountInventory::DropOnDeath(mob);
 
         // MC LivingEntity.dropExperience (LivingEntity.java:1492-1495): XP
         // only inside the player kill-credit window, gated on
@@ -857,12 +893,15 @@ namespace Server {
         // isAlwaysExperienceDropper is player/dragon-fight machinery and
         // never reaches this manager. The award spawns real orb entities —
         // ServerLevelBridge::AwardExperience → ExperienceOrbManager::Award.
-        if (killedByPlayer && mobDrops && (isMonster || !mob.IsBaby())) {
+        if (!mob.WasExperienceConsumed() && killedByPlayer && mobDrops && (isMonster || !mob.IsBaby())) {
             // MC dropExperience: processMobExperience over the killer's gear
             // (the mob_experience component — no vanilla enchantment
             // carries it, the hook is the data's).
-            const int xp = Game::EnchantmentHelper::ProcessMobExperience(*m_level, killer, mob,
-                                                                         mob.GetXpReward());
+            // Mob.getBaseExperienceReward's equipment bonus: +1..3 for each
+            // piece still worn that was not a guaranteed drop.
+            int baseXp = mob.GetXpReward();
+            if (baseXp > 0) baseXp += Game::MobEquipment::ExperienceBonus(mob, rng);
+            const int xp = Game::EnchantmentHelper::ProcessMobExperience(*m_level, killer, mob, baseXp);
             if (xp > 0) {
                 m_level->AwardExperience(mob.position, xp, mob.LastHurtByPlayerId());
             }
@@ -993,6 +1032,51 @@ namespace Server {
                     (onFire && chosen->smeltedItem != Game::Items::Air) ? chosen->smeltedItem
                                                                         : chosen->item;
                 m_level->SpawnItemDrop(mob.position, item, count);
+            }
+        }
+
+        // The pillager's only pool (loot_table/entities/pillager.json), which
+        // the generated table cannot express: entity_properties on THIS with
+        // type_specific minecraft:raider {is_captain: true} (has_raid false —
+        // no raid exists), one ominous bottle, set_ominous_bottle_amplifier
+        // uniform(0, 4) — UniformGenerator.getInt = Mth.nextInt(0, 4), an
+        // amplifier equal to the bottle's default 0 left off the patch.
+        if (mob.GetType() == Game::EntityTypeId::Pillager) {
+            if (const auto* raider = dynamic_cast<const Game::Raider*>(&mob); raider && raider->IsCaptain()) {
+                Game::ItemStack bottle(Game::Items::OminousBottle, 1);
+                const int amplifier = rng.NextInt(Game::DataComponents::kOminousBottleMaxAmplifier + 1);
+                if (amplifier != 0) bottle.components.set(Game::DataComponents::OMINOUS_BOTTLE_AMPLIFIER, amplifier);
+                m_level->SpawnItemStackDrop(mob.position, bottle);
+            }
+        }
+
+        // The creeper's second pool (loot_table/entities/creeper.json), which
+        // the generated table cannot express: entity_properties on the
+        // ATTACKER with type #minecraft:skeletons (skeleton, stray, wither
+        // skeleton, skeleton horse, bogged, parched), one roll over a
+        // `minecraft:tag` entry with expand: true on
+        // #minecraft:creeper_drop_music_discs — the twelve C418 discs, each
+        // its own weight-1 entry. A skeleton's arrow counts: the attacker is
+        // the damage's causing entity, the shooter.
+        if (mob.GetType() == Game::EntityTypeId::Creeper) {
+            if (const Game::LivingEntity* attacker = ResolveKiller(mob.GetKillerId())) {
+                const Game::EntityTypeId t = attacker->GetType();
+                const bool skeleton = t == Game::EntityTypeId::Skeleton || t == Game::EntityTypeId::Stray ||
+                                      t == Game::EntityTypeId::WitherSkeleton ||
+                                      t == Game::EntityTypeId::SkeletonHorse ||
+                                      t == Game::EntityTypeId::Bogged || t == Game::EntityTypeId::Parched;
+                if (skeleton) {
+                    static constexpr Game::ItemID kCreeperDropMusicDiscs[] = {
+                        Game::Items::MusicDisc13,   Game::Items::MusicDiscCat,
+                        Game::Items::MusicDiscBlocks, Game::Items::MusicDiscChirp,
+                        Game::Items::MusicDiscFar,  Game::Items::MusicDiscMall,
+                        Game::Items::MusicDiscMellohi, Game::Items::MusicDiscStal,
+                        Game::Items::MusicDiscStrad, Game::Items::MusicDiscWard,
+                        Game::Items::MusicDisc11,   Game::Items::MusicDiscWait,
+                    };
+                    constexpr int kDiscCount = static_cast<int>(std::size(kCreeperDropMusicDiscs));
+                    m_level->SpawnItemDrop(mob.position, kCreeperDropMusicDiscs[rng.NextInt(kDiscCount)], 1);
+                }
             }
         }
     }

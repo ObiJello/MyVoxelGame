@@ -1,5 +1,6 @@
 // File: src/common/entity/decoration/ItemFrame.cpp
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/data/DataComponents.hpp"
@@ -9,6 +10,7 @@
 #include "common/world/block/RedstoneFamilies.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/ILevelWrite.hpp"
+#include "common/world/map/MapItem.hpp"
 
 namespace Game {
 
@@ -57,12 +59,14 @@ namespace Game {
     }
 
     AABBd ItemFrame::CalculateBoundingBox(const glm::ivec3& pos, Direction direction) const {
-        // MC ItemFrame.createBoundingBox (no framed map: always 12×12 px).
+        // MC ItemFrame.createBoundingBox: 12×12 px, or the whole face when
+        // it holds a map (hasFramedMap — the item carries a MAP_ID).
         const glm::dvec3 center = glm::dvec3(pos) + glm::dvec3(0.5) - Step(direction) * kShiftToBlockWall;
         const Axis axis = AxisOf(direction);
-        const glm::dvec3 size(axis == Axis::X ? kDepth : kWidth,
-                              axis == Axis::Y ? kDepth : kWidth,
-                              axis == Axis::Z ? kDepth : kWidth);
+        const double width = HasFramedMap() ? 1.0 : kWidth;
+        const glm::dvec3 size(axis == Axis::X ? kDepth : width,
+                              axis == Axis::Y ? kDepth : width,
+                              axis == Axis::Z ? kDepth : width);
         return AABBd::FromMinMax(center - size * 0.5, center + size * 0.5);
     }
 
@@ -98,6 +102,10 @@ namespace Game {
         }
     }
 
+    bool ItemFrame::HasFramedMap() const {
+        return !m_item.IsEmpty() && m_item.get(DataComponents::MAP_ID).has_value();
+    }
+
     void ItemFrame::SetItem(const ItemStack& stack, bool updateNeighbours) {
         ItemStack one = stack;
         if (!one.IsEmpty()) one.count = 1;   // copyWithCount(1)
@@ -105,6 +113,15 @@ namespace Game {
         m_itemDirty = true;
         if (!m_item.IsEmpty()) PlaySound(AddItemSound(), 1.0f, 1.0f);
         if (updateNeighbours) UpdateComparatorBehind();
+        // onItemChanged → recalculateBoundingBox: a map fills the face.
+        RecalculateBoundingBox();
+    }
+
+    void ItemFrame::RemoveFramedMap(const ItemStack& stack) {
+        // MC ItemFrame.removeFramedMap: the map's frame marker goes.
+        if (!m_level || m_level->IsClientSide() || stack.IsEmpty()) return;
+        if (!stack.get(DataComponents::MAP_ID)) return;
+        MapItemBridge::RemovedFromFrame(stack, m_pos, GetId());
     }
 
     void ItemFrame::SetRotation(int rotation, bool updateNeighbours) {
@@ -114,11 +131,13 @@ namespace Game {
 
     UseResult ItemFrame::Interact(LivingEntity& player, ItemStack& held) {
         // MC ItemFrame.interact, the server half.
-        (void)player;
         if (m_fixed) return UseResult::Pass;
         if (m_item.IsEmpty()) {
             if (held.IsEmpty() || IsRemoved()) return UseResult::Pass;
+            // A map already at the tracked-marker limit is refused.
+            if (MapItemBridge::MapTrackedCountOverLimit(held, Maps::kTrackedDecorationLimit)) return UseResult::Fail;
             SetItem(held);
+            GameEvent(GameEventId::BlockChange, &player);   // MC: gameEvent(BLOCK_CHANGE, player)
             // itemStack.consume(1, player): creative keeps its stack through
             // the interact dispatch's count snapshot.
             held.count -= 1;
@@ -127,6 +146,7 @@ namespace Game {
         }
         PlaySound(RotateItemSound(), 1.0f, 1.0f);
         SetRotation(m_rotation + 1);
+        GameEvent(GameEventId::BlockChange, &player);   // MC: gameEvent(BLOCK_CHANGE, player)
         return UseResult::Success;
     }
 
@@ -162,6 +182,7 @@ namespace Game {
         // item out first; the frame breaks on the next hit.
         if (source != MobDamageSource::Explosion && !m_item.IsEmpty()) {
             DropItem(attacker, /*withFrame=*/false);
+            GameEvent(GameEventId::BlockChange, attacker);   // MC: gameEvent(BLOCK_CHANGE, source.getEntity())
             PlaySound(RemoveItemSound(), 1.0f, 1.0f);
             return true;
         }
@@ -171,6 +192,7 @@ namespace Game {
     void ItemFrame::DropItem(Entity* causedBy) {
         PlaySound(BreakSound(), 1.0f, 1.0f);
         DropItem(causedBy, /*withFrame=*/true);
+        GameEvent(GameEventId::BlockChange, causedBy);   // MC dropItem(level, causedBy)
     }
 
     void ItemFrame::DropItem(Entity* causedBy, bool withFrame) {
@@ -178,11 +200,18 @@ namespace Game {
         if (m_fixed || !m_level) return;
         const ItemStack framed = m_item;
         SetItem(ItemStack{});
-        if (!m_level->DoEntityDrops()) return;
-        if (causedBy && causedBy->IsPlayer() && causedBy->IsCreative()) return;
+        if (!m_level->DoEntityDrops()) {
+            if (causedBy == nullptr) RemoveFramedMap(framed);
+            return;
+        }
+        if (causedBy && causedBy->IsPlayer() && causedBy->IsCreative()) {
+            RemoveFramedMap(framed);
+            return;
+        }
         if (withFrame) SpawnAtLocation(FrameItemStackWithData());
-        if (!framed.IsEmpty() && m_level->Random().NextFloat() < m_dropChance) {
-            SpawnAtLocation(framed);
+        if (!framed.IsEmpty()) {
+            RemoveFramedMap(framed);
+            if (m_level->Random().NextFloat() < m_dropChance) SpawnAtLocation(framed);
         }
     }
 

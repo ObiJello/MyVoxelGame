@@ -16,7 +16,9 @@
 namespace Server {
 
     void SheepEatCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("sheepeat", SheepEatCommand::Execute);
+        dispatcher.RegisterCommand("sheepeat", SheepEatCommand::Execute,
+            Game::Cmd::Root().Executes().Then(Game::Cmd::Argument("radius", Game::Cmd::Arg::Float)
+                .Suggests({"8", "16", "32"}).Executes()));
     }
 
     namespace {

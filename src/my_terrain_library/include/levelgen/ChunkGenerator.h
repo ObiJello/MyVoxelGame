@@ -74,6 +74,11 @@ public:
         // Beardifier.forStructuresInChunk(structureManager, chunk.getPos());
         // null = Beardifier.EMPTY.
         std::shared_ptr<const density::DensitySampler> beardifier;
+        // generateCarvers' carverBiomeRegion: the region chunk at a chunk
+        // position within 8 of the one being carved, whose carverBiome
+        // memoizes that source chunk's carver biome. Empty = no region
+        // (every source biome is sampled).
+        std::function<::world::IChunk*(int32_t chunkX, int32_t chunkZ)> carverBiomeRegion;
     };
 
     /**

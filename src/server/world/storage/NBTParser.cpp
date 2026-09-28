@@ -9,6 +9,15 @@
 
 namespace World {
 
+    // Big-endian loads with no bounds check, for arrays checked as a whole.
+    // Clang, GCC and MSVC all fold these into a single load + byte swap.
+    static inline uint32_t LoadBE32(const uint8_t* p) {
+        return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+    }
+    static inline uint64_t LoadBE64(const uint8_t* p) {
+        return (uint64_t(LoadBE32(p)) << 32) | uint64_t(LoadBE32(p + 4));
+    }
+
     // Helper function to create indentation
     static std::string Indent(int level) {
         return std::string(level * 2, ' ');
@@ -64,7 +73,13 @@ namespace World {
         }
 
         offset++;
+        return ParsePayload(tagType, data, offset, hasName);
+    }
 
+    // Everything of a tag after its type byte: the name (when hasName) and the
+    // payload. List elements come straight here with the list's element type.
+    NBTTagPtr NBTTag::ParsePayload(NBTTagType tagType, const std::vector<uint8_t>& data, size_t& offset,
+                                   bool hasName) {
         if (tagType == NBTTagType::TAG_End) {
             return nullptr; // End tag has no name or payload
         }
@@ -155,9 +170,8 @@ namespace World {
                     }
 
                     arrayTag->value.resize(length);
-                    for (int32_t i = 0; i < length; ++i) {
-                        arrayTag->value[i] = static_cast<int8_t>(data[offset++]);
-                    }
+                    if (length > 0) std::memcpy(arrayTag->value.data(), &data[offset], static_cast<size_t>(length));
+                    offset += static_cast<size_t>(length);
                     tag = arrayTag;
                     break;
                 }
@@ -186,6 +200,17 @@ namespace World {
                         }
                     }
 
+                    // The element type is validated as ParseTag validates a type
+                    // byte. The elements used to be parsed from a COPY of the
+                    // rest of the buffer with the type byte prepended - every
+                    // element of every list copied everything after it, which
+                    // made a chunk's parse quadratic in its size.
+                    if (length > 0 && (static_cast<int>(listTag->listType) < 0 ||
+                                       static_cast<int>(listTag->listType) > 12)) {
+                        throw std::runtime_error("Invalid NBT list element type: " +
+                                                 std::to_string(static_cast<int>(listTag->listType)));
+                    }
+                    listTag->value.reserve(static_cast<size_t>(length));
                     for (int32_t i = 0; i < length; ++i) {
                         // Check if we have enough data left for at least one more tag
                         if (offset >= data.size()) {
@@ -193,23 +218,11 @@ namespace World {
                                                    std::to_string(i) + "/" + std::to_string(length));
                         }
 
-                        // List elements don't have names, but we need to inject the type
-                        size_t elementStart = offset;
-
-                        // Save current position and create a temporary buffer with the type prefix
-                        std::vector<uint8_t> elementData;
-                        elementData.push_back(static_cast<uint8_t>(listTag->listType));
-                        elementData.insert(elementData.end(), data.begin() + offset, data.end());
-
-                        size_t elementOffset = 0;
                         try {
-                            NBTTagPtr element = ParseTag(elementData, elementOffset, false);
+                            NBTTagPtr element = ParsePayload(listTag->listType, data, offset, false);
                             if (element) {
-                                listTag->value.push_back(element);
+                                listTag->value.push_back(std::move(element));
                             }
-
-                            // Update main offset (subtract 1 because we added the type byte)
-                            offset = elementStart + (elementOffset - 1);
                         } catch (const std::exception& e) {
                             Log::Error("Failed to parse list element %d/%d in tag '%s': %s",
                                       i, length, tagName.c_str(), e.what());
@@ -237,7 +250,7 @@ namespace World {
                         try {
                             NBTTagPtr childTag = ParseTag(data, offset, true);
                             if (childTag) {
-                                compoundTag->value[childTag->name] = childTag;
+                                compoundTag->value[childTag->name] = std::move(childTag);
                             }
                         } catch (const std::exception& e) {
                             Log::Error("Failed to parse child tag in compound '%s' at offset %zu: %s",
@@ -270,10 +283,13 @@ namespace World {
                         throw std::runtime_error(oss.str());
                     }
 
+                    // Bounds were checked for the whole array above.
                     arrayTag->value.resize(length);
-                    for (int32_t i = 0; i < length; ++i) {
-                        arrayTag->value[i] = NBTParser::ReadInt32BE(data, offset);
+                    const uint8_t* src = data.data() + offset;
+                    for (int32_t i = 0; i < length; ++i, src += 4) {
+                        arrayTag->value[i] = static_cast<int32_t>(LoadBE32(src));
                     }
+                    offset += requiredBytes;
                     tag = arrayTag;
                     break;
                 }
@@ -326,16 +342,14 @@ namespace World {
                         throw std::runtime_error(oss.str());
                     }
 
+                    // Bounds were checked for the whole array above; the block
+                    // states' packed words are most of a chunk's bytes.
                     arrayTag->value.resize(length);
-                    for (int32_t i = 0; i < length; ++i) {
-                        try {
-                            arrayTag->value[i] = NBTParser::ReadInt64BE(data, offset);
-                        } catch (const std::exception& e) {
-                            Log::Error("Failed to read long array element %d/%d in tag '%s': %s",
-                                      i, length, tagName.c_str(), e.what());
-                            throw;
-                        }
+                    const uint8_t* src = data.data() + offset;
+                    for (int32_t i = 0; i < length; ++i, src += 8) {
+                        arrayTag->value[i] = static_cast<int64_t>(LoadBE64(src));
                     }
+                    offset += requiredBytes;
                     tag = arrayTag;
                     break;
                 }
@@ -351,7 +365,7 @@ namespace World {
         }
 
         if (tag) {
-            tag->name = tagName;
+            tag->name = std::move(tagName);
         }
 
         return tag;
@@ -602,7 +616,16 @@ namespace World {
         // everything else, which is how an emoji on a sign survives a load
         // and then gets written back double-encoded.
         std::string result;
-        if (!Game::Nbt::DecodeModifiedUtf8(&data[offset], length, result)) {
+        const uint8_t* bytes = data.data() + offset;
+        bool ascii = true;
+        for (uint16_t i = 0; i < length; ++i) {
+            if (bytes[i] >= 0x80) { ascii = false; break; }
+        }
+        if (ascii) {
+            // Modified UTF-8 is ASCII-transparent (the decoder maps these bytes
+            // to themselves); nearly every chunk string is a block/biome id.
+            result.assign(reinterpret_cast<const char*>(bytes), length);
+        } else if (!Game::Nbt::DecodeModifiedUtf8(&data[offset], length, result)) {
             // Malformed rather than fatal: fall back to the raw bytes so one
             // bad string cannot take down a whole chunk or level.dat.
             result.assign(reinterpret_cast<const char*>(&data[offset]), length);

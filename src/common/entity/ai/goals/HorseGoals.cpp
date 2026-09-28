@@ -11,9 +11,12 @@ namespace Game {
 
     namespace {
 
-        // MC AbstractHorse.isMobControlled — the first passenger is a Mob.
-        bool IsMobControlled(const AbstractHorse& horse) {
-            return dynamic_cast<Mob*>(horse.GetFirstPassenger()) != nullptr;
+        // MC AbstractHorse.isMobControlled: false on the base — only the
+        // zombie horse answers "a mob rides me" (its jockey); the llama keeps
+        // the base answer.
+        bool IsMobControlled(const Mob& horse) {
+            const auto* equine = dynamic_cast<const AbstractHorse*>(&horse);
+            return equine && equine->IsMobControlled();
         }
 
     } // namespace
@@ -31,14 +34,17 @@ namespace Game {
 
     RunAroundLikeCrazyGoal::RunAroundLikeCrazyGoal(AbstractHorse* horse,
                                                    double speedModifier)
-        : m_horse(horse), m_speedModifier(speedModifier) {
+        : RunAroundLikeCrazyGoal(horse, horse, speedModifier) {}
+
+    RunAroundLikeCrazyGoal::RunAroundLikeCrazyGoal(PathfinderMob* mob, HorseTaming* taming,
+                                                   double speedModifier)
+        : m_horse(mob), m_taming(taming), m_speedModifier(speedModifier) {
         SetFlags(static_cast<uint8_t>(GoalFlag::Move));
     }
 
     bool RunAroundLikeCrazyGoal::CanUse() {
-        // MC: !isMobControlled && !isTamed && isVehicle — taming does not
-        // exist, so the tame term is always "untamed".
-        if (IsMobControlled(*m_horse) || !m_horse->IsVehicle()) return false;
+        // MC: !isMobControlled && !isTamed && isVehicle.
+        if (IsMobControlled(*m_horse) || m_taming->IsTamed() || !m_taming->IsEquineVehicle()) return false;
         auto pos = RandomPos::GetPos(*m_horse, 5, 4);
         if (!pos) return false;
         m_posX = pos->x;
@@ -52,13 +58,32 @@ namespace Game {
     }
 
     bool RunAroundLikeCrazyGoal::CanContinueToUse() {
-        return !m_horse->GetNavigation().IsDone() && m_horse->IsVehicle();
+        return !m_taming->IsTamed() && !m_horse->GetNavigation().IsDone() &&
+               m_taming->IsEquineVehicle();
     }
 
-    // MC's tick() rolls the 1-in-50 buck: dismount the player rider, or
-    // tame at temper. Both halves ride the taming/riding-player systems —
-    // and the goal cannot run without a player rider — so the base tick (a
-    // no-op) is the honest port until they land.
+    void RunAroundLikeCrazyGoal::Tick() {
+        EntityLevel* level = m_horse->Level();
+        if (!level || level->IsClientSide()) return;
+        if (m_taming->IsTamed() || level->Random().NextInt(AdjustedTickDelay(50)) != 0) return;
+        // getFirstPassenger: none → nothing; a player rolls the temper; any
+        // other rider (a mob on an untamed horse) is simply thrown.
+        if (!m_taming->IsEquineVehicle()) return;
+        if (LivingEntity* player = m_taming->GetPlayerRider()) {
+            const int temper = m_taming->GetTemper();
+            const int maxTemper = m_taming->GetMaxTemper();
+            if (maxTemper > 0 && level->Random().NextInt(maxTemper) < temper) {
+                m_taming->TameWithName(*player);
+                return;
+            }
+            m_taming->ModifyTemper(5);
+        }
+        // ejectPassengers: every passenger, the player seat included.
+        m_taming->EjectPlayerRider();
+        m_horse->EjectPassengers();
+        m_taming->MakeMad();
+        level->BroadcastEntityEvent(*m_horse, 6);
+    }
 
     RandomStandGoal::RandomStandGoal(AbstractHorse* horse) : m_horse(horse) {
         ResetStandInterval();

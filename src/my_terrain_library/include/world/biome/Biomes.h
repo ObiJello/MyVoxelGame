@@ -172,12 +172,15 @@ private:
 
     // get() auto-creates biomes on first lookup and is reached from parallel
     // worldgen phases (section biome fill), so the registry must be locked.
-    // Not hot: interned Biome* storage means per-block/per-quart queries no
-    // longer go through the registry at all.
+    // Per-quart callers (biome fill, carvers) are served from get()'s
+    // per-thread cache of recent keys and only take the lock on a miss.
     static std::mutex& registryMutex() {
         static std::mutex s_mutex;
         return s_mutex;
     }
+
+    // get()'s find-or-create in the registry, under the mutex.
+    static Biome* getLocked(const BiomeKey& key);
 
 public:
     /**

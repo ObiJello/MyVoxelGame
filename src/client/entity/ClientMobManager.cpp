@@ -12,13 +12,20 @@
 #include "common/entity/ArmorStand.hpp"
 #include "common/entity/decoration/Painting.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "common/entity/vehicle/Boat.hpp"
+#include "common/entity/vehicle/Minecart.hpp"
+#include "client/entity/ClientVehicles.hpp"
+#include "common/entity/decoration/LeashFenceKnot.hpp"
 #include "common/network/packets/game/ArmorStandDataS2CPacket.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
 #include "common/entity/projectile/Arrow.hpp"
+#include "common/entity/projectile/FireworkRocket.hpp"
 #include "common/entity/projectile/EyeOfEnder.hpp"
 #include "common/entity/projectile/ThrowableProjectile.hpp"
+#include "common/entity/projectile/FishingHook.hpp"
 #include "common/entity/projectile/HurtingProjectile.hpp"
 #include "common/entity/projectile/ShulkerBullet.hpp"
 #include "common/entity/projectile/LlamaSpit.hpp"
@@ -26,7 +33,9 @@
 #include "common/entity/projectile/EvokerFangs.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/LightningBolt.hpp"
+#include "common/entity/OminousItemSpawner.hpp"
 #include "client/renderer/environment/EnvironmentState.hpp"
+#include "client/world/ClientWeather.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
@@ -36,6 +45,14 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Log.hpp"
 #include "client/sound/ClientSounds.hpp"
+#include "client/sound/JukeboxSongPlayback.hpp"
+#include "common/world/block/entity/JukeboxBlockEntity.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "client/world/ClientLevelEvents.hpp"
+#include "client/renderer/particle/BlockParticleTint.hpp"
+#include "common/world/biome/Biomes.hpp"
+#include "common/world/level/World.hpp"
+#include "common/world/lighting/ChunkLight.hpp"
 #include "client/sound/SoundInstance.hpp"
 
 #include <algorithm>
@@ -76,6 +93,84 @@ namespace Client {
                                                       std::string_view event, Game::SoundSource source,
                                                       float volume, float pitch, int64_t seed) {
         if (except.player) Sounds::PlayEntityBound(sourceEntity.GetId(), event, source, volume, pitch, seed);
+    }
+
+    int ClientLevelBridge::GetSkyBrightness(int x, int y, int z) const {
+        if (!m_blocks) return 15;
+        return m_blocks->GetBrightness(Game::Lighting::LightLayer::Sky, x, y, z);
+    }
+
+    void ClientLevelBridge::GetPlayingJukeboxes(std::vector<glm::ivec3>& out) const {
+        JukeboxSongPlayback::ForEachPlaying([&](const glm::ivec3& pos) { out.push_back(pos); });
+    }
+
+    bool ClientLevelBridge::IsJukeboxPlaying(const glm::ivec3& pos) const {
+        if (JukeboxSongPlayback::IsPlayingAt(pos)) return true;
+        // The block entity's copy (BlockEntityDataS2C) — also set for a song
+        // that started before this client was near.
+        auto* level = const_cast<Game::ILevelWrite*>(dynamic_cast<const Game::ILevelWrite*>(m_blocks));
+        if (!level) return false;
+        const auto* jukebox = dynamic_cast<const Game::JukeboxBlockEntity*>(level->GetBlockEntity(pos));
+        return jukebox && jukebox->GetSongPlayer().IsPlaying();
+    }
+
+    int ClientLevelBridge::GetSkyDarken() const {
+        // MC ClientLevel.updateSkyBrightness: SKY_LIGHT_LEVEL with the
+        // weather layers (World::SkyDarkenFor).
+        return Game::World::SkyDarkenFor(m_dayTime, ClientWeather::RainLevel(1.0f),
+                                         ClientWeather::ThunderLevel(1.0f));
+    }
+
+    int ClientLevelBridge::GetMaxLocalRawBrightness(int x, int y, int z) const {
+        return GetMaxLocalRawBrightness(x, y, z, GetSkyDarken());
+    }
+
+    int ClientLevelBridge::GetMaxLocalRawBrightness(int x, int y, int z, int amount) const {
+        // MC LevelLightEngine.getRawBrightness: max(block, sky - amount).
+        if (!m_blocks) return 15;
+        const int sky = m_blocks->GetBrightness(Game::Lighting::LightLayer::Sky, x, y, z) - amount;
+        return std::max(m_blocks->GetBrightness(Game::Lighting::LightLayer::Block, x, y, z), sky);
+    }
+
+    float ClientLevelBridge::GetRainLevel(float partialTick) const {
+        return ClientWeather::RainLevel(partialTick);
+    }
+
+    float ClientLevelBridge::GetThunderLevel(float partialTick) const {
+        return ClientWeather::ThunderLevel(partialTick);
+    }
+
+    bool ClientLevelBridge::IsRaining() const {
+        return ClientWeather::IsRaining();
+    }
+
+    bool ClientLevelBridge::IsThundering() const {
+        // Level.isThundering: canHaveWeather && getThunderLevel(1) > 0.9.
+        return ClientWeather::IsThundering();
+    }
+
+    int ClientLevelBridge::PrecipitationAt(const glm::ivec3& pos) const {
+        // Level.precipitationAt: raining, canSeeSky (the sky light at full
+        // strength), at or above the MOTION_BLOCKING heightmap, and the
+        // biome's precipitation at that height — which is what makes the
+        // leaves drip (LeavesBlock.animateTick's isRainingAt(above)).
+        if (!m_blocks) return kPrecipitationNone;
+        return ClientWeather::PrecipitationAt(*m_blocks, pos);
+    }
+
+    int ClientLevelBridge::GetClientLeafTintColor(const glm::ivec3& pos) const {
+        if (!m_blocks) return -1;
+        const int64_t tint = Render::BlockTintColor(m_blocks->GetBlockState(pos.x, pos.y, pos.z), m_blocks, pos,
+                                                    /*asTerrainParticle=*/false);
+        return static_cast<int>(tint);
+    }
+
+    void ClientLevelBridge::PlayLevelEvent(const Game::SoundExcept& except, int type, const glm::ivec3& pos,
+                                           int data) {
+        // MC ClientLevel.levelEvent: `if (except == minecraft.player)` — a
+        // player `except` IS the local player on this side (as for sounds);
+        // an entity `except` never is.
+        if (except.player) LevelEvents::LevelEvent(type, pos, data);
     }
 
     void ClientLevelBridge::PlayLocalSound(const glm::dvec3& pos, std::string_view event,
@@ -119,6 +214,8 @@ namespace Client {
         constexpr uint8_t kFlagAggressive = 0x02;
         constexpr uint8_t kFlagOnFire     = 0x04;
         constexpr uint8_t kFlagAgeLocked  = 0x08;   // MC AgeableMob.AGE_LOCKED
+        constexpr uint8_t kFlagUsingItem  = 0x10;   // DATA_LIVING_ENTITY_FLAGS bit 1
+        constexpr uint8_t kFlagUseOffhand = 0x20;   // ... bit 2
 
         std::unique_ptr<Game::Mob> CreateMobOfType(Game::EntityTypeId type,
                                                    Game::EntityLevel* level) {
@@ -158,9 +255,14 @@ namespace Client {
                 case Game::EntityTypeId::MagmaCube:
                     return std::make_unique<Game::MagmaCube>(level);
                 case Game::EntityTypeId::Cod:
-                case Game::EntityTypeId::Salmon:
-                case Game::EntityTypeId::TropicalFish:
                     return std::make_unique<Game::SchoolingFish>(type, level);
+                // The size / variant carriers — the server's classes, so the
+                // synced variant byte (and the tropical fish's anim byte)
+                // decode into the state the renderer reads.
+                case Game::EntityTypeId::Salmon:
+                    return std::make_unique<Game::Salmon>(level);
+                case Game::EntityTypeId::TropicalFish:
+                    return std::make_unique<Game::TropicalFish>(level);
                 case Game::EntityTypeId::Pufferfish:
                     return std::make_unique<Game::Pufferfish>(level);
                 case Game::EntityTypeId::Squid:
@@ -247,11 +349,11 @@ namespace Client {
                     return std::make_unique<Game::LargeFireball>(level);
                 case Game::EntityTypeId::DragonFireball:
                     return std::make_unique<Game::DragonFireball>(level);
-                // Renders as NOTHING by design: MC draws the cloud purely as
-                // particles, and no particle system exists — MobRenderer's
-                // GetModelFor returns null for it (no model, no MobDef row)
-                // and skips it. The entity still ticks so a late-joining
-                // client keeps consistent ids.
+                // No model by design: MC draws the cloud purely as
+                // particles, which the server sends every tick (the
+                // EffectCloud particle burst) — MobRenderer's GetModelFor
+                // returns null for it and skips it. The entity still ticks
+                // so a late-joining client keeps consistent ids.
                 case Game::EntityTypeId::AreaEffectCloud:
                     return std::make_unique<Game::AreaEffectCloud>(level);
                 case Game::EntityTypeId::WitherSkull:
@@ -285,10 +387,28 @@ namespace Client {
                     return std::make_unique<Game::ItemFrame>(level, /*glow=*/false);
                 case Game::EntityTypeId::GlowItemFrame:
                     return std::make_unique<Game::ItemFrame>(level, /*glow=*/true);
+                case Game::EntityTypeId::Cushion:
+                    return std::make_unique<Game::Cushion>(level);
+                case Game::EntityTypeId::LeashKnot:
+                    return std::make_unique<Game::LeashFenceKnot>(level);
                 case Game::EntityTypeId::EnderPearl:
                     return std::make_unique<Game::ThrownEnderpearl>(level);
+                case Game::EntityTypeId::FireworkRocket:
+                    return std::make_unique<Game::FireworkRocket>(level);
+                // MC FishingHook — its owner, hooked entity and bite follow
+                // in FishingHookDataS2C (Client::Fishing).
+                case Game::EntityTypeId::FishingBobber:
+                    return std::make_unique<Game::FishingHook>(level);
+                // MC OminousItemSpawner — its item follows in ItemFrameDataS2C
+                // (the "entity's displayed item" packet); ItemEntityRenderer
+                // draws it.
+                case Game::EntityTypeId::OminousItemSpawner:
+                    return std::make_unique<Game::OminousItemSpawner>(level);
                 default: break;
             }
+            // Boats and minecarts — mirrors MakeMobForLoad's vehicle cases.
+            if (Game::IsBoatEntityType(type)) return std::make_unique<Game::Boat>(type, level);
+            if (Game::IsMinecartEntityType(type)) return Game::CreateMinecart(type, level);
             // MUST mirror IntegratedServer::MakeMob's fallthrough. The server
             // spawns, tracks and sends every type in the def table; a client
             // that returns null here drops the AddEntityS2C on the floor and
@@ -309,6 +429,21 @@ namespace Client {
             mob.SetAggressive((flags & kFlagAggressive) != 0);
             mob.SetRemainingFireTicks((flags & kFlagOnFire) != 0 ? 20 : 0);
 
+            // MC LivingEntity.onSyncedDataUpdated(DATA_LIVING_ENTITY_FLAGS):
+            // a use that began starts the client's own countdown on the hand's
+            // item (the charge pose reads it); one that ended stops it.
+            {
+                const bool usingItem = (flags & kFlagUsingItem) != 0;
+                const Game::EquipmentSlot hand = (flags & kFlagUseOffhand) != 0
+                    ? Game::EquipmentSlot::OFFHAND : Game::EquipmentSlot::MAINHAND;
+                if (usingItem && (!mob.IsUsingItem() || mob.GetUsedItemHand() != hand)) {
+                    mob.StopUsingItem();
+                    mob.StartUsingItem(hand);
+                } else if (!usingItem && mob.IsUsingItem()) {
+                    mob.StopUsingItem();
+                }
+            }
+
             // The golden dandelion's lock. MC sends the lock/unlock burst
             // from the server (sendParticles); here the flag flipping IS
             // the event, and the ageable's own timer draws the burst.
@@ -319,6 +454,8 @@ namespace Client {
                     if (!firstSight) {
                         if (auto* ageable = dynamic_cast<Game::AgeableMob*>(&mob)) {
                             ageable->ArmAgeLockParticles();
+                        } else if (auto* tadpole = dynamic_cast<Game::Tadpole*>(&mob)) {
+                            tadpole->ArmAgeLockParticles();
                         }
                     }
                 }
@@ -354,7 +491,7 @@ namespace Client {
                                  const glm::vec3& vel, float yRot, float xRot, float yHeadRot,
                                  float health, uint8_t flags, uint8_t variantData,
                                  uint8_t pose, uint8_t animState,
-                                 uint32_t blockStateRaw) {
+                                 uint32_t blockStateRaw, const SpawnExactState* exact) {
         if (!Game::IsValidEntityType(type)) {
             Log::Warning("[ClientMobManager] Unknown entity type %u for id %d", type, id);
             return;
@@ -387,6 +524,12 @@ namespace Client {
             // The proxy is filled after the spawn data below is applied, at
             // the end of this function.
             m_blockProxies.emplace_back();
+            // A minecart's rolling loop starts with it (its position is set
+            // just below; the sound follows the cart from its first tick).
+            if (Game::IsMinecartEntityType(typeId)) {
+                existing->mob->position = pos;
+                Client::Vehicles::OnVehicleSpawned(*existing->mob);
+            }
         }
 
         Game::Mob& mob = *existing->mob;
@@ -398,10 +541,26 @@ namespace Client {
         mob.oldPosition = pos;
         mob.velocity = glm::dvec3(vel);
         mob.physicsParked = false;
+        // The exact block, when the server sent one, replaces the packed
+        // angles everywhere below (targets and render-previous included).
+        float yBodyRot = yRot;
+        if (exact) {
+            yRot     = exact->yRot;
+            xRot     = exact->xRot;
+            yHeadRot = exact->yHeadRot;
+            yBodyRot = exact->yBodyRot;
+            mob.walkAnimation.position      = exact->walkPosition;
+            mob.walkAnimation.speed         = exact->walkSpeed;
+            mob.walkAnimation.speedOld      = exact->walkSpeedOld;
+            mob.walkAnimation.positionScale = exact->walkScale;
+            // Before the pose below: SetPose starts animation timers against
+            // tickCount.
+            if (exact->animAge >= 0) mob.tickCount = exact->animAge;
+        }
         mob.yRot = mob.yRotO = yRot;
         mob.xRot = mob.xRotO = xRot;
         mob.yHeadRot = mob.yHeadRotO = yHeadRot;
-        mob.yBodyRot = mob.yBodyRotO = yRot;
+        mob.yBodyRot = mob.yBodyRotO = yBodyRot;
         mob.SetHealth(health);
         ApplyFlags(mob, flags, /*firstSight=*/true);
         if (MobTraceOn()) TraceMob("SPAWN vel", id, mob, glm::dvec3(vel));
@@ -413,6 +572,12 @@ namespace Client {
         // those timers read has to already be in place.
         mob.SetAnimStateByte(animState);
         mob.SetPose(Game::PoseById(pose));
+        // The exact block's render phase (a wolf's beg tilt and shake …),
+        // over what the anim byte just set: the eased values as the server
+        // has them, previous tick included.
+        if (exact && exact->renderPhaseCount > 0) {
+            mob.SetRenderPhase(exact->renderPhase, exact->renderPhaseCount);
+        }
 
         // The block a block-shaped entity carries — AddEntityS2C's per-type
         // data int. Applied after the synched fields because it is a spawn-time
@@ -454,7 +619,7 @@ namespace Client {
         existing->renderPrevYRot = yRot;
         existing->renderPrevXRot = xRot;
         existing->renderPrevYHeadRot = yHeadRot;
-        existing->renderPrevYBodyRot = yRot;
+        existing->renderPrevYBodyRot = yBodyRot;
 
         m_codecBase[id] = pos;
         // Renderer summary for this slot — see BlockEntityProxy. Written
@@ -464,11 +629,46 @@ namespace Client {
         }
     }
 
+    void ClientMobManager::SettleInterpolation() {
+        for (ClientMob* entry : m_mobList) {
+            if (!entry || !entry->mob || entry->interpSteps <= 0) continue;
+            Game::Mob& mob = *entry->mob;
+            // A vehicle this client drives is where its own simulation put
+            // it (see Tick); a passenger's position is the vehicle's to set.
+            if (Client::Vehicles::IsLocallyDriven(mob)) { entry->interpSteps = 0; continue; }
+            if (!mob.IsPassenger()) {
+                mob.position       = entry->targetPosition;
+                mob.oldPosition    = entry->targetPosition;
+                entry->renderPrevPosition = entry->targetPosition;
+            }
+            mob.yRot     = mob.yRotO     = entry->targetYRot;
+            mob.xRot     = mob.xRotO     = entry->targetXRot;
+            mob.yHeadRot = mob.yHeadRotO = entry->targetYHeadRot;
+            entry->renderPrevYRot     = mob.yRot;
+            entry->renderPrevXRot     = mob.xRot;
+            entry->renderPrevYHeadRot = mob.yHeadRot;
+            entry->interpSteps = 0;
+            if (entry->listIndex < m_blockProxies.size()) FillProxy(m_blockProxies[entry->listIndex], *entry);
+        }
+    }
+
     void ClientMobManager::MoveDelta(int32_t id, bool hasPos, const glm::dvec3& delta,
                                      bool hasRot, float yRot, float xRot, float yHeadRot,
                                      bool onGround) {
         ClientMob* entry = Find(id);
         if (!entry) return;
+
+        // A vehicle this client drives is simulated here: the server's own
+        // moves of it only advance the codec base (MC handleMoveEntity skips
+        // a locally authoritative entity).
+        if (Client::Vehicles::IsLocallyDriven(*entry->mob)) {
+            if (hasPos) {
+                auto it = m_codecBase.find(id);
+                const glm::dvec3 base = (it == m_codecBase.end()) ? entry->mob->position : it->second;
+                m_codecBase[id] = base + delta;
+            }
+            return;
+        }
 
         if (hasPos) {
             // The delta is relative to the SERVER's last-sent position, not to
@@ -524,6 +724,9 @@ namespace Client {
 
         m_codecBase[id] = pos;
         if (Traced(*entry->mob)) TraceMob(snap ? "SYNC(snap) pos" : "SYNC pos", id, *entry->mob, pos);
+        // MC handleEntityPositionSync: not for a locally authoritative
+        // entity (a boat this client drives — MoveVehicleS2C corrects it).
+        if (!snap && Client::Vehicles::IsLocallyDriven(*entry->mob)) return;
 
         if (snap) {
             // A portal crossing: the body is already drawn emerging on the
@@ -575,6 +778,10 @@ namespace Client {
 
     void ClientMobManager::SetMotion(int32_t id, const glm::vec3& vel) {
         if (ClientMob* entry = Find(id)) {
+            // A vehicle or mount this client drives owns its motion (the
+            // server's copy stands still between the driver's moves, so its
+            // zero velocity must not stop the one simulated here).
+            if (entry->mob && Client::Vehicles::IsLocallyDriven(*entry->mob)) return;
             if (Traced(*entry->mob)) TraceMob("MOTION vel", id, *entry->mob, glm::dvec3(vel));
             entry->mob->velocity = glm::dvec3(vel);
             entry->mob->physicsParked = false;
@@ -619,10 +826,47 @@ namespace Client {
         ClientMob* entry = Find(id);
         if (!entry) return;
         if (auto* frame = dynamic_cast<Game::ItemFrame*>(entry->mob.get())) frame->SetItemSilently(item);
+        // The ominous item spawner's DATA_ITEM rides the same packet.
+        if (auto* spawner = dynamic_cast<Game::OminousItemSpawner*>(entry->mob.get())) spawner->SetItem(item);
     }
 
-    void ClientMobManager::CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind) {
-        TrackingEmitter emitter{entityId, kind, 0};
+    void ClientMobManager::SetLeashHolder(int32_t id, int32_t holderId) {
+        ClientMob* entry = Find(id);
+        if (!entry || !entry->mob || !entry->mob->IsLeashable()) return;
+        entry->mob->SetDelayedLeashHolderId(holderId);
+    }
+
+    void ClientMobManager::SetBodyArmor(int32_t id, const Game::ItemStack& item) {
+        ClientMob* entry = Find(id);
+        if (!entry) return;
+        if (auto* wolf = dynamic_cast<Game::Wolf*>(entry->mob.get())) {
+            wolf->SetBodyArmorItem(item);
+        } else if (entry->mob) {
+            // Any other mob's BODY slot (horse armour, a llama's carpet, a
+            // happy ghast's harness) — its EntityEquipment.
+            entry->mob->SetEquipment(Game::EquipmentSlot::BODY, item);
+        }
+    }
+
+    void ClientMobManager::SetMainHandItem(int32_t id, const Game::ItemStack& item) {
+        ClientMob* entry = Find(id);
+        if (!entry || !entry->mob) return;
+        if (auto* allay = dynamic_cast<Game::Allay*>(entry->mob.get())) {
+            allay->SetMainHandItem(item);
+            return;
+        }
+        // Any other mob's main hand is its humanoid equipment.
+        entry->mob->SetEquipment(Game::EquipmentSlot::MAINHAND, item);
+    }
+
+    void ClientMobManager::SetEquipment(int32_t id, Game::EquipmentSlot slot, const Game::ItemStack& item) {
+        ClientMob* entry = Find(id);
+        if (!entry || !entry->mob) return;
+        entry->mob->SetEquipment(slot, item);
+    }
+
+    void ClientMobManager::CreateTrackingEmitter(int32_t entityId, Game::ParticleKind kind, int lifeTime) {
+        TrackingEmitter emitter{entityId, kind, 0, lifeTime};
         // The constructor ticks once: the first burst lands with the hit.
         if (TickTrackingEmitter(emitter)) m_trackingEmitters.push_back(emitter);
     }
@@ -656,7 +900,7 @@ namespace Client {
                                 pos.z + width * (za / 4.0),
                                 xa, ya + 0.2, za);
         }
-        return ++emitter.life < kTrackingEmitterLifeTime;
+        return ++emitter.life < emitter.lifeTime;
     }
 
     void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,
@@ -1078,6 +1322,15 @@ namespace Client {
 
                 mob.SetOldPosAndRot();
                 ++mob.tickCount;
+
+                // A vehicle or mount this client drives is where its own
+                // simulation put it: correction steps armed before the ride
+                // began (a horse's run-around while being broken in, the
+                // wander of an unsaddled one) must not drag it back toward
+                // the server's older positions once it is ours.
+                if (entry.interpSteps > 0 && Client::Vehicles::IsLocallyDriven(mob)) {
+                    entry.interpSteps = 0;
+                }
 
                 if (entry.interpSteps > 0) {
                     const double alpha = 1.0 / static_cast<double>(entry.interpSteps);

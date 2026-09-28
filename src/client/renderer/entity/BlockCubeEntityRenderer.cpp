@@ -796,7 +796,8 @@ namespace Render {
             const Game::BlockID id = s.Block();
             if (id == Game::BlockID::Air) return false;
             return Game::BlockRegistry::Get(id).opaque &&
-                   !Game::BlockEntityTypes::HasBlockEntity(id) &&
+                   (!Game::BlockEntityTypes::HasBlockEntity(id) || id == Game::BlockID::ChiseledBookshelf ||
+                    id == Game::BlockID::SuspiciousSand || id == Game::BlockID::SuspiciousGravel) &&
                    Game::BlockRegistry::IsOcclusionFullCube(s);
         };
         const auto cornerAo = [&](const glm::ivec3& n, const glm::ivec3& e1, const glm::ivec3& e2) {

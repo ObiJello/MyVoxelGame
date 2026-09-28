@@ -17,6 +17,7 @@
 #include "client/world/ClientLevel.hpp"
 #include "client/renderer/portal/PortalCrosshair.hpp"
 
+#include "client/ClientTickRateManager.hpp"   // WorldClockSeconds — the portal timings' clock
 #include <GLFW/glfw3.h>
 #include <algorithm>  // std::clamp — required for MSVC, transitively
                       // included on libc++/libstdc++ but not on MSVC's STL
@@ -48,17 +49,23 @@ namespace Client {
         // active, it gets a "static ping" that fades over kStaticDurationSec
         // — Portal's signature visual when a portal is fired with its
         // partner already on the wall.
-        const double now    = glfwGetTime();
-        portal.openStartTimeSec       = now;
+        // The world clock, not wall time: a paused world's portals hold
+        // their open/ping animation (ClientTickRateManager::WorldClockSeconds).
+        // A portal that already existed (the join / catch-up sync:
+        // `opening` 0) is shown fully open at once — started a whole open
+        // duration ago, and no ping on its partner.
+        const double now    = Client::g_clientTickRate.WorldClockSeconds();
+        const bool opening  = p.opening != 0;
+        portal.openStartTimeSec       = opening ? now : now - Client::kOpenDurationSec - 1.0;
         portal.staticPingStartTimeSec = -1.0e9;
 
         ClientPortalPair& pair = m_pairs[p.gunId];
         if (p.color == 0) {
             pair.blue = portal;
-            if (pair.orange.active) pair.orange.staticPingStartTimeSec = now;
+            if (opening && pair.orange.active) pair.orange.staticPingStartTimeSec = now;
         } else {
             pair.orange = portal;
-            if (pair.blue.active)   pair.blue.staticPingStartTimeSec   = now;
+            if (opening && pair.blue.active)   pair.blue.staticPingStartTimeSec   = now;
         }
 
         Log::Info("[ClientPortal] Set %s portal for gun=%llu at "
@@ -483,7 +490,7 @@ namespace Client {
         // normally happen — server only fires teleport on an existing
         // pair — but defensive coding for packet reordering).
         auto& pair = m_pairs[p.gunId];
-        pair.flashEndTimeSec = glfwGetTime() + kFlashDurationSec;
+        pair.flashEndTimeSec = Client::g_clientTickRate.WorldClockSeconds() + kFlashDurationSec;
     }
 
     void ClientPortalManager::OnPortalFizzle(const Network::PortalFizzleS2CPacket& p) {

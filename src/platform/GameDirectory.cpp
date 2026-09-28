@@ -4,7 +4,7 @@
 #include "common/core/Log.hpp"
 #include "server/world/storage/NBTParser.hpp"
 #include <cmath>
-#include <zlib.h>
+#include "common/core/Deflate.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -389,31 +389,38 @@ namespace Platform {
     }
 
     void GameSettings::ApplyFirstRunHardwareDefaults() {
-        const auto& hw = Core::HardwareProfile::Get();
-        if (!hw.IsLowEnd()) return;
-        // MC gates its own defaults on hardware too (the render-distance
-        // ceiling on maxMemory, Fabulous's transparency on the GPU warnlist);
-        // a first launch on a low-end machine gets the Fast table.
+        // DELIBERATE DEVIATION (user decision 2026-09-28): every first launch
+        // starts on the Fast graphics preset, on any hardware (MC defaults to
+        // Fancy and only drops to Fast on weak machines). An existing
+        // options.txt is never touched.
         ApplyGraphicsPreset(GraphicsPreset::Fast);
-        Log::Info("First run on a low-end machine (%s): Fast graphics preset applied",
-                  hw.ToString().c_str());
+        // ...with three of Fancy's rows kept (user decision 2026-09-28):
+        // Biome Blend 5x5 (radius 2), Smooth Lighting on and Entity Distance
+        // 100%. Touching rows after a preset makes the preset Custom, as in MC.
+        SetBiomeBlendRadius(2);
+        SetAO(true);
+        SetEntityDistanceScaling(1.0f);
+        Log::Info("First run (%s): Fast graphics preset + 5x5 biome blend + smooth lighting + 100%% entity distance",
+                  Core::HardwareProfile::Get().ToString().c_str());
     }
 
     // ── Graphics preset ─────────────────────────────────────────────────────
 
     const char* GameSettings::GraphicsPresetName(GraphicsPreset preset) {
         switch (preset) {
-            case GraphicsPreset::Fast:  return "fast";
-            case GraphicsPreset::Fancy: return "fancy";
-            case GraphicsPreset::Custom: break;
+            case GraphicsPreset::Fast:     return "fast";
+            case GraphicsPreset::Fancy:    return "fancy";
+            case GraphicsPreset::Fabulous: return "fabulous";
+            case GraphicsPreset::Custom:   break;
         }
         return "custom";
     }
 
     GameSettings::GraphicsPreset GameSettings::GetGraphicsPreset() const {
         const std::string name = GetString("graphicsPreset", "custom");
-        if (name == "fast")  return GraphicsPreset::Fast;
-        if (name == "fancy") return GraphicsPreset::Fancy;
+        if (name == "fast")     return GraphicsPreset::Fast;
+        if (name == "fancy")    return GraphicsPreset::Fancy;
+        if (name == "fabulous") return GraphicsPreset::Fabulous;
         return GraphicsPreset::Custom;
     }
 
@@ -425,38 +432,47 @@ namespace Platform {
     }
 
     // The table is MC's (client/GraphicsPreset.java:38-103), minus the
-    // options this engine does not have (Fabulous transparency, anisotropy,
-    // texture filtering, weather radius, menu blur) and with cloudRange in
-    // blocks rather than chunks because that is what the slider stores.
+    // options this engine does not have (anisotropy, texture filtering, menu
+    // blur, entity shadows) and with cloudRange in blocks rather than chunks
+    // because that is what the slider stores (MC's 32 / 64 / 128 chunks
+    // map to 64 / 128 / 256 here, the ratio the first two already had).
     //
-    //   option                  Fast          Fancy
-    //   renderDistance          8             16
-    //   simulationDistance      6             12
-    //   ao (smooth lighting)    off           on
-    //   cutoutLeaves            off           on
-    //   particles               Decreased     All
-    //   biomeBlendRadius        1             2
-    //   renderClouds            fast          fancy ("true")
-    //   entityDistanceScaling   0.75          1.0
-    //   mipmapLevels            2             4
-    //   prioritizeChunkUpdates  NONE          PLAYER_AFFECTED
-    //   cloudRange (blocks)     64            128
+    //   option                  Fast          Fancy          Fabulous
+    //   renderDistance          8             16             32
+    //   simulationDistance      6             12             12
+    //   ao (smooth lighting)    off           on             on
+    //   cutoutLeaves            off           on             on
+    //   particles               Decreased     All            All
+    //   biomeBlendRadius        1             2              2
+    //   renderClouds            fast          fancy ("true") fancy
+    //   entityDistanceScaling   0.75          1.0            1.25
+    //   mipmapLevels            2             4              4
+    //   prioritizeChunkUpdates  NONE          PLAYER_AFFECTED PLAYER_AFFECTED
+    //   cloudRange (blocks)     64            128            256
+    //   weatherRadius           5             10             10
+    //   improvedTransparency    off           off            ON
+    //
+    // Fabulous is the only thing in the engine that turns Improved
+    // Transparency on besides the option itself: only when picked.
     void GameSettings::ApplyGraphicsPreset(GraphicsPreset preset) {
         if (preset == GraphicsPreset::Custom) return;
-        const bool fancy = preset == GraphicsPreset::Fancy;
+        const bool fabulous = preset == GraphicsPreset::Fabulous;
+        const bool fancy = preset == GraphicsPreset::Fancy || fabulous;
 
         m_applyingGraphicsPreset = true;
-        SetRenderDistance(fancy ? 16 : 8);
+        SetRenderDistance(fabulous ? 32 : (fancy ? 16 : 8));
         SetSimulationDistance(fancy ? 12 : 6);
         SetAO(fancy);
         SetCutoutLeaves(fancy);
         SetParticles(fancy ? 0 : 1);
         SetBiomeBlendRadius(fancy ? 2 : 1);
         SetRenderClouds(fancy ? "true" : "fast");
-        SetEntityDistanceScaling(fancy ? 1.0f : 0.75f);
+        SetEntityDistanceScaling(fabulous ? 1.25f : (fancy ? 1.0f : 0.75f));
         SetMipmapLevels(fancy ? 4 : 2);
         SetPrioritizeChunkUpdates(fancy ? 1 : 0);
-        SetCloudRange(fancy ? 128 : 64);
+        SetCloudRange(fabulous ? 256 : (fancy ? 128 : 64));
+        SetWeatherRadius(fancy ? 10 : 5);
+        SetImprovedTransparency(fabulous);
         SetString("graphicsPreset", GraphicsPresetName(preset));
         m_applyingGraphicsPreset = false;
 
@@ -767,36 +783,9 @@ namespace Platform {
     }
 
     // Inflate a gzip (or zlib) stream. level.dat is gzipped NBT.
-    // Mirrors RegionDumper's use of inflateInit2(15 + 32) for header auto-detect.
     static bool InflateAll(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
-        if (in.empty()) return false;
-
-        z_stream strm{};
-        strm.next_in  = const_cast<Bytef*>(in.data());
-        strm.avail_in = static_cast<uInt>(in.size());
-        if (inflateInit2(&strm, 15 + 32) != Z_OK) return false;
-
-        out.assign(in.size() * 6 + 1024, 0);
-        strm.next_out  = out.data();
-        strm.avail_out = static_cast<uInt>(out.size());
-
-        int ret;
-        while (true) {
-            ret = inflate(&strm, Z_NO_FLUSH);
-            if (ret == Z_STREAM_END) break;
-            if (ret != Z_OK && ret != Z_BUF_ERROR) { inflateEnd(&strm); return false; }
-            if (strm.avail_out == 0) {
-                const size_t used = strm.total_out;
-                out.resize(out.size() * 2);
-                strm.next_out  = out.data() + used;
-                strm.avail_out = static_cast<uInt>(out.size() - used);
-                continue;
-            }
-            if (ret == Z_BUF_ERROR) { inflateEnd(&strm); return false; }  // truncated
-        }
-        out.resize(strm.total_out);
-        inflateEnd(&strm);
-        return true;
+        return !in.empty() &&
+               Core::Deflate::Decompress(in.data(), in.size(), out, 64u << 20) == Core::Deflate::Status::Ok;
     }
 
     // Fill the LevelSummary-equivalent fields from a world's level.dat.

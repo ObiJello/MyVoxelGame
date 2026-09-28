@@ -24,6 +24,7 @@
 namespace Game {
 
     struct ItemStack;
+    class Entity;
 
     class IUsePlayer {
     public:
@@ -54,6 +55,19 @@ namespace Game {
 
         virtual bool IsSneaking() const = 0;
 
+        // The player as a Game::Entity, for the game events an item or block
+        // interaction raises (MC passes the Player itself as the event's
+        // source entity): the server's PlayerEntityView. Null on the client,
+        // whose level posts no game events anyway.
+        virtual Entity* GameEventSource() { return nullptr; }
+
+        // MC LivingEntity.isFallFlying — gliding on an elytra. A firework
+        // rocket used in the air boosts a gliding player and does nothing
+        // otherwise (FireworkRocketItem.use); one used on a block while
+        // gliding passes (useOn). Server: the ServerPlayer's flag; client:
+        // the local player's own glide.
+        virtual bool isFallFlying() const { return false; }
+
         // MC Player.getPlainTextName — the name a command source built from
         // this player answers "@s" / "@p" with (a book resolved as it is put
         // on a lectern). Empty for an adapter with no name behind it.
@@ -81,6 +95,12 @@ namespace Game {
         // buckets into one filled bucket. Default keeps that fallback for
         // players without an inventory behind them (the client's predictor).
         virtual void CreateFilledResult(ItemStack& held, const ItemStack& filled);   // Item.cpp
+
+        // MC `if (!player.getInventory().add(stack)) player.drop(stack,
+        // false)`: into the inventory, the rest dropped at the player. False
+        // (nothing done) for a player with no inventory behind it (the
+        // client's predictor).
+        virtual bool AddItemOrDrop(const ItemStack& stack) { (void)stack; return false; }
 
         virtual ItemStack& getItemInHand(uint32_t hand) = 0;
         virtual int        handSlotIndex(uint32_t hand) const = 0;
@@ -163,6 +183,20 @@ namespace Game {
         //   client (LocalPlayer.openItemGui): a WRITABLE book opens the
         //     book-and-quill editor straight away.
         virtual void OpenItemGui(ItemStack& stack, uint32_t hand) { (void)stack; (void)hand; }
+
+        // MC Player.canEat(canAlwaysEat) — `abilities.invulnerable ||
+        // canAlwaysEat || foodData.needsFood()`. Asked by blocks you eat
+        // from (CakeBlock.eat). The default knows no hunger and refuses; the
+        // server answers from its FoodData, the client's prediction from the
+        // food level the HUD shows.
+        virtual bool CanEat(bool canAlwaysEat) const { (void)canAlwaysEat; return false; }
+
+        // MC player.getFoodData().eat(nutrition, saturationModifier) — a
+        // cake slice (2, 0.1). The server's FoodData only: the client's copy
+        // follows through SetHealthS2C, so the default does nothing.
+        virtual void EatFood(int nutrition, float saturationModifier) {
+            (void)nutrition; (void)saturationModifier;
+        }
     };
 
 } // namespace Game

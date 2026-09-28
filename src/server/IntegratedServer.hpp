@@ -12,6 +12,7 @@
 #include "common/network/AsioInclude.hpp"
 #include "commands/CommandDispatcher.hpp"
 #include "server/world/watch/ChunkLoader.hpp"
+#include "common/portal/PortalRoute.hpp"
 #include "ServerTickRateManager.hpp"
 #include "ServerStressStats.hpp"
 #include <memory>
@@ -44,10 +45,13 @@ namespace Game {
 // SummonMobs takes an EntityTypeId by value, so the enum must be complete
 // here rather than forward-declared.
 #include "common/entity/EntityType.hpp"
+#include "common/entity/SpawnReason.hpp"
 
 namespace Game::Immersive { struct Portal; }
 
 namespace Game { struct BlockHitResult; }
+
+namespace World { class NBTTagCompound; }
 
 namespace Server {
 
@@ -115,6 +119,12 @@ namespace Server {
         // detonates in sequence instead of as one blast. 0 = simultaneous.
         // No vanilla equivalent — MC would need one command per fuse value.
         int tntFuseStep = 0;
+        // MC SummonCommand's <nbt> (CompoundTagArgument): loaded onto each
+        // new entity as a saved compound is (Game::Anvil::ApplyMobNbt), after
+        // which the entity is snapped to the summon position. When present,
+        // finalizeSpawn is NOT run (MC createEntity(..., finalize = false)),
+        // so the compound's variant, colour and age stand as given.
+        std::shared_ptr<const ::World::NBTTagCompound> nbt;
     };
 
     // Forward declarations
@@ -124,8 +134,12 @@ namespace Server {
     class PlayerSessionManager;
     class RemoteControlManager;
     class MorphCarry;
+    class WanderingTraderSpawner;
+    class PatrolSpawner;
+    class ServerWeather;
     class MorphBlockAnchor;
     class ServerSoundBroadcaster;
+    class ServerParticleBroadcaster;
     class ServerPlayer;
     class PlayerSession;
     class SectionChangeAccumulator;
@@ -235,6 +249,11 @@ namespace Server {
         // (DedicatedServer.java:722). Kept separate from the name because an
         // empty name is legitimate — it means "the server's default name".
         bool hasSingleplayerOwner = false;
+        // The join transition's hold (see IntegratedServer::ReleaseOwnerJoinHold):
+        // the owner's client is showing the last-world panorama that this
+        // world is about to replace, so the world must not move until the
+        // picture has become it. Only meaningful with hasSingleplayerOwner.
+        bool holdOwnerJoin = false;
     };
 
 
@@ -399,7 +418,12 @@ namespace Server {
         // distance, plus the far side of every immersive portal near it (and,
         // one level deep, portals near those far sides). See ChunkLoader.hpp
         // and the mod's ChunkVisibility. Server thread.
-        std::vector<ChunkLoader> ComputeChunkLoaders(const PlayerSession& session) const;
+        // `outRoutes` (optional) receives the routes through every portal
+        // the player could look through (Game::PortalRoute) — the send
+        // order's portal-aware distance (PlayerSession::SetSendRoutes).
+        // They never change the loaders.
+        std::vector<ChunkLoader> ComputeChunkLoaders(const PlayerSession& session,
+                                                     std::vector<Game::PortalRoute::Route>* outRoutes = nullptr) const;
 
         // The level a session's player is standing in. Falls back to the
         // overworld for a session with no player attached yet.
@@ -485,6 +509,62 @@ namespace Server {
             return m_tickRateManager.runsNormally() && !m_paused;
         }
 
+        // ── Join hold ───────────────────────────────────────────────────────
+        //
+        // Rejoining the world the title's last-world panorama is a picture of,
+        // the client keeps that picture up while the world streams in beneath
+        // it and hands over to the live world only once the view is meshed
+        // and the panorama has eased to the leave look (PlatformMain's
+        // JoinTransition). Anything the world did meanwhile — a mob that
+        // walked, water that flowed, the sun that moved — would show at the
+        // hand-over as the picture "jumping". So while the hold is on, the
+        // owner's session counts as PAUSED in the pause computation below:
+        // with nobody else in the world the server simply stays in the pause
+        // it starts in (m_paused is true until a playing session appears), so
+        // there is no pause transition, no "Saving and pausing" save, and
+        // chunk loading, generation and sending carry on as under any pause.
+        //
+        // Armed from the config (IntegratedServerConfig::holdOwnerJoin) before
+        // the server thread starts, so not one tick runs unheld; released by
+        // the client's main thread on the hand-over frame. The resume that
+        // follows is the ordinary one ("Resuming game", ForceTimeSync). A
+        // guest who joins meanwhile is not held and un-pauses the world as a
+        // playing guest always does. Never waits forever: after
+        // kOwnerJoinHoldTimeoutTicks the server lets itself go.
+        void ReleaseOwnerJoinHold() { m_ownerJoinHold.store(false, std::memory_order_release); }
+        bool OwnerJoinHeld() const  { return m_ownerJoinHold.load(std::memory_order_acquire); }
+        // 60 s. The client's own escape hatches end the transition well before
+        // this (LevelLoadTracker's 30 s, then an ease of at most ~1.2 s).
+        static constexpr int kOwnerJoinHoldTimeoutTicks = 60 * 20;
+
+        // ── The owner's view of the mobs, at Save and Quit ─────────────────
+        //
+        // The last-world panorama is a picture of the CLIENT's mobs: body
+        // yaw (body-follows-head runs client side), head, pitch, limb swing
+        // and animation age as rendered. The server's own copies of those
+        // drift from it, and the save records the server's — so a rejoined
+        // world would not quite be the picture. At Save and Quit (after the
+        // capture) the host's client hands its view over; it is applied to
+        // the server's mobs before anything else in the next tick (ahead of
+        // the owner's disconnect being processed and any chunk unloading),
+        // or at the start of Shutdown's save should no tick run again. The
+        // save (obey_* extras) and the spawn packet then carry it back.
+        // Single-player owner only; any thread.
+        struct ClientMobView {
+            int32_t          id = 0;
+            Game::DimensionId dimension = Game::DimensionId::Overworld;
+            float yRot = 0.0f, xRot = 0.0f, yHeadRot = 0.0f, yBodyRot = 0.0f;
+            float walkPosition = 0.0f, walkSpeed = 0.0f, walkSpeedOld = 0.0f, walkScale = 1.0f;
+            int32_t age = 0;   // the client's tickCount for the mob
+            // Game::Mob::GetRenderPhase (a wolf's beg tilt and shake, …).
+            int   phaseCount = 0;
+            float phase[8] = {};
+        };
+        void SubmitClientMobViews(std::vector<ClientMobView> views) {
+            std::lock_guard<std::mutex> lock(m_clientMobViewMutex);
+            m_pendingClientMobViews = std::move(views);
+        }
+
         // playerdata/<uuid>.dat. Saved on disconnect and on autosave — NOT in
         // Shutdown(), where Stop() has already destroyed every ServerPlayer.
         void SavePlayerData(const ServerPlayer& player);
@@ -511,6 +591,9 @@ namespace Server {
 
         // Get session manager for accessing player sessions
         PlayerSessionManager* GetSessionManager() const { return m_sessionManager.get(); }
+        // The weather (/weather, the night skip, the thunder tick). Null
+        // before Initialize has read level.dat.
+        ServerWeather* Weather() const { return m_weather.get(); }
         // /control pairs (src/server/control/RemoteControlManager.hpp).
         RemoteControlManager& RemoteControl() { return *m_remoteControl; }
         // /morph item pickups (src/server/entity/MorphCarry.hpp).
@@ -680,7 +763,8 @@ namespace Server {
         int  GetWorldGameType() const { return m_config.defaultGameMode; }
         void SetWorldGameType(int gameMode);                    // level.dat GameType
         // MC IntegratedServer.guestCommandAccess: may players who are not
-        // the host run commands? Default false.
+        // the host run commands? Default true here (MC defaults it off):
+        // joining players get commands unless the host turns it off.
         bool GetGuestCommandAccess() const { return m_guestCommandAccess.load(); }
         void SetGuestCommandAccess(bool access);               // saved with the world (level.dat obeycraft)
         // MC IntegratedServer.forceGameMode: every joining guest is put in
@@ -879,6 +963,9 @@ namespace Server {
         // (server/sound/ServerSoundBroadcaster.hpp). Global: a sound's
         // dimension travels with it.
         std::unique_ptr<ServerSoundBroadcaster> m_soundBroadcaster;
+        // ServerLevel.sendParticles — the Game::Particles server sink
+        // (server/particle/ServerParticleBroadcaster.hpp).
+        std::unique_ptr<ServerParticleBroadcaster> m_particleBroadcaster;
         CommandDispatcher m_commandDispatcher;
 
         // Player reference (for integrated server)
@@ -903,7 +990,7 @@ namespace Server {
         std::atomic<bool> m_allowCommands{true};
         std::atomic<bool> m_hardcore{false};
         std::atomic<bool> m_difficultyLocked{false};
-        std::atomic<bool> m_guestCommandAccess{false};
+        std::atomic<bool> m_guestCommandAccess{true};
         std::atomic<bool> m_forceGameMode{true};
         std::atomic<bool> m_joinable{true};
         // Disconnect every connection that is not the singleplayer owner.
@@ -928,6 +1015,15 @@ namespace Server {
         // TRANSITION and fire a full world save before the world exists.
         int64_t m_currentServerTick = 0;   // set each ServerTick, read by the unload sweep
         std::atomic<bool> m_paused{true};
+        // See ReleaseOwnerJoinHold. Set from the config in the constructor;
+        // the tick count is server-thread only (the timeout).
+        std::atomic<bool> m_ownerJoinHold{false};
+        int m_ownerJoinHoldTicks = 0;
+        // SubmitClientMobViews' hand-over; applied (server thread, or
+        // Shutdown after the thread is joined) by ApplyClientMobViews.
+        std::mutex                 m_clientMobViewMutex;
+        std::vector<ClientMobView> m_pendingClientMobViews;
+        void ApplyClientMobViews();
 
         // MC SleepStatus + the sleep block of ServerLevel.tick: when enough
         // Overworld players have been asleep long enough (players_sleeping_
@@ -963,6 +1059,15 @@ namespace Server {
         std::unique_ptr<Game::Anvil::SessionLock> m_sessionLock;
         // level.dat as read at Initialize (see SavedLevelDat).
         std::optional<Game::Anvil::LevelDatData> m_savedLevelDat;
+        // MC's overworld CustomSpawner for the wandering trader (its clock is
+        // saved in level.dat — see WanderingTraderSpawner.hpp).
+        std::unique_ptr<WanderingTraderSpawner> m_wanderingTraderSpawner;
+        // MC's overworld CustomSpawner for pillager patrols (its countdown
+        // lives in memory only, as MC's does — PatrolSpawner.hpp).
+        std::unique_ptr<PatrolSpawner> m_patrolSpawner;
+        // MC's weather — the server's one WeatherData (saved in level.dat)
+        // and every weather level's eased levels (ServerWeather.hpp).
+        std::unique_ptr<ServerWeather> m_weather;
         std::unordered_map<uint32_t, std::unique_ptr<ServerPlayer>> m_remotePlayers; // Remote players by ID
         // NOTE: PlayerSession is now managed by PlayerSessionManager, not stored here
 
@@ -1107,9 +1212,13 @@ namespace Server {
         // `location`: the click relative to the entity's position, when the
         // client sent one (Entity.interact's location — the armor stand's
         // slot pick); null = an older client, read as the feet.
+        // `autoSpinAttack`: MC LivingEntity.checkAutoSpinAttack's
+        // doAutoAttackOnTouch — a riptiding player ran into the entity: the
+        // attack at the spin's damage with the spin's trident, no swing.
         void HandleInteract(uint32_t connectionId, int32_t entityId, bool attack,
                             bool sprinting, int dragonPart = -1,
-                            const glm::vec3* location = nullptr);
+                            const glm::vec3* location = nullptr,
+                            bool autoSpinAttack = false);
         // MC ArmorStandItem.useOn: a stand placed on the clicked face, its
         // yaw snapped to 45°, refused where its box would meet a block or an
         // entity. Returns whether one was placed (the caller consumes the
@@ -1126,6 +1235,13 @@ namespace Server {
         // on any face of the clicked block, inside the build height.
         bool PlaceItemFrameFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
                                    const Game::ItemStack& used, bool glow);
+        // MC CushionItem.useOn: a cushion on the UP face clicked (re-clipped
+        // against the collision shape for #cushion_uses_collision_shape
+        // blocks), centred on the block, facing the player, refused where
+        // it would not survive, its resting face is buried, or a cushion
+        // already sits. `eye` is the player's eye the click was made from.
+        bool PlaceCushionFromUse(PlayerSession& session, const Game::BlockHitResult& hit,
+                                 const Game::ItemStack& used, const glm::dvec3& eye);
 
         // MC PlayerList.broadcastSystemMessage(component, false): a server
         // message with no sender, delivered to every connected client. Used for
@@ -1203,7 +1319,8 @@ namespace Server {
         bool SpawnMobFromItemUse(Game::EntityTypeId type, const glm::ivec3& spawnPos,
                                  bool tryMoveDown, bool movedUp, Game::DimensionId dimension,
                                  int portalCooldownTicks = 0,
-                                 const std::function<void(Game::Mob&)>& configure = {});
+                                 const std::function<void(Game::Mob&)>& configure = {},
+                                 Game::SpawnReason reason = Game::SpawnReason::SpawnItemUse);
 
         // MC EndCrystalItem.useOn — place a crystal entity on obsidian or
         // bedrock, and let the End's dragon fight test for the respawn

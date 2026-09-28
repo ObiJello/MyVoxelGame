@@ -885,7 +885,9 @@ namespace Game {
 
     void Whirlwind::Tick() {
         Mob::Tick();
-        --m_lifeLeft;
+        // A named whirlwind does not blow itself out (this engine's rule:
+        // a named entity never despawns); water and lava still break it up.
+        if (!HasCustomName()) --m_lifeLeft;
         if (m_level && !m_level->IsClientSide() && (m_lifeLeft <= 0 || IsInWater() || IsInLava())) {
             Discard();
         }

@@ -114,7 +114,7 @@ namespace Game {
         if (m_level && !m_level->IsClientSide() &&
             m_ambientSoundTime > -GetAmbientSoundInterval() + 20) {
             ResetAmbientSoundTime();
-            MakeSound(result.IsEmpty() ? "entity.villager.no" : "entity.villager.yes");
+            MakeSound(GetTradeUpdatedSound(!result.IsEmpty()));
         }
     }
 
@@ -143,7 +143,12 @@ namespace Game {
     void AbstractVillager::AddOffersFromTradeSet(const std::string& key, MerchantOffers& offers,
                                                  std::optional<VillagerType> merchantType) {
         if (!m_level) return;
-        VillagerTrades::AddOffersFromTradeSet(key, offers, m_level->Random(), merchantType);
+        // VillagerTrade.getOffer's LootContext: ORIGIN = the merchant's
+        // position, in its level.
+        VillagerTrades::TradeOrigin origin;
+        origin.dimensionId = DimensionToRaw(m_level->Dimension());
+        origin.position = position;
+        VillagerTrades::AddOffersFromTradeSet(key, offers, m_level->Random(), merchantType, &origin);
     }
 
     // ── Inventory (MC SimpleContainer) ───────────────────────────────────
@@ -857,28 +862,16 @@ namespace Game {
                CanAddToInventory(stack);
     }
 
-    void Villager::PickUpNearbyItems() {
-        // MC Mob.aiStep's pickup (canPickUpLoot, alive, mobGriefing) with
-        // Villager.pickUpItem → InventoryCarrier.pickUpItem: the part that
-        // fits goes into the inventory; getPickupReach is (1, 0, 1).
-        if (!m_level || m_level->IsClientSide() || !CanPickUpLoot() || !IsAlive() ||
-            !m_level->MobGriefing()) {
-            return;
-        }
-        AABBd box = GetAABBd();
-        box.min -= glm::dvec3(1.0, 0.0, 1.0);
-        box.max += glm::dvec3(1.0, 0.0, 1.0);
-        std::vector<EntityLevel::NearbyItemEntity> items;
-        m_level->GetItemEntitiesInBox(box, items);
-        for (const auto& item : items) {
-            if (!item.canPickUp) continue;
-            const ItemStack* stack = m_level->GetItemEntityStack(item.id);
-            if (!stack || stack->IsEmpty() || !WantsToPickUp(*stack)) continue;
-            const ItemStack wanted = *stack;
-            const ItemStack remainder = AddToInventory(wanted);
-            const int taken = wanted.count - remainder.count;
-            if (taken > 0) m_level->TakeFromItemEntity(item.id, taken);
-        }
+    void Villager::PickUpItem(int32_t itemEntityId, const ItemStack& stack) {
+        // MC Villager.pickUpItem → InventoryCarrier.pickUpItem(level, mob,
+        // carrier, entity): onItemPickup, then the part that fits goes into
+        // the inventory and is taken from the item entity. The sweep itself
+        // is Mob.aiStep's (Mob::TickLooting, reach (1, 0, 1), mobGriefing).
+        if (!CanAddToInventory(stack)) return;
+        OnItemPickup(itemEntityId, stack);
+        const ItemStack remainder = AddToInventory(stack);
+        const int taken = stack.count - remainder.count;
+        if (taken > 0) TakeItemEntity(itemEntityId, taken);
     }
 
     // ── Sleeping ─────────────────────────────────────────────────────────
@@ -999,6 +992,28 @@ namespace Game {
         AbstractVillager::Die(source, attacker);
     }
 
+    void Villager::ThunderHit(Entity* bolt) {
+        if (!m_level || m_level->IsClientSide()) return;
+        if (m_level->GetDifficulty() == Difficulty::Peaceful || IsRemoved()) {
+            AbstractVillager::ThunderHit(bolt);
+            return;
+        }
+        Log::Info("Villager %d was struck by lightning %d.", GetId(), bolt ? bolt->GetId() : -1);
+        // convertTo(WITCH, ConversionParams.single(this, false, false), w ->
+        // { w.finalizeSpawn(..., CONVERSION, null); w.setPersistenceRequired();
+        // this.releaseAllPois(); }).
+        auto witch = std::make_unique<Witch>(m_level);
+        Witch* w = witch.get();
+        CopyConversionState(*w);
+        // preserveCanPickUpLoot = false: the witch keeps its own default.
+        w->SetCanPickUpLoot(false);
+        if (IsBaby()) w->SetBaby(true);   // ConversionType.convertCommon
+        w->FinalizeSpawn(SpawnReason::Conversion, nullptr);
+        w->SetPersistenceRequired(true);
+        ReleaseAllPois();
+        FinishConversion(std::move(witch));
+    }
+
     void Villager::Tick() {
         // MC LivingEntity.tick's bed check (server): a sleeper whose bed is
         // gone gets up.
@@ -1021,8 +1036,8 @@ namespace Game {
     }
 
     void Villager::AiStep() {
+        // Mob.aiStep's looting (Mob::TickLooting → PickUpItem) runs inside.
         AbstractVillager::AiStep();
-        PickUpNearbyItems();
     }
 
     const char* Villager::GetAmbientSound() const {

@@ -1260,19 +1260,68 @@ private:
                 }
             }
         }
-        // Sentry (shulker): setPos(x + 0.5, y, z + 0.5) and addFreshEntity -
-        // no persistence flag and NO finalizeSpawn (Java skips it here).
         // Level.isInSpawnableBounds is the +-30M horizontal / build-height
-        // test, which every placed marker passes. Elytra is an ItemFrame (a
-        // hanging entity this engine does not have), so it is not placed.
-        else if (chunkBB.isInside(pos.getX(), pos.getY(), pos.getZ())
-                 && markerId.rfind("Sentry", 0) == 0) {
-            StructureEntities::addFreshEntity(
-                level,
-                StructureEntities::mobTag("minecraft:shulker", pos.getX() + 0.5, pos.getY(),
-                                          pos.getZ() + 0.5, 0.0f, 0.0f, false),
-                false);
+        // test, which every placed marker passes.
+        else if (chunkBB.isInside(pos.getX(), pos.getY(), pos.getZ())) {
+            if (markerId.rfind("Sentry", 0) == 0) {
+                // Sentry (shulker): setPos(x + 0.5, y, z + 0.5) and
+                // addFreshEntity - no persistence flag and NO finalizeSpawn
+                // (Java skips it here).
+                StructureEntities::addFreshEntity(
+                    level,
+                    StructureEntities::mobTag("minecraft:shulker", pos.getX() + 0.5,
+                                              pos.getY(), pos.getZ() + 0.5, 0.0f, 0.0f,
+                                              false),
+                    false);
+            } else if (markerId.rfind("Elytra", 0) == 0) {
+                // new ItemFrame(level, position,
+                // placeSettings.getRotation().rotate(SOUTH)), setItem(ELYTRA,
+                // false), addFreshEntity - no RNG, no finalizeSpawn.
+                StructureEntities::addFreshEntity(level, elytraFrameTag(pos), false);
+            }
         }
+    }
+
+    // The compound a fresh ItemFrame(level, pos, facing) holding an elytra
+    // saves as. The constructor's setDirection sets the rotation (a wall
+    // frame: xRot 0, yRot = 2D data value * 90) and recalculateBoundingBox
+    // puts the entity at the centre of its box: the block centre pulled
+    // 0.46875 back towards the wall (createBoundingBox, no framed map).
+    // Saved keys: BlockAttachedEntity "block_pos", then ItemFrame's Item,
+    // ItemRotation, ItemDropChance (1.0), Facing (3D data value), Invisible,
+    // Fixed.
+    std::shared_ptr<nbt::CompoundTag> elytraFrameTag(const core::BlockPos& pos) const {
+        // Rotation.rotate(Direction.SOUTH): NONE south, CLOCKWISE_90 west,
+        // CLOCKWISE_180 north, COUNTERCLOCKWISE_90 east.
+        struct Facing { int stepX, stepZ, data2d, data3d; };
+        static constexpr Facing kSouth{0, 1, 0, 3};
+        static constexpr Facing kWest{-1, 0, 1, 4};
+        static constexpr Facing kNorth{0, -1, 2, 2};
+        static constexpr Facing kEast{1, 0, 3, 5};
+        Facing facing = kSouth;
+        switch (m_rotation) {
+            case 1: facing = kWest; break;    // CLOCKWISE_90
+            case 2: facing = kNorth; break;   // CLOCKWISE_180
+            case 3: facing = kEast; break;    // COUNTERCLOCKWISE_90
+            default: break;
+        }
+        constexpr double kShiftToBlockWall = 0.46875;
+        auto tag = StructureEntities::mobTag(
+            "minecraft:item_frame",
+            pos.getX() + 0.5 - kShiftToBlockWall * facing.stepX, pos.getY() + 0.5,
+            pos.getZ() + 0.5 - kShiftToBlockWall * facing.stepZ,
+            static_cast<float>(facing.data2d * 90), 0.0f, false);
+        tag->putIntArray("block_pos", {pos.getX(), pos.getY(), pos.getZ()});
+        auto item = std::make_unique<nbt::CompoundTag>();
+        item->putString("id", "minecraft:elytra");
+        item->putInt("count", 1);
+        tag->put("Item", std::move(item));
+        tag->putByte("ItemRotation", 0);
+        tag->putFloat("ItemDropChance", 1.0f);
+        tag->putByte("Facing", static_cast<int8_t>(facing.data3d));
+        tag->putBoolean("Invisible", false);
+        tag->putBoolean("Fixed", false);
+        return tag;
     }
 
     std::string m_templateId;

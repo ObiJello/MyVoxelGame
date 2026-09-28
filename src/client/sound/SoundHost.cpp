@@ -4,6 +4,7 @@
 #include "client/sound/AmbientSoundHandlers.hpp"
 #include "client/sound/AurelithSounds.hpp"
 #include "client/sound/ClientSounds.hpp"
+#include "client/sound/JukeboxSongPlayback.hpp"
 #include "client/sound/MusicManager.hpp"
 #include "client/sound/SoundManager.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -53,6 +54,10 @@ namespace Client::SoundHost {
             // not a biome, so it rides beside the biome handler.
             AurelithSounds::Tick(context);
         }
+        // MC JukeboxBlockEntity.setRemoved on the client: a song whose
+        // jukebox left this client's world (broken, replaced, its chunk
+        // unloaded) stops, and the entities near it are told.
+        if (context.inWorld) JukeboxSongPlayback::Tick(context.paused);
 
         // MC Minecraft.tick: musicManager.tick(); soundManager.tick(pause).
         MusicManager::Get().Tick(context);
@@ -74,6 +79,7 @@ namespace Client::SoundHost {
         // are what the player should hear from the far side on.
         MusicManager::Get().StopPlaying();
         AmbientSounds::Reset();
+        JukeboxSongPlayback::StopAll();   // the level's LevelEventHandler goes with it
         GetSoundManager().StopAll();
     }
 
@@ -81,6 +87,7 @@ namespace Client::SoundHost {
         // MC updateLevelInEngines(level, stopSound = true): every sound of the
         // old world stops, and the ambient loops are gone with the player.
         AmbientSounds::Reset();
+        JukeboxSongPlayback::Reset();
         GetSoundManager().StopAll();
         MusicManager::Get().OnWorldChanged();
         SetSoundEntityResolver(nullptr);

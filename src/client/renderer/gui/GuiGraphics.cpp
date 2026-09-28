@@ -1,4 +1,6 @@
 // File: src/client/renderer/gui/GuiGraphics.cpp
+#include "client/entity/ClientFishing.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "client/resource/ResourcePacks.hpp"
 #include "GuiGraphics.hpp"
 #include "FontRenderer.hpp"
@@ -6,6 +8,7 @@
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/entity/Inventory.hpp"
+#include "client/entity/LocalItemCooldowns.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockModel.hpp"
@@ -909,7 +912,12 @@ namespace Render {
                 // (player position + yaw + target). Otherwise fall back to the static sprite.
                 std::string spriteName;
                 bool useFrameSelector = false;
-                if (item.selectFrame && !item.spriteFrames.empty()) {
+                // A sprite chosen by the STACK (a loaded crossbow's
+                // crossbow_arrow / crossbow_firework, its pulling frames).
+                if (item.stackSprite) spriteName = item.stackSprite(stack);
+                if (!spriteName.empty()) {
+                    useFrameSelector = true;
+                } else if (item.selectFrame && !item.spriteFrames.empty()) {
                     int frame = item.selectFrame(Game::ItemRegistry::GetRenderContext());
                     if (frame < 0) frame = 0;
                     if (frame >= (int)item.spriteFrames.size()) frame = (int)item.spriteFrames.size() - 1;
@@ -917,6 +925,12 @@ namespace Render {
                     useFrameSelector = true;
                 } else {
                     spriteName = item.spriteName;
+                }
+                // MC FishingRodCast (items/fishing_rod.json's condition): the
+                // local player's held rod, while its line is out.
+                if (stack.itemId == Game::Items::FishingRod && Client::Fishing::IsCastStack(stack)) {
+                    spriteName = "fishing_rod_cast";
+                    useFrameSelector = false;
                 }
 
                 // ── Multi-layer / tinted rendering (leather armor + dye,
@@ -1006,7 +1020,7 @@ namespace Render {
 
     void GuiGraphics::RenderItemDecorations(const Game::ItemStack& slot, int x, int y) {
         // MC GuiGraphics.itemDecorations: the durability bar, then the
-        // (cooldown — no item cooldowns here), then the count on top.
+        // cooldown sweep, then the count on top.
         if (slot.IsEmpty()) return;
 
         // itemBar: a 13x2 black trough two px in and 13 down, the coloured
@@ -1017,6 +1031,18 @@ namespace Render {
             Fill(left, top, left + Game::kItemMaxBarWidth, top + 2, 0xFF000000u);
             Fill(left, top, left + Game::GetBarWidth(slot), top + 1,
                  0xFF000000u | Game::GetBarColor(slot));
+        }
+
+        // itemCooldown: the local player's rest on this item's group, a
+        // white (Integer.MAX_VALUE = 0x7FFFFFFF, half-alpha white) fill from
+        // the bottom up, shrinking as the cooldown runs out.
+        {
+            const float cooldown = Client::LocalItemCooldowns::GetCooldownPercent(slot);
+            if (cooldown > 0.0f) {
+                const int top    = y + static_cast<int>(std::floor(16.0f * (1.0f - cooldown)));
+                const int bottom = top + static_cast<int>(std::ceil(16.0f * cooldown));
+                Fill(x, top, x + 16, bottom, 0x7FFFFFFFu);
+            }
         }
 
         if (slot.count == 1) return;

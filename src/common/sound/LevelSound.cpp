@@ -27,4 +27,9 @@ namespace Game::Sound {
     void SetServerSink(ServerSoundSink* sink) { g_serverSink.store(sink, std::memory_order_release); }
     ServerSoundSink* GetServerSink() { return g_serverSink.load(std::memory_order_acquire); }
 
+    void BroadcastLevelEvent(DimensionId dimension, const SoundExcept& except, int type,
+                             const glm::ivec3& pos, int data) {
+        if (ServerSoundSink* sink = GetServerSink()) sink->LevelEvent(dimension, except, type, pos, data);
+    }
+
 } // namespace Game::Sound

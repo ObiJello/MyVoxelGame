@@ -7,6 +7,8 @@
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/player/SpectatorMode.hpp"
+#include "server/entity/PlayerRiding.hpp"
 
 namespace Server {
     
@@ -112,6 +114,22 @@ namespace Server {
     void ServerPlayPacketListener::onPlayerMoveC2S(const Network::PlayerMoveC2SPacket& packet) {
         m_session.HandlePlayerMove(packet);
     }
+
+    void ServerPlayPacketListener::onPlayerInputC2S(const Network::PlayerInputC2SPacket& packet) {
+        PlayerRiding::HandlePlayerInput(m_session, packet.keys);
+    }
+
+    void ServerPlayPacketListener::onMoveVehicleC2S(const Network::MoveVehicleC2SPacket& packet) {
+        PlayerRiding::HandleMoveVehicle(m_session, packet);
+    }
+
+    void ServerPlayPacketListener::onPaddleBoatC2S(const Network::PaddleBoatC2SPacket& packet) {
+        PlayerRiding::HandlePaddleBoat(m_session, packet.left, packet.right, packet.reverse);
+    }
+
+    void ServerPlayPacketListener::onRidingCommandC2S(const Network::RidingCommandC2SPacket& packet) {
+        PlayerRiding::HandleRidingCommand(m_session, packet);
+    }
     
     void ServerPlayPacketListener::onChatMessageC2S(const Network::ChatMessageC2SPacket& packet) {
         // MC handleChat / handleChatCommand live on the game listener. Ours
@@ -172,6 +190,16 @@ namespace Server {
         m_session.HandleRenameItem(packet);
     }
 
+    void ServerPlayPacketListener::onSpectatorActionC2S(const Network::SpectatorActionC2SPacket& packet) {
+        // MC handleSpectatorAction: its own hasClientLoaded() check, inside.
+        Spectator::HandleSpectatorAction(m_session, packet);
+    }
+
+    void ServerPlayPacketListener::onTeleportToEntityC2S(const Network::TeleportToEntityC2SPacket& packet) {
+        // MC handleTeleportToEntityPacket: no load gate, spectators only.
+        Spectator::HandleTeleportToEntity(m_session, packet);
+    }
+
     void ServerPlayPacketListener::onInventoryClickC2S(const Network::InventoryClickC2SPacket& packet) {
         m_session.HandleInventoryClick(packet);
     }
@@ -227,6 +255,8 @@ namespace Server {
     void ServerPlayPacketListener::onPlayerLoaded() {
         // MC ServerGamePacketListenerImpl.handleAcceptPlayerLoad -> markClientLoaded()
         m_session.MarkClientLoaded();
+        // How far each portal far side had got by the client's hand-over.
+        m_session.LogSendRouteCoverage("client loaded");
     }
 
 #if ENABLE_IMMERSIVE_PORTALS

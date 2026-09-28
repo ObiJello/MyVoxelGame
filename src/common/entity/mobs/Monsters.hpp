@@ -9,6 +9,9 @@
 #pragma once
 
 #include "common/entity/Monster.hpp"
+#include "common/entity/raid/Raider.hpp"
+#include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/ItemBasedSteering.hpp"
 #include "common/entity/NeutralMob.hpp"
 #include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
@@ -21,6 +24,8 @@ namespace Game {
 
     class RandomStrollGoal;
     class BreakDoorGoal;
+    class RangedBowAttackGoal;
+    class MeleeAttackGoal;
 
     // MC Zombie.ZombieGroupData — the pack token: the FIRST zombie of a pack
     // rolls the 5% baby chance and every later member reuses the answer, which
@@ -68,6 +73,15 @@ namespace Game {
         // MC Zombie.doHurtTarget — an on-fire, empty-handed zombie passes the
         // fire to whatever it hits.
         bool DoHurtTarget(Entity& target) override;
+
+        // MC Zombie.populateDefaultEquipmentSlots: Mob's armour roll, then a
+        // weapon with chance 0.05 (Hard) / 0.01 — nextInt(6): 0 iron sword,
+        // 1 iron spear, else iron shovel.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        // MC Zombie.canHoldItem: a baby riding something will not hold an egg.
+        bool CanHoldItem(const ItemStack& stack) const override;
+        // MC Zombie.wantsToPickUp: never glow ink sacs.
+        bool WantsToPickUp(const ItemStack& stack) const override;
 
         // MC Zombie.tick — the in-water conversion clock, then super.tick():
         // eyes underwater for 600 straight ticks starts a 300-tick conversion
@@ -139,9 +153,8 @@ namespace Game {
         int  m_inWaterTime = 0;
         int  m_conversionTime = -1;   // MC NOT_CONVERTING
         bool m_underWaterConverting = false;
-        // The accumulated caller-charge on SPAWN_REINFORCEMENTS (MC keeps it
-        // as the modifier's amount; the attribute map has no read-back, so it
-        // is mirrored here).
+        // The caller-charge last written to SPAWN_REINFORCEMENTS (read back
+        // from the modifier itself before each new charge, as MC does).
         double m_reinforcementCallerCharge = 0.0;
     };
 
@@ -158,6 +171,13 @@ namespace Game {
         // MC Husk.doHurtTarget — a landed empty-handed hit applies HUNGER for
         // 140 * (int)effectiveDifficulty ticks.
         bool DoHurtTarget(Entity& target) override;
+
+        // MC Husk.finalizeSpawn: Zombie's, a second canPickUpLoot roll, then
+        // (natural spawns, where a camel husk fits) the 10% camel husk
+        // jockey — the husk takes an iron spear and rides a fresh camel husk
+        // with a parched behind it.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
     protected:
         bool BurnsInDaylight() const override { return false; }
@@ -216,10 +236,9 @@ namespace Game {
     // drowned chase you INTO the water instead of pacing the shore.)
     //
     // Ranged: MC gives 6.25% of drowned a trident (populateDefaultEquipment-
-    // Slots: 10% roll a weapon, 10-in-16 of those a trident) and gates
-    // DrownedTridentAttackGoal on holding it. No mob equipment system exists,
-    // so the roll lives in FinalizeSpawn as a flag — same odds, same
-    // behaviour, no item.
+    // Slots: 10% roll a weapon, 10-in-16 of those a trident, the rest a
+    // fishing rod) and gates DrownedTridentAttackGoal on holding it in the
+    // main hand — a drowned that picks one up turns ranged too.
     class Drowned : public Zombie, public RangedAttackMob {
     public:
         explicit Drowned(EntityLevel* level);
@@ -228,7 +247,18 @@ namespace Game {
         // base's no-liquid half would refuse every underwater spawn.
         bool CheckSpawnObstruction(EntityLevel& level) const override { return IsUnobstructed(level); }
 
-        bool HasTrident() const { return m_hasTrident; }
+        // MC: getMainHandItem().is(TRIDENT).
+        bool HasTrident() const { return GetMainHandEquipment().itemId == Items::Trident; }
+
+        // MC Drowned.populateDefaultEquipmentSlots (no armour roll).
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        // MC Drowned.canReplaceCurrentItem: a nautilus shell is never given up.
+        bool CanReplaceCurrentItem(const ItemStack& newStack, const ItemStack& current,
+                                   EquipmentSlot slot) const override;
+        // MC Drowned.getPreferredWeaponType: #drowned_preferred_weapons.
+        const char* GetPreferredWeaponType() const override { return "minecraft:drowned_preferred_weapons"; }
+        // MC Drowned.wantsToPickUp: never spears.
+        bool WantsToPickUp(const ItemStack& stack) const override;
 
         // MC Drowned.performRangedAttack — a trident from eye height minus
         // 0.1, aimed a third up the target's box, velocity 1.6, inaccuracy
@@ -242,9 +272,6 @@ namespace Game {
         bool BurnsInDaylight() const override { return false; }
         bool ConvertsInWater() const override { return false; }
         void AddBehaviourGoals() override;
-
-    private:
-        bool m_hasTrident = false;
     };
 
     // MC ZombifiedPiglin — fire-immune, and NEUTRAL (implements NeutralMob):
@@ -266,6 +293,13 @@ namespace Game {
 
         // MC PERSISTENT_ANGER_TIME = TimeUtil.rangeOfSeconds(20, 39).
         void StartPersistentAngerTimer() override;
+
+        // MC ZombifiedPiglin.populateDefaultEquipmentSlots: a golden sword (a
+        // golden spear 1 time in 20), no armour.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        // MC ZombifiedPiglin.wantsToPickUp: canHoldItem (the glow-ink rule of
+        // Zombie's does not apply).
+        bool WantsToPickUp(const ItemStack& stack) const override { return CanHoldItem(stack); }
 
         void ClearReferenceTo(const Entity* entity) override {
             Zombie::ClearReferenceTo(entity);
@@ -298,10 +332,10 @@ namespace Game {
     // damage stay at the Monster defaults (20 / 2).
     //
     // Ranged: the skeleton is a RangedAttackMob driven by RangedBowAttackGoal
-    // (1.0, 20-or-40, 15.0F). MC's reassessWeaponGoal swaps between the bow
-    // goal and MeleeAttackGoal(1.2, false) based on the held item; with no mob
-    // equipment system the bow is permanent, which is also MC's steady state —
-    // every naturally spawned skeleton holds one.
+    // (1.0, 20-or-40, 15.0F) while it holds a bow, and MeleeAttackGoal(1.2,
+    // false) otherwise — MC's reassessWeaponGoal, rerun whenever a piece of
+    // equipment changes (a skeleton that picks up a sword walks in to hit).
+    // Every naturally spawned skeleton is handed a bow in finalizeSpawn.
     //
     // MC Skeleton.doFreezeConversion (skeleton → STRAY after 140 ticks inside
     // powder snow) is SKIPPED: no powder snow block exists, so the freeze
@@ -324,6 +358,28 @@ namespace Game {
         static constexpr int kHardAttackInterval   = 20;
         static constexpr int kNormalAttackInterval = 40;
 
+        // MC AbstractSkeleton.finalizeSpawn: the equipment and enchantment
+        // rolls, reassessWeaponGoal, canPickUpLoot (0.55 * special), the
+        // Halloween head.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC AbstractSkeleton.populateDefaultEquipmentSlots: Mob's armour
+        // roll, then a bow in the main hand.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        // MC AbstractSkeleton.reassessWeaponGoal: the bow goal (with the
+        // difficulty's interval) when the weapon hand holds a bow, else melee.
+        // Server side only. Virtual: the Twilight Forest druid swaps its own
+        // (the hoe's ranged goal).
+        virtual void ReassessWeaponGoal();
+        // MC AbstractSkeleton.onEquipItem → reassessWeaponGoal.
+        void OnEquipItem(EquipmentSlot slot, const ItemStack& oldStack, const ItemStack& newStack) override;
+        // MC AbstractSkeleton.getPreferredWeaponType: #skeleton_preferred_weapons.
+        const char* GetPreferredWeaponType() const override { return "minecraft:skeleton_preferred_weapons"; }
+        // MC AbstractSkeleton.wantsToPickUp: never spears.
+        bool WantsToPickUp(const ItemStack& stack) const override;
+        // MC AbstractSkeleton.canUseNonMeleeWeapon: a bow.
+        bool CanUseNonMeleeWeapon(const ItemStack& stack) const override { return stack.itemId == Items::Bow; }
+
     protected:
         // The variant constructor — Stray and Bogged are skeletons of a
         // different type id, exactly as MC's `extends AbstractSkeleton`.
@@ -340,19 +396,22 @@ namespace Game {
 
         void RegisterGoals() override;
         bool BurnsInDaylight() const override { return true; }
+
+    private:
+        // The two weapon goals reassessWeaponGoal swaps (owned by the goal
+        // selector while registered; null when not).
+        RangedBowAttackGoal* m_bowGoal = nullptr;
+        MeleeAttackGoal*     m_meleeGoal = nullptr;
     };
 
-    // MC WitherSkeleton — promoted from the generic path for its melee wither
-    // touch only: a landed hit applies WITHER for 200 ticks (10 s). The
-    // def-driven GenericMonster goal set stands in for AbstractSkeleton's,
-    // which is truthful here because a wither skeleton fights with its stone
-    // sword — melee — not a bow (MC's reassessWeaponGoal lands on
-    // MeleeAttackGoal for it). Fire immunity is EntityType.fireImmune in MC's
-    // type builder.
-    class WitherSkeleton : public GenericMonster {
+    // MC WitherSkeleton extends AbstractSkeleton: AbstractSkeleton's goals
+    // and weapon reassessment (it spawns with a stone sword, so it melees; one
+    // that picks up a bow shoots flaming arrows), a landed melee hit applies
+    // WITHER for 200 ticks, ATTACK_DAMAGE 4 set at spawn. Fire immunity is
+    // EntityType.fireImmune in MC's type builder.
+    class WitherSkeleton : public Skeleton {
     public:
-        explicit WitherSkeleton(EntityLevel* level)
-            : GenericMonster(EntityTypeId::WitherSkeleton, level) {}
+        explicit WitherSkeleton(EntityLevel* level);
 
         bool FireImmune() const override { return true; }
 
@@ -362,8 +421,31 @@ namespace Game {
         // MC WitherSkeleton.canBeAffected — immune to WITHER.
         bool CanBeAffected(const MobEffectInstance& effect) const override {
             if (effect.effect == MobEffectId::Wither) return false;
-            return GenericMonster::CanBeAffected(effect);
+            return Skeleton::CanBeAffected(effect);
         }
+
+        // MC WitherSkeleton.finalizeSpawn: AbstractSkeleton's, then
+        // ATTACK_DAMAGE base 4 and a fresh reassessWeaponGoal.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC WitherSkeleton.populateDefaultEquipmentSlots: a stone sword, no
+        // armour roll; populateDefaultEquipmentEnchantments: nothing.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+        void PopulateDefaultEquipmentEnchantments(JavaRandom& random, const DifficultyInstance& difficulty) override {
+            (void)random; (void)difficulty;
+        }
+        // MC WitherSkeleton.getPreferredWeaponType: none.
+        const char* GetPreferredWeaponType() const override { return nullptr; }
+        // MC WitherSkeleton.canHoldItem: not #wither_skeleton_disliked_weapons.
+        bool CanHoldItem(const ItemStack& stack) const override;
+
+    protected:
+        // MC WitherSkeleton.getArrow: the arrow is set on fire (100 s).
+        void CustomizeArrow(Arrow& arrow) override;
+        bool BurnsInDaylight() const override { return false; }
+        // MC WitherSkeleton.registerGoals: piglins (AbstractPiglin) as
+        // targets at 3, then AbstractSkeleton's.
+        void RegisterGoals() override;
     };
 
     // MC Stray — a skeleton whose arrows carry SLOWNESS. Attributes and goals
@@ -447,6 +529,24 @@ namespace Game {
         bool IsIgnited() const { return m_ignited; }
         void Ignite() { m_ignited = true; }
 
+        // MC Creeper.DATA_IS_POWERED — a charged creeper: its blast is twice
+        // the radius. Set by a lightning strike (thunderHit), saved as
+        // "powered", synced to clients on the variant byte (bit 0).
+        bool IsPowered() const { return m_powered; }
+        void SetPowered(bool powered) { m_powered = powered; }
+        uint8_t GetVariantByte() const override { return m_powered ? 1 : 0; }
+        void    SetVariantByte(uint8_t v) override { m_powered = (v & 1) != 0; }
+
+        // MC Creeper.thunderHit: super.thunderHit (burn + 5 lightning
+        // damage), then DATA_IS_POWERED = true.
+        void ThunderHit(Entity* bolt) override;
+
+        // MC Creeper.killedEntity: a charged creeper's first kill drops the
+        // victim's charged_creeper loot — its mob head (piglin, creeper,
+        // skeleton, wither skeleton, zombie) — once per creeper
+        // (droppedSkulls), under mob_drops.
+        void KilledEntity(LivingEntity& victim) override;
+
         // MC Creeper.doHurtTarget returns true WITHOUT dealing damage —
         // creepers never melee, they only explode.
         bool DoHurtTarget(Entity& target) override { return true; }
@@ -485,6 +585,7 @@ namespace Game {
 
     private:
         void Explode();
+        bool m_droppedSkulls = false;   // MC droppedSkulls
         // MC Creeper.spawnLingeringCloud — the death cloud that carries any
         // active effects the creeper had. Empty-effect creepers (the usual
         // case) spawn nothing.
@@ -494,6 +595,7 @@ namespace Game {
         int  m_swell = 0;
         int  m_oldSwell = 0;
         bool m_ignited = false;
+        bool m_powered = false;
     };
 
     // MC EnderMan. MAX_HEALTH 40, MOVEMENT_SPEED 0.3, ATTACK_DAMAGE 7,
@@ -520,7 +622,7 @@ namespace Game {
         // MC requiresCustomPersistence: a carrying enderman never despawns —
         // otherwise the block it stole would vanish with it.
         bool RequiresCustomPersistence() const override {
-            return m_carriedBlock != BlockID::Air;
+            return Monster::RequiresCustomPersistence() || m_carriedBlock != BlockID::Air;
         }
 
         // MC isBeingStaredBy: the player's view ray within a distance-scaled
@@ -912,6 +1014,8 @@ namespace Game {
 
         // MC Ghast.checkFallDamage is empty — a ghast never lands hard.
         bool CauseFallDamage(double, float) override { return false; }
+        // ... nor kicks up landing dust or accumulates a fall at all.
+        void CheckFallDamage(double, bool) override {}
 
         // MC Ghast.travel — travelFlying(input, 0.02F): no gravity, air drag
         // 0.91 (0.8 in water, 0.5 in lava).
@@ -942,8 +1046,8 @@ namespace Game {
     // SNOW_GOLEM_MELTS environment attribute) and in water (isSensitiveTo-
     // Water). Shears take the pumpkin off (mobInteract → shear: the
     // carved-pumpkin drop at eye height, DATA_PUMPKIN_ID cleared, the
-    // renderer's SnowGolemHeadLayer stops drawing it). Not modelled, named
-    // at its site: the snow trail (no snow layer block).
+    // renderer's SnowGolemHeadLayer stops drawing it). Leaves a trail of
+    // single snow layers behind it while mobGriefing is on (AiStep).
     class SnowGolem : public PathfinderMob, public RangedAttackMob {
     public:
         explicit SnowGolem(EntityLevel* level);
@@ -992,13 +1096,17 @@ namespace Game {
     // target's state (Witch.performRangedAttack), and drinks its own —
     // water breathing / fire resistance / healing / swiftness on MC's exact
     // triggers and odds, as a 32-tick timed state with the −0.25 drinking
-    // slowdown. The item visuals (the bottle in hand, DATA_USING_ITEM sync)
-    // are commented away at their sites: no mob equipment or client sync
-    // exists. The raid-layer goals (NearestHealableRaiderTargetGoal, the
-    // raider-heal throw branch, the Raider base) wait on raids.
-    class Witch : public Monster, public RangedAttackMob {
+    // slowdown; the potion is held in the main hand while it drinks (the
+    // equipment sync carries it to WitchItemLayer). It is a Raider (the
+    // patrol goal, the raider friendly-fire exemption) that never leads a
+    // patrol; the raid-layer goals (NearestHealableRaiderTargetGoal, the
+    // raider-heal throw branch) wait on raids.
+    class Witch : public Raider, public RangedAttackMob {
     public:
         explicit Witch(EntityLevel* level);
+
+        // MC Witch.canBeLeader: false.
+        bool CanBeLeader() const override { return false; }
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1027,9 +1135,6 @@ namespace Game {
     private:
         bool m_isDrinking = false;
         int  m_usingTime = 0;
-        // The potion being drunk — applied to self when the timer runs out
-        // (MC reads it back off the main-hand ItemStack; no item system).
-        std::vector<MobEffectInstance> m_drinkPotion;
     };
 
     // MC monster/Shulker (AbstractGolem -> PathfinderMob). MAX_HEALTH 30.
@@ -1125,9 +1230,12 @@ namespace Game {
     // base, its goals, applyRaidBuffs, the celebrate sound), shields
     // (blockedByItem is the only thing that STARTS a stun), leaf-destruction
     // on collision (needs mob griefing), and the stun/roar particles.
-    class Ravager : public Monster {
+    class Ravager : public Raider {
     public:
         explicit Ravager(EntityLevel* level);
+
+        // MC Ravager.canBeLeader: false.
+        bool CanBeLeader() const override { return false; }
 
         // MC Ravager.checkSpawnObstruction: !containsAnyLiquid only — the
         // entity-overlap half is dropped.
@@ -1143,7 +1251,7 @@ namespace Game {
 
         // MC Ravager.isImmobile: any active clock roots it in place.
         bool IsImmobile() const override {
-            return Monster::IsImmobile() || m_attackTick > 0 ||
+            return Raider::IsImmobile() || m_attackTick > 0 ||
                    m_stunnedTick > 0 || m_roarTick > 0;
         }
 
@@ -1238,9 +1346,14 @@ namespace Game {
         // MC Phantom.travel: travelFlying(input, 0.2F).
         void Travel(const glm::dvec3& input) override;
 
+        // MC Phantom.tick: the client copy's wing-beat flap sound and the
+        // MYCELIUM motes shed off both wing tips every tick.
+        void Tick() override;
+
         // MC Phantom.checkFallDamage is empty — a swooping phantom never
         // lands hard.
         bool CauseFallDamage(double, float) override { return false; }
+        void CheckFallDamage(double, bool) override {}
 
         // MC Phantom.finalizeSpawn: anchor five blocks up, size 0.
         std::shared_ptr<SpawnGroupData>
@@ -1268,8 +1381,8 @@ namespace Game {
     // anim byte (MC DATA_FLAGS_ID bit 1); the renderer swaps to the charging
     // texture and sets isCharging from it. Not modelled, each named at its
     // site: noPhysics wall-phasing (the engine's mover has no ghost mode —
-    // a vex respects walls), the iron-sword equipment roll, and the raid
-    // roster exemption on HurtByTargetGoal.
+    // a vex respects walls) and the raid roster exemption on
+    // HurtByTargetGoal.
     class Vex : public Monster {
     public:
         // `type` lets a subclass register under its own id (EchoWraith,
@@ -1307,6 +1420,13 @@ namespace Game {
         // MC Vex.tick: noGravity every tick, and the expired-life starvation.
         void Tick() override;
 
+        // MC Vex.finalizeSpawn: the equipment and enchantment rolls BEFORE
+        // super's.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC Vex.populateDefaultEquipmentSlots: an iron sword that never drops.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
+
         void ClearReferenceTo(const Entity* entity) override {
             Monster::ClearReferenceTo(entity);
             if (m_owner == entity) m_owner = nullptr;
@@ -1334,13 +1454,12 @@ namespace Game {
     // MC monster/illager/SpellcasterIllager — the casting-state machinery the
     // Evoker (and one day the Illusioner) runs on. The current spell id rides
     // the wire's anim byte (MC DATA_SPELL_CASTING_ID), which is also what the
-    // renderer keys the SPELLCASTING arm pose on. The AbstractIllager /
-    // Raider layers above it in MC are raid machinery and are skipped with
-    // raids; this port derives Monster directly, as the other promotions do.
-    class SpellcasterIllager : public Monster {
+    // renderer keys the SPELLCASTING arm pose on. It sits on AbstractIllager
+    // (common/entity/raid/Raider.hpp) as in MC.
+    class SpellcasterIllager : public AbstractIllager {
     public:
         // MC SpellcasterIllager.IllagerSpell (ids are wire-visible via the
-        // anim byte; the colours are the skipped hand particles').
+        // anim byte; the colours are the hand particles' — SpellColor).
         enum class IllagerSpell : uint8_t {
             None = 0,
             SummonVex = 1,
@@ -1372,8 +1491,11 @@ namespace Game {
         // MC SpellcasterIllager.customServerAiStep: count the cast down.
         void CustomServerAiStep() override;
 
-        // MC SpellcasterIllager.tick's client half is the two hand-particle
-        // streams — no particle system to land them in.
+    public:
+        // MC SpellcasterIllager.tick: the client half is the two hand-
+        // particle streams (ENTITY_EFFECT in the spell's colour).
+        void Tick() override;
+    protected:
 
     private:
         int m_spellCastingTickCount = 0;
@@ -1396,6 +1518,10 @@ namespace Game {
     class Evoker : public SpellcasterIllager {
     public:
         explicit Evoker(EntityLevel* level);
+
+        // MC Evoker.considersEntityAsAlly: itself, AbstractIllager's rule,
+        // or a vex whose owner it counts as an ally.
+        bool ConsidersEntityAsAlly(const Entity& other) const override;
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1424,9 +1550,8 @@ namespace Game {
     // Not modelled, each named at its site: the raid layer (Raider base,
     // applyRaidBuffs, celebrate), the four client-side mirror images
     // (clientSideIllusionOffsets — render trickery for a renderer with no
-    // multi-instance draw), and the bow ITEM in hand (finalizeSpawn's
-    // setItemSlot(BOW) — no mob equipment system; the bow goal treats the bow
-    // as permanent, the skeleton precedent).
+    // multi-instance draw). The bow is real equipment (finalizeSpawn's
+    // setItemSlot(BOW)); the bow goal runs only while it is held.
     class Illusioner : public SpellcasterIllager, public RangedAttackMob {
     public:
         explicit Illusioner(EntityLevel* level);
@@ -1438,6 +1563,15 @@ namespace Game {
         // up the target's box with the 0.2-per-block loft, velocity 1.6,
         // inaccuracy 14 - difficultyId * 4.
         void PerformRangedAttack(LivingEntity& target, float power) override;
+
+        // MC Illusioner.aiStep's client half, the part that shows without
+        // mirror images: while invisible, a reshuffle (the first hurt tick,
+        // or every 1200 ticks) puffs 16 CLOUDs and the mirror-move sound.
+        void AiStep() override;
+
+        // MC Illusioner.finalizeSpawn: a bow in the main hand, then super's.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
     protected:
         void RegisterGoals() override;
@@ -1455,22 +1589,23 @@ namespace Game {
     // system those gates would leave the behaviour permanently dead, so they
     // are treated as satisfied — the door pounding itself (240 ticks,
     // NORMAL/HARD only, mobGriefing-gated) is MC's in-raid behaviour
-    // exactly. Not modelled, each named at its site: the raid layer
-    // (Raider base, HoldGroundAttackGoal, RaiderOpenDoorGoal, applyRaidBuffs,
-    // celebrate), VindicatorJohnnyAttackGoal (armed by naming the mob
-    // "Johnny" — no custom-name system), and the iron axe in hand
-    // (populateDefaultEquipmentSlots — no mob equipment; the model's
-    // ATTACKING arm pose rides the aggressive flag as MC's does).
-    class Vindicator : public Monster {
+    // exactly. It is an AbstractIllager (patrols, HoldGroundAttackGoal at 4,
+    // the raider friendly-fire exemption). Not modelled, each named at its
+    // site: the raid layer (RaiderOpenDoorGoal, applyRaidBuffs, celebrate). The iron axe is real equipment (the renderer shows it only
+    // while aggressive, as VindicatorRenderer does).
+    class Vindicator : public AbstractIllager {
     public:
         explicit Vindicator(EntityLevel* level);
 
         static void CreateAttributes(AttributeMap& out);
 
-        // MC Vindicator.finalizeSpawn: navigation.setCanOpenDoors(true) (plus
-        // the equipment rolls, skipped — no equipment system).
+        // MC Vindicator.finalizeSpawn: navigation.setCanOpenDoors(true), then
+        // the equipment and enchantment rolls.
         std::shared_ptr<SpawnGroupData>
         FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        // MC Vindicator.populateDefaultEquipmentSlots: an iron axe when not
+        // in a raid (no raids here — always), no armour.
+        void PopulateDefaultEquipmentSlots(JavaRandom& random, const DifficultyInstance& difficulty) override;
 
     protected:
         void RegisterGoals() override;
@@ -1500,6 +1635,8 @@ namespace Game {
     class Wither : public Monster, public RangedAttackMob {
     public:
         explicit Wither(EntityLevel* level);
+        // MC WitherBoss.canUsePortal: never.
+        bool CanUsePortal(bool ignorePassenger) const override { (void)ignorePassenger; return false; }
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1625,13 +1762,67 @@ namespace Game {
     // it), the suffocating/shivering cold state (variant byte -> the cold
     // texture swap + the -34% speed), water sensitivity, the lava-first walk
     // target, and the spawn jockeys (zombified-piglin 1/30, baby-strider
-    // 1/10 — riding is live). Not modelled, each named at its site:
-    // saddle/riding-by-player (ItemBasedSteering, warped fungus on a stick),
-    // TemptGoal/breeding food (no warped fungus item exists), and the
-    // STRIDER_WARM_BLOCKS tag beyond lava itself.
-    class Strider : public Animal {
+    // 1/10 — riding is live), the warped-fungus food and tempting, and the
+    // player's ride (ItemSteerable: saddled, steered by a warped fungus on a
+    // stick — ItemBasedSteering, FoodOnAStickItem).
+    class Strider : public Animal, public ItemSteerable {
     public:
         explicit Strider(EntityLevel* level);
+
+        // ── Riding (MC Strider.getControllingPassenger / tickRidden /
+        //    getRiddenInput / getRiddenSpeed / boost) ────────────────────
+        // MC getControllingPassenger: saddled, and the player in the first
+        // seat holds a warped fungus on a stick in either hand.
+        bool CanBeSteeredBy(const RiderControl& rider) const override;
+        // MC getRiddenInput: straight ahead, whatever keys are held.
+        glm::dvec3 GetRiddenInput(const RiderControl& rider, const glm::dvec3& selfInput) override;
+        // MC tickRidden: turn to the rider's view (pitch halved), the boost
+        // clock, then super.
+        void TickRidden(const RiderControl& rider, const glm::dvec3& riddenInput) override;
+        // MC getRiddenSpeed: MOVEMENT_SPEED * (suffocating 0.35 : 0.55) *
+        // boostFactor (the suffocating modifier already sits on the
+        // attribute, so a shivering strider is slowed twice, as in MC).
+        float GetRiddenSpeed(const RiderControl& rider) const override;
+        // MC ItemSteerable.boost — the warped fungus on a stick's use.
+        bool Boost() override;
+        // MC Strider.mobInteract: no food in hand, saddled, unridden, not
+        // sneaking — the player climbs on; else Animal's (plus STRIDER_EAT
+        // when food was taken).
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+        // ── The saddle (MC Strider.canUseSlot / canDispenserEquipIntoSlot /
+        //    getEquipSound) ─────────────────────────────────────────────────
+        bool CanUseSlot(EquipmentSlot slot) const override {
+            if (slot != EquipmentSlot::SADDLE) return Animal::CanUseSlot(slot);
+            return IsAlive() && !IsBaby();
+        }
+        bool CanDispenserEquipIntoSlot(EquipmentSlot slot) const override {
+            return slot == EquipmentSlot::SADDLE || Animal::CanDispenserEquipIntoSlot(slot);
+        }
+        std::string GetEquipSound(EquipmentSlot slot, const ItemStack& stack,
+                                  const Equippable& equippable) const override {
+            return slot == EquipmentSlot::SADDLE ? std::string(SoundEvents::STRIDER_SADDLE)
+                                                 : Animal::GetEquipSound(slot, stack, equippable);
+        }
+        // MC Strider.canAddPassenger: one rider, and none while the strider's
+        // eyes are under lava.
+        bool CanAddPassenger(const Entity& passenger) const override;
+        // MC Strider.getPassengerAttachmentPoint: the type's seat (AT_HEIGHT;
+        // the baby's 0.65625), bobbing with the walk on a client.
+        glm::dvec3 GetPassengerAttachmentPoint(const Entity& passenger) const override;
+        // MC Strider.getDismountLocationForPassenger: the first free, non-lava
+        // floor ahead of the rider (±22.5°, ±45°), else on top of the strider.
+        glm::dvec3 GetDismountLocationForPassenger(const LivingEntity& passenger) const override;
+        // MC DATA_BOOST_TIME on the mob's synced data int (see Pig).
+        uint32_t GetCarriedBlockRaw() const override {
+            return static_cast<uint32_t>(m_steering.BoostTimeTotal());
+        }
+        void SetCarriedBlockRaw(uint32_t raw) override;
+
+        // MC Strider.getAmbientSound: silent while panicking or tempted.
+        const char* GetAmbientSound() const override;
+        // MC Strider.playStepSound: STRIDER_STEP_LAVA in lava, else
+        // STRIDER_STEP, full volume.
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1639,11 +1830,13 @@ namespace Game {
         void SetSuffocating(bool v);
 
         uint8_t GetVariantByte() const override { return m_suffocating ? 1 : 0; }
-        void SetVariantByte(uint8_t v) override { m_suffocating = (v & 1) != 0; }
+        // DATA_SUFFOCATING arrives through SetSuffocating so the client's
+        // MOVEMENT_SPEED carries the modifier too (the steering client moves
+        // the strider with it).
+        void SetVariantByte(uint8_t v) override { SetSuffocating((v & 1) != 0); }
 
-        // No warped fungus item exists — nothing tempts or breeds a strider
-        // yet (MC: ItemTags.STRIDER_FOOD / STRIDER_TEMPT_ITEMS).
-        bool IsFood(uint32_t) const override { return false; }
+        // MC ItemTags.STRIDER_FOOD: warped fungus.
+        bool IsFood(uint32_t itemId) const override;
         std::unique_ptr<Animal> CreateBaby() override {
             return std::make_unique<Strider>(m_level);
         }
@@ -1684,11 +1877,25 @@ namespace Game {
     protected:
         void RegisterGoals() override;
         bool IsSensitiveToWater() const override { return true; }
+        // MC Strider.nextStep: moveDist + 0.6.
+        float NextStep() const override { return m_moveDist + 0.6f; }
 
     private:
         void FloatStrider();
+        // MC isBeingTempted: the tempt goal is running.
+        bool IsBeingTempted() const;
+        // Stood on the lava surface (the Travel approximation holds it on the
+        // cell top, where MC's liquid collision keeps it half a block into
+        // the lava — "in lava" for MC's step sound and warm check).
+        bool IsOnLavaSurface() const;
 
         bool m_suffocating = false;
+        ItemBasedSteering m_steering;   // MC Strider.steering
+        // MC temptGoal (STRIDER_TEMPT_ITEMS: warped fungus, warped fungus on a
+        // stick) — two goals here, one per item (the Pig precedent). Owned by
+        // the goal selector.
+        class TemptGoal* m_temptGoal = nullptr;
+        class TemptGoal* m_temptGoalRod = nullptr;
     };
 
     // ── Ender dragon ───────────────────────────────────────────────────────
@@ -1823,6 +2030,8 @@ namespace Game {
     class EnderDragon : public Mob {
     public:
         explicit EnderDragon(EntityLevel* level);
+        // MC EnderDragon.canUsePortal: never.
+        bool CanUsePortal(bool ignorePassenger) const override { (void)ignorePassenger; return false; }
         ~EnderDragon() override;   // out of line: unique_ptr<DragonPhaseInstance>
 
         static void CreateAttributes(AttributeMap& out);
@@ -2006,6 +2215,10 @@ namespace Game {
         // per-tick displacement instead).
         glm::dvec3 m_prevPosForFlap{0.0};
         bool m_prevPosForFlapValid = false;
+        // The client copy's phase clock for the phases' doClientTick
+        // particles (SittingFlaming's flameTicks restart on entry).
+        uint8_t m_clientParticlePhase = 0xFF;
+        int     m_clientFlameTicks = 0;
 
         // MC EnderDragon.growlTime — the client's idle growl clock.
         int m_growlTime = 100;

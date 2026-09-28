@@ -69,11 +69,19 @@ namespace Client {
 
         size_t Count() const { return m_portals.size(); }
 
+        // Changes on every change to the set (add, update, remove, chunk
+        // unload, clear) and is unique across all stores of the process:
+        // lets per-frame consumers cache what they derive from it (the mesh
+        // order's portal candidates, MeshPriority.hpp).
+        uint64_t Revision() const { return m_revision; }
+
     private:
+        void Touch();
         void Index(const Portal& portal);
         void Unindex(const Portal& portal);
 
         std::unordered_map<PortalId, Portal> m_portals;
+        uint64_t m_revision = 0;
         std::unordered_map<Game::Math::ChunkPos, std::vector<PortalId>,
                            Game::Math::ChunkPosHash> m_byChunk;
     };

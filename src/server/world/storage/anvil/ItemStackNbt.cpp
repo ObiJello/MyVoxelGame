@@ -1,12 +1,16 @@
 // File: src/server/world/storage/anvil/ItemStackNbt.cpp
 #include "common/core/Features.hpp"
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
+#include "common/entity/mobs/TropicalFishVariant.hpp"
+#include "common/entity/raid/OminousBanner.hpp"
+#include "common/text/TextComponent.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
@@ -366,6 +370,48 @@ namespace Game::Anvil {
 
     } // namespace
 
+    namespace {
+        // FireworkExplosion.CODEC: shape (the serialized name), colors /
+        // fade_colors (Codec.INT lists — an IntArray tag under NbtOps),
+        // has_trail / has_twinkle; the optional fields omitted at their
+        // defaults, as DFU does.
+        void WriteFireworkExplosionBody(Nbt::Writer& w, const FireworkExplosion& e) {
+            w.String("shape", std::string(FireworkExplosion::ShapeName(e.shape)));
+            if (!e.colors.empty()) w.IntArray("colors", e.colors.data(), e.colors.size());
+            if (!e.fadeColors.empty()) w.IntArray("fade_colors", e.fadeColors.data(), e.fadeColors.size());
+            if (e.hasTrail) w.Bool("has_trail", true);
+            if (e.hasTwinkle) w.Bool("has_twinkle", true);
+        }
+
+        // An int list in any of the forms an NBT reader may meet: the
+        // IntArray NbtOps writes, or a list of numbers (SNBT, other tools).
+        std::vector<int32_t> ReadIntList(const ::World::NBTTag* tag) {
+            std::vector<int32_t> out;
+            if (!tag) return out;
+            if (auto arr = dynamic_cast<const ::World::NBTTagIntArray*>(tag)) return arr->value;
+            if (auto list = dynamic_cast<const ::World::NBTTagList*>(tag)) {
+                for (const auto& element : list->value) {
+                    if (!element) continue;
+                    if (auto n = NumberOf(*element)) out.push_back(static_cast<int32_t>(*n));
+                }
+            }
+            return out;
+        }
+
+        std::optional<FireworkExplosion> ReadFireworkExplosion(const ::World::NBTTagCompound& c) {
+            FireworkExplosion e;
+            // `shape` is required (fieldOf); an unknown name fails the codec.
+            if (!FireworkExplosion::ShapeFromName(c.GetValue<std::string>("shape", ""), e.shape)) {
+                return std::nullopt;
+            }
+            e.colors     = ReadIntList(c.GetTag("colors").get());
+            e.fadeColors = ReadIntList(c.GetTag("fade_colors").get());
+            e.hasTrail   = c.GetValue<int8_t>("has_trail", 0) != 0;
+            e.hasTwinkle = c.GetValue<int8_t>("has_twinkle", 0) != 0;
+            return e;
+        }
+    } // namespace
+
     void WritePotionContentsBody(Nbt::Writer& w, const PotionContents& c) {
         if (c.potion) w.String("potion", std::string(kNamespace) + GetPotionKey(*c.potion));
         if (c.customColor) w.Int("custom_color", *c.customColor);
@@ -491,6 +537,18 @@ namespace Game::Anvil {
 #endif
 
         const auto sulfurBucket = stack.components.get(DataComponents::SULFUR_CUBE_BUCKET);
+        // MC minecraft:bucket_entity_data (CustomData) and
+        // minecraft:axolotl/variant — a fish / axolotl / tadpole bucket.
+        const auto bucketEntity   = stack.components.get(DataComponents::BUCKET_ENTITY_DATA);
+        const auto axolotlVariant = stack.components.get(DataComponents::AXOLOTL_VARIANT);
+        // MC minecraft:salmon/size and minecraft:tropical_fish/{pattern,
+        // base_color, pattern_color} — the salmon and tropical fish buckets.
+        const auto salmonSize        = stack.components.get(DataComponents::SALMON_SIZE);
+        const auto fishPattern       = stack.components.get(DataComponents::TROPICAL_FISH_PATTERN);
+        const auto fishBaseColor     = stack.components.get(DataComponents::TROPICAL_FISH_BASE_COLOR);
+        const auto fishPatternColor  = stack.components.get(DataComponents::TROPICAL_FISH_PATTERN_COLOR);
+        const bool hasFishData       = salmonSize.has_value() || fishPattern.has_value() ||
+                                       fishBaseColor.has_value() || fishPatternColor.has_value();
         const auto potion        = stack.components.get(DataComponents::POTION_CONTENTS);
         const auto durationScale = stack.components.get(DataComponents::POTION_DURATION_SCALE);
         const auto stew          = stack.components.get(DataComponents::SUSPICIOUS_STEW_EFFECTS);
@@ -507,11 +565,51 @@ namespace Game::Anvil {
         const auto dyedColor     = stack.components.get(DataComponents::DYED_COLOR);
         // MC DataComponents.PAINTING_VARIANT — the variant holder's id.
         const auto paintingVariant = stack.components.get(DataComponents::PAINTING_VARIANT);
+        // MC DataComponents.MAP_ID (MapId.CODEC: the bare int),
+        // MAP_DECORATIONS (a compound of key -> {type, x, z, rotation}) and
+        // MAP_COLOR (MapItemColor.CODEC: the bare RGB int).
+        const auto mapId          = stack.components.get(DataComponents::MAP_ID);
+        const auto mapDecorations = stack.components.get(DataComponents::MAP_DECORATIONS);
+        const auto mapColor       = stack.components.get(DataComponents::MAP_COLOR);
+        const bool hasMapData     = mapId.has_value() || mapColor.has_value() ||
+                                    (mapDecorations.has_value() && !mapDecorations->decorations.empty());
+        // MC DataComponents.FIREWORKS / FIREWORK_EXPLOSION /
+        // CHARGED_PROJECTILES — a rocket's flight and stars, a star's
+        // explosion, a loaded crossbow's projectiles.
+        const auto fireworks         = stack.components.get(DataComponents::FIREWORKS);
+        const auto fireworkExplosion = stack.components.get(DataComponents::FIREWORK_EXPLOSION);
+        const auto chargedProjectiles = stack.components.get(DataComponents::CHARGED_PROJECTILES);
+        const bool hasFireworkData   = fireworks.has_value() || fireworkExplosion.has_value() ||
+                                       chargedProjectiles.has_value();
+        // MC DataComponents.OMINOUS_BOTTLE_AMPLIFIER — OminousBottleAmplifier
+        // .CODEC is the bare int (0..4).
+        const auto ominousAmplifier  = stack.components.get(DataComponents::OMINOUS_BOTTLE_AMPLIFIER);
+        // MC DataComponents.INSTRUMENT — InstrumentComponent.CODEC is an
+        // EitherHolder: the registry id as a bare string.
+        const auto instrument        = stack.components.get(DataComponents::INSTRUMENT);
+        // MC DataComponents.POT_DECORATIONS (PotDecorations.CODEC: optional
+        // back / left / right / front ItemStackTemplates) and CONTAINER
+        // (ItemContainerContents.CODEC: [{slot, item}]).
+        const auto potDecorations    = stack.components.get(DataComponents::POT_DECORATIONS);
+        const auto containerContents = stack.components.get(DataComponents::CONTAINER);
+        // MC DataComponents.BANNER_PATTERNS (BannerPatternLayers.CODEC: a
+        // list of {pattern, color}), ITEM_NAME (a text Component) and RARITY
+        // (the lower-case enum name) — the ominous banner's patch.
+        const auto bannerPatterns    = stack.components.get(DataComponents::BANNER_PATTERNS);
+        const auto itemName          = stack.components.get(DataComponents::ITEM_NAME);
+        const auto rarity            = stack.components.get(DataComponents::RARITY);
+        const bool hasBannerData     = (bannerPatterns.has_value() && !bannerPatterns->IsEmpty()) ||
+                                       itemName.has_value() || rarity.has_value();
 
-        if (!customName.has_value() && !hasEnchants && !gunInstance.has_value() &&
-            !sulfurBucket.has_value() && !potion.has_value() && !durationScale.has_value() &&
+        if (!customName.has_value() && !hasEnchants && !gunInstance.has_value() && !hasBannerData &&
+            !sulfurBucket.has_value() && !bucketEntity.has_value() && !axolotlVariant.has_value() &&
+            !hasFishData &&
+            !potion.has_value() && !durationScale.has_value() &&
             !stew.has_value() && !writtenBook.has_value() && !writableBook.has_value() &&
-            !dyedColor.has_value() && !hasDurabilityData && !paintingVariant.has_value()) return;
+            !dyedColor.has_value() && !hasDurabilityData && !paintingVariant.has_value() &&
+            !hasMapData && !hasFireworkData && !ominousAmplifier.has_value() &&
+            !instrument.has_value() && !potDecorations.has_value() &&
+            !containerContents.has_value()) return;
 
         w.BeginCompound("components");
         if (potion.has_value()) {
@@ -527,8 +625,126 @@ namespace Game::Anvil {
         if (dyedColor.has_value()) {
             w.Int("minecraft:dyed_color", *dyedColor);
         }
+        if (ominousAmplifier.has_value()) {
+            w.Int("minecraft:ominous_bottle_amplifier", *ominousAmplifier);
+        }
+        if (instrument.has_value()) {
+            w.String("minecraft:instrument", *instrument);
+        }
+        if (potDecorations.has_value()) {
+            static constexpr const char* kSides[4] = { "back", "left", "right", "front" };
+            w.BeginCompound("minecraft:pot_decorations");
+            for (int side = 0; side < 4; ++side) {
+                const std::string name = ItemName(potDecorations->sides[static_cast<size_t>(side)]);
+                if (name.empty()) continue;
+                w.BeginCompound(kSides[side]);
+                w.String("id", name);
+                w.EndCompound();
+            }
+            w.EndCompound();
+        }
+        if (containerContents.has_value()) {
+            auto list = w.BeginList("minecraft:container", Nbt::TagType::Compound);
+            for (size_t slot = 0; slot < containerContents->items.size(); ++slot) {
+                const ItemStack& item = containerContents->items[slot];
+                if (item.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                w.Int("slot", static_cast<int32_t>(slot));
+                w.BeginCompound("item");
+                WriteItemStackBody(w, item);
+                w.EndCompound();
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+        if (bannerPatterns.has_value() && !bannerPatterns->IsEmpty()) {
+            // BannerPatternLayers.CODEC = Layer.CODEC.listOf(): {pattern:
+            // the banner_pattern id, color: DyeColor's serialized name}.
+            static constexpr const char* kDyeNames[16] = {
+                "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black" };
+            auto list = w.BeginList("minecraft:banner_patterns", Nbt::TagType::Compound);
+            for (const BannerPatternLayer& layer : bannerPatterns->layers) {
+                w.ListCompoundBegin(list);
+                w.String("pattern", layer.pattern);
+                w.String("color", kDyeNames[layer.color & 15]);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+        if (itemName.has_value()) {
+            // ITEM_NAME is a text Component in MC; the engine keeps display
+            // text. The ominous banner's is MC's translatable name — written
+            // as such, so a vanilla reader still sees Raid's exact banner
+            // (ItemStack.matches decides captaincy); any other is literal.
+            if (IsSameItemSameComponents(stack, Raid::GetOminousBannerInstance())) {
+                WriteTextComponent(w, "minecraft:item_name",
+                                   Text::Component::Translatable(Raid::kOminousBannerNameKey));
+            } else {
+                w.String("minecraft:item_name", *itemName);
+            }
+        }
+        if (rarity.has_value()) {
+            static constexpr const char* kRarityNames[] = { "common", "uncommon", "rare", "epic" };
+            const auto index = static_cast<size_t>(*rarity);
+            if (index < std::size(kRarityNames)) w.String("minecraft:rarity", kRarityNames[index]);
+        }
         if (paintingVariant.has_value()) {
             w.String("minecraft:painting/variant", *paintingVariant);
+        }
+        if (fireworks.has_value()) {
+            // Fireworks.CODEC: flight_duration (UNSIGNED_BYTE, default 0),
+            // explosions (default empty).
+            w.BeginCompound("minecraft:fireworks");
+            if (fireworks->flightDuration != 0) {
+                w.Byte("flight_duration", static_cast<int8_t>(std::clamp(fireworks->flightDuration, 0, 255)));
+            }
+            if (!fireworks->explosions.empty()) {
+                auto list = w.BeginList("explosions", Nbt::TagType::Compound);
+                for (const FireworkExplosion& e : fireworks->explosions) {
+                    w.ListCompoundBegin(list);
+                    WriteFireworkExplosionBody(w, e);
+                    w.ListCompoundEnd(list);
+                }
+                w.EndList(list);
+            }
+            w.EndCompound();
+        }
+        if (fireworkExplosion.has_value()) {
+            w.BeginCompound("minecraft:firework_explosion");
+            WriteFireworkExplosionBody(w, *fireworkExplosion);
+            w.EndCompound();
+        }
+        if (chargedProjectiles.has_value()) {
+            // ChargedProjectiles.CODEC: a list of ItemStackTemplates.
+            auto list = w.BeginList("minecraft:charged_projectiles", Nbt::TagType::Compound);
+            for (const ItemStack& projectile : chargedProjectiles->items) {
+                if (projectile.IsEmpty()) continue;
+                w.ListCompoundBegin(list);
+                WriteItemStackBody(w, projectile);
+                w.ListCompoundEnd(list);
+            }
+            w.EndList(list);
+        }
+        if (mapId.has_value()) {
+            w.Int("minecraft:map_id", *mapId);
+        }
+        if (mapColor.has_value()) {
+            w.Int("minecraft:map_color", *mapColor);
+        }
+        if (mapDecorations.has_value() && !mapDecorations->decorations.empty()) {
+            // MapDecorations.CODEC: Codec.unboundedMap(STRING, Entry.CODEC),
+            // Entry = {type (registry id), x, z (double), rotation (float)}.
+            w.BeginCompound("minecraft:map_decorations");
+            for (const auto& [key, entry] : mapDecorations->decorations) {
+                w.BeginCompound(key);
+                w.String("type", std::string(kNamespace) + std::string(Maps::Info(entry.type).name));
+                w.Double("x", entry.x);
+                w.Double("z", entry.z);
+                w.Float("rotation", entry.rotation);
+                w.EndCompound();
+            }
+            w.EndCompound();
         }
         if (stew.has_value()) {
             // SuspiciousStewEffects.CODEC: a list of {id, duration}.
@@ -588,6 +804,49 @@ namespace Game::Anvil {
             w.Bool("age_locked", sulfurBucket->ageLocked);
             w.Bool("NoAI", sulfurBucket->noAi);
             w.EndCompound();
+        }
+        if (bucketEntity.has_value()) {
+            // CustomData: the compound as Bucketable / the mob wrote it —
+            // booleans only when true (MC's `if (…) putBoolean`).
+            w.BeginCompound("minecraft:bucket_entity_data");
+            if (bucketEntity->noAi)                w.Bool("NoAI", true);
+            if (bucketEntity->silent)              w.Bool("Silent", true);
+            if (bucketEntity->noGravity)           w.Bool("NoGravity", true);
+            if (bucketEntity->glowing)             w.Bool("Glowing", true);
+            if (bucketEntity->invulnerable)        w.Bool("Invulnerable", true);
+            if (bucketEntity->persistenceRequired) w.Bool("PersistenceRequired", true);
+            if (bucketEntity->health)              w.Float("Health", *bucketEntity->health);
+            if (bucketEntity->age)                 w.Int("Age", *bucketEntity->age);
+            if (bucketEntity->ageLocked)           w.Bool("AgeLocked", *bucketEntity->ageLocked);
+            if (bucketEntity->huntingCooldown)     w.Long("HuntingCooldown", *bucketEntity->huntingCooldown);
+            w.EndCompound();
+        }
+        if (axolotlVariant.has_value()) {
+            // Axolotl.Variant.CODEC — the StringRepresentable name.
+            static constexpr const char* kAxolotlVariants[] = {"lucy", "wild", "gold", "cyan", "blue"};
+            const int32_t v = (*axolotlVariant >= 0 && *axolotlVariant < 5) ? *axolotlVariant : 0;
+            w.String("minecraft:axolotl/variant", kAxolotlVariants[v]);
+        }
+        if (salmonSize.has_value()) {
+            // Salmon.Variant.CODEC — the StringRepresentable name.
+            static constexpr const char* kSalmonSizes[] = {"small", "medium", "large"};
+            w.String("minecraft:salmon/size", kSalmonSizes[std::clamp<int32_t>(*salmonSize, 0, 2)]);
+        }
+        if (fishPattern.has_value()) {
+            // TropicalFish.Pattern.CODEC — the StringRepresentable name.
+            const int32_t p = (*fishPattern >= 0 && *fishPattern < TropicalFishVariants::kPatternCount)
+                ? *fishPattern : 0;
+            w.String("minecraft:tropical_fish/pattern", std::string(TropicalFishVariants::PatternName(
+                static_cast<TropicalFishVariants::Pattern>(p))));
+        }
+        if (fishBaseColor.has_value()) {
+            // DyeColor.CODEC — the colour's name.
+            w.String("minecraft:tropical_fish/base_color",
+                     std::string(TropicalFishVariants::DyeName(*fishBaseColor)));
+        }
+        if (fishPatternColor.has_value()) {
+            w.String("minecraft:tropical_fish/pattern_color",
+                     std::string(TropicalFishVariants::DyeName(*fishPatternColor)));
         }
         if (gunInstance.has_value()) {
             w.Long(std::string(kOwnNamespace) + "portal_gun_instance_id",
@@ -673,6 +932,56 @@ namespace Game::Anvil {
             stack.components.set(DataComponents::CUSTOM_NAME, name->value);
         }
 
+        // ITEM_NAME: a text Component (a bare string is literal text, a
+        // compound may be translatable — the ominous banner's is), kept as
+        // its plain text.
+        if (auto nameTag = components->GetTag("minecraft:item_name")) {
+            if (auto component = ReadTextComponent(*nameTag)) {
+                const std::string text = Text::GetString(*component);
+                if (!text.empty()) stack.components.set(DataComponents::ITEM_NAME, text);
+            }
+        }
+        // RARITY: Rarity's serialized (lower-case) name.
+        if (auto rarityTag = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:rarity"))) {
+            static constexpr const char* kRarityNames[] = { "common", "uncommon", "rare", "epic" };
+            std::string_view value = rarityTag->value;
+            if (value.rfind("minecraft:", 0) == 0) value.remove_prefix(10);
+            for (size_t i = 0; i < std::size(kRarityNames); ++i) {
+                if (value == kRarityNames[i]) {
+                    stack.components.set(DataComponents::RARITY, static_cast<Rarity>(i));
+                    break;
+                }
+            }
+        }
+        // BANNER_PATTERNS: [{pattern: id, color: dye name}, …]. A layer whose
+        // colour is not a DyeColor fails the codec (MC drops the component).
+        if (auto patterns = std::dynamic_pointer_cast<::World::NBTTagList>(
+                components->GetTag("minecraft:banner_patterns"))) {
+            static constexpr const char* kDyeNames[16] = {
+                "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black" };
+            BannerPatternLayers layers;
+            bool valid = true;
+            for (const auto& elem : patterns->value) {
+                auto layerTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(elem);
+                if (!layerTag) { valid = false; break; }
+                BannerPatternLayer layer;
+                layer.pattern = layerTag->GetValue<std::string>("pattern", "");
+                if (layer.pattern.empty()) { valid = false; break; }
+                if (layer.pattern.find(':') == std::string::npos) layer.pattern = "minecraft:" + layer.pattern;
+                const std::string color = layerTag->GetValue<std::string>("color", "");
+                int found = -1;
+                for (int i = 0; i < 16; ++i) if (color == kDyeNames[i]) { found = i; break; }
+                if (found < 0) { valid = false; break; }
+                layer.color = static_cast<uint8_t>(found);
+                layers.layers.push_back(std::move(layer));
+            }
+            if (valid && !layers.IsEmpty()) {
+                stack.components.set(DataComponents::BANNER_PATTERNS, std::move(layers));
+            }
+        }
+
         if (auto sb = std::dynamic_pointer_cast<::World::NBTTagCompound>(
                 components->GetTag(std::string(kOwnNamespace) + "sulfur_cube_bucket"))) {
             SulfurCubeBucketData data;
@@ -683,12 +992,127 @@ namespace Game::Anvil {
             stack.components.set(DataComponents::SULFUR_CUBE_BUCKET, data);
         }
 
+        if (auto be = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:bucket_entity_data"))) {
+            BucketEntityData data;
+            data.noAi                = be->GetValue<int8_t>("NoAI", 0) != 0;
+            data.silent              = be->GetValue<int8_t>("Silent", 0) != 0;
+            data.noGravity           = be->GetValue<int8_t>("NoGravity", 0) != 0;
+            data.glowing             = be->GetValue<int8_t>("Glowing", 0) != 0;
+            data.invulnerable        = be->GetValue<int8_t>("Invulnerable", 0) != 0;
+            data.persistenceRequired = be->GetValue<int8_t>("PersistenceRequired", 0) != 0;
+            if (be->HasTag("Health"))          data.health = be->GetValue<float>("Health", 0.0f);
+            if (be->HasTag("Age"))             data.age = be->GetValue<int32_t>("Age", 0);
+            if (be->HasTag("AgeLocked"))       data.ageLocked = be->GetValue<int8_t>("AgeLocked", 0) != 0;
+            if (be->HasTag("HuntingCooldown")) data.huntingCooldown = be->GetValue<int64_t>("HuntingCooldown", 0);
+            stack.components.set(DataComponents::BUCKET_ENTITY_DATA, data);
+        }
+        if (auto av = components->GetTag("minecraft:axolotl/variant")) {
+            // The name (MC's codec); an int id is accepted too.
+            static constexpr const char* kAxolotlVariants[] = {"lucy", "wild", "gold", "cyan", "blue"};
+            int32_t id = -1;
+            if (auto s = std::dynamic_pointer_cast<::World::NBTTagString>(av)) {
+                std::string name = s->value;
+                if (name.rfind("minecraft:", 0) == 0) name = name.substr(10);
+                for (int32_t i = 0; i < 5; ++i) if (name == kAxolotlVariants[i]) id = i;
+            } else if (auto n = std::dynamic_pointer_cast<::World::NBTTagInt>(av)) {
+                id = n->value;
+            }
+            if (id >= 0 && id < 5) stack.components.set(DataComponents::AXOLOTL_VARIANT, id);
+        }
+        if (auto size = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:salmon/size"))) {
+            // Salmon.Variant.CODEC's names (small 0, medium 1, large 2).
+            static constexpr std::string_view kSalmonSizes[] = {"small", "medium", "large"};
+            std::string_view name = size->value;
+            if (name.rfind("minecraft:", 0) == 0) name.remove_prefix(10);
+            for (int32_t id = 0; id < 3; ++id) {
+                if (name == kSalmonSizes[id]) stack.components.set(DataComponents::SALMON_SIZE, id);
+            }
+        }
+        if (auto pattern = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:tropical_fish/pattern"))) {
+            if (auto p = TropicalFishVariants::PatternFromName(pattern->value)) {
+                stack.components.set(DataComponents::TROPICAL_FISH_PATTERN, static_cast<int32_t>(*p));
+            }
+        }
+        if (auto color = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:tropical_fish/base_color"))) {
+            if (auto c = TropicalFishVariants::DyeFromName(color->value)) {
+                stack.components.set(DataComponents::TROPICAL_FISH_BASE_COLOR, static_cast<int32_t>(*c));
+            }
+        }
+        if (auto color = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:tropical_fish/pattern_color"))) {
+            if (auto c = TropicalFishVariants::DyeFromName(color->value)) {
+                stack.components.set(DataComponents::TROPICAL_FISH_PATTERN_COLOR, static_cast<int32_t>(*c));
+            }
+        }
+
         if (auto potionTag = components->GetTag("minecraft:potion_contents")) {
             stack.components.set(DataComponents::POTION_CONTENTS, ReadPotionContents(*potionTag));
         }
         if (auto scale = std::dynamic_pointer_cast<::World::NBTTagFloat>(
                 components->GetTag("minecraft:potion_duration_scale"))) {
             stack.components.set(DataComponents::POTION_DURATION_SCALE, scale->value);
+        }
+        // OminousBottleAmplifier.CODEC: ExtraCodecs.intRange(0, 4) — a value
+        // outside it fails the component (MC drops the stack's patch entry).
+        // InstrumentComponent.CODEC: a holder id (a direct inline
+        // instrument has no id to keep and is dropped).
+        if (auto decorations = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:pot_decorations"))) {
+            static constexpr const char* kSides[4] = { "back", "left", "right", "front" };
+            PotDecorations value;
+            for (int side = 0; side < 4; ++side) {
+                auto entry = decorations->GetTag(kSides[side]);
+                if (auto c = std::dynamic_pointer_cast<::World::NBTTagCompound>(entry)) {
+                    value.sides[static_cast<size_t>(side)] = ItemFromName(c->GetValue<std::string>("id", ""));
+                } else if (auto str = std::dynamic_pointer_cast<::World::NBTTagString>(entry)) {
+                    value.sides[static_cast<size_t>(side)] = ItemFromName(str->value);
+                }
+            }
+            stack.components.set(DataComponents::POT_DECORATIONS, value);
+        } else if (auto sideList = std::dynamic_pointer_cast<::World::NBTTagList>(
+                       components->GetTag("minecraft:pot_decorations"))) {
+            // The pre-26 form: a list of up to four item ids, back, left,
+            // right, front.
+            PotDecorations value;
+            for (size_t i = 0; i < sideList->value.size() && i < 4; ++i) {
+                if (auto str = std::dynamic_pointer_cast<::World::NBTTagString>(sideList->value[i])) {
+                    value.sides[i] = ItemFromName(str->value);
+                }
+            }
+            stack.components.set(DataComponents::POT_DECORATIONS, value);
+        }
+        if (auto contents = std::dynamic_pointer_cast<::World::NBTTagList>(
+                components->GetTag("minecraft:container"))) {
+            ItemContainerContents value;
+            for (const auto& element : contents->value) {
+                auto entry = std::dynamic_pointer_cast<::World::NBTTagCompound>(element);
+                if (!entry) continue;
+                const int slot = entry->GetValue<int32_t>("slot", -1);
+                auto itemTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(entry->GetTag("item"));
+                if (slot < 0 || slot >= 256 || !itemTag) continue;
+                ItemStack item = ReadItemStack(*itemTag);
+                if (item.IsEmpty()) continue;
+                if (value.items.size() <= static_cast<size_t>(slot)) value.items.resize(static_cast<size_t>(slot) + 1);
+                value.items[static_cast<size_t>(slot)] = std::move(item);
+            }
+            stack.components.set(DataComponents::CONTAINER, std::move(value));
+        }
+        if (auto instrument = std::dynamic_pointer_cast<::World::NBTTagString>(
+                components->GetTag("minecraft:instrument"))) {
+            std::string id = instrument->value;
+            if (id.find(':') == std::string::npos) id = "minecraft:" + id;
+            stack.components.set(DataComponents::INSTRUMENT, id);
+        }
+        if (auto amplifier = components->GetTag("minecraft:ominous_bottle_amplifier")) {
+            const int32_t value = components->GetValue<int32_t>("minecraft:ominous_bottle_amplifier", -1);
+            if (amplifier->type != ::World::NBTTagType::TAG_Compound && value >= 0 &&
+                value <= DataComponents::kOminousBottleMaxAmplifier) {
+                stack.components.set(DataComponents::OMINOUS_BOTTLE_AMPLIFIER, value);
+            }
         }
         // DyedItemColor.CODEC: an int — or, through RGB_COLOR_CODEC's
         // alternative, a list of three floats (0..1 per channel).
@@ -707,9 +1131,65 @@ namespace Game::Anvil {
                                      static_cast<int32_t>((rgb[0] << 16) | (rgb[1] << 8) | rgb[2]));
             }
         }
+        if (auto fw = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:fireworks"))) {
+            Fireworks value;
+            value.flightDuration = fw->GetValue<int32_t>("flight_duration", 0) & 0xFF;
+            if (auto list = std::dynamic_pointer_cast<::World::NBTTagList>(fw->GetTag("explosions"))) {
+                for (const auto& element : list->value) {
+                    auto c = std::dynamic_pointer_cast<::World::NBTTagCompound>(element);
+                    if (!c) continue;
+                    if (value.explosions.size() >= Fireworks::kMaxExplosions) break;
+                    if (auto e = ReadFireworkExplosion(*c)) value.explosions.push_back(std::move(*e));
+                }
+            }
+            // The item's own default (Fireworks(1, [])) is no patch.
+            const auto prototype = ItemRegistry::Get(stack.itemId).defaultComponents.get(DataComponents::FIREWORKS);
+            if (!prototype || !(*prototype == value)) stack.components.set(DataComponents::FIREWORKS, std::move(value));
+        }
+        if (auto fe = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:firework_explosion"))) {
+            if (auto e = ReadFireworkExplosion(*fe)) stack.components.set(DataComponents::FIREWORK_EXPLOSION, std::move(*e));
+        }
+        if (auto cp = std::dynamic_pointer_cast<::World::NBTTagList>(
+                components->GetTag("minecraft:charged_projectiles"))) {
+            ChargedProjectiles value;
+            for (const auto& element : cp->value) {
+                auto c = std::dynamic_pointer_cast<::World::NBTTagCompound>(element);
+                if (!c) continue;
+                if (value.items.size() >= ChargedProjectiles::kMaxSize) break;
+                ItemStack projectile = ReadItemStack(*c);
+                if (!projectile.IsEmpty()) value.items.push_back(std::move(projectile));
+            }
+            // EMPTY is the crossbow's default — no patch.
+            if (!value.items.empty()) stack.components.set(DataComponents::CHARGED_PROJECTILES, std::move(value));
+        }
         if (auto variant = std::dynamic_pointer_cast<::World::NBTTagString>(
                 components->GetTag("minecraft:painting/variant"))) {
             stack.components.set(DataComponents::PAINTING_VARIANT, variant->value);
+        }
+        if (auto mapIdTag = std::dynamic_pointer_cast<::World::NBTTagInt>(components->GetTag("minecraft:map_id"))) {
+            stack.components.set(DataComponents::MAP_ID, static_cast<int32_t>(mapIdTag->value));
+        }
+        if (auto mapColorTag = std::dynamic_pointer_cast<::World::NBTTagInt>(components->GetTag("minecraft:map_color"))) {
+            stack.components.set(DataComponents::MAP_COLOR, static_cast<int32_t>(mapColorTag->value));
+        }
+        if (auto decorationsTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                components->GetTag("minecraft:map_decorations"))) {
+            Maps::MapDecorations decorations;
+            for (const auto& [key, tag] : decorationsTag->value) {
+                auto entryTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag);
+                if (!entryTag) continue;
+                const auto type = Maps::DecorationTypeFromKey(entryTag->GetValue<std::string>("type", ""));
+                if (!type) continue;
+                Maps::MapDecorations::Entry entry;
+                entry.type     = *type;
+                entry.x        = entryTag->GetValue<double>("x", 0.0);
+                entry.z        = entryTag->GetValue<double>("z", 0.0);
+                entry.rotation = entryTag->GetValue<float>("rotation", 0.0f);
+                decorations.decorations.emplace_back(key, entry);
+            }
+            if (!decorations.decorations.empty()) stack.components.set(DataComponents::MAP_DECORATIONS, decorations);
         }
         if (auto list = std::dynamic_pointer_cast<::World::NBTTagList>(
                 components->GetTag("minecraft:suspicious_stew_effects"))) {

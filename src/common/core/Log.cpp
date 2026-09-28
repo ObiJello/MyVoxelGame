@@ -1,5 +1,6 @@
 // File: src/common/core/Log.cpp
 #include "Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -222,6 +223,9 @@ namespace Log {
         char callbackBuf[2048];
         std::vsnprintf(callbackBuf, sizeof(callbackBuf), fmt, argsCopy);
         va_end(argsCopy);
+        // In a Tracy build every log line is also a message on the capture's
+        // timeline, so events ("view distance 32 applied") line up with zones.
+        PROFILE_MESSAGE(callbackBuf, std::strlen(callbackBuf));
 
         std::lock_guard<std::mutex> lock(getLogMutex());
         std::FILE* out = (level == Level::Error ? stderr : stdout);

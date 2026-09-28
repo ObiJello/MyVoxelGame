@@ -137,6 +137,19 @@ public:
         (void)pos;
         (void)canonicalNbt;
     }
+    // Reference: ChunkAccess.setBlockEntityNbt proper - a PENDING tag (the
+    // {id:"DUMMY"} WorldGenRegion.setBlock writes, or a tag read back from
+    // storage), which Java drops when the position already holds a live
+    // BlockEntity (`if (!blockEntities.containsKey(pos))`). Producers that in
+    // Java go through level.getBlockEntity (template placement, createChest,
+    // setBlockEntityLootTable, spawner setEntityId, the archaeology blocks)
+    // materialise that BlockEntity; setBlockEntityNbt above records them as
+    // such, so a later setBlock at the same position (the template
+    // waterlogging pass, a neighbour's shape update) keeps the payload instead
+    // of reverting it to DUMMY.
+    virtual void setPendingBlockEntityNbt(const BlockPos& pos, std::string canonicalNbt) {
+        setBlockEntityNbt(pos, std::move(canonicalNbt));
+    }
     virtual void removeBlockEntity(const BlockPos& pos) { (void)pos; }
     virtual const std::map<std::tuple<int, int, int>, std::string>*
     getBlockEntityNbts() const {

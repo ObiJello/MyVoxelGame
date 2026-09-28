@@ -1,6 +1,7 @@
 // File: src/client/renderer/backend/vulkan/VKBackend.cpp
 #ifdef HAS_VULKAN
 
+#include "common/core/TickParallel.hpp"
 #include <chrono>
 #include "VKBackend.hpp"
 #include <cstdio>
@@ -146,6 +147,7 @@ namespace Render {
 
         vkDeviceWaitIdle(m_device);
         ReclaimDetachedSubmits(/*waitAll=*/true);
+        OitDestroyTargets();   // before the textures and pools it lives in
         // Persist the pipeline cache first: everything below is destruction
         // and none of it can add to the cache.
         SavePipelineCache(/*synchronous=*/true);
@@ -216,6 +218,7 @@ namespace Render {
         // pool / layouts so descriptor sets referencing the layout are
         // released first).
         DestroyFrameUBOs();
+        DestroyOitLayouts();
         if (m_portalPipelineLayout != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(m_device, m_portalPipelineLayout, nullptr);
             m_portalPipelineLayout = VK_NULL_HANDLE;
@@ -239,7 +242,7 @@ namespace Render {
         if (m_imguiDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
 
         CleanupSwapchain();
-        DestroyReadback(/*waitForGpu=*/false);   // the device is idle by here
+        DestroyReadbacks(/*waitForGpu=*/false);   // the device is idle by here
         if (m_renderPass != VK_NULL_HANDLE) {
             vkDestroyRenderPass(m_device, m_renderPass, nullptr);
             m_renderPass = VK_NULL_HANDLE;
@@ -248,6 +251,7 @@ namespace Render {
             vkDestroyRenderPass(m_device, m_renderPassLoad, nullptr);
             m_renderPassLoad = VK_NULL_HANDLE;
         }
+        DestroyKeepDepthPasses();
 
         DestroyRenderFinishedSemaphores();
         for (size_t i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
@@ -311,6 +315,11 @@ namespace Render {
         m_deletionQueues[m_currentFrame].clear();
         }
 
+        // Improved Transparency switched on or off since the last frame:
+        // rebuild the frame's depth images and framebuffers now, between
+        // frames (see m_frameDepthPreserved).
+        if (m_frameDepthPreservedWanted != m_frameDepthPreserved) ApplyFrameDepthPreserved();
+
         // Acquire swapchain image (1 second timeout).
         //
         // Separate zone from the fence wait because the two mean different
@@ -351,7 +360,7 @@ namespace Render {
         // Begin render pass
         VkRenderPassBeginInfo renderPassInfo{};
         renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        renderPassInfo.renderPass = m_renderPass;
+        renderPassInfo.renderPass = FrameBeginPass();
         renderPassInfo.framebuffer = FrameFramebuffer();
         renderPassInfo.renderArea.offset = {0, 0};
         renderPassInfo.renderArea.extent = m_swapchainExtent;
@@ -427,6 +436,7 @@ namespace Render {
         m_boundShaderInfo = nullptr;
         m_boundLayout = VK_NULL_HANDLE;
         m_boundIsPortal = false;
+        m_boundNeedsOitSet = false;
         m_boundTexture = INVALID_TEXTURE;
         ResetRecordedBindings();
 
@@ -463,8 +473,9 @@ namespace Render {
     void VKBackend::EndFrame(GLFWwindow* window) {
         PROFILE_ZONE_N("Vk.EndFrame");
         if (!m_frameActive) return; // BeginFrame failed — skip submit/present
-        // A render target left bound: back to the frame's pass, so the
-        // swapchain image ends the frame in PRESENT_SRC.
+        // A render target (or an OIT pass) left bound: back to the frame's
+        // pass, so the swapchain image ends the frame in PRESENT_SRC.
+        if (m_oitPassOpen) OitEndPass();
         if (m_activeTarget != INVALID_RENDER_TARGET) BindRenderTarget(INVALID_RENDER_TARGET);
         m_frameActive = false;
 
@@ -602,22 +613,33 @@ namespace Render {
         vkCmdSetViewport(m_commandBuffers[m_currentFrame], 0, 1, &viewport);
     }
 
-    void VKBackend::DestroyReadback(bool waitForGpu) {
-        if (m_readback.buffer == VK_NULL_HANDLE && m_readback.memory == VK_NULL_HANDLE) {
-            m_readback = BackbufferReadback{};
-            return;
-        }
-        // An untaken request may still be copying; the buffer cannot go
+    void VKBackend::DestroyReadbacks(bool waitForGpu) {
+        // An untaken request may still be copying; its buffer cannot go
         // while it is.
-        if (waitForGpu) vkQueueWaitIdle(m_graphicsQueue);
-        if (m_readback.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, m_readback.buffer, nullptr);
-        if (m_readback.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, m_readback.memory, nullptr);
-        m_readback = BackbufferReadback{};
+        if (waitForGpu && !m_readbacks.empty()) vkQueueWaitIdle(m_graphicsQueue);
+        auto destroy = [this](BackbufferReadback& r) {
+            if (r.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, r.buffer, nullptr);
+            if (r.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, r.memory, nullptr);
+        };
+        for (auto& r : m_readbacks) destroy(r);
+        for (auto& r : m_readbackFree) destroy(r);
+        m_readbacks.clear();
+        m_readbackFree.clear();
     }
 
     bool VKBackend::RequestBackbufferReadback(int x, int y, int w, int h) {
         if (!m_frameActive || !m_swapchainTransferSrc || m_renderPassLoad == VK_NULL_HANDLE) return false;
-        DestroyReadback(/*waitForGpu=*/true);
+        // The frame pass is what this suspends and resumes; with a render
+        // target bound there is none to resume.
+        if (m_activeTarget != INVALID_RENDER_TARGET) return false;
+        // Several may be in flight (the capture asks for a row a frame and
+        // takes each two frames later); past the limit the oldest is
+        // dropped, which has to wait for its copy first.
+        if (m_readbacks.size() >= kMaxReadbacksInFlight) {
+            vkQueueWaitIdle(m_graphicsQueue);
+            m_readbackFree.push_back(m_readbacks.front());
+            m_readbacks.pop_front();
+        }
 
         // Clamp to the image. The rectangle is bottom-left based (the
         // SetViewport convention); the image's rows run top-down.
@@ -630,11 +652,23 @@ namespace Render {
         if (w <= 0 || h <= 0) return false;
 
         const VkDeviceSize bytes = static_cast<VkDeviceSize>(w) * static_cast<VkDeviceSize>(h) * 4u;
-        if (!CreateVkBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                            m_readback.buffer, m_readback.memory)) {
-            m_readback = BackbufferReadback{};
-            return false;
+        // A taken read-back's buffer if one is big enough (the capture asks
+        // for the same size every time), else a new one.
+        BackbufferReadback rb;
+        for (size_t i = 0; i < m_readbackFree.size(); ++i) {
+            if (m_readbackFree[i].capacity >= bytes) {
+                rb = m_readbackFree[i];
+                m_readbackFree.erase(m_readbackFree.begin() + static_cast<std::ptrdiff_t>(i));
+                break;
+            }
+        }
+        if (rb.buffer == VK_NULL_HANDLE) {
+            if (!CreateVkBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                rb.buffer, rb.memory)) {
+                return false;
+            }
+            rb.capacity = bytes;
         }
 
         VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
@@ -665,7 +699,7 @@ namespace Render {
         region.imageSubresource  = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageOffset       = {x, sh - y - h, 0};
         region.imageExtent       = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
-        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, m_readback.buffer, 1, &region);
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, rb.buffer, 1, &region);
 
         VkImageMemoryBarrier toColor = toSrc;
         toColor.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -678,7 +712,7 @@ namespace Render {
         // Resume the frame, keeping what it has drawn so far.
         VkRenderPassBeginInfo resume{};
         resume.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        resume.renderPass = m_renderPassLoad;
+        resume.renderPass = FrameResumePass();
         resume.framebuffer = FrameFramebuffer();
         resume.renderArea.offset = {0, 0};
         resume.renderArea.extent = m_swapchainExtent;
@@ -694,11 +728,91 @@ namespace Render {
         SetViewport(0, 0, sw, sh);
         ClearScissorRect();
 
-        m_readback.width       = w;
-        m_readback.height      = h;
-        m_readback.frameSlot   = m_currentFrame;
-        m_readback.frameNumber = m_frameNumber;
-        m_readback.pending     = true;
+        rb.width       = w;
+        rb.height      = h;
+        rb.frameSlot   = m_currentFrame;
+        rb.frameNumber = m_frameNumber;
+        m_readbacks.push_back(rb);
+        return true;
+    }
+
+    bool VKBackend::CopyFramebufferToRenderTarget(RenderTargetHandle dst) {
+        if (!m_frameActive || !m_swapchainTransferSrc || m_renderPassLoad == VK_NULL_HANDLE) return false;
+        // The frame pass is what this suspends and resumes (as the read-back
+        // does); with a target bound there is none.
+        if (m_activeTarget != INVALID_RENDER_TARGET) return false;
+        auto it = m_renderTargets.find(dst);
+        if (it == m_renderTargets.end()) return false;
+        VKRenderTargetInfo& rt = it->second;
+        // vkCmdCopyImage: same format (a target's colour IS the swapchain
+        // format) and here the same extent.
+        if (static_cast<uint32_t>(rt.width) != m_swapchainExtent.width ||
+            static_cast<uint32_t>(rt.height) != m_swapchainExtent.height) {
+            return false;
+        }
+
+        VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
+        VkImage         image = m_swapchainImages[m_currentImageIndex];
+        vkCmdEndRenderPass(cmd);
+
+        // Swapchain: PRESENT_SRC (the frame pass's finalLayout) -> TRANSFER_SRC.
+        // Target: resting SHADER_READ_ONLY -> TRANSFER_DST.
+        VkImageMemoryBarrier pre[2]{};
+        pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        pre[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        pre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pre[0].image = image;
+        pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        pre[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        pre[1] = pre[0];
+        pre[1].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        pre[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pre[1].image = rt.colorImage;
+        pre[1].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 2, pre);
+
+        VkImageCopy region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1};
+        vkCmdCopyImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       rt.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        // Back: the swapchain to a colour attachment for the resumed pass,
+        // the target to sampleable.
+        VkImageMemoryBarrier post[2] = {pre[0], pre[1]};
+        post[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        post[0].newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        post[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        post[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        post[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        post[1].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        post[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        post[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, post);
+
+        // Resume the frame, keeping what it has drawn so far.
+        VkRenderPassBeginInfo resume{};
+        resume.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        resume.renderPass = FrameResumePass();
+        resume.framebuffer = FrameFramebuffer();
+        resume.renderArea.offset = {0, 0};
+        resume.renderArea.extent = m_swapchainExtent;
+        std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
+        clearValues[0].color = m_clearColor;
+        clearValues[1].depthStencil = {1.0f, 0};
+        resume.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        resume.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(cmd, &resume, VK_SUBPASS_CONTENTS_INLINE);
+        SetViewport(0, 0, static_cast<int>(m_swapchainExtent.width), static_cast<int>(m_swapchainExtent.height));
+        ClearScissorRect();
         return true;
     }
 
@@ -717,7 +831,10 @@ namespace Render {
     }
 
     bool VKBackend::TakeBackbufferReadback(std::vector<uint8_t>& outRgba, int& outW, int& outH) {
-        if (!m_readback.pending) return false;
+        if (m_readbacks.empty()) return false;
+        // The oldest request (they are taken in the order they were made).
+        const BackbufferReadback rb = m_readbacks.front();
+        m_readbacks.pop_front();
         // The copy rode the requesting frame's command buffer; its fence is
         // the proof it has executed — but only until a later frame reuses
         // the slot: BeginFrame waits on that fence and RESETS it before
@@ -726,32 +843,47 @@ namespace Render {
         // whole timeout (one frame every two seconds, as it did). The
         // reuse itself is the proof then: the wait that reset the fence
         // was the copy completing.
-        const bool slotReused = m_frameNumber - m_readback.frameNumber >= static_cast<uint64_t>(MAX_FRAMES_IN_FLIGHT);
+        const bool slotReused = m_frameNumber - rb.frameNumber >= static_cast<uint64_t>(MAX_FRAMES_IN_FLIGHT);
         if (!slotReused) {
-            vkWaitForFences(m_device, 1, &m_inFlightFences[m_readback.frameSlot], VK_TRUE, 2'000'000'000);
+            vkWaitForFences(m_device, 1, &m_inFlightFences[rb.frameSlot], VK_TRUE, 2'000'000'000);
         }
 
-        const size_t bytes = static_cast<size_t>(m_readback.width) * static_cast<size_t>(m_readback.height) * 4u;
+        const size_t bytes = static_cast<size_t>(rb.width) * static_cast<size_t>(rb.height) * 4u;
         void* mapped = nullptr;
-        if (vkMapMemory(m_device, m_readback.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-            DestroyReadback(/*waitForGpu=*/false);
+        if (vkMapMemory(m_device, rb.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            m_readbackFree.push_back(rb);
             return false;
         }
         outRgba.resize(bytes);
-        std::memcpy(outRgba.data(), mapped, bytes);
-        vkUnmapMemory(m_device, m_readback.memory);
-
         // The swapchain is BGRA on every platform this ships on; the
-        // contract is RGBA with a solid alpha.
+        // contract is RGBA with a solid alpha. One pass, a pixel a word,
+        // fanned out over the fork-join pool: a whole panorama face is
+        // 38 MB, and a byte-at-a-time swap after a separate copy was most
+        // of a frame.
         const bool bgra = m_swapchainFormat == VK_FORMAT_B8G8R8A8_UNORM ||
                           m_swapchainFormat == VK_FORMAT_B8G8R8A8_SRGB;
-        for (size_t i = 0; i + 3 < bytes; i += 4) {
-            if (bgra) std::swap(outRgba[i], outRgba[i + 2]);
-            outRgba[i + 3] = 255;
-        }
-        outW = m_readback.width;
-        outH = m_readback.height;
-        DestroyReadback(/*waitForGpu=*/false);
+        const size_t pixels = bytes / 4u;
+        constexpr size_t kChunk = 256u * 1024u;   // pixels per task (1 MB)
+        const auto* src = static_cast<const uint32_t*>(mapped);
+        uint8_t* dstBytes = outRgba.data();
+        Core::ParallelFor((pixels + kChunk - 1) / kChunk, 1, [&](size_t c) {
+            const size_t begin = c * kChunk, end = std::min(pixels, begin + kChunk);
+            uint32_t* dst = reinterpret_cast<uint32_t*>(dstBytes) + begin;
+            const uint32_t* in = src + begin;
+            const size_t n = end - begin;
+            if (bgra) {
+                for (size_t i = 0; i < n; ++i) {
+                    const uint32_t v = in[i];   // bytes B G R A, little-endian
+                    dst[i] = (v & 0x0000FF00u) | ((v & 0x000000FFu) << 16) | ((v >> 16) & 0x000000FFu) | 0xFF000000u;
+                }
+            } else {
+                for (size_t i = 0; i < n; ++i) dst[i] = in[i] | 0xFF000000u;
+            }
+        });
+        vkUnmapMemory(m_device, rb.memory);
+        outW = rb.width;
+        outH = rb.height;
+        m_readbackFree.push_back(rb);   // done with (its copy has executed): reused by the next request
         return true;
     }
 
@@ -1877,6 +2009,7 @@ namespace Render {
         if (slot < kMaxTextureSlots) {
             m_boundTextures[slot] = handle;
         }
+
         if (auto it = m_textures.find(handle); it != m_textures.end()) {
             it->second.lastUsedFrame = m_frameNumber;
             it->second.everBound = true;
@@ -1976,6 +2109,17 @@ namespace Render {
                 ++pit;
             }
         }
+        for (auto& map : m_oitPipelines) {
+            for (auto pit = map.begin(); pit != map.end(); ) {
+                if (pit->second.shader == handle) {
+                    vkDestroyPipeline(m_device, pit->second.pipeline, nullptr);
+                    if (m_currentPipeline == pit->second.pipeline) m_currentPipeline = VK_NULL_HANDLE;
+                    pit = map.erase(pit);
+                } else {
+                    ++pit;
+                }
+            }
+        }
         vkDestroyShaderModule(m_device, it->second.vertModule, nullptr);
         vkDestroyShaderModule(m_device, it->second.fragModule, nullptr);
         m_memStats.shaderCount--;
@@ -1983,13 +2127,25 @@ namespace Render {
     }
 
     void VKBackend::BindShader(ShaderHandle handle) {
+        // Improved Transparency: inside an OIT stage the engine shader's
+        // variant draws instead — or nothing, when it has none.
+        if (m_oitStage != OitStage::None) {
+            const ShaderHandle variant = OitVariantFor(handle);
+            m_oitSkipDraw = variant == INVALID_SHADER;
+            if (!m_oitSkipDraw) handle = variant;
+        }
         m_boundShader = handle;
         // Resolve the layout here, once, instead of in every draw path.
         auto it = m_shaders.find(handle);
         m_boundShaderInfo = (it != m_shaders.end()) ? &it->second : nullptr;
-        m_boundIsPortal   = m_boundShaderInfo && m_boundShaderInfo->layoutType == 1 &&
-                            m_portalPipelineLayout != VK_NULL_HANDLE;
-        m_boundLayout     = m_boundIsPortal ? m_portalPipelineLayout : m_pipelineLayout;
+        const int layoutType = m_boundShaderInfo ? m_boundShaderInfo->layoutType : 0;
+        // 3 / 4: the portal / block layout with the OIT set (6) appended.
+        m_boundNeedsOitSet = layoutType == 3 || layoutType == 4;
+        m_boundIsPortal   = (layoutType == 1 && m_portalPipelineLayout != VK_NULL_HANDLE) ||
+                            (layoutType == 3 && m_portalOitPipelineLayout != VK_NULL_HANDLE);
+        m_boundLayout     = layoutType == 3 ? m_portalOitPipelineLayout
+                          : layoutType == 4 ? m_blockOitPipelineLayout
+                          : m_boundIsPortal ? m_portalPipelineLayout : m_pipelineLayout;
     }
 
     // Uniform names are matched by string on every call, from every draw of
@@ -2048,6 +2204,11 @@ namespace Render {
                 m_commonUBOData.uMVP = vkMVP;
                 m_commonMatricesDirty = true;
             }
+        } else if (NameIs(name, "uPostParams")) {
+            // A post pass's config uniforms (Render::PostChain), packed four
+            // vec4s deep into the uMVP slot — never a transform, so no depth
+            // correction.
+            m_pushConstants.uMVP = value;
         } else if (NameIs(name, "uModel")) {
             if (m_commonUBOData.uModel != value) {
                 m_commonUBOData.uModel = value;
@@ -2190,12 +2351,25 @@ namespace Render {
             // entity_outline_box_blur's BlurDir.
             m_pushConstants.uUVRange.x = value.x;
             m_pushConstants.uUVRange.y = value.y;
+        } else if (NameIs(name, "uOutSize")) {
+            // A post pass's SamplerInfo.OutSize (Render::PostChain).
+            m_pushConstants.uUVRange.z = value.x;
+            m_pushConstants.uUVRange.w = value.y;
+        } else if (NameIs(name, "uAuxSize")) {
+            // A post pass's second sampler's size.
+            m_pushConstants.uColor.x = value.x;
+            m_pushConstants.uColor.y = value.y;
         }
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
         // Push-constant block-style aliases:
         if (NameIs(name, "uLineWidth"))           { m_pushConstants.uLineWidth = value; }
         else if (NameIs(name, "uAlphaTest"))      { m_pushConstants.uAlphaTest = value; }
+        // Post passes (Render::PostChain): whether each input samples
+        // bilinear (else nearest, in the shader), and globals.MenuBlurRadius.
+        else if (NameIs(name, "uInBilinear"))     { m_pushConstants.uLineWidth = value; }
+        else if (NameIs(name, "uAuxBilinear"))    { m_pushConstants.uAlphaTest = value; }
+        else if (NameIs(name, "uMenuBlurRadius")) { m_pushConstants.uScalars.x = value; }
         // Portal renderer + crosshair scalar packing:
         else if (NameIs(name, "uPulse"))          { m_pushConstants.uScalars.x = value; m_commonUBOData.uPortalColor.a = value; m_commonUBODirty = true; }
         else if (NameIs(name, "uOpenAmount"))     { m_pushConstants.uScalars.z = value; m_commonUBOData.uColorDark.a    = value; m_commonUBODirty = true; }
@@ -2375,6 +2549,21 @@ namespace Render {
             state.frontFace = (state.frontFace == FrontFace::CounterClockwise)
                                   ? FrontFace::Clockwise : FrontFace::CounterClockwise;
         }
+        // Improved Transparency (MC 26.3 OIT): inside a stage every draw is
+        // MC's OIT snippet — depth tested, not written (the clouds' depth
+        // bounds excepted), blended One/One (MAX into the depth bounds,
+        // ADD elsewhere — the pass's pipeline bakes the op). No stage: the
+        // caller's state, untouched.
+        m_requestedPipelineState = state_;
+        if (m_oitStage != OitStage::None) {
+            state.depthTestEnabled  = true;
+            state.depthCompareOp    = CompareOp::LessEqual;
+            state.depthWriteEnabled = m_oitStage == OitStage::DepthBounds && m_oitDbWritesDepth;
+            state.blendEnabled      = true;
+            state.srcBlendFactor    = BlendFactor::One;
+            state.dstBlendFactor    = BlendFactor::One;
+            state.colorWriteEnabled = true;
+        }
         m_currentPipelineState = state;
     }
 
@@ -2444,7 +2633,7 @@ namespace Render {
     }
 
     bool VKBackend::PrepareDraw(VkCommandBuffer cmd) {
-        if (!m_boundShaderInfo) return false;
+        if (!m_boundShaderInfo || m_oitSkipDraw) return false;
 
         VkPipeline pipeline = GetOrCreatePipeline(m_currentPipelineState, m_boundShader);
         if (pipeline == VK_NULL_HANDLE) return false;
@@ -2478,7 +2667,9 @@ namespace Render {
             // recording the draw anyway would use the PREVIOUS draw's texture
             // and offsets. It rebinds set 0, so the block-path cache is stale.
             m_recorded.textureSet = VK_NULL_HANDLE;
-            return BindPortalDescriptorForDraw(cmd, m_boundTexture);
+            if (!BindPortalDescriptorForDraw(cmd, m_boundTexture)) return false;
+            if (m_boundNeedsOitSet) BindOitSet(cmd);   // Improved Transparency's set 6
+            return true;
         }
 
         // Block-style shader: texture-only descriptor at set 0. Skipped when
@@ -2493,6 +2684,7 @@ namespace Render {
                                     0, 1, &texSet, 0, nullptr);
             m_recorded.textureSet = texSet;
         }
+        if (m_boundNeedsOitSet) BindOitSet(cmd);   // Improved Transparency's set 6
         return true;
     }
 
@@ -3272,15 +3464,25 @@ namespace Render {
         // write the same depth image, so nothing ties frame N+1's pass to
         // frame N's.
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            // SAMPLED only while the frame's depth is preserved (Improved
+            // Transparency's clouds read it); otherwise exactly the
+            // attachment-only image it always was.
+            const VkImageUsageFlags depthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                (m_frameDepthPreserved ? VK_IMAGE_USAGE_SAMPLED_BIT : 0u);
             if (!CreateVkImage(m_swapchainExtent.width, m_swapchainExtent.height, 1,
                                m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
-                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                               depthUsage,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_depthImages[i], m_depthMemory[i])) {
                 Log::Error("VKBackend: Failed to create depth image");
                 return false;
             }
             m_depthImageViews[i] = CreateImageView(m_depthImages[i], m_depthFormat, aspect, 1);
             if (m_depthImageViews[i] == VK_NULL_HANDLE) return false;
+            if (m_frameDepthPreserved) {
+                // Sampling reads the depth aspect alone.
+                m_depthSampleViews[i] = CreateImageView(m_depthImages[i], m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+                if (m_depthSampleViews[i] == VK_NULL_HANDLE) return false;
+            }
         }
         return true;
     }
@@ -3300,7 +3502,7 @@ namespace Render {
     // attachment, and initial layouts matching where the interrupted frame
     // leaves the images. Attachments are otherwise identical, which is what
     // keeps every pipeline compatible with both passes.
-    bool VKBackend::CreateRenderPassVariant(bool loadContents, VkRenderPass& out) {
+    bool VKBackend::CreateRenderPassVariant(bool loadContents, VkRenderPass& out, bool keepDepth) {
         VkAttachmentDescription colorAttachment{};
         colorAttachment.format = m_swapchainFormat;
         colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -3325,6 +3527,12 @@ namespace Render {
         // pass, so stencil never needs to survive the swap.
         depthAttachment.stencilLoadOp = loadContents ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        // Improved Transparency's keep-depth variants (m_frameDepthPreserved):
+        // the frame's depth and stencil outlive an interruption.
+        if (keepDepth) {
+            depthAttachment.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+            depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+        }
         depthAttachment.initialLayout = loadContents ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
                                                      : VK_IMAGE_LAYOUT_UNDEFINED;
         depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -3697,6 +3905,801 @@ namespace Render {
         return it != m_renderTargets.end() ? it->second.colorTexture : INVALID_TEXTURE;
     }
 
+    // ========================================================================
+    // IMPROVED TRANSPARENCY (Render::ImprovedTransparency)
+    // ========================================================================
+
+    void VKBackend::DestroyKeepDepthPasses() {
+        if (m_renderPassKeepDepth != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(m_device, m_renderPassKeepDepth, nullptr);
+            m_renderPassKeepDepth = VK_NULL_HANDLE;
+        }
+        if (m_renderPassLoadKeepDepth != VK_NULL_HANDLE) {
+            vkDestroyRenderPass(m_device, m_renderPassLoadKeepDepth, nullptr);
+            m_renderPassLoadKeepDepth = VK_NULL_HANDLE;
+        }
+    }
+
+    void VKBackend::ApplyFrameDepthPreserved() {
+        // Between frames (BeginFrame, before this slot's command buffer is
+        // begun): every frame slot's depth image and every framebuffer are
+        // replaced, so nothing may still be using them.
+        vkDeviceWaitIdle(m_device);
+        m_frameDepthPreserved = m_frameDepthPreservedWanted;
+
+        // Improved Transparency's framebuffers hold the old depth views.
+        OitDestroyTargets();
+        for (auto fb : m_framebuffers) vkDestroyFramebuffer(m_device, fb, nullptr);
+        m_framebuffers.clear();
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (m_depthSampleViews[i] != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthSampleViews[i], nullptr);
+            m_depthSampleViews[i] = VK_NULL_HANDLE;
+            if (m_depthImageViews[i] != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthImageViews[i], nullptr);
+            if (m_depthImages[i] != VK_NULL_HANDLE) vkDestroyImage(m_device, m_depthImages[i], nullptr);
+            if (m_depthMemory[i] != VK_NULL_HANDLE) vkFreeMemory(m_device, m_depthMemory[i], nullptr);
+            m_depthImageViews[i] = VK_NULL_HANDLE;
+            m_depthImages[i] = VK_NULL_HANDLE;
+            m_depthMemory[i] = VK_NULL_HANDLE;
+        }
+        // Usage follows m_frameDepthPreserved (SAMPLED while on); the
+        // format is the device's fixed choice, so every pipeline and every
+        // render target stays compatible.
+        if (!CreateDepthResources()) {
+            Log::Error("VKBackend: frame depth images could not be rebuilt");
+        }
+
+        DestroyKeepDepthPasses();
+        if (m_frameDepthPreserved) {
+            if (!CreateRenderPassVariant(false, m_renderPassKeepDepth, /*keepDepth=*/true) ||
+                !CreateRenderPassVariant(true, m_renderPassLoadKeepDepth, /*keepDepth=*/true)) {
+                // Without both variants the frame cannot keep its depth:
+                // fall back to the ordinary passes, and say so.
+                DestroyKeepDepthPasses();
+                m_frameDepthPreserved = false;
+                Log::Error("VKBackend: keep-depth render passes unavailable - frame depth not preserved");
+            }
+        }
+        CreateFramebuffers();
+        m_currentPipeline = VK_NULL_HANDLE;
+        Log::Info("VKBackend: frame depth %s", m_frameDepthPreserved ? "preserved (Improved Transparency)"
+                                                                      : "discarded (default)");
+    }
+
+    // ========================================================================
+    // IMPROVED TRANSPARENCY — MC 26.3 WAVELET OIT
+    // ========================================================================
+    //
+    // LevelRenderer.executeOit on this backend. Per frame slot: the OIT
+    // colour images (rest SHADER_READ_ONLY), the clouds' depth, seven
+    // framebuffers (one per OitPass — the frame's own depth image of the
+    // slot, or the clouds', as the depth attachment) and three set-6
+    // descriptor sets (the samplers of the depth-bounds, transmittance and
+    // accumulate stages). The OIT variants of the participating shaders use
+    // the portal or block pipeline layout with that set appended (layout
+    // types 3 and 4).
+
+    bool VKBackend::EnsureOitLayouts() {
+        if (m_device == VK_NULL_HANDLE) return false;
+        if (m_oitSetLayout == VK_NULL_HANDLE) {
+            // MC DepthBoundsSampler, Coeff0, Coeff1 + the projection terms
+            // MC's deviceToLinearDepth reads (OitProjParams).
+            std::array<VkDescriptorSetLayoutBinding, 4> b{};
+            for (uint32_t i = 0; i < 3; ++i) {
+                b[i].binding = i;
+                b[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                b[i].descriptorCount = 1;
+                b[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            }
+            b[3].binding = 3;
+            b[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            b[3].descriptorCount = 1;
+            b[3].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            info.bindingCount = static_cast<uint32_t>(b.size());
+            info.pBindings = b.data();
+            if (vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_oitSetLayout) != VK_SUCCESS) {
+                m_oitSetLayout = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        if (m_emptySetLayout == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            if (vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_emptySetLayout) != VK_SUCCESS) {
+                m_emptySetLayout = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        VkPushConstantRange push{};
+        push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        push.offset = 0;
+        push.size = sizeof(PushConstantBlock);
+        if (m_portalOitPipelineLayout == VK_NULL_HANDLE && m_portalPipelineLayout != VK_NULL_HANDLE) {
+            // Sets 0..5 exactly the portal layout's (so its descriptor
+            // binding code stays compatible), set 6 the OIT set.
+            VkDescriptorSetLayout sets[7] = {
+                m_textureDescriptorLayout, m_portalDescriptorLayout, m_textureDescriptorLayout,
+                m_uniformBlockLayout != VK_NULL_HANDLE ? m_uniformBlockLayout : m_emptySetLayout,
+                (m_uniformBlockLayout != VK_NULL_HANDLE && m_texelBufferLayout != VK_NULL_HANDLE)
+                    ? m_texelBufferLayout : m_emptySetLayout,
+                (m_uniformBlockLayout != VK_NULL_HANDLE && m_texelBufferLayout != VK_NULL_HANDLE)
+                    ? m_textureDescriptorLayout : m_emptySetLayout,
+                m_oitSetLayout};
+            VkPipelineLayoutCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            info.setLayoutCount = 7;
+            info.pSetLayouts = sets;
+            info.pushConstantRangeCount = 1;
+            info.pPushConstantRanges = &push;
+            if (vkCreatePipelineLayout(m_device, &info, nullptr, &m_portalOitPipelineLayout) != VK_SUCCESS) {
+                m_portalOitPipelineLayout = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        if (m_blockOitPipelineLayout == VK_NULL_HANDLE) {
+            VkDescriptorSetLayout sets[7] = {m_textureDescriptorLayout, m_emptySetLayout, m_emptySetLayout,
+                                             m_emptySetLayout, m_emptySetLayout, m_emptySetLayout,
+                                             m_oitSetLayout};
+            VkPipelineLayoutCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            info.setLayoutCount = 7;
+            info.pSetLayouts = sets;
+            info.pushConstantRangeCount = 1;
+            info.pPushConstantRanges = &push;
+            if (vkCreatePipelineLayout(m_device, &info, nullptr, &m_blockOitPipelineLayout) != VK_SUCCESS) {
+                m_blockOitPipelineLayout = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        // The passes: [configuration][load, clear]. Colour attachments rest
+        // COLOR_ATTACHMENT inside the pass (barriers outside move them), the
+        // depth the frame's or the clouds' — loaded and stored.
+        static const VkFormat kColor[3][2] = {
+            {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_UNDEFINED},
+            {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT},
+            {VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_UNDEFINED}};
+        for (int config = 0; config < 3; ++config) {
+            for (int clear = 0; clear < 2; ++clear) {
+                VkRenderPass& out = m_oitPasses[static_cast<size_t>(config)][static_cast<size_t>(clear)];
+                if (out != VK_NULL_HANDLE) continue;
+                const uint32_t colorCount = config == 1 ? 2u : 1u;
+                std::array<VkAttachmentDescription, 3> att{};
+                std::array<VkAttachmentReference, 2> colorRefs{};
+                for (uint32_t c = 0; c < colorCount; ++c) {
+                    att[c].format = kColor[config][c];
+                    att[c].samples = VK_SAMPLE_COUNT_1_BIT;
+                    att[c].loadOp = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+                    att[c].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                    att[c].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                    att[c].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                    att[c].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    att[c].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                    colorRefs[c] = {c, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+                }
+                VkAttachmentDescription& depth = att[colorCount];
+                depth.format = m_depthFormat;
+                depth.samples = VK_SAMPLE_COUNT_1_BIT;
+                depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                depth.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE;
+                depth.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                VkAttachmentReference depthRef{colorCount, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+                VkSubpassDescription subpass{};
+                subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+                subpass.colorAttachmentCount = colorCount;
+                subpass.pColorAttachments = colorRefs.data();
+                subpass.pDepthStencilAttachment = &depthRef;
+                VkSubpassDependency dep{};
+                dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+                dep.dstSubpass = 0;
+                dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                   VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+                dep.dstStageMask = dep.srcStageMask;
+                dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                VkRenderPassCreateInfo rp{};
+                rp.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+                rp.attachmentCount = colorCount + 1;
+                rp.pAttachments = att.data();
+                rp.subpassCount = 1;
+                rp.pSubpasses = &subpass;
+                rp.dependencyCount = 1;
+                rp.pDependencies = &dep;
+                if (vkCreateRenderPass(m_device, &rp, nullptr, &out) != VK_SUCCESS) {
+                    out = VK_NULL_HANDLE;
+                    return false;
+                }
+            }
+        }
+        if (m_oitDummy == INVALID_TEXTURE) {
+            const unsigned char none[4] = {0, 0, 0, 0};
+            m_oitDummy = CreateTexture2D(1, 1, TextureFormat::RGBA8, none);
+            if (m_oitDummy == INVALID_TEXTURE) return false;
+        }
+        return true;
+    }
+
+    void VKBackend::DestroyOitPasses() {
+        DestroyOitPipelines();   // built against these passes
+        for (auto& config : m_oitPasses) {
+            for (VkRenderPass& rp : config) {
+                if (rp != VK_NULL_HANDLE) vkDestroyRenderPass(m_device, rp, nullptr);
+                rp = VK_NULL_HANDLE;
+            }
+        }
+    }
+
+    void VKBackend::DestroyOitLayouts() {
+        if (m_device == VK_NULL_HANDLE) return;
+        OitDestroyTargets();
+        DestroyOitPasses();
+        if (m_portalOitPipelineLayout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(m_device, m_portalOitPipelineLayout, nullptr);
+        if (m_blockOitPipelineLayout != VK_NULL_HANDLE)
+            vkDestroyPipelineLayout(m_device, m_blockOitPipelineLayout, nullptr);
+        if (m_oitSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_oitSetLayout, nullptr);
+        if (m_emptySetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, m_emptySetLayout, nullptr);
+        m_portalOitPipelineLayout = VK_NULL_HANDLE;
+        m_blockOitPipelineLayout = VK_NULL_HANDLE;
+        m_oitSetLayout = VK_NULL_HANDLE;
+        m_emptySetLayout = VK_NULL_HANDLE;
+        // m_oitDummy is an ordinary texture: Shutdown's texture sweep frees it.
+    }
+
+    void VKBackend::DestroyOitPipelines() {
+        for (auto& map : m_oitPipelines) {
+            for (auto& [key, rec] : map) {
+                if (rec.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, rec.pipeline, nullptr);
+            }
+            map.clear();
+        }
+        m_currentPipeline = VK_NULL_HANDLE;
+    }
+
+    ShaderHandle VKBackend::CreateOitShaderFromFiles(const std::string& vertexPath,
+                                                     const std::string& fragmentPath) {
+        if (!EnsureOitLayouts()) return INVALID_SHADER;
+        const ShaderHandle h = CreateShaderFromFiles(vertexPath, fragmentPath);
+        if (h != INVALID_SHADER) {
+            auto it = m_shaders.find(h);
+            if (it != m_shaders.end()) it->second.layoutType = 4;   // block + the OIT set
+        }
+        return h;
+    }
+
+    ShaderHandle VKBackend::OitVariantFor(ShaderHandle engine) {
+        const size_t stage = static_cast<size_t>(m_oitStage);
+        OitVariantSet& v = m_oitVariants[engine];
+        if (v.tried[stage]) return v.shader[stage];
+        v.tried[stage] = true;
+        auto it = m_shaders.find(engine);
+        if (it == m_shaders.end() || it->second.fragPath.empty()) return INVALID_SHADER;
+        const VKShaderInfo base = it->second;   // copy: m_shaders may rehash below
+        if (base.layoutType != 0 && base.layoutType != 1) return INVALID_SHADER;
+        // shaders/<name>.frag -> shaders/<name>_oit_<stage>.frag, which
+        // CreateShaderFromFiles maps to <name>_oit_<stage>_vk.frag.spv
+        // (compiled from <name>_vk.frag with the stage's defines).
+        const size_t dot = base.fragPath.rfind(".frag");
+        if (dot == std::string::npos) return INVALID_SHADER;
+        const char* suffix = m_oitStage == OitStage::DepthBounds ? "_oit_db"
+                           : m_oitStage == OitStage::Transmittance ? "_oit_tr" : "_oit_ac";
+        const std::string fragPath = base.fragPath.substr(0, dot) + suffix + ".frag";
+        const std::string spvPath = base.fragPath.substr(0, dot) + suffix + "_vk.frag.spv";
+        if (!std::filesystem::exists(spvPath)) return INVALID_SHADER;   // not a participating shader
+        if (!EnsureOitLayouts()) return INVALID_SHADER;
+        const ShaderHandle variant = CreateShaderFromFiles(base.vertPath, fragPath);
+        if (variant == INVALID_SHADER) return INVALID_SHADER;
+        VKShaderInfo& info = m_shaders[variant];
+        info.layoutType = base.layoutType == 1 ? 3 : 4;
+        info.vertexLayout = base.vertexLayout;
+        info.instanceLayout = base.instanceLayout;
+        info.ignoresCommonMatrices = base.ignoresCommonMatrices;
+        v.shader[stage] = variant;
+        return variant;
+    }
+
+    void VKBackend::BindOitSet(VkCommandBuffer cmd) {
+        if (!m_oitCreated) return;
+        const OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
+        const size_t index = m_oitSamplerStage == OitStage::Transmittance ? 1
+                           : m_oitSamplerStage == OitStage::Accumulate ? 2 : 0;
+        const VkDescriptorSet set = slot.stageSets[index];
+        if (set == VK_NULL_HANDLE) return;
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boundLayout,
+                                6, 1, &set, 0, nullptr);
+    }
+
+    void VKBackend::SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) {
+        m_oitStage = stage;
+        m_oitProjParams = projParams;
+        m_oitDbWritesDepth = depthBoundsWriteDepth;
+        m_oitSkipDraw = false;
+        // The next BindShader resolves the stage's variant; nothing draws
+        // with the one bound now.
+        m_boundShader = INVALID_SHADER;
+        m_boundShaderInfo = nullptr;
+        if (stage != OitStage::None) {
+            m_oitSamplerStage = stage;
+            if (m_oitCreated) {
+                OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
+                if (slot.paramsMapped) std::memcpy(slot.paramsMapped, &projParams, sizeof(glm::vec4));
+            }
+        }
+        SetPipelineState(m_requestedPipelineState);   // re-splice for the new stage
+    }
+
+    bool VKBackend::OitEnsureTargets(int width, int height) {
+        if (width <= 0 || height <= 0 || !m_frameDepthPreserved) return false;
+        if (!EnsureOitLayouts()) return false;
+        if (m_oitCreated && m_oitWidth == width && m_oitHeight == height) return true;
+        OitDestroyTargets();
+        // MC blends MAX into RGBA32F and ADD into RGBA16F.
+        for (VkFormat f : {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}) {
+            VkFormatProperties props{};
+            vkGetPhysicalDeviceFormatProperties(m_physicalDevice, f, &props);
+            const VkFormatFeatureFlags need = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT |
+                                              VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT |
+                                              VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+            if ((props.optimalTilingFeatures & need) != need) {
+                Log::Warning("VKBackend: float colour format %d lacks attachment/blend/sample support - "
+                             "Improved Transparency unavailable", static_cast<int>(f));
+                return false;
+            }
+        }
+        const uint32_t w = static_cast<uint32_t>(width);
+        const uint32_t h = static_cast<uint32_t>(height);
+        m_oitWidth = width;
+        m_oitHeight = height;
+        m_oitCreated = true;   // so a failure below is undone by OitDestroyTargets
+
+        // Its own pool: per slot five colour textures + the frame depth's,
+        // three set-6 sets. Destroyed (sets and all) with the targets.
+        std::array<VkDescriptorPoolSize, 2> sizes{};
+        sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sizes[0].descriptorCount = MAX_FRAMES_IN_FLIGHT * (6 + 9);
+        sizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        sizes[1].descriptorCount = MAX_FRAMES_IN_FLIGHT * 3;
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
+        poolInfo.pPoolSizes = sizes.data();
+        poolInfo.maxSets = MAX_FRAMES_IN_FLIGHT * (6 + 3);
+        if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_oitPool) != VK_SUCCESS) {
+            m_oitPool = VK_NULL_HANDLE;
+            OitDestroyTargets();
+            return false;
+        }
+
+        // A sampled texture entry over an image this code owns: nearest,
+        // clamped, its own set from the OIT pool.
+        auto makeTexture = [this](VkImageView view, VkFormat format, int tw, int th) -> TextureHandle {
+            VKTextureInfo tex{};
+            tex.magFilter = VK_FILTER_NEAREST;
+            tex.minFilter = VK_FILTER_NEAREST;
+            tex.mipLevels = 1;
+            tex.format = format;
+            tex.width = tw;
+            tex.height = th;
+            tex.imageView = view;   // not owned: OitDestroyTargets nulls it before the texture goes
+            VkSamplerCreateInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            si.magFilter = VK_FILTER_NEAREST;
+            si.minFilter = VK_FILTER_NEAREST;
+            si.addressModeU = si.addressModeV = si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.maxAnisotropy = 1.0f;
+            si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            if (vkCreateSampler(m_device, &si, nullptr, &tex.sampler) != VK_SUCCESS) return INVALID_TEXTURE;
+            VkDescriptorSetAllocateInfo alloc{};
+            alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc.descriptorPool = m_oitPool;
+            alloc.descriptorSetCount = 1;
+            alloc.pSetLayouts = &m_textureDescriptorLayout;
+            if (vkAllocateDescriptorSets(m_device, &alloc, &tex.descriptorSet) != VK_SUCCESS) {
+                vkDestroySampler(m_device, tex.sampler, nullptr);
+                return INVALID_TEXTURE;
+            }
+            WriteTextureDescriptor(m_device, tex.descriptorSet, view, tex.sampler);
+            const TextureHandle handle = AllocHandle();
+            m_textures[handle] = tex;
+            return handle;
+        };
+        auto makeColor = [&](OitColor& c, VkFormat format) {
+            if (!CreateVkImage(w, h, 1, format, VK_IMAGE_TILING_OPTIMAL,
+                               VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, c.image, c.memory)) return false;
+            c.view = CreateImageView(c.image, format, VK_IMAGE_ASPECT_COLOR_BIT, 1);
+            if (c.view == VK_NULL_HANDLE) return false;
+            c.texture = makeTexture(c.view, format, width, height);
+            return c.texture != INVALID_TEXTURE;
+        };
+
+        VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (DepthFormatHasStencil(m_depthFormat)) depthAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        const VkFormat f32 = VK_FORMAT_R32G32B32A32_SFLOAT;
+        const VkFormat f16 = VK_FORMAT_R16G16B16A16_SFLOAT;
+        for (size_t s = 0; s < MAX_FRAMES_IN_FLIGHT; ++s) {
+            OitSlot& slot = m_oitSlots[s];
+            if (!makeColor(slot.depthBounds, f32) || !makeColor(slot.culled, f32) ||
+                !makeColor(slot.coeff0, f16) || !makeColor(slot.coeff1, f16) ||
+                !makeColor(slot.accumulate, f16)) {
+                OitDestroyTargets();
+                return false;
+            }
+            if (!CreateVkImage(w, h, 1, m_depthFormat, VK_IMAGE_TILING_OPTIMAL,
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               slot.cloudDepthImage, slot.cloudDepthMemory)) {
+                OitDestroyTargets();
+                return false;
+            }
+            slot.cloudDepthView = CreateImageView(slot.cloudDepthImage, m_depthFormat, depthAspect, 1);
+            if (slot.cloudDepthView == VK_NULL_HANDLE || m_depthSampleViews[s] == VK_NULL_HANDLE) {
+                OitDestroyTargets();
+                return false;
+            }
+            slot.frameDepthTexture = makeTexture(m_depthSampleViews[s], m_depthFormat, width, height);
+            if (slot.frameDepthTexture == INVALID_TEXTURE) { OitDestroyTargets(); return false; }
+
+            // The framebuffers, by OitPass.
+            const VkImageView frameDepth = m_depthImageViews[s];
+            auto makeFb = [&](OitPass pass, std::initializer_list<VkImageView> views) {
+                std::vector<VkImageView> list(views);
+                VkFramebufferCreateInfo fb{};
+                fb.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                fb.renderPass = m_oitPasses[static_cast<size_t>(OitPassConfig(pass))][0];
+                fb.attachmentCount = static_cast<uint32_t>(list.size());
+                fb.pAttachments = list.data();
+                fb.width = w;
+                fb.height = h;
+                fb.layers = 1;
+                return vkCreateFramebuffer(m_device, &fb, nullptr,
+                                           &slot.framebuffers[static_cast<size_t>(pass)]) == VK_SUCCESS;
+            };
+            const bool fbs =
+                makeFb(OitPass::DepthBounds,        {slot.depthBounds.view, frameDepth}) &&
+                makeFb(OitPass::DepthBoundsCull,    {slot.culled.view, frameDepth}) &&
+                makeFb(OitPass::CloudDepthBounds,   {slot.culled.view, slot.cloudDepthView}) &&
+                makeFb(OitPass::Transmittance,      {slot.coeff0.view, slot.coeff1.view, frameDepth}) &&
+                makeFb(OitPass::CloudTransmittance, {slot.coeff0.view, slot.coeff1.view, slot.cloudDepthView}) &&
+                makeFb(OitPass::Accumulate,         {slot.accumulate.view, frameDepth}) &&
+                makeFb(OitPass::CloudAccumulate,    {slot.accumulate.view, slot.cloudDepthView});
+            if (!fbs) { OitDestroyTargets(); return false; }
+
+            // OitProjParams: host-visible, rewritten by SetOitStage — only
+            // ever while this slot records (its previous frame has passed
+            // its fence).
+            if (!CreateVkBuffer(256, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                slot.paramsBuffer, slot.paramsMemory) ||
+                vkMapMemory(m_device, slot.paramsMemory, 0, 256, 0, &slot.paramsMapped) != VK_SUCCESS) {
+                OitDestroyTargets();
+                return false;
+            }
+            std::memset(slot.paramsMapped, 0, 256);
+
+            // Set 6 per stage: the depth-bounds stage reads the ORIGINAL
+            // bounds (the cull pass does), the others the culled ones; only
+            // the accumulation reads the coefficients.
+            std::array<VkDescriptorSetLayout, 3> layouts = {m_oitSetLayout, m_oitSetLayout, m_oitSetLayout};
+            VkDescriptorSetAllocateInfo alloc{};
+            alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc.descriptorPool = m_oitPool;
+            alloc.descriptorSetCount = 3;
+            alloc.pSetLayouts = layouts.data();
+            if (vkAllocateDescriptorSets(m_device, &alloc, slot.stageSets.data()) != VK_SUCCESS) {
+                OitDestroyTargets();
+                return false;
+            }
+            const VKTextureInfo& dummy = m_textures[m_oitDummy];
+            auto imageOf = [&](const OitColor* c) {
+                VkDescriptorImageInfo i{};
+                const TextureHandle th = c ? c->texture : m_oitDummy;
+                const VKTextureInfo& t = c ? m_textures[th] : dummy;
+                i.sampler = t.sampler;
+                i.imageView = c ? c->view : t.imageView;
+                i.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                return i;
+            };
+            VkDescriptorBufferInfo params{};
+            params.buffer = slot.paramsBuffer;
+            params.offset = 0;
+            params.range = sizeof(glm::vec4);
+            const OitColor* bounds[3] = {&slot.depthBounds, &slot.culled, &slot.culled};
+            for (size_t stageIndex = 0; stageIndex < 3; ++stageIndex) {
+                const bool acc = stageIndex == 2;
+                std::array<VkDescriptorImageInfo, 3> images = {
+                    imageOf(bounds[stageIndex]),
+                    imageOf(acc ? &slot.coeff0 : nullptr),
+                    imageOf(acc ? &slot.coeff1 : nullptr)};
+                std::array<VkWriteDescriptorSet, 4> writes{};
+                for (uint32_t b = 0; b < 4; ++b) {
+                    writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    writes[b].dstSet = slot.stageSets[stageIndex];
+                    writes[b].dstBinding = b;
+                    writes[b].descriptorCount = 1;
+                    if (b < 3) {
+                        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        writes[b].pImageInfo = &images[b];
+                    } else {
+                        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                        writes[b].pBufferInfo = &params;
+                    }
+                }
+                vkUpdateDescriptorSets(m_device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+            }
+        }
+
+        // Resting layouts: colour images sampleable, the clouds' depth an
+        // attachment.
+        VkCommandBuffer cmd = BeginSingleTimeCommands();
+        std::vector<VkImageMemoryBarrier> barriers;
+        for (OitSlot& slot : m_oitSlots) {
+            for (OitColor* c : {&slot.depthBounds, &slot.culled, &slot.coeff0, &slot.coeff1, &slot.accumulate}) {
+                VkImageMemoryBarrier b{};
+                b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                b.image = c->image;
+                b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+                b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                barriers.push_back(b);
+            }
+            VkImageMemoryBarrier d{};
+            d.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            d.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            d.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            d.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.image = slot.cloudDepthImage;
+            d.subresourceRange = {depthAspect, 0, 1, 0, 1};
+            d.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barriers.push_back(d);
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                             0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+        EndSingleTimeCommands(cmd);
+
+        Log::Info("VKBackend: Improved Transparency targets %dx%d (%d frame slots)", width, height,
+                  MAX_FRAMES_IN_FLIGHT);
+        return true;
+    }
+
+    void VKBackend::OitDestroyTargets() {
+        if (!m_oitCreated || m_device == VK_NULL_HANDLE) return;
+        vkDeviceWaitIdle(m_device);
+        if (m_oitPassOpen) m_oitPassOpen = false;
+        DestroyOitPipelines();
+        auto dropTexture = [this](TextureHandle& handle) {
+            if (handle == INVALID_TEXTURE) return;
+            auto it = m_textures.find(handle);
+            if (it != m_textures.end()) {
+                if (it->second.sampler != VK_NULL_HANDLE) vkDestroySampler(m_device, it->second.sampler, nullptr);
+                m_textures.erase(it);   // its set goes with the OIT pool
+            }
+            handle = INVALID_TEXTURE;
+        };
+        for (OitSlot& slot : m_oitSlots) {
+            for (VkFramebuffer& fb : slot.framebuffers) {
+                if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(m_device, fb, nullptr);
+                fb = VK_NULL_HANDLE;
+            }
+            for (OitColor* c : {&slot.depthBounds, &slot.culled, &slot.coeff0, &slot.coeff1, &slot.accumulate}) {
+                dropTexture(c->texture);
+                if (c->view != VK_NULL_HANDLE) vkDestroyImageView(m_device, c->view, nullptr);
+                if (c->image != VK_NULL_HANDLE) vkDestroyImage(m_device, c->image, nullptr);
+                if (c->memory != VK_NULL_HANDLE) vkFreeMemory(m_device, c->memory, nullptr);
+                *c = OitColor{};
+            }
+            dropTexture(slot.frameDepthTexture);   // the view is the frame's (m_depthSampleViews)
+            if (slot.cloudDepthView != VK_NULL_HANDLE) vkDestroyImageView(m_device, slot.cloudDepthView, nullptr);
+            if (slot.cloudDepthImage != VK_NULL_HANDLE) vkDestroyImage(m_device, slot.cloudDepthImage, nullptr);
+            if (slot.cloudDepthMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, slot.cloudDepthMemory, nullptr);
+            slot.cloudDepthView = VK_NULL_HANDLE;
+            slot.cloudDepthImage = VK_NULL_HANDLE;
+            slot.cloudDepthMemory = VK_NULL_HANDLE;
+            if (slot.paramsMapped) vkUnmapMemory(m_device, slot.paramsMemory);
+            if (slot.paramsBuffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, slot.paramsBuffer, nullptr);
+            if (slot.paramsMemory != VK_NULL_HANDLE) vkFreeMemory(m_device, slot.paramsMemory, nullptr);
+            slot.paramsMapped = nullptr;
+            slot.paramsBuffer = VK_NULL_HANDLE;
+            slot.paramsMemory = VK_NULL_HANDLE;
+            slot.stageSets.fill(VK_NULL_HANDLE);
+        }
+        if (m_oitPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_oitPool, nullptr);
+        m_oitPool = VK_NULL_HANDLE;
+        // The variants live with the option: rebuilt when it comes back.
+        std::vector<ShaderHandle> variants;
+        for (auto& [engine, v] : m_oitVariants) {
+            for (ShaderHandle s : v.shader) if (s != INVALID_SHADER) variants.push_back(s);
+        }
+        m_oitVariants.clear();
+        for (ShaderHandle s : variants) DestroyShader(s);
+        m_oitCreated = false;
+        m_oitWidth = m_oitHeight = 0;
+    }
+
+    bool VKBackend::OitBeginPass(OitPass pass, bool clearColor) {
+        if (!m_frameActive || !m_oitCreated || m_oitPassOpen || !m_frameDepthPreserved) return false;
+        if (m_activeTarget != INVALID_RENDER_TARGET) return false;
+        const int config = OitPassConfig(pass);
+        const VkRenderPass rp = m_oitPasses[static_cast<size_t>(config)][clearColor ? 1 : 0];
+        OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
+        const VkFramebuffer fb = slot.framebuffers[static_cast<size_t>(pass)];
+        if (rp == VK_NULL_HANDLE || fb == VK_NULL_HANDLE) return false;
+        if (static_cast<uint32_t>(m_oitWidth) != m_swapchainExtent.width ||
+            static_cast<uint32_t>(m_oitHeight) != m_swapchainExtent.height) {
+            return false;
+        }
+
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+        SuspendActivePass(cmd);   // the frame's pass ends (its depth stored); swapchain back to an attachment
+
+        std::vector<VkImageMemoryBarrier> barriers;
+        auto toAttachment = [&](const OitColor& c) {
+            VkImageMemoryBarrier b{};
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = c.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            barriers.push_back(b);
+        };
+        switch (pass) {
+            case OitPass::DepthBounds:        toAttachment(slot.depthBounds); break;
+            case OitPass::DepthBoundsCull:
+            case OitPass::CloudDepthBounds:   toAttachment(slot.culled); break;
+            case OitPass::Transmittance:
+            case OitPass::CloudTransmittance: toAttachment(slot.coeff0); toAttachment(slot.coeff1); break;
+            case OitPass::Accumulate:
+            case OitPass::CloudAccumulate:    toAttachment(slot.accumulate); break;
+        }
+        VkPipelineStageFlags dstStages = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        if (pass == OitPass::CloudDepthBounds) {
+            // The clouds blit the frame's depth into their own: sampled.
+            VkImageMemoryBarrier d{};
+            d.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            d.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            d.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            d.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.image = m_depthImages[static_cast<size_t>(m_currentFrame)];
+            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            d.subresourceRange = {aspect, 0, 1, 0, 1};
+            d.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            d.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barriers.push_back(d);
+            dstStages |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                             dstStages, 0, 0, nullptr, 0, nullptr,
+                             static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        // MC's clear values: the depth bounds (-FLT_MAX, 0, 0, 0) so MAX
+        // finds the nearest and farthest; the rest zero.
+        std::array<VkClearValue, 3> clears{};
+        const bool bounds = config == 0;
+        clears[0].color = bounds ? VkClearColorValue{{-3.4028235e38f, 0.0f, 0.0f, 0.0f}}
+                                 : VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}};
+        clears[1].color = VkClearColorValue{{0.0f, 0.0f, 0.0f, 0.0f}};
+        clears[config == 1 ? 2 : 1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = rp;
+        begin.framebuffer = fb;
+        begin.renderArea.offset = {0, 0};
+        begin.renderArea.extent = {static_cast<uint32_t>(m_oitWidth), static_cast<uint32_t>(m_oitHeight)};
+        begin.clearValueCount = config == 1 ? 3u : 2u;
+        begin.pClearValues = clears.data();
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        m_oitPassOpen = true;
+        m_oitOpenPass = pass;
+        m_currentPipeline = VK_NULL_HANDLE;
+        ResetRecordedBindings();
+        SetViewport(0, 0, m_oitWidth, m_oitHeight);
+        ClearScissorRect();
+        return true;
+    }
+
+    void VKBackend::OitEndPass() {
+        if (!m_oitPassOpen) return;
+        VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
+        vkCmdEndRenderPass(cmd);
+        const OitPass pass = m_oitOpenPass;
+        m_oitPassOpen = false;
+        OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
+
+        std::vector<VkImageMemoryBarrier> barriers;
+        auto toSampled = [&](const OitColor& c) {
+            VkImageMemoryBarrier b{};
+            b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.image = c.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barriers.push_back(b);
+        };
+        switch (pass) {
+            case OitPass::DepthBounds:        toSampled(slot.depthBounds); break;
+            case OitPass::DepthBoundsCull:
+            case OitPass::CloudDepthBounds:   toSampled(slot.culled); break;
+            case OitPass::Transmittance:
+            case OitPass::CloudTransmittance: toSampled(slot.coeff0); toSampled(slot.coeff1); break;
+            case OitPass::Accumulate:
+            case OitPass::CloudAccumulate:    toSampled(slot.accumulate); break;
+        }
+        if (pass == OitPass::CloudDepthBounds) {
+            VkImageMemoryBarrier d{};
+            d.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            d.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            d.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            d.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            d.image = m_depthImages[static_cast<size_t>(m_currentFrame)];
+            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            d.subresourceRange = {aspect, 0, 1, 0, 1};
+            d.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            d.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                              VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            barriers.push_back(d);
+        }
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT,
+                             0, 0, nullptr, 0, nullptr, static_cast<uint32_t>(barriers.size()), barriers.data());
+
+        // Back to the frame, colour and depth as they were.
+        VkRenderPassBeginInfo resume{};
+        resume.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        resume.renderPass = FrameResumePass();
+        resume.framebuffer = FrameFramebuffer();
+        resume.renderArea.offset = {0, 0};
+        resume.renderArea.extent = m_swapchainExtent;
+        std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
+        clearValues[0].color = m_clearColor;
+        clearValues[1].depthStencil = {1.0f, 0};
+        resume.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        resume.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(cmd, &resume, VK_SUBPASS_CONTENTS_INLINE);
+        m_currentPipeline = VK_NULL_HANDLE;
+        ResetRecordedBindings();
+        SetViewport(0, 0, static_cast<int>(m_swapchainExtent.width), static_cast<int>(m_swapchainExtent.height));
+        ClearScissorRect();
+    }
+
+    TextureHandle VKBackend::OitTexture(OitImage image) const {
+        if (!m_oitCreated) return INVALID_TEXTURE;
+        const OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
+        switch (image) {
+            case OitImage::DepthBounds:       return slot.depthBounds.texture;
+            case OitImage::DepthBoundsCulled: return slot.culled.texture;
+            case OitImage::Coeff0:            return slot.coeff0.texture;
+            case OitImage::Coeff1:            return slot.coeff1.texture;
+            case OitImage::Accumulate:        return slot.accumulate.texture;
+            case OitImage::FrameDepth:        return slot.frameDepthTexture;
+        }
+        return INVALID_TEXTURE;
+    }
+
     void VKBackend::SuspendActivePass(VkCommandBuffer cmd) {
         vkCmdEndRenderPass(cmd);
         VkImageMemoryBarrier barrier{};
@@ -3731,6 +4734,7 @@ namespace Render {
 
     void VKBackend::BindRenderTarget(RenderTargetHandle handle) {
         if (!m_frameActive || handle == m_activeTarget) return;
+        if (m_oitPassOpen) return;   // an OIT pass is open: OitEndPass returns to the frame
         auto rtIt = handle != INVALID_RENDER_TARGET ? m_renderTargets.find(handle) : m_renderTargets.end();
         if (handle != INVALID_RENDER_TARGET && rtIt == m_renderTargets.end()) return;
         if (handle == INVALID_RENDER_TARGET && m_renderPassLoad == VK_NULL_HANDLE) return;
@@ -3769,7 +4773,7 @@ namespace Render {
                 texIt->second.lastUsedFrame = m_frameNumber;
             }
         } else {
-            begin.renderPass  = m_renderPassLoad;
+            begin.renderPass  = FrameResumePass();
             begin.framebuffer = FrameFramebuffer();
             begin.renderArea.extent = m_swapchainExtent;
         }
@@ -3791,7 +4795,10 @@ namespace Render {
 
         // The frame's depth and stencil were not stored (see the note at
         // m_renderTargets): give what follows an empty, defined buffer.
-        if (handle == INVALID_RENDER_TARGET) Clear(false, true, DepthFormatHasStencil(m_depthFormat));
+        // Preserved (Improved Transparency), they were — and were loaded.
+        if (handle == INVALID_RENDER_TARGET && !m_frameDepthPreserved) {
+            Clear(false, true, DepthFormatHasStencil(m_depthFormat));
+        }
     }
 
     bool VKBackend::CreateCommandPool() {
@@ -4582,8 +5589,11 @@ namespace Render {
     std::vector<std::string> VKBackend::PipelineManifestLines() const {
         std::vector<std::string> lines;
         for (const auto& [key, rec] : m_pipelines) {
+            // Improved Transparency's shaders (layoutType 3 / 4) exist only
+            // while it is on; the warm-up would rebuild them without their
+            // layout.
             auto it = m_shaders.find(rec.shader);
-            if (it == m_shaders.end() || it->second.vertPath.empty()) continue;
+            if (it == m_shaders.end() || it->second.vertPath.empty() || it->second.layoutType >= 3) continue;
             lines.push_back(it->second.vertPath + "\t" + it->second.fragPath + "\t" +
                             HexOf(&rec.state, sizeof(PipelineState)));
         }
@@ -4637,6 +5647,7 @@ namespace Render {
             if (rec.pipeline != VK_NULL_HANDLE) vkDestroyPipeline(m_device, rec.pipeline, nullptr);
         }
         m_pipelines.clear();
+        DestroyOitPipelines();
         m_currentPipeline = VK_NULL_HANDLE;
     }
 
@@ -4701,6 +5712,14 @@ namespace Render {
                 m_renderPassLoad = VK_NULL_HANDLE;
             }
             CreateRenderPass();
+            // The keep-depth variants have the old formats too, and so do
+            // Improved Transparency's passes (rebuilt on their next use).
+            DestroyKeepDepthPasses();
+            DestroyOitPasses();
+            if (m_frameDepthPreserved) {
+                CreateRenderPassVariant(false, m_renderPassKeepDepth, /*keepDepth=*/true);
+                CreateRenderPassVariant(true, m_renderPassLoadKeepDepth, /*keepDepth=*/true);
+            }
             // Render targets share the attachment formats (so the pipelines
             // stay compatible with their pass): new pass, new images.
             if (m_targetRenderPass != VK_NULL_HANDLE) {
@@ -4728,7 +5747,11 @@ namespace Render {
 
     void VKBackend::CleanupSwapchain() {
         // Deliberately leaves m_renderPass alone — see RecreateSwapchain.
+        // Improved Transparency's framebuffers hold the frame's depth views.
+        OitDestroyTargets();
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (m_depthSampleViews[i] != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthSampleViews[i], nullptr);
+            m_depthSampleViews[i] = VK_NULL_HANDLE;
             if (m_depthImageViews[i] != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_depthImageViews[i], nullptr);
             if (m_depthImages[i] != VK_NULL_HANDLE) vkDestroyImage(m_device, m_depthImages[i], nullptr);
             if (m_depthMemory[i] != VK_NULL_HANDLE) vkFreeMemory(m_device, m_depthMemory[i], nullptr);
@@ -5190,6 +6213,21 @@ namespace Render {
 
     VkPipeline VKBackend::GetOrCreatePipeline(const PipelineState& state, ShaderHandle shader) {
         size_t hash = HashPipelineState(state, shader);
+        if (m_oitPassOpen) {
+            // Improved Transparency: built against the open OIT pass, kept in
+            // that configuration's own map.
+            const int config = OitPassConfig(m_oitOpenPass);
+            auto& map = m_oitPipelines[static_cast<size_t>(config)];
+            auto oit = map.find(hash);
+            if (oit != map.end()) return oit->second.pipeline;
+            OitPipelineTarget target;
+            target.renderPass = m_oitPasses[static_cast<size_t>(config)][0];
+            target.colorCount = config == 1 ? 2u : 1u;
+            target.blendMax   = config == 0;
+            VkPipeline pipeline = CreateGraphicsPipeline(state, shader, &target);
+            if (pipeline != VK_NULL_HANDLE) map[hash] = PipelineRecord{state, shader, pipeline};
+            return pipeline;
+        }
         auto it = m_pipelines.find(hash);
         if (it != m_pipelines.end()) return it->second.pipeline;
 
@@ -5202,7 +6240,8 @@ namespace Render {
         return pipeline;
     }
 
-    VkPipeline VKBackend::CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader) {
+    VkPipeline VKBackend::CreateGraphicsPipeline(const PipelineState& state, ShaderHandle shader,
+                                                 const OitPipelineTarget* oit) {
         // On MoltenVK this is a Metal shader/pipeline-state compile unless the
         // VkPipelineCache already holds it. Mid-frame, that is a hitch.
         PROFILE_ZONE_N("Vk.CreateGraphicsPipeline");
@@ -5429,12 +6468,31 @@ namespace Render {
         colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
         colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        // Improved Transparency's OIT passes (MC's OIT snippets): the
+        // colour AND alpha blend One/One — MAX into the depth bounds, ADD
+        // into the coefficients and the accumulation — on every attachment.
+        std::array<VkPipelineColorBlendAttachmentState, 2> blendAttachments = {colorBlendAttachment,
+                                                                               colorBlendAttachment};
+        uint32_t blendAttachmentCount = 1;
+        if (oit) {
+            for (auto& a : blendAttachments) {
+                if (state.blendEnabled) {
+                    a.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                    a.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+                    a.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    a.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+                    a.colorBlendOp = oit->blendMax ? VK_BLEND_OP_MAX : VK_BLEND_OP_ADD;
+                    a.alphaBlendOp = oit->blendMax ? VK_BLEND_OP_MAX : VK_BLEND_OP_ADD;
+                }
+            }
+            blendAttachmentCount = oit->colorCount;
+        }
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
         colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
         colorBlending.logicOpEnable = VK_FALSE;
-        colorBlending.attachmentCount = 1;
-        colorBlending.pAttachments = &colorBlendAttachment;
+        colorBlending.attachmentCount = blendAttachmentCount;
+        colorBlending.pAttachments = blendAttachments.data();
 
         // Create pipeline
         VkGraphicsPipelineCreateInfo pipelineInfo{};
@@ -5458,10 +6516,16 @@ namespace Render {
             if (sit != m_shaders.end() && sit->second.layoutType == 1 &&
                 m_portalPipelineLayout != VK_NULL_HANDLE) {
                 pl = m_portalPipelineLayout;
+            } else if (sit != m_shaders.end() && sit->second.layoutType == 3 &&
+                       m_portalOitPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_portalOitPipelineLayout;
+            } else if (sit != m_shaders.end() && sit->second.layoutType == 4 &&
+                       m_blockOitPipelineLayout != VK_NULL_HANDLE) {
+                pl = m_blockOitPipelineLayout;
             }
         }
         pipelineInfo.layout = pl;
-        pipelineInfo.renderPass = m_renderPass;
+        pipelineInfo.renderPass = (oit && oit->renderPass != VK_NULL_HANDLE) ? oit->renderPass : m_renderPass;
         pipelineInfo.subpass = 0;
 
         VkPipeline pipeline;

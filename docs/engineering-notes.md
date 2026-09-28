@@ -500,6 +500,495 @@ the tour pose that measured no GPU change (within noise, +1% vertices from
 split greedy rectangles) — kept for parity. `OBEY_BLOCK_LAYERS=1` restores the
 per-block layer; `[LayerCensus]` in the log counts the moves.
 
+## Fresh-chunk generation throughput (2026-09-26)
+
+Measured in game: `/tp` into never-generated land at view distance 32 (3,725
+chunks), Tracy zones per stage, `OBEY_SERVER_STATS=1` for the chunk rate.
+Output-identical changes are checked with the harness: `async_chunk_test
+--radius 10 --center 0 0 --phases 0-5 --seed 12345 --dump-full` (and r8 at
+1500,-900) must produce byte-identical dumps; `--dedicated-lane` runs the lane
+the way the game does.
+
+- **The serial worldgen lane paces generation.** MC's `worldgenTaskDispatcher`
+  is a consecutive executor, and FEATURES runs on it synchronously, so every
+  chunk passes through one serial stage (~2.6 ms per chunk). Sharing the FIFO
+  worldgen pool, each lane hop queued behind 5-30 ms terrain tasks: the lane
+  was busy ~75% of every second while four of the nine pool threads idled,
+  and faster terrain tasks barely moved wall time. The lane now runs on
+  `SharedLaneExecutor` (two elevated threads, `WorldgenLane` in Tracy):
+  13 s vs 15-16 s to generate the view, t90 11 s vs 13 s, features 1.6 vs
+  1.9 ms per chunk. `OBEY_SHARED_LANE=1` restores the shared pool for A/B.
+  The 2026-08-30 "no gain" measurement predates the 26.3 engine.
+- **Lane bookkeeping (Game Mode, 3 interleaved pairs):** of the lane's time,
+  features are ~77%, `Lane.ScheduleLayer` ~9.5%, structure starts ~6%,
+  template loading ~4.4%, the executor's task wrapper ~2.6%. Kept, ~1%
+  (all received 7.35-7.41 -> 7.30 s): `scheduleChunkInLayer` tests
+  `hasCompletedStep` before chasing the chunk's persisted status (same
+  outcome: a step's status is written to the chunk before the holder marks it
+  complete, and only rises), and the pool's per-task CPU/wall clocks run only
+  under `OBEY_POOL_PROBE`. The rest of ScheduleLayer is MC's walk over up to
+  529 holders per layer, a cache miss each.
+- **Structure-template warmup - tried and reverted.** Preloading every
+  template's jigsaw data on a background thread (1,917 templates, 1.6-3 s,
+  1.3-2.4 s CPU) and prefetching each piece's full template on the pool when
+  the piece is created took template loading off the lane (0.33 -> 0.02 s a
+  run) but did not move arrival times (90% 6.40 vs 6.38 s, 100% 7.35 vs
+  7.23 s), while the prefetch parsed 2.6x more than the lane had used.
+- **Features are at MC's algorithmic cost.** They are ~76% of the lane
+  (7.0 of 9.2 s); ore placement is 45-70% of features, and most of that is
+  the palette write of each ore block (MC's own work). Tried and reverted, no
+  measurable change (1.61 vs 1.62 ms per chunk in game; single-thread harness
+  over 15 interleaved pairs -0.4..-1.1%, within noise): a 64-slot per-Block
+  memo in `TagMatchTest`, per-Block memo of the tree sweep's name checks. Features
+  cannot leave the lane: MC runs them strictly one chunk at a time and
+  neighbouring chunks' features overlap.
+- **With the lane off the pool, the machine was CPU-saturated** (pool ~7 of
+  11 threads, render and I/O on top of 4P+6E cores); after the noise work
+  below, wall time is paced by the lane again and Surface (~30 s of CPU for
+  the view) is the largest remaining CPU cost.
+- **The whole pipeline keeps up with generation** (Tracy, zone end times
+  after the teleport): conversion, initial light, send and client receive
+  finish within 0.1-0.3 s of each chunk's generation, and meshing's 90% mark
+  is 0.1 s behind. Generation is the bottleneck, and inside it the serial
+  lane (~78% busy); per-chunk cost roughly doubles over a 10 s run as the Air
+  heats (surface 4.7 -> 7.5 ms, features 1.2 -> 2.4 ms).
+- **Measure under real Game Mode.** A directly exec'd build-tree binary never
+  gets it (nor does `gamepolicyctl game-mode set on` alone: the daemon sees an
+  unregistered identity and no gaming session). Clone the bundle to
+  `~/Applications`, `lsregister -f`, `open -W --env K=V ... --args ...` (open's
+  own --env: the game opens its log before parsing its own `--env`), policy
+  automatic, and confirm per run that gamepolicyd logged "Full screen gaming
+  session is now active" (`/usr/bin/log show` - zsh's `log` is a builtin).
+  Under Game Mode the whole picture shifts: the fresh view took 9 s instead
+  of 12-13 s, and conclusions drawn without it can be wrong (below).
+- **8 generation requests in flight on high-tier hardware** (MC: 4;
+  `OBEY_INFLIGHT` overrides, low-tier `HardwareProfile` keeps 4). Without Game
+  Mode 8 showed no gain; under it (3 interleaved runs each): 50/90/100% of the
+  view received at 4.6/8.0/8.9 s with 4, 4.0/7.3/7.7 s with 8. 16 was worse
+  (farther chunks and border-only chunks crowd out the near ones).
+- **Chunk batch rate vs the frame (client).** `ChunkBatchSizeCalculator`
+  timed each batch by wall clock like vanilla; the client drains packets once
+  per frame, so at 120 Hz vsync a batch arriving across a frame boundary
+  measured >= 8.3 ms whatever its size, the requested rate fell to 11-20
+  chunks a tick and one run in three stalled delivery at ~250 chunks/s while
+  generation ran at 500 (all received at 10-14 s instead of 8). Now a batch
+  costs its arrival span on the I/O thread plus its main-thread apply time,
+  unless a drain hit its 6 ms budget during the batch (client behind: wall
+  time, as before); a slow link still stretches the arrival span. With both
+  changes: 3.5/6.3/7.2 s (was 3.9-4.9/7.0-8.9/8.0-10.3 s), minimum requested
+  rate 24-78 chunks a tick instead of 11-13.
+- **Features are at MC's algorithmic cost.** They are ~76% of the lane
+  (7.0 of 9.2 s); ore placement is 45-70% of features, and most of that is
+  the palette write of each ore block (MC's own work). Tried and reverted, no
+  measurable change (1.61 vs 1.62 ms per chunk): a 64-slot per-Block memo in
+  `TagMatchTest`, per-Block memo of the tree sweep's name checks. Features
+  cannot leave the lane: MC runs them strictly one chunk at a time and
+  neighbouring chunks' features overlap.
+- **With the lane off the pool, the machine was CPU-saturated** (pool ~7 of
+  11 threads, render and I/O on top of 4P+6E cores); after the noise work
+  below, wall time is paced by the lane again and Surface (~30 s of CPU for
+  the view) is the largest remaining CPU cost.
+- **The whole pipeline keeps up with generation** (Tracy, zone end times
+  after the teleport): conversion, initial light, send and client receive
+  finish within 0.1-0.3 s of each chunk's generation, and meshing's 90% mark
+  is 0.1 s behind. Generation is the bottleneck, and inside it the serial
+  lane (~78% busy); per-chunk cost roughly doubles over a 10 s run as the Air
+  heats (surface 4.7 -> 7.5 ms, features 1.2 -> 2.4 ms).
+- **`OBEY_INFLIGHT` (MC's 4-request throttle) does not bring chunks sooner.**
+  With the dedicated lane, 8 / 16 in flight raise lane occupancy to 89% / 95%
+  and finish all generation 1-2 s earlier, but the chunks the player gets are
+  no earlier (50% at 4.7 s, 90% at 9.3 s with 4 and 8; 5.2-6.1 / 9.6-10.0 s
+  with 16): the extra lane work goes to farther chunks and to border chunks
+  generated only for their neighbours. A pool that prioritizes by ticket
+  level would do the same, so neither was adopted.
+- **Per-chunk CPU that was pure overhead** (all output-identical):
+  - `BiomeManager::getBiome` (the surface rules ask per block) recomputed
+    eight corners' LCG fiddles every call; they come from a per-thread
+    direct-mapped corner cache now (`BiomeManager::cornerFiddle`). The
+    distance sum is unchanged.
+  - `Biomes::get` took the registry mutex on every quart of the biome fill
+    and the carvers (~1,000 contended-wait samples); a per-thread cache of
+    recent keys serves nearly all of them. Safe because an entry is never
+    replaced once created.
+  - The carvers sampled the full climate for all 289 source chunks of every
+    chunk; MC memoizes that on the source chunk (`ChunkAccess.carverBiome`),
+    and so does `ProtoChunk::carverBiome` now (via
+    `TerrainContext::carverBiomeRegion`). Carvers 2.7 -> 0.9 ms per chunk.
+  - `RegionBiomeSource` did a `dynamic_cast` per lookup; the grid is cast once.
+  - Net: Surface 6.9 -> 5.7 ms, Biomes 1.35 -> 0.57 ms, terrain CPU -18%.
+- **Noise stage, 7.6 -> 5.2 ms per chunk in game (-32%)**, all verified
+  byte-identical (density parity 222/222 vs Java + terrain dumps, four regions
+  including a structure-heavy r16 at 3000,3000):
+  - `PerlinNoise` / `SmearedPerlinNoise::addToVolume`: the Y terms (wrap,
+    floor, smoothstep, smear) depend on indexY alone and the X terms on indexX
+    alone; they are computed once per call, not once per cell. The Y walk runs
+    over runs of equal floorY (gradients refreshed where a run starts, exactly
+    where the old `lastFloorY` test fired) and the run is a branch-free loop
+    Clang vectorizes 4-wide (check with `-Rpass=loop-vectorize`). Lanes do the
+    scalar operations in the same order and `-ffp-contract=off` forbids FMA,
+    so values are bit-identical.
+  - `NoiseBasedAquifer`: the 12 cells around an anchor (index + unpacked
+    location) are cached per anchor; an anchor spans 16x12x16 blocks.
+  - `Beardifier::sampleVolume`: per column, only the pieces/junctions that can
+    reach it (beard kernel / bury sphere) are summed, in their order. The
+    others add exactly +0.0f and the sum starts at +0.0f (never -0.0f), so
+    dropping them is exact; the sphere test uses x*x + z*z (a lower bound of
+    the float x*x + y*y + z*z, rounding being monotonic).
+  - Single-thread harness (`MC_BG_THREADS=1`, r8): 4.35 -> 3.97 s per run.
+  - Wall time for the view did not move (13 s): the serial lane paces it again.
+- **Surface stage, ~6.3 -> ~5.9 ms per chunk in game** (about -10% relative
+  to the same run's Noise; runs vary with temperature), byte-identical:
+  - `BiomeManager::getBiome` keeps the last cell's eight corner fiddles (a
+    column walk asks for the same cell 3 times in 4); the corner cache only
+    fills a new cell.
+  - `ProtoChunk` keeps its heightmaps in a per-type array as well as the map
+    (MC: EnumMap), and `ChunkStatus::heightmapsAfterList` is a vector: every
+    block write updated the tracked heightmaps through two `std::map` lookups
+    each and a `std::set` walk.
+  - What remains is MC's rule tree (one virtual evaluator per rule, memoized
+    lazy conditions), the biome zoom's eight distance sums, and block
+    reads/writes - no redundant work left to remove without changing the
+    evaluation itself.
+- `terrain/tests/parity/minecraft_classpath.txt` carried the old Desktop path
+  after the project move, so `run_density_parity.sh` compared against a stale
+  `java.bin` (75/222); fixed, 222/222.
+- **Thermal**: this Air throttles within a few runs of full-pool generation
+  (per-chunk Surface cost climbs 4.4 -> 8 ms across one 15 s run). Compare
+  back-to-back runs only after a 60 s cool-down, and prefer per-stage Tracy
+  means over wall time for CPU changes.
+
+## Saved-chunk loading (2026-09-26)
+
+Measured under Game Mode on a saved 32-chunk view (3,725 chunks): join into a
+saved world, and `/tp` from one saved area to another; per-stage end times
+from Tracy (`LoadFromDisk`, `PrebuildChunk` = received, `ProcessMeshJob`),
+frame times from the `Render` zone. Before this pass the view took 1.9-2.6 s
+to arrive; now ~1.15-1.25 s, frames unchanged (p50 16.4 ms, p95 ~18 ms).
+The fixes, in the order they became the bottleneck:
+
+- **Region reads serialized on one mutex.** `AnvilChunkIo::ReadChunkNbt` held
+  the store lock across the file read AND the zlib inflate: 27% of load time
+  was lock waiting. Now `AnvilRegion::ReadCompressed` (positional `pread`,
+  no shared file position) runs under a `shared_mutex` in shared mode when
+  the region is already open (`RegionStore::Find`, no LRU touch); opening,
+  evicting, writing and clearing take it exclusively; inflate runs unlocked.
+  Writes `fflush`+`fsync` before they return, so a positional read after a
+  write sees it. Verified: all 14,784 chunks of a saved world read and parse
+  identically through the new path.
+- **NBT list parsing was quadratic.** Every list element was parsed from a
+  copy of the rest of the buffer with its type byte prepended.
+  `NBTTag::ParsePayload` parses elements in place (identical trees on all
+  chunks of a saved world; parse ~0.09 ms/chunk cheaper).
+- **Chunk-batch pacing on the integrated server.** The client's allowance
+  (vanilla 7 ms per tick) held a saved view to ~100 chunks a tick although
+  applying one costs ~70 us and the per-frame drain budget (6 ms) already
+  guards the frame. `ClientPacketHandler::SetLocalServer`: our own server
+  gets 35 ms and up to 512 chunks a tick, and the estimate starts at 0.1 ms
+  per chunk instead of 0.25 ms; remote servers keep 7 ms / 256 (a batch
+  there costs link time, and a larger allowance queues data ahead of chat on
+  a slow link). `OBEY_CHUNK_BUDGET_MS` / `OBEY_CHUNK_RATE_MAX` override.
+- **12 ms serialize budget per tick.** `PlayerSession::SendNextChunks` built
+  ~130 chunk packets a tick on the server thread (~90 us each). Now in waves
+  on `Core::ParallelFor` (the builder only reads the chunk; the server thread
+  waits), sent in the same nearest-first order; the 12 ms budget is checked
+  between waves. ~200 chunks a tick, server ticks still < 50 ms.
+- **Load jobs on the efficiency cores.** `ServerWorkerPool` workers run at
+  Throughput QoS; a `CHUNK_LOADING` job runs Elevated. Disk read of the view
+  1.1-1.3 s -> 0.8-0.9 s. The class changes only when the job TYPE does
+  (`WORLD_IO` - entity reads, entity writes, fresh-chunk conversion - keeps
+  the current one): dropping to Throughput after every load made each worker
+  wait for a core between loads behind any default-QoS work, and at world
+  open that work is the stronghold ring search (MC
+  `ChunkGeneratorStructureState.ensureStructuresGenerated`: 128
+  `findBiomeHorizontal` scans, ~3.5 s of CPU on the nine-thread worldgen
+  pool, ~0.35 s wall). For its whole run the loads trickled - four workers
+  mostly idle - and the view's disk reads finished at 0.59-0.69 s; now
+  0.43-0.46 s (Game Mode, join and teleport).
+- **World open.** The terrain library's block table (`Blocks::bootstrap`,
+  ~150 ms, now `call_once` and thread-safe) was built on the server thread
+  when a world opened; PlatformMain now builds it on a background thread at
+  launch (joined when Run returns). Server start -> first chunk read
+  0.26 s -> 0.10 s.
+- **Palette decode.** `Anvil::UnpackFromDisk` adopts the disk words directly
+  (`PalettedContainer::ReadFrom`) whenever the engine would use a palette of
+  the same width (block states <= 256 entries, biomes <= 8) - the layouts are
+  identical (MC SimpleBitStorage) - after a range check of every index; the
+  unpack + `BuildFrom` path remains for the rest. `BitStorage::ForEach` walks
+  words instead of 4096 `Get`s, used by `PalettedContainer::ForEachValue`
+  (the census recount on load). Verified identical
+  against the old path on 3,984 random palettes of every size, invalid
+  indices included. Load cost per chunk -10..17%.
+- **NBT parse.** `NBTParser` reads int/long arrays in one bounds check with
+  unchecked big-endian loads (they were a checked `ReadInt64BE` per element),
+  byte arrays by `memcpy`, ASCII strings without the modified-UTF-8 decoder
+  (it maps ASCII to itself), and moves tag names and children instead of
+  copying them. 61 -> 35 us per chunk over the saved world's 14,784 chunks,
+  canonical tree hash identical on every one. What is left is the tree's
+  allocations (a `shared_ptr` per tag, an `unordered_map` per compound).
+- **Palette entry memo.** `ResolveBlockStateEntry` (a palette entry -> state
+  id through `BlockStateRegistry`: several strings built and hashed per
+  entry, per section) is memoised per thread on name + properties in the
+  compound's own order; only resolutions that found a block are kept, so an
+  unknown block still reaches the unimplemented-block tracker every time.
+  `OBEY_NO_PALETTE_MEMO=1` = off. Load cost per chunk ~ -7%.
+- **Client settings before play.** The client sends its view/simulation
+  distance right after LoginStart (MC's configuration phase sends
+  ClientInformation before the game starts); the server's pre-play handler
+  parks it and `OnPlayerJoin` applies it as the session is created. Sent
+  only on LOGIN SUCCESS it waited for the next tick, so a join tracked the
+  7x7 default first: the full view is now requested 13 ms after the session
+  exists instead of 52 ms.
+- **Chunk packet build.** `SendNextChunks` counted each section's non-air
+  blocks by walking all 4096 voxels (`ForEachValue`) per chunk per player;
+  it now sends the section's maintained `nonAirCount` (MC
+  `LevelChunkSection.write` sends `nonEmptyBlockCount` the same way). Palette
+  words are written and read with `PacketBuffer::WriteLongs` /
+  `PacketReader::ReadLongs` (one resize / one bounds check instead of 8
+  `push_back`s a word). `SerializeChunk` 111-129 -> 15-21 us; the view now
+  reaches the client in 0.66-0.76 s (join and teleport), was 0.86-1.26 s.
+- **libdeflate for chunk decompression** (FetchContent, v1.24, MIT; runtime
+  CPU dispatch, so one build serves Apple silicon, Intel Macs and Windows;
+  x86_64 and universal slices compiled and round-trip tested).
+  `AnvilRegion::Inflate` decodes zlib/gzip chunk streams through
+  `Core::Deflate::Decompress` (a per-thread scratch buffer grown until the
+  stream fits). 78.5 -> 17.1 us per chunk on the saved world's 14,784
+  chunks (identical output); in game the disk-load cost per chunk -20..28%.
+- **zlib and minizip removed (2026-09-26).** Every deflate stream in the
+  game, the launcher and the terrain library goes through libdeflate:
+  `common/core/Deflate` (compress; exact-size decompress for network frames
+  and zip entries; unknown-size decompress that grows and restarts, gzip
+  sized from its ISIZE trailer; CRC-32), `common/core/ZipArchive` (read-only
+  zip over it: central directory, Zip64, stored/deflate, CRC-checked — the
+  resource and shader packs and the launcher's Installer), and the terrain
+  library's own `util/Deflate.h` (its standalone parity build fetches the
+  same tag). What it costs: no streaming, so a zip entry or a stream is held
+  whole in memory (the largest is the game binary in an update zip), and a
+  zlib stream of unknown size may be decoded more than once while its buffer
+  grows. Sentry's crash handler (crashpad) still carries zlib — the OS's on
+  macOS/Linux, its own copy on Windows — which is not ours to swap.
+- **Network compression (remote players) also on libdeflate** -
+  `NetworkConnection::FrameForWire` / `ProcessFrame`, level 6 zlib format.
+  Interop verified both ways
+  on 14,784 real chunk bodies (0 failures; 2.8x faster to compress, same
+  77.3 MB); live test: headless server + 3 bots over the LAN address,
+  compression on, 0 disconnects. Loopback (single player) never compresses.
+- **Tried and reverted: letting chunk serialisation use the tick's idle time**
+  (a 35 ms shared deadline past each session's 12 ms). No change in arrival:
+  after libdeflate the per-tick batches are cut by CPU contention (waves run
+  slowly while the loaders and mesh workers saturate the machine), not by the
+  budget, and ticks looked the same either way.
+- **Local rate estimator starts with a full history weight (9)** - at weight
+  1 the first batch (arriving during the client's first frames and pipeline
+  builds) was half the estimate and collapsed the requested rate right after
+  a join. Teleport arrival 1.06-1.11 -> 0.93-1.01 s; join unchanged.
+- **Click to view, measured** (Tracy log messages, `--world` = the world
+  list's action; a real click comes from an already full-screen title
+  screen): server thread 7 ms, world + terrain generator ready ~32 ms,
+  session ~33 ms, full view requested ~45 ms, loading screen gone ~160 ms,
+  every chunk read ~0.42-0.55 s, every chunk at the client 0.57-0.69 s,
+  90% meshed 0.66-0.70 s (was 0.85-1.05 / 0.9-1.1 s). Teleport: every
+  chunk at the client 0.52-0.55 s after the first read.
+- **First server tick at once** (MC `runServer`: `nextTickTimeNanos =
+  getNanos()` after `initServer`). Starting the schedule a tick out held the
+  owner's login - queued since before the world finished opening - for
+  ~50 ms.
+- **Client chunk decode off the network thread.** `ClientConnection`
+  queues each ChunkDataS2C in arrival order as an `AsyncChunkDataS2CPacket`
+  whose decode runs on `ChunkDecodePool` (3 Elevated threads, 1 on low-tier
+  hardware); applying one waits for its own decode (FIFO, so at most one
+  chunk's decode). `ChunkSection::AdoptStatesFromWire` takes the packet's
+  non-air count (MC `LevelChunkSection.read`) instead of recounting 4096
+  voxels, and recounts only when the palette holds a randomly ticking
+  block; light layers are read in place (`PacketReader::ReadSpan`).
+  Decode + build ~110 -> ~70 us, now parallel.
+- **Chunk batch rate estimator, per stage** (`ClientPacketHandler::
+  ChunkBatchSizeCalculator`, the role of MC's `ChunkBatchSizeCalculator`).
+  Vanilla's wall time per batch counted the server spreading a batch over
+  its send phase, the wait for the next frame's drain and the client's
+  startup frames: it read 45-425 us a chunk against a ~3 us apply and held
+  a saved view to 250-380 chunks a tick. Now three stages are timed: link =
+  (arrival span - the server's own send span, a trailing field on
+  `ChunkBatchFinishedS2C`) / n; decode on the pool threads; apply on the
+  main thread against a 7 ms-a-tick budget. The client asks for what its
+  slowest stage can take (caps 512 local / 256 remote), and scales down
+  when more than two ticks' worth of chunks sit unapplied. Fresh estimate
+  per connection, light averaging (3 batches). Tracy plots
+  `ChunkBatch/*`. Singleplayer asks for 512 from the first batch; over the
+  LAN address it measured the server's per-connection compression (level 6,
+  ~250 us a chunk on the network thread) and asked for 112-200.
+- **Chunk packets deflated on the parallel workers.** A compressing
+  connection (remote player) deflated every chunk (level 6, ~250 us) on the
+  server's single network thread - the link stage above. `SendNextChunks`
+  now builds each chunk with `NetworkConnection::PreparePacket` on the
+  wave's workers (body + libdeflate deflate for the connection's current
+  threshold) and queues it with `SendPrepared`; the strand still frames at
+  write time and uses the prepared deflate only if the stream's threshold is
+  the one it was made for (else frames as `SendPacket` would), so the switch
+  to compression stays race-free and the bytes are identical. LAN join
+  (same machine, LAN address): link 240-640 -> 7-69 us a chunk, requested
+  rate 70-190 -> 256 (the remote cap), first-to-last chunk 1.32 -> 1.03 s;
+  meshes on the remote client identical.
+- **Network I/O threads Elevated** (client `NetworkIOService`, server
+  network thread). At the default QoS they lost the cores to the loaders,
+  decoders and mesh workers during a burst and a batch trickled in over tens
+  of ms on loopback (what the link stage first read as 0.3-2.9 ms a chunk).
+- **Light border pass filtered.** `ReconcileFace` queues an increase only
+  when the engine's own first step could raise the cell across the border
+  (`from - Opacity(to) > to`); air against stone was queued, popped and
+  dropped (~0.36 M of 1.9 M entries on the benchmark world; identical
+  light). Most of the rest is real: a world saved with unfinished border
+  light repairs (and saves) it on its next load - a re-saved copy of the
+  benchmark world did ~1,000 entries.
+- What is left: the loaders at ~0.35-0.4 ms per chunk (NBT tree allocation,
+  palette/section build, light layers), the client's I/O thread decoding
+  chunk packets (~90-115 us each, serial), and the whole machine busy during
+  the burst (loaders, ring search, mesh workers, render). Tracy builds put
+  every log line on the capture timeline (`PROFILE_MESSAGE` in `Log.cpp`;
+  `tracy-csvexport -m`), which is how the join hand-off above was timed. Game launch (not world open) is ~1.4 s of sequential
+  main-thread init (atlas ~270 ms, block models ~310 ms, sounds ~150 ms,
+  asset listing ~140 ms, items ~100-150 ms) - done by the time the title
+  screen shows, so it is not part of opening a world from the menu.
+- Tools: saved-world benchmark = a private copy of a world saved after a
+  `/tp` run (join: player restored in the saved area; teleport: `/tp` to the
+  other saved area); `sample` cannot profile startup (attaching early stalls
+  the process in dyld) - use `xctrace record --template 'Time Profiler'
+  --launch` and export the `time-profile` table.
+
+## Section meshing (2026-09-26)
+
+Per-section build cost (`BuildSectionMeshFromCache`, saved 32-chunk view,
+Game Mode) 0.69-0.80 ms -> 0.44 ms; mesh output verified identical with
+`OBEY_MESH_HASH=<file>` (a sorted content hash of every section built,
+written at exit; translucent indices excluded - they are camera-sorted; one
+section of the benchmark world differs run to run on its own).
+
+- **Biome lookups.** MC's blend (`calculateBlockTint`, radius 2 = 25
+  samples) called the fuzzy zoom (`BiomeZoom::NoiseQuartAt`, 8 corner hashes)
+  for every sample of every tinted face: 26% of meshing. `Mesher::
+  ResolveBiome` caches per build over the section plus the widest blend
+  margin (stamped by generation, reset by both fill functions);
+  `OBEY_NO_MESH_BIOME_CACHE=1` = off. -33%.
+- **Blended tint per block** (MC `BlockTintCache`): the packed colour per
+  (channel, block) for the section's own blocks, so a grass block or a leaf
+  blends once, not per face. `OBEY_NO_MESH_TINT_CACHE=1` = off. ~ -5%.
+- **Per-state lookups.** `BlockStates::FromIndex/Count/Base` and
+  `BlockState::Block/Index` are inline over arrays mirrored at `Init`
+  (`BlockStates::detail`) - they were out-of-line calls through a
+  function-local static, 7% of a build by themselves. `ProcessBlock` reads the
+  water flag `DeriveWaterCache` already computed, and resolves models through
+  a per-state pointer table (`Mesher::ModelFor`) instead of a state -> name ->
+  string-hash lookup per block; the table resets when
+  `BlockModelRegistry::Generation()` moves (any load, clear, registration or
+  blockstate load). ~ -7% together.
+- **Buried blocks** skip the model walk: all six neighbours opaque and every
+  face of the state's model naming a cullface (`Mesher::AllFacesCull`, a
+  per-state table reset with `ModelFor`'s) means every face would be dropped
+  at `ShouldCullFace`, so `ProcessBlock` returns after the fluid half. Not
+  with portal faces in the section. `OBEY_NO_BURIED_SKIP=1` = off; check with
+  `OBEY_MESH_HASH`.
+- **One mesher per worker thread** (`ClientWorkerPool::BuildSectionMesh`,
+  `thread_local`): a mesher per job cleared its caches, allocated its fluid
+  builder, std::functions and biome/tint caches, and started the per-state
+  model table empty, so every state's first use in every section went back
+  to the registry's name lookup. Job 611-657 -> 585-637 us (join, -3-4%),
+  identical meshes. `OBEY_MESHER_PER_JOB=1` = a mesher per job again.
+- Profile after these (Time Profiler, teleport into saved land, inclusive
+  share of a build): model walk 78% (face emission 44%), biome tint blend
+  13% (zoom lookups the per-build cache misses 8.6%), AO shade lookups 8%,
+  greedy flush 8%, face light 7%, AO 6.5%, fluids 5.5%. Outside the build
+  a job spends ~7% filling the light cache and ~5% the block cache.
+- What is left: `ProcessBlock`'s own work (face loop, culling, per-face
+  layer), AO and face light (~15%), the fluid builder (~12%).
+- **Upload permits** (`MeshUploadPermits`, PlatformMain): uploads drain once
+  a frame, so the pool caps meshing at permits x fps. The 128 floor (7,680/s
+  at 60 fps) was the limit - a leave-capture warm-up sat at a flat 768 per
+  100 ms; 192 still was (191 jobs started a frame, workers 83% busy at 0.37 ms
+  a section, ~225 a frame of capacity on 5 workers). Floor now 256 on 8+
+  threads, just above the workers; the per-frame upload (~2 ms at 190) follows
+  what the workers deliver, not the permit count.
+
+## Last-world panorama capture (2026-09-26)
+
+Six 90° faces from the eye, drawn and read back before the frame's own view
+(PlatformMain `LeaveCapture`); under the pause menu while the world is
+paused (the prepass), else after Save and Quit / Quit Game. Rules that were
+each a measured bug:
+
+- **Warm-up waits on the faces themselves.** `RecordViewForScheduler`
+  returns a face's sections still dirty or building (never-built sections of
+  a column without all neighbours excluded: the scheduler will not mesh
+  them). Caught up = all six recorded since the warm-up began and at zero —
+  the global mesh queue is not the test (at 32 chunks it never empties, and
+  early on it is empty only because nothing was scheduled yet).
+- **Faces are seeded at the eye** (`SetPortalViewSeed`): the occlusion
+  flood's set (the main view's cached slot, the same section), not every
+  section in a 90° frustum — unseeded, each face took in ~4,000 cave and
+  underground sections nobody can see.
+- **Only the sections a face could see at the warm-up's start are waited
+  for** (`faceWaitFor`). Meshing a section opens the flood past it (MC:
+  UNCOMPILED blocks visibility), so waiting on everything chased cave
+  interiors layer by layer for ~2 s even after the player had looked all
+  around.
+- **A recorded view wakes the scheduler** (`WakeMeshScheduler`): a face is a
+  candidate for one pass only, and the idle backoff was skipping most of
+  them.
+- **Capture**: a row of tiles per frame side by side (2 on a 16:9 window),
+  read back pipelined (Vulkan keeps up to 4 read-backs in flight, taken two
+  frames later): 24 tiles in ~14 frames. The Vulkan take swaps BGRA to RGBA
+  a word at a time over the fork-join pool (a row's take 8.4 -> 4.3 ms of
+  the frame). PNGs: libdeflate as stb's deflate, six faces encoded in
+  parallel (~3 s -> ~0.2 s; Quit Game waits for them).
+- **Tried and dropped: a whole face a frame, off-screen.** Each face drawn
+  into a face-sized render target, read back whole and blitted into its
+  texture on the GPU: 7 frames instead of 13 (capture 231 -> 153-196 ms),
+  but a whole 3090² face is ~20 ms of GPU, so the outro pan ran at ~40 fps
+  for its duration instead of 60 — visibly worse for ~50 ms. (Traps met on
+  the way: MoltenVK builds a pipeline for a format-converting
+  vkCmdBlitImage on first use, a 366 ms stall; a fresh 38 MB vector per
+  take is mostly page faults.)
+- **Measured, Save and Quit 0.5 s after pausing** (`--ui-test-leave 0.5`,
+  bench world, Vulkan, Game Mode, click -> first title frame): 128 permits,
+  no buried skip ~0.62 s; + buried skip 0.62 s (permit-bound either way);
+  + 256 permits 0.35 s (warm-up after the click 353 -> 86 ms; without the
+  buried skip it is 153 ms).
+- Measured (Quit Game, 32 chunks): after looking around 0.72 s from the
+  leave to the files written (warm-up 13 frames); without, 3.3 s (the
+  warm-up meshes everything behind the player). `--ui-test-leave <sec>`
+  times Save and Quit through the pause menu.
+
+### Joining back: the world holds still until the hand-over
+
+Rejoining the world the panorama shows (PlatformMain `JoinTransition`), the
+picture stays up while the world streams in and eases to the leave look;
+the world must not move before the hand-over frame or the picture "jumps".
+
+- **Host (integrated server).** `IntegratedServerConfig::holdOwnerJoin` arms
+  `IntegratedServer`'s owner join hold before the server thread starts: the
+  owner's session counts as paused, so the server never leaves the pause it
+  starts in (no pause transition, no "Saving and pausing" save). Chunk
+  loading, generation, sending, light and entity tracking (mobs, items,
+  orbs) run as under any pause; the simulation, time, weather and player
+  ticks do not. The hand-over frame calls `ReleaseOwnerJoinHold()`; the next
+  tick is the ordinary resume ("Resuming game" + time sync). A guest who
+  joins meanwhile is not held. Timeout: 60 s server-side.
+- **Client.** The hold is part of the world pause
+  (`SetWorldPaused((menu || joinTransition.active) && serverPaused)`), so it
+  freezes what the pause menu freezes: mobs/items/orbs (partial tick 1),
+  animate ticks, block-entity ticks, the sky clock and its partial, cloud
+  partial, particles (zero step), texture animations, sounds, the player's
+  physics and move packets.
+- **Joining someone else's server** nothing can pause their world: only the
+  local player is held (physics and move packets) until the hand-over; the
+  world under the panorama keeps running as before.
+- **The panorama is drawn last in the level** (after the gun-portal pass,
+  particles, clouds, weather, the Improved Transparency resolve and a shader
+  pack's EndScene; the hand, post effects and HUD are off while joining).
+  There is no crossfade — the hand-over is a cut at a matched view — so
+  nothing of the live world may be drawn over the picture before it.
+- Nothing waits forever: LevelLoadTracker's 30 s escape hatch ends the load
+  wait, the ease hands over at the latest 3 s after it began, and the
+  server lets itself go after 60 s.
+
 ## Camera-relative rendering (2026-09-07)
 
 The world past a few hundred thousand blocks used to jitter (float32 resolves
@@ -866,3 +1355,72 @@ Implementation notes that are easy to break:
 - Install order matters: `InstallCrashHandler` runs **after** `sentry_init`, and chains
   to the previously-installed handler, so Sentry still reports.
 - Test with `--crash-test` (SIGSEGV after 3s); it logs the expected report path first.
+
+## Post effects (MC PostChain)
+
+`client/renderer/post/PostChain` runs MC's `post_effect/*.json` chains (vanilla files verbatim
+under `assets/post_effect/`, resource-pack overridable) on both backends. Today they drive the
+spectated-entity views (creeper / spider / invert, `GameRenderer.checkEntityPostEffect`).
+
+- **Order:** after the world, the hand and `EntityOutline::Composite`, before the GUI — MC's
+  `applyPostEffects` spot. On Vulkan the frame copy and every target pass interrupt the frame's
+  render pass, so, like the outline, it only runs once nothing in the world needs depth.
+- **`minecraft:main`:** reading it copies the frame (`RenderBackend::CopyFramebufferToRenderTarget`:
+  GL `glBlitFramebuffer`, VK `vkCmdCopyImage` from the swapchain image); writing it draws onto the frame.
+- **Shaders:** `shaders/post_<name>.{vert,frag}` + `_vk` twins, portal pipeline layout on Vulkan
+  (sampler "In" = slot 0, the other input = slot 1). The config uniform blocks are packed std140-style
+  into sixteen floats (`uPostParams`); inputs not marked `bilinear` are snapped to texel centres in
+  the shader, so targets need only a linear sampler (changing a VK sampler mid-session drains the GPU).
+- **Frame overlap:** every target exists twice and consecutive runs alternate between the two sets.
+- **Shader packs:** skipped (one log line) while a pack is active — OptiFine's behaviour: the pack's
+  composite/final programs own post-processing.
+
+## Improved Transparency (MC 26.3 wavelet OIT)
+
+`client/renderer/post/ImprovedTransparency` is MC 26.3's Video Settings "Improved Transparency":
+wavelet order-independent transparency (`LevelRenderer.executeOit`, `client/renderer/oit/*`,
+`shaders/include/oit*.glsl`, `core/oit_composite.fsh`, `core/oit_depth_bounds_cull.fsh`). It is OFF
+by default. Only the option itself or the Fabulous graphics preset turns it on.
+
+- **Off:** nothing exists or runs. There are no targets, variants, passes or backend modes, and the
+  frame depth is not preserved. `Defer` returns false, so every feature draws where, how and with
+  the shaders it always did. The base `.spv` files are byte-identical to before (the OIT code is
+  all `#ifdef OIT`).
+- **Features:** translucent terrain, dropped items, mob particles, weather and clouds. When
+  active, each is handed to `Defer` at its usual place and drawn at `Resolve` (after the weather,
+  before the hand) once per stage. Translucent terrain is captured and replayed
+  (`ChunkRenderer::CaptureDeferredTranslucentForOit`), because portal views rebuild the renderer
+  in between.
+- **Stages:**
+  - DEPTH_BOUNDS: RGBA32F, MAX-blended, cleared to (-FLT_MAX,0,0,0).
+  - The cull: the bounds are blitted into the culled target, then `oit_depth_bounds_cull` pulls
+    the far bound in to the nearest opaque OIT surface and writes its depth.
+  - TRANSMITTANCE: 2×RGBA16F, eight rank-2 coefficients, added.
+  - ACCUMULATE: RGBA16F, premultiplied colour × transmittance, added.
+  - The composite: premultiplied over the frame, depth ALWAYS with write.
+- **Clouds** run each stage in passes of their own, against their own depth. The frame's depth is
+  blitted in during their depth bounds, which write depth, as MC `CloudRenderer.renderOit` does.
+- **Shader variants:** the participating shaders (`terrain_solid`, `block`, `mob_particle`,
+  `clouds`) get per-stage defines through `SetOitStage`.
+  - GL splices `shaders/oit_lib.glsl` in at `#pragma oit_library`.
+  - Vulkan loads `<name>_oit_{db,tr,ac}_vk.frag.spv`, which CMake builds with glslc `-D`. Those use
+    layout types 3/4: portal/block plus set 6 (bounds, coefficients, params UBO).
+- **Depth convention:** depth is not reversed here. The bounds target's b/a channels therefore
+  store 1 − depth ("nearness"), so MAX still selects the nearest. MC's `ProjMat[2][2]`/`[3][2]`
+  arrive as `OitProjParams.xy`.
+- **Vulkan frame depth:** it is normally discarded at every render-target interruption. While the
+  option is on (`SetFrameDepthPreserved`), the frame uses the keep-depth pass variants, and the
+  per-slot depth images get SAMPLED usage and sample views. The OIT passes attach the current
+  slot's frame depth.
+- **Frame overlap:** Vulkan keeps one OIT target set per frame slot, and the next frame never
+  writes what the previous one reads. GL has a single set.
+- **Memory (on):** per set per pixel:
+  - 16 B depth bounds + 16 B culled bounds + 2×8 B coefficients + 8 B accumulation.
+  - 8 B for the clouds' depth (D32S8). GL instead has a 4 B frame-depth copy and 4 B D24S8 cloud
+    depth.
+  - Total: 64 B/px. At 2560×1600 that is ≈ 262 MB per set: ~524 MB on Vulkan (two slots) and
+    ~262 MB on GL. The 26.1 sorting-layer chain it replaced used ~590 / ~200 MB.
+  - Everything is freed the frame the option goes off.
+- **Not covered:** portal views, the panorama capture and shader packs draw their translucency the
+  classic way. A shader pack disables the option, as OptiFine does. The portal gun's additive
+  sparks also stay classic.

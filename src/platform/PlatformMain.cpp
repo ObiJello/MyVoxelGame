@@ -2,12 +2,14 @@
 #include "PlatformMain.hpp"
 #include "Time.hpp"
 #include "client/input/Input.hpp"
+#include "client/FramerateLimitTracker.hpp"
 #include "client/renderer/shader/ShaderPipeline.hpp"
 #include "client/input/KeyMapping.hpp"
 #include "client/dev/SessionReplay.hpp"
 #include "client/dev/BotSwarm.hpp"
 #include "client/control/RemoteControl.hpp"
 #include "client/sound/SoundHost.hpp"
+#include "client/sound/JukeboxSongPlayback.hpp"
 #include "client/renderer/gui/BossBarState.hpp"
 #include "client/sound/SoundManager.hpp"
 #include "common/world/block/entity/BlockEntityType.hpp"
@@ -22,14 +24,18 @@
 #include "client/renderer/debug/DebugSystem.hpp"
 // Include game headers
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/chunk/Heightmap.hpp"   // InitHeightmapTable
 #include "common/world/block/BlockModel.hpp"
 #include "common/world/block/BlockStateModels.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "client/input/PlayerController.hpp"
+#include "client/entity/ClientFireworks.hpp"
+#include "client/entity/ClientVehicles.hpp"
 #include "client/entity/Player.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // for Game::Items::Compass etc.
 #include "client/renderer/gui/InventoryScreen.hpp"
 #include "client/renderer/gui/CreativeModeInventoryScreen.hpp"
+#include "client/renderer/gui/CreativeHotbars.hpp"
 #include "client/renderer/gui/MerchantScreen.hpp"
 #include "client/renderer/gui/AnvilScreen.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
@@ -40,6 +46,7 @@
 #include "client/renderer/gui/items/BannerItemRenderer.hpp"
 #include "client/renderer/gui/items/HeadItemRenderer.hpp"
 #include "client/renderer/gui/items/ShieldItemRenderer.hpp"
+#include "client/renderer/gui/items/DecoratedPotItemRenderer.hpp"
 #include "common/physics/RayCast.hpp"
 #include "common/physics/Physics.hpp"
 
@@ -54,6 +61,7 @@
 #include "client/renderer/blockentity/EndPortalRenderer.hpp"
 #include "client/renderer/blockentity/BedRenderer.hpp"
 #include "client/renderer/blockentity/SpawnerRenderer.hpp"
+#include "client/renderer/blockentity/VaultRenderer.hpp"
 #include "common/world/block/BedBlock.hpp"
 #include "client/renderer/debug/Crosshair.hpp"
 #include "client/renderer/debug/Gizmos.hpp"
@@ -67,6 +75,7 @@
 #include "client/renderer/entity/EntityCulling.hpp"
 #include <glm/gtc/type_ptr.hpp>
 #include <array>
+#include <deque>
 #include <iomanip>
 #include <fstream>
 #include <ctime>
@@ -78,9 +87,16 @@
 #endif
 #if ENABLE_PORTAL_GUN
 #include "client/renderer/portal/PortalRenderer.hpp"
+#include "client/renderer/portal/PortalCameraTransform.hpp"
 #include "client/renderer/portal/PortalParticleSystem.hpp"
 #include "client/renderer/viewmodel/PortalGunViewmodel.hpp"
 #include "client/renderer/viewmodel/HeldItemRenderer.hpp"
+#include "client/renderer/gui/SpectatorGui.hpp"
+#include "client/renderer/post/PostChain.hpp"
+#include "client/renderer/post/ImprovedTransparency.hpp"
+#include "client/renderer/gui/PlayerTabOverlay.hpp"
+#include "client/network/ClientPlayerInfo.hpp"
+#include "common/world/block/MenuProviders.hpp"
 #include "client/renderer/portal/PortalCrosshair.hpp"
 #include "common/entity/Item.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
@@ -88,6 +104,7 @@
 #include "client/portal/ClientPortalManager.hpp"
 #endif
 #include "client/renderer/particle/MobParticleSystem.hpp"
+#include "client/world/ClientParticleTicks.hpp"
 #include "client/renderer/gui/GuiAtlas.hpp"
 #include "client/renderer/gui/GuiRenderState.hpp"
 #include "client/renderer/gui/GuiRenderer.hpp"
@@ -116,6 +133,7 @@
 #include "client/renderer/environment/MobEffectEnvironment.hpp"
 #include "client/renderer/environment/SkyRenderer.hpp"
 #include "client/renderer/environment/CloudRenderer.hpp"
+#include "client/renderer/environment/WeatherEffectRenderer.hpp"
 #include "client/renderer/gui/screens/OptionsScreens.hpp"
 #include "client/renderer/gui/screens/SkyboxSelectScreen.hpp"
 #include "client/network/FriendsClient.hpp"
@@ -146,6 +164,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "common/world/level/WorldGlobals.hpp"
 #include "server/world/ChunkProvider.hpp"
 #include "server/world/MyTerrainGenerator.hpp"
+#include "world/level/block/Blocks.h"
 
 // Include mesh system headers
 #include "client/renderer/mesh/ChunkRenderer.hpp"
@@ -178,6 +197,7 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 
 // Multiplayer player visibility
 #include "client/entity/RemotePlayerManager.hpp"
+#include "client/entity/ShoulderParrots.hpp"
 #include "client/renderer/entity/PlayerRenderer.hpp"
 #include "client/entity/ItemEntityManager.hpp"
 #include "client/entity/XpOrbManager.hpp"
@@ -186,6 +206,8 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "client/renderer/entity/LightningBoltRenderer.hpp"
 #include "client/entity/ClientMobManager.hpp"
 #include "common/text/Language.hpp"
+#include "common/entity/PlayerArmPose.hpp"
+#include "common/entity/ElytraAnimationState.hpp"
 #include "client/entity/ClientFallingBlocks.hpp"
 #include "client/ClientTickRateManager.hpp"
 #include "client/renderer/entity/BlockCubeEntityRenderer.hpp"
@@ -227,7 +249,8 @@ static PlayerDrawDiag g_playerDrawDiag;
 static const bool g_portalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
 
 // Third-person camera state (see the F5 block in the frame loop): the
-// zoom in body heights and the arrow keys' orbit in degrees.
+// distance in body heights (MC's 4 unless the I/O zoom set its own) and the
+// arrow keys' orbit in degrees.
 static float s_thirdPersonZoom  = 4.0f;
 static float s_thirdPersonOrbit = 0.0f;
 
@@ -238,6 +261,7 @@ static float s_thirdPersonOrbit = 0.0f;
 static Render::MobRenderer::MorphPose MorphPoseOf(const Client::RemotePlayer& rp, float partialTick) {
     Render::MobRenderer::MorphPose pose;
     pose.code      = rp.morph;
+    pose.variant   = rp.morphVariant;
     pose.position  = glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(partialTick));
     pose.bodyYaw   = Game::Mth::RotLerp(partialTick, rp.renderPrevBodyYaw, rp.bodyYaw);
     pose.headYaw   = Game::Mth::RotLerp(partialTick, rp.renderPrevRotation.x, rp.rotation.x);
@@ -249,7 +273,24 @@ static Render::MobRenderer::MorphPose MorphPoseOf(const Client::RemotePlayer& rp
     pose.hurtTime  = rp.hurtTime;
     pose.deathTime = rp.deathTime;
     pose.seed      = rp.playerId;
-    pose.crouching = rp.isCrouching;
+    pose.crouching = rp.isCrouching && rp.vehicleId == 0;
+    pose.passenger = rp.vehicleId != 0;
+    pose.elytraFlags = rp.elytraFlags;
+    pose.elytraRotX  = rp.elytraAnim.RotX(partialTick);
+    pose.elytraRotY  = rp.elytraAnim.RotY(partialTick);
+    pose.elytraRotZ  = rp.elytraAnim.RotZ(partialTick);
+    // The swing (PlayerSwingS2C → getAttackAnim) and the held-item arm poses
+    // the server resolved (PlayerUpdateS2C).
+    pose.attackTime     = rp.AttackAnim(partialTick);
+    pose.rightArmPose   = rp.rightArmPose;
+    pose.leftArmPose    = rp.leftArmPose;
+    pose.usingItem      = rp.usingItem;
+    pose.useItemHand    = rp.useItemHand;
+    pose.ticksUsingItem = static_cast<float>(rp.ticksUsingItem) + (rp.usingItem ? partialTick : 0.0f);
+    pose.maxCrossbowCharge = static_cast<float>(rp.maxCrossbowCharge);
+    // A riptide in flight, and a charging spear's recoil.
+    pose.autoSpinAttack = rp.autoSpinAttack;
+    pose.ticksSinceKineticHitFeedback = rp.TicksSinceKineticHitFeedback(partialTick);
     pose.animTick  = Game::Mth::Lerp(partialTick, static_cast<float>(rp.morphAnimOld),
                                      static_cast<float>(rp.morphAnim));
     // MC Creeper.getSwelling(partialTick): the tick's lerp over maxSwell.
@@ -259,8 +300,88 @@ static Render::MobRenderer::MorphPose MorphPoseOf(const Client::RemotePlayer& rp
     // The synched INVISIBLE / GLOWING flags (MC shared flags 5 / 6).
     pose.invisible = rp.effects.Invisible();
     pose.glowing   = rp.effects.Glowing();
+    // What they hold and wear (BodyArmorS2C for a player — the morph body's
+    // hands and armour layer).
+    if (Client::g_remotePlayerManager) {
+        if (const auto* equipment = Client::g_remotePlayerManager->GetEquipment(rp.playerId)) {
+            for (size_t i = 0; i < equipment->size(); ++i) pose.equipment[i] = (*equipment)[i];
+        }
+    }
     return pose;
 }
+
+// MC ParrotOnShoulderLayer: a player's shoulder parrots (ShoulderParrots,
+// from ShoulderParrotsS2C) as mob-renderer poses riding that player's pose —
+// one per occupied shoulder. The body's own pose fields carry over; the
+// layer takes no hurt tint (OverlayTexture.NO_OVERLAY).
+// Advanced once per frame (the main loop): ShoulderParrots::IsDancing tells
+// a player just come into view from one drawn every frame.
+static uint64_t g_shoulderPartyFrame = 0;
+
+// Whether the jukebox at `pos` is playing, as the client knows it — the
+// same answer the ground parrots get (ClientLevelBridge::IsJukeboxPlaying).
+static bool ClientJukeboxPlaying(const glm::ivec3& pos) {
+    return Client::g_clientMobManager && Client::g_clientMobManager->Level().IsJukeboxPlaying(pos);
+}
+
+static void AppendShoulderParrotPoses(Render::MobRenderer::MorphPose pose, uint32_t playerId,
+                                      const Client::ShoulderParrots::Pair& pair,
+                                      std::vector<Render::MobRenderer::MorphPose>& out) {
+    pose.code     = Game::Morph::kNone;
+    pose.hurtTime = 0;
+    // An engine addition: shoulder parrots dance near a playing jukebox,
+    // event-driven with a per-frame distance check (ShoulderParrots).
+    pose.shoulderParty = Client::ShoulderParrots::IsDancing(
+        playerId, pose.position, g_shoulderPartyFrame, &ClientJukeboxPlaying,
+        [](const std::function<void(const glm::ivec3&)>& fn) { Client::JukeboxSongPlayback::ForEachPlaying(fn); });
+    if (pair.left != Client::ShoulderParrots::kNone) {
+        pose.shoulderParrot = pair.left;
+        pose.shoulderLeft   = true;
+        out.push_back(pose);
+    }
+    if (pair.right != Client::ShoulderParrots::kNone) {
+        pose.shoulderParrot = pair.right;
+        pose.shoulderLeft   = false;
+        out.push_back(pose);
+    }
+}
+
+// A player drawn through a portal pair and/or clipped at a surface, for the
+// layer renderers (mob renderer: morphs, elytra, riptide, shoulder parrots),
+// which take a view and read the entity clip plane rather than a per-body
+// model: `model` (world → world, the portal pair's transform) folds into the
+// view in double (Render::FarRenderView with the active render origin on
+// both sides), the frustum and the eye follow it back into the body's own
+// space, and `clip` (a WORLD plane on the drawn side) becomes the entity clip
+// plane for the scope's life, expressed in the body's space (Mᵀ·plane).
+struct PortalLayerScope {
+    glm::mat4  view;
+    Frustum    frustum;
+    glm::dvec3 eye;
+    bool       clipSet = false;
+    glm::dvec4 savedClip{0.0};
+
+    PortalLayerScope(const glm::mat4& P, const glm::mat4& V, const glm::dvec3& camPos,
+                     const Frustum& fr, const glm::dmat4* model, const glm::dvec4* clip)
+        : view(V), frustum(fr), eye(camPos) {
+        if (model) {
+            const glm::dvec3 origin = Render::RenderOrigin();
+            view    = Render::FarRenderView(V, *model, origin, origin);
+            frustum = Frustum::FromMatrix(P * Render::WorldViewFromRenderView(view));
+            eye     = glm::dvec3(glm::inverse(*model) * glm::dvec4(camPos, 1.0));
+        }
+        if (clip) {
+            savedClip = Render::ChunkRenderer::PortalClipPlaneWorld();
+            Render::ChunkRenderer::SetPortalClipPlane(model ? glm::transpose(*model) * *clip : *clip);
+            clipSet = true;
+        }
+    }
+    ~PortalLayerScope() {
+        if (clipSet) Render::ChunkRenderer::SetPortalClipPlane(savedClip);
+    }
+    PortalLayerScope(const PortalLayerScope&) = delete;
+    PortalLayerScope& operator=(const PortalLayerScope&) = delete;
+};
 
 static glm::dmat4 BodyScaleModel(const glm::dvec3& feet, float scale) {
     if (std::abs(scale - 1.0f) < 1e-4f) return glm::dmat4(1.0);
@@ -345,11 +466,6 @@ static void CloseSentryOnce() {
     }
 }
 
-// Shared "E held" state for cross-branch edge detection (game branch opens inventory,
-// inventory branch closes inventory — both must observe the same held-state to avoid
-// double-firing on the frame the inventory opens). The local `extern bool s_eKeyHeld;`
-// declarations inside Run() resolve to this via the enclosing namespace.
-bool s_eKeyHeld = false;
 // The first-person hand's walk distance (bob phase); file-scope so a
 // controlled client can send it in its view frame.
 static float s_heldWalkDist = 0.0f;
@@ -416,6 +532,13 @@ static uint16_t     s_lastPresencePort = 0;
         return GetVanillaAssetPath(relativePath);
     }
 
+    // The local player is a spectator this frame (set by the frame loop
+    // before the world pass) — the block outline's shouldRenderBlockOutline.
+    static bool s_outlineViewerSpectator = false;
+    // The entity a spectator's first-person camera is inside, -1 for none:
+    // it is not drawn, and neither is its name tag.
+    static int32_t s_hiddenCameraEntityId = -1;
+
     void RenderBlockHighlight(const std::optional<Game::RaycastHit>& hit, const glm::mat4& proj,
                               const glm::mat4& view, bool entityPicked,
                               const glm::vec3& cameraPos, float fovDeg, int fbWidth, int fbHeight) {
@@ -426,6 +549,13 @@ static uint16_t     s_lastPresencePort = 0;
         if (entityPicked) return;
 
         if (!Render::BlockHighlight::IsValidHighlight(hit)) return;
+
+        // MC GameRenderer.shouldRenderBlockOutline: a spectator (who may not
+        // build) sees the outline only on a block it can use —
+        // showAsInteractableInSpectatorMode (a menu, or a portal).
+        if (s_outlineViewerSpectator && !Game::ShowAsInteractableInSpectatorMode(hit->state)) {
+            return;
+        }
 
         // MC LevelRenderer.submitBlockOutline: the block's VoxelShape through
         // ShapeRenderer.renderShape — the UNION's edges (a stair is an L, not
@@ -523,6 +653,57 @@ static uint16_t     s_lastPresencePort = 0;
     // RenderHUD's mob nametags so a tag rides the same lerped body the mob
     // renderer drew.
     static float s_entityPartialTick = 1.0f;
+    // The partial tick a rider's view and seat were placed with this frame
+    // (Client::Vehicles::FrameUpdate, before the player's physics), or -1.
+    // The world pass lerps the entities with the same value: read again a
+    // few milliseconds later, the clock gives a larger partial, and the
+    // vehicle is drawn ahead of the seat by its speed times that gap — a
+    // different gap every frame, so a moving boat shudders under the view.
+    static float s_riderFramePartial = -1.0f;
+
+    // MC Minecraft.cameraEntity for a spectator looking through another
+    // entity (SetCameraS2C): that entity's eye and view rotation at this
+    // frame's partial tick — Camera.setup's `entity.getEyePosition(a)`,
+    // `getViewYRot(a)` (a living entity's HEAD yaw) and `getViewXRot(a)`.
+    // False while the client does not have the entity (not tracked yet, or
+    // just removed): the view stays with the body until it does, or until
+    // the server hands the camera back.
+    struct SpectatedView {
+        glm::dvec3 eye{0.0};
+        float      yaw   = 0.0f;
+        float      pitch = 0.0f;
+    };
+    bool ResolveSpectatedView(int32_t entityId, float partialTick, SpectatedView& out) {
+        if (Client::g_clientMobManager) {
+            if (const Client::ClientMob* entry = Client::g_clientMobManager->GetMob(entityId);
+                entry && entry->mob) {
+                const Game::Mob& mob = *entry->mob;
+                const glm::dvec3 feet = glm::mix(entry->renderPrevPosition, mob.position,
+                                                 static_cast<double>(partialTick));
+                out.eye   = feet + glm::dvec3(0.0, mob.GetEyeHeight(), 0.0);
+                out.yaw   = Client::RotLerp(partialTick, entry->renderPrevYHeadRot, mob.yHeadRot);
+                out.pitch = glm::mix(entry->renderPrevXRot, mob.xRot, partialTick);
+                return true;
+            }
+        }
+        if (Client::g_remotePlayerManager && entityId >= 0) {
+            const auto& players = Client::g_remotePlayerManager->GetPlayers();
+            if (auto it = players.find(static_cast<uint32_t>(entityId));
+                it != players.end() && it->second.positionInitialized) {
+                const Client::RemotePlayer& rp = it->second;
+                const glm::dvec3 feet = glm::mix(rp.renderPrevPosition, rp.position,
+                                                 static_cast<double>(partialTick));
+                // Player eye: 1.62 standing, 1.27 crouching (MC Avatar
+                // POSES), at the body's scale.
+                const double eyeHeight = (rp.isCrouching ? 1.27 : 1.62) * rp.scale;
+                out.eye   = feet + glm::dvec3(0.0, eyeHeight, 0.0);
+                out.yaw   = Client::RotLerp(partialTick, rp.renderPrevRotation.x, rp.rotation.x);
+                out.pitch = glm::mix(rp.renderPrevRotation.y, rp.rotation.y, partialTick);
+                return true;
+            }
+        }
+        return false;
+    }
     // gpu_utilization entry: the whole-frame GPU timer, begun at frame start
     // and ended before Present; read back the following frame.
     static Render::GPUTimerHandle s_frameGpuTimer = Render::INVALID_GPU_TIMER;
@@ -538,6 +719,15 @@ static uint16_t     s_lastPresencePort = 0;
     };
     static FrameProfileRecorder s_frameProfile;
 
+    // --crash-test=stack-overflow: recursion the optimizer cannot flatten (the
+    // volatile frame buffer is live across the call).
+    [[gnu::noinline]] static int CrashTestRecurse(int depth) {
+        volatile char frame[512];
+        if (depth < 0) return 0;   // never true; keeps -Winfinite-recursion quiet
+        frame[depth % 512] = static_cast<char>(depth);
+        return CrashTestRecurse(depth + 1) + frame[(depth * 7) % 512];
+    }
+
     // ── --ui-test: in-process click-through of the pause menu's World Options
     // screens (dev harness). Drives ScreenManager directly with GUI-space
     // clicks, so it needs no Accessibility permission and works under
@@ -549,6 +739,21 @@ static uint16_t     s_lastPresencePort = 0;
             // still paused (the shutdown save then records where the player
             // was DURING the pause — the vanilla-pause check).
             bool   pauseOnly = false;
+            // --ui-test-leave <seconds>: open the pause menu, hold it that
+            // long, then click Save and Quit to Title (times the leave and
+            // its last-world panorama; the log has the phases).
+            bool   leave = false;
+            double leaveHoldSec = 0.0;
+            // --ui-test-rejoin <n> (with --world): join, Save and Quit to
+            // Title, re-open the world through the --world auto-join path,
+            // n times, then quit — the same-process second-join check (state
+            // a session leaves behind in statics/singletons). With
+            // --ui-test-rejoin-alt <name>, the re-opens alternate between
+            // --world and that world.
+            int    rejoinTotal = 0;
+            int    rejoinDone = 0;
+            bool   rejoinWaiting = false;   // left; the next session re-arms the driver
+            std::string rejoinAltWorld;
             bool   started = false;
             double startAt = 0.0;
             int    step = 0;
@@ -558,8 +763,28 @@ static uint16_t     s_lastPresencePort = 0;
         };
         static Driver s_ui;
 
+        // Outer session loop: true when a --ui-test-rejoin leave is waiting
+        // for its re-open. Consumes it and re-arms the driver for the new
+        // session; `world` becomes the world to open this time.
+        static bool ConsumeRejoin(const std::string& baseWorld, std::string& world) {
+            if (!s_ui.rejoinWaiting) return false;
+            s_ui.rejoinWaiting = false;
+            ++s_ui.rejoinDone;
+            world = (!s_ui.rejoinAltWorld.empty() && (s_ui.rejoinDone % 2) == 1)
+                ? s_ui.rejoinAltWorld : baseWorld;
+            s_ui.enabled = true;
+            s_ui.started = false;
+            s_ui.startAt = 0.0;
+            s_ui.step = 0;
+            s_ui.wait = 0;
+            s_ui.releasePending = false;
+            Log::Info("[UiTest] rejoin %d/%d: opening \"%s\"", s_ui.rejoinDone, s_ui.rejoinTotal,
+                      world.c_str());
+            return true;
+        }
+
         static void Tick(GLFWwindow* window, Render::ScreenManager& screens) {
-            if (!s_ui.enabled) return;
+            if (!s_ui.enabled || s_ui.rejoinWaiting) return;
             if (!s_ui.started) {
                 if (!Client::g_levelLoadTracker.IsLoaded()) return;
                 if (s_ui.startAt == 0.0) { s_ui.startAt = glfwGetTime() + 3.0; return; }
@@ -599,6 +824,32 @@ static uint16_t     s_lastPresencePort = 0;
                 for (const char* c = text; *c; ++c) screens.CharTyped(static_cast<unsigned int>(*c));
             };
             int wait = 8;
+            if (s_ui.leave) {
+                if (s_ui.step == 0 && s_ui.rejoinTotal > 0 && s_ui.rejoinDone >= s_ui.rejoinTotal) {
+                    Log::Info("[UiTest] rejoin: %d rejoins done — quitting", s_ui.rejoinDone);
+                    glfwSetWindowShouldClose(window, GLFW_TRUE);
+                    s_ui.enabled = false;
+                    return;
+                }
+                if (s_ui.step == 0) {
+                    Log::Info("[UiTest] leave: open pause, hold %.1f s", s_ui.leaveHoldSec);
+                    screens.Push(std::make_unique<Render::PauseScreen>());
+                    s_ui.startAt = glfwGetTime() + s_ui.leaveHoldSec;
+                    ++s_ui.step;
+                    return;
+                }
+                if (s_ui.step == 1) {
+                    if (glfwGetTime() < s_ui.startAt) return;
+                    click(cx, pauseY0 + 72 + 10, "Save and Quit to Title");
+                    ++s_ui.step;
+                    // The click leaves at once — the session loop ends before
+                    // this driver ticks again. ConsumeRejoin re-arms it.
+                    if (s_ui.rejoinTotal > 0) s_ui.rejoinWaiting = true;
+                    return;
+                }
+                s_ui.enabled = false;   // the release went out on the tick after the click
+                return;
+            }
             if (s_ui.pauseOnly) {
                 if (s_ui.step == 0) {
                     Log::Info("[UiTest] pause-only: open pause, hold");
@@ -870,15 +1121,13 @@ static uint16_t     s_lastPresencePort = 0;
             }
             switch (screen) {
                 case ControlScreen::Survival:
+                    // (The E that opened it over there cannot close it here:
+                    // the inventory branch takes key PRESS events, and the
+                    // screen opening empties that queue.)
                     if (!Render::GetSurvivalInventoryScreen().IsOpen()) Render::GetSurvivalInventoryScreen().OpenSilently();
-                    // The E that opened it over there is very likely still
-                    // down here; the inventory branch's edge must not read
-                    // that as the press that closes it.
-                    s_eKeyHeld = Input::IsGlfwKeyDown(GLFW_KEY_E);
                     break;
                 case ControlScreen::Creative:
                     if (!Render::GetCreativeInventoryScreen().IsOpen()) Render::GetCreativeInventoryScreen().OpenSilently();
-                    s_eKeyHeld = Input::IsGlfwKeyDown(GLFW_KEY_E);
                     break;
                 default: break;
             }
@@ -1118,7 +1367,9 @@ static uint16_t     s_lastPresencePort = 0;
                 // hung into the head.
                 int tagY = -lineH;
 
-                // MC SubmitNodeCollection.submitNameTag. The NORMAL-mode text
+                // MC SubmitNodeCollection.submitNameTag — every part drawn
+                // WITHOUT a drop shadow (nameTag: Content.Text(..., false, ...)).
+                // The NORMAL-mode text
                 // goes through rendertype_text, which FOGS it (a player in
                 // the Blindness fog wears a black name); the see-through
                 // half (25 % black background, 50 % white text) is not
@@ -1147,17 +1398,17 @@ static uint16_t     s_lastPresencePort = 0;
                     // (textColor + background), depth-tested — so visible
                     // only while nothing is in the way — and fogged.
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(name, tagX, tagY, foggedWhite(0x80u), true);
+                    graphics.DrawString(name, tagX, tagY, foggedWhite(0x80u), false);
                 } else if (occluded) {
                     // Behind a wall only the see-through half passes.
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, true);
+                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, false);
                 } else {
                     // Both halves: the solid NORMAL text (white, fogged),
                     // then the see-through background and text over it.
-                    graphics.DrawString(name, tagX, tagY, foggedWhite(0xFFu), true);
+                    graphics.DrawString(name, tagX, tagY, foggedWhite(0xFFu), false);
                     graphics.Fill(tagX - 1, tagY - 1, tagX + textW + 1, tagY + lineH, kBackground);
-                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, true);
+                    graphics.DrawString(name, tagX, tagY, kSeeThroughText, false);
                 }
                 graphics.PopMatrix();
             };
@@ -1185,8 +1436,9 @@ static uint16_t     s_lastPresencePort = 0;
                 if (rp.name.empty()) continue;
                 // /invisible, and MC LivingEntityRenderer.shouldShowName:
                 // `!entity.isInvisibleTo(localPlayer)` — INVISIBILITY hides
-                // the name with the body.
-                if (rp.invisible || rp.effects.Invisible()) continue;
+                // the name with the body (not from a spectator, who sees it).
+                if (rp.invisible || (rp.effects.Invisible() && !s_outlineViewerSpectator)) continue;
+                if (static_cast<int32_t>(id) == s_hiddenCameraEntityId) continue;   // spectated, first person
                 if (rp.IsMorphed()) continue; // /morph: a mob has no name tag
 
                 // MC NameTagFeatureRenderer line 43: translate(x, nameTagAttachment.y + 0.5, z)
@@ -1257,6 +1509,57 @@ static uint16_t     s_lastPresencePort = 0;
                     else if (!occluded && glm::length(image - eye) < 32.0) drawTag(rp.name, rp.scale, image, false, true);
                 });
 #endif
+#if ENABLE_PORTAL_GUN
+                // Through a gun portal pair: looking into one portal of a
+                // pair shows the room in front of its partner, so a player
+                // standing there has their tag at the image of its position
+                // on this side (M⁻¹ of the pair's src→dst transform) — shown
+                // when the line from the eye to that image passes through the
+                // near portal's oval, occluded in two legs (eye to the oval
+                // here, the far oval to the player there), sized by the
+                // distance to the image as MC's billboard would be. Players
+                // in the portal views get their tags this way, the same rules
+                // as a direct tag (64 blocks, sneaking hides it behind walls).
+                if (Client::IsRemotePlayerInBoundLevel(rp)) {
+                    // PortalRenderer's oval: half extents in portal-local
+                    // right / up (1 × 1.6875 blocks).
+                    constexpr double kOvalHalfW = 0.5;
+                    constexpr double kOvalHalfH = 0.84375;
+                    Client::GetClientPortalManager().ForEachPair(
+                        [&](uint64_t, const Client::ClientPortalPair& pair) {
+                            if (!pair.blue.active || !pair.orange.active) return;
+                            for (int side = 0; side < 2; ++side) {
+                                const Client::ClientPortal& src = side == 0 ? pair.blue : pair.orange;
+                                const Client::ClientPortal& dst = side == 0 ? pair.orange : pair.blue;
+                                if (src.dimension != rp.dimension || dst.dimension != rp.dimension) continue;
+                                const glm::dvec3 srcN(src.normal), dstN(dst.normal);
+                                // The eye on the room side of the near portal,
+                                // the player on the room side of the far one.
+                                if (glm::dot(srcN, cameraPos - src.origin) <= 0.0) continue;
+                                if (glm::dot(dstN, rp.position - dst.origin) <= 0.0) continue;
+                                const glm::dmat4 M = Render::PortalTransform::SrcToDst(src, dst);
+                                const glm::dvec3 image(glm::inverse(M) * glm::dvec4(tagWorld, 1.0));
+                                const glm::dvec3 ray = image - cameraPos;
+                                if (glm::length(ray) > 64.0) continue;
+                                const double denom = glm::dot(srcN, ray);
+                                if (std::abs(denom) < 1e-9) continue;
+                                const double t = glm::dot(srcN, src.origin - cameraPos) / denom;
+                                if (t <= 0.0 || t >= 1.0) continue;
+                                const glm::dvec3 hit = cameraPos + ray * t;
+                                const double lx = glm::dot(hit - src.origin, glm::dvec3(src.right)) / kOvalHalfW;
+                                const double ly = glm::dot(hit - src.origin, glm::dvec3(src.upDir)) / kOvalHalfH;
+                                if (lx * lx + ly * ly > 1.0) continue;
+                                bool occluded = blocked(cameraPos, hit - glm::normalize(ray) * 0.05);
+                                if (!occluded) {
+                                    const glm::dvec3 farHit = glm::dvec3(M * glm::dvec4(hit, 1.0)) + dstN * 0.05;
+                                    occluded = blocked(farHit, tagWorld);
+                                }
+                                if (!rp.isCrouching) drawTag(rp.name, rp.scale, image, occluded);
+                                else if (!occluded && glm::length(ray) < 32.0) drawTag(rp.name, rp.scale, image, false, true);
+                            }
+                        });
+                }
+#endif
             }
 
             // ── Nametags above named mobs ─────────────────────────────────
@@ -1283,6 +1586,7 @@ static uint16_t     s_lastPresencePort = 0;
                     if (!entryPtr || !entryPtr->mob) continue;
                     const Client::ClientMob& entry = *entryPtr;
                     const int32_t id = entry.selfId;
+                    if (id == s_hiddenCameraEntityId) continue;   // spectated, first person
                     const Game::Mob& mob = *entry.mob;
                     // MC ItemFrameRenderer.shouldShowName / getNameTag: a
                     // frame shows its FRAMED ITEM's name — only when looked
@@ -1303,6 +1607,12 @@ static uint16_t     s_lastPresencePort = 0;
                         continue;
                     }
                     if (!mob.HasCustomName() && !mob.IsCustomNameVisible()) continue;
+                    // A cushion is a plain Entity: EntityRenderer.shouldShowName
+                    // — CustomNameVisible and a custom name, no crosshair rule.
+                    if (mob.GetType() == Game::EntityTypeId::Cushion &&
+                        !(mob.IsCustomNameVisible() && mob.HasCustomName())) {
+                        continue;
+                    }
 
                     const glm::dvec3 renderPos = glm::mix(entry.renderPrevPosition, mob.position,
                                                           static_cast<double>(s_entityPartialTick));
@@ -1363,6 +1673,14 @@ static uint16_t     s_lastPresencePort = 0;
             Render::DebugScreen::Overlay().Render(graphics, s_debugContext, static_cast<int>(guiScale));
         }
 
+        // MC Hud's tab-list layer (PlayerTabOverlay), over the hotbar and
+        // the debug overlay.
+        if (!s_hideHudForLeave && Render::GetPlayerTabOverlay().IsVisible()) {
+            PROFILE_ZONE_N("TabList");
+            graphics.NextStratum();
+            Render::GetPlayerTabOverlay().Render(graphics);
+        }
+
         // Free-camera hint — drawn while the debug fly camera is detached so
         // it's obvious why the player is standing still and the crosshair is
         // gone. Top-center, out of the way of the hotbar and chat.
@@ -1379,6 +1697,7 @@ static uint16_t     s_lastPresencePort = 0;
         DEBUG_PIE_ZONE("screen");
         g_chatComponent.Update(deltaTime);
         if (!s_hideHudForLeave) {
+            g_chatComponent.SetOpenLift(g_chatScreen.HistoryLift());
             g_chatComponent.Render(graphics, g_chatComponent.GetGameTime(), g_chatScreen.IsOpen());
             g_chatScreen.Render(graphics);
         }
@@ -1529,6 +1848,8 @@ static uint16_t     s_lastPresencePort = 0;
     void ReloadResources(bool force = false) {
         if (!Resources::ApplySelection() && !force) return;
         Log::Info("[ResourcePacks] reloading resources...");
+        // A pack may carry its own post_effect JSON: re-read on next use.
+        Render::PostEffects::Get().Reload();
 
         // The mesh workers read the atlas UV table while they build; let
         // the ones in flight finish before the table is replaced.
@@ -1572,6 +1893,7 @@ static uint16_t     s_lastPresencePort = 0;
         Render::g_mobParticleSystem.ReloadTextures();
         Render::g_skyRenderer.ReloadResources();
         Render::g_cloudRenderer.ReloadTexture();
+        Render::g_weatherEffectRenderer.ReloadTextures();
         // MC SoundManager is a reload listener: a pack's sounds.json and
         // .ogg files take effect now.
         Client::GetSoundManager().ReloadResources();
@@ -1590,6 +1912,19 @@ static uint16_t     s_lastPresencePort = 0;
         if (Resources::AnyEnabledPackHasStartupOnlyContent()) {
             Log::Info("[ResourcePacks] a selected pack carries models / blockstates / items / lang: those apply at the next launch");
         }
+    }
+
+    // MC Minecraft.renderFrame's `framerateLimitTracker.getFramerateLimit()`
+    // for an in-world frame: a level is always present here (MC sets it
+    // before the join's loading screen), so the menu row never applies —
+    // only minimized and, with "Reduce FPS When: AFK", the AFK rows.
+    int GameFramerateLimit(GLFWwindow* window) {
+        namespace FLT = Client::FramerateLimitTracker;
+        const FLT::ThrottleReason reason = FLT::GetThrottleReason(
+            glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE,
+            Platform::g_gameSettings.GetInactivityFPSLimit() == "afk",
+            /*hasLevel=*/true, /*screenOrOverlay=*/false);
+        return FLT::GetFramerateLimit(Platform::g_gameSettings.GetMaxFPS(), reason);
     }
 
     void HandlePlayerInput(Game::ClientPlayer& player, Game::ClientPlayerController& controller, Render::Camera& camera, bool cursorVisible, bool freeCamDetached) {
@@ -1614,7 +1949,14 @@ static uint16_t     s_lastPresencePort = 0;
         } else {
             glm::vec3 movementInput = camera.CalculateMovementInput();
             player.SetMovementInput(movementInput);
+            // A double-tap during noclip can only clear the flying flag under
+            // it (ClientPlayer::SetJumpPressed); the movement does not change,
+            // so say so on the action bar.
+            const bool flyingBeforeTap = player.physics.isFlying;
             player.SetJumpPressed(camera.IsJumpPressed());
+            if (player.physics.noclip && player.physics.isFlying != flyingBeforeTap) {
+                g_hudRenderer.SetOverlayMessage("Flying: off (applies when noclip ends)");
+            }
             player.SetJumpHeld(camera.IsJumpPressed());
             player.SetSprintPressed(camera.IsSprintPressed());
             player.SetSneakPressed(camera.IsSneakPressed());
@@ -1675,7 +2017,43 @@ static uint16_t     s_lastPresencePort = 0;
             // number key pressed mid-flight neither switches slots now nor
             // fires a stale click on re-attach.
             while (Input::ConsumeClick(*Input::Binds::Hotbar[i])) {
-                if (!freeCamDetached) controller.OnHotbarChanged(i);
+                if (freeCamDetached) continue;
+                // MC handleKeybinds: a spectator's number keys drive the
+                // spectator menu (SpectatorGui.onHotbarSelected), not a slot.
+                if (player.IsSpectator()) {
+                    Render::GetSpectatorGui().OnHotbarSelected(i);
+                    continue;
+                }
+                // MC handleKeybinds: a creative player holding the load (X)
+                // or save (C) hotbar activator loads / saves saved hotbar i
+                // instead of selecting slot i (handleHotbarLoadOrSave).
+                const bool loadPressed = Input::IsDown(*Input::Binds::LoadToolbarActivator);
+                const bool savePressed = Input::IsDown(*Input::Binds::SaveToolbarActivator);
+                if (!player.IsCreative() || (!loadPressed && !savePressed)) {
+                    controller.OnHotbarChanged(i);
+                } else if (loadPressed) {
+                    const auto clicks = Render::CreativeHotbars::BuildLoadClicks(i, player);
+                    if (Client::g_networkClient && Client::g_networkClient->IsConnected()) {
+                        if (auto conn = Client::g_networkClient->GetConnection()) {
+                            for (const auto& click : clicks) {
+                                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryClickC2S),
+                                                 Network::Serialization::Serialize(click));
+                            }
+                        }
+                    }
+                } else {
+                    g_hudRenderer.SetOverlayMessage(Render::CreativeHotbars::SaveFrom(i, player));
+                }
+            }
+        }
+
+        // MC handleKeybinds: `if (player.isSpectator()) while
+        // (keySpectatorHotbar.consumeClick()) spectatorGui
+        // .onHotbarActionKeyPressed()` — drained in every mode, so a click
+        // made before becoming a spectator does not open the menu later.
+        while (Input::Binds::SpectatorHotbar && Input::ConsumeClick(*Input::Binds::SpectatorHotbar)) {
+            if (!cursorVisible && !freeCamDetached && player.IsSpectator()) {
+                Render::GetSpectatorGui().OnHotbarActionKeyPressed();
             }
         }
 
@@ -1686,7 +2064,8 @@ static uint16_t     s_lastPresencePort = 0;
         // survival the server only switches to a stack the player already
         // carries (MC tryPickItem), creative also conjures one.
         if (Input::ConsumeClick(*Input::Binds::PickItem)) {
-            if (!freeCamDetached) {
+            // A spectator has no inventory to pick into.
+            if (!freeCamDetached && !player.IsSpectator()) {
                 Network::PickItemC2SPacket pick;
                 if (const int32_t entityId = controller.PickEntity(); entityId != 0) {
                     pick.kind = Network::PickItemC2SPacket::Kind::Entity;
@@ -1713,7 +2092,8 @@ static uint16_t     s_lastPresencePort = 0;
         // press frame, before any chord existed.) Everything is likewise
         // consumed-and-dropped while already detached.
         if (!cursorVisible && Input::ConsumeClick(*Input::Binds::SwapOffhand)) {
-            if (!freeCamDetached && !Input::IsKeyDown(Input::Key::C)) {
+            // MC: `if (!player.isSpectator())`.
+            if (!freeCamDetached && !Input::IsKeyDown(Input::Key::C) && !player.IsSpectator()) {
                 controller.SendPlayerAction(Network::PlayerAction::SWAP_ITEM_WITH_OFFHAND);
             }
         }
@@ -1721,7 +2101,7 @@ static uint16_t     s_lastPresencePort = 0;
         // Drop held item (Q) — MC's DROP_ITEM player action. No item-entity
         // system yet, so the server just shrinks the stack.
         if (!cursorVisible && Input::ConsumeClick(*Input::Binds::Drop)) {
-            if (!freeCamDetached) {
+            if (!freeCamDetached && !player.IsSpectator()) {   // MC: `if (!player.isSpectator())`
                 controller.SendPlayerAction(Network::PlayerAction::DROP_ITEM);
             }
         }
@@ -1735,8 +2115,16 @@ static uint16_t     s_lastPresencePort = 0;
         // Sensitivity 0.5 needs two notches per slot and 2.0 moves two.
         // The old sign test stepped once per frame with any offset at all,
         // which is why the option never changed anything here.
+        // MC MouseHandler.onScroll only reaches the hotbar / spectator speed
+        // when `minecraft.screen == null`: with chat, an inventory or any
+        // other screen up, the wheel belongs to that screen (which consumes
+        // it) and never moves the selection. The Tab free cursor is not a
+        // screen, so it keeps the wheel.
+        const bool anyScreenOpen = g_chatScreen.IsOpen() || Render::GetInventoryScreen().IsOpen() ||
+                                   (!Render::GetScreenManager().Empty() && !Client::Control::IsControlled());
         auto [scrollX, scrollY] = Input::GetScrollOffset();
-        if (!freeCamDetached && scrollY != 0.0) {
+        if (anyScreenOpen && scrollY != 0.0) Input::ResetScrollOffset();
+        if (!freeCamDetached && !anyScreenOpen && scrollY != 0.0) {
             static double s_accumulatedScrollY = 0.0;
             if (s_accumulatedScrollY != 0.0 && (scrollY > 0.0) != (s_accumulatedScrollY > 0.0)) {
                 s_accumulatedScrollY = 0.0;
@@ -1748,7 +2136,20 @@ static uint16_t     s_lastPresencePort = 0;
                 // ScrollWheelHandler.getNextScrollWheelSelection: one step
                 // per call in the wheel's direction (MC steps once per
                 // event even for a multi-unit wheel; kept).
-                if (wheel > 0) {
+                if (player.IsSpectator()) {
+                    // MouseHandler.onScroll for a spectator: an open
+                    // spectator menu steps its selection; otherwise the
+                    // wheel is the flying speed, 0.005 a notch in 0…0.2
+                    // (the local Abilities.flyingSpeed — never sent; the
+                    // next abilities packet resets it, as in MC).
+                    auto& gui = Render::GetSpectatorGui();
+                    if (gui.IsMenuActive()) {
+                        gui.OnMouseScrolled(-wheel);
+                    } else {
+                        player.flyingSpeed = std::clamp(player.flyingSpeed + static_cast<float>(wheel) * 0.005f,
+                                                        0.0f, 0.2f);
+                    }
+                } else if (wheel > 0) {
                     controller.OnHotbarChanged((player.GetSelectedSlot() - 1 + 9) % 9);
                 } else {
                     controller.OnHotbarChanged((player.GetSelectedSlot() + 1) % 9);
@@ -1758,9 +2159,20 @@ static uint16_t     s_lastPresencePort = 0;
 
         // Debug noclip toggle. Swallowed while the free camera is detached —
         // silently flipping the frozen player's physics mode mid-flight would
-        // change what happens the moment control returns.
+        // change what happens the moment control returns — and for a
+        // spectator, who already passes through everything and always flies:
+        // flipping a flag they cannot feel would only surprise them on the
+        // way back out. (Modifier+N, the spectator cycle, is a debug chord
+        // and never reaches this binding.)
         if (Input::ConsumeClick(*Input::Binds::Noclip)) {
-            if (!freeCamDetached) player.ToggleNoclip();
+            if (!freeCamDetached && !player.IsSpectator()) player.ToggleNoclip();
+        }
+
+        // MC handleKeybinds: `while (keyToggleSpectatorShaderEffects
+        // .consumeClick()) gameRenderer.toggleSpectatorPostEffect()`.
+        while (Input::Binds::ToggleSpectatorShaderEffects &&
+               Input::ConsumeClick(*Input::Binds::ToggleSpectatorShaderEffects)) {
+            Render::PostEffects::Get().ToggleSpectatorPostEffect();
         }
 
         // F5 — cycle camera perspective (MC: first person → third person
@@ -2104,21 +2516,20 @@ static uint16_t     s_lastPresencePort = 0;
             const double now = glfwGetTime();
             const float  dt  = static_cast<float>(now - lastTime);
             lastTime = now;
-            // The same frame limiter the game loop applies (max FPS
-            // setting; 260 = unlimited). The title used to spin freely
-            // with vsync off, so a world capped at 120 handed over to a
-            // panorama running at 500, and the turn's pacing changed at
-            // the seam.
+            // The same frame limiter the game loop applies, at MC's
+            // FramerateLimitTracker limit: out of a level with a screen up
+            // that is a flat 60 (OUT_OF_LEVEL_MENU), minimized 10, and the
+            // AFK rows when "Reduce FPS When" is AFK. The title used to spin
+            // freely with vsync off.
             {
-                const int maxFps = Platform::g_gameSettings.GetMaxFPS();
-                if (maxFps > 0 && maxFps < 260) {
-                    static auto s_titleFrameDeadline = std::chrono::steady_clock::now();
-                    const auto frameBudget = std::chrono::nanoseconds(1'000'000'000LL / maxFps);
-                    const auto nowClock = std::chrono::steady_clock::now();
-                    s_titleFrameDeadline += frameBudget;
-                    if (s_titleFrameDeadline < nowClock) s_titleFrameDeadline = nowClock;
-                    else std::this_thread::sleep_until(s_titleFrameDeadline);
-                }
+                namespace FLT = Client::FramerateLimitTracker;
+                const FLT::ThrottleReason reason = FLT::GetThrottleReason(
+                    glfwGetWindowAttrib(window, GLFW_ICONIFIED) == GLFW_TRUE,
+                    Platform::g_gameSettings.GetInactivityFPSLimit() == "afk",
+                    /*hasLevel=*/false, /*screenOrOverlay=*/true);
+                static auto s_titleFrameDeadline = std::chrono::steady_clock::now();
+                FLT::LimitDisplayFps(FLT::GetFramerateLimit(Platform::g_gameSettings.GetMaxFPS(), reason),
+                                     s_titleFrameDeadline);
             }
             int winW = 0, winH = 0, fbW = 0, fbH = 0;
             glfwGetWindowSize(window, &winW, &winH);
@@ -2329,6 +2740,12 @@ static uint16_t     s_lastPresencePort = 0;
 
         // Initialize block registries
         Game::BlockRegistry::Init();
+        // The heightmap classification (derived from the registry): the
+        // client primes its own heightmaps from every chunk it receives
+        // (ClientChunkManager::PrebuildChunk) — the weather reads
+        // MOTION_BLOCKING — and a client of a dedicated server never runs
+        // the integrated server's init that also builds it. Idempotent.
+        Game::InitHeightmapTable();
         // Initialize item registry AFTER blocks so block-items can copy their display names.
         // (Sprite item textures are preloaded later, AFTER the render backend is up.)
         Game::ItemRegistry::Initialize();
@@ -2410,6 +2827,9 @@ static uint16_t     s_lastPresencePort = 0;
         }
         if (!Render::g_cloudRenderer.Initialize()) {
             Log::Warning("Cloud renderer init failed — clouds will not render");
+        }
+        if (!Render::g_weatherEffectRenderer.Initialize()) {
+            Log::Warning("Weather renderer init failed — rain and snow will not render");
         }
 
         // Block-entity dispatcher + per-type renderers (chest, sign, banner,
@@ -2540,6 +2960,12 @@ static uint16_t     s_lastPresencePort = 0;
             if (GLFWwindow* w = glfwGetCurrentContext()) {
                 glfwSetClipboardString(w, text.c_str());
             }
+        });
+
+        // MC Hud.setNowPlaying: a jukebox song started near the player —
+        // "Now Playing: <song>" on the action bar, in cycling colour.
+        Client::JukeboxSongPlayback::SetNowPlayingHandler([](const std::string& text) {
+            g_hudRenderer.SetOverlayMessage(text, true);
         });
 
         // Set up chat message callback
@@ -2754,7 +3180,9 @@ static uint16_t     s_lastPresencePort = 0;
         std::string world;
         uint16_t    port = 0;          // 0: OBEY_HOST_PORT, else 25565
         double      quitAfterSec = 0.0;
-        bool        guestCommands = false;
+        // --guest-commands / --no-guest-commands; unset keeps the world's
+        // saved Command Access (on unless the host turned it off).
+        std::optional<bool> guestCommands;
         bool        vanillaPortals = false;
     };
 
@@ -2826,8 +3254,10 @@ static uint16_t     s_lastPresencePort = 0;
         }
         if (o.guestCommands) {
             // Saved with the world (level.dat), like the World Options toggle.
-            Server::g_integratedServer->SetGuestCommandAccess(true);
+            Server::g_integratedServer->SetGuestCommandAccess(*o.guestCommands);
         }
+        Log::Info("[Headless] guest command access: %s",
+                  Server::g_integratedServer->GetGuestCommandAccess() ? "on" : "off");
         const uint16_t port = Server::g_integratedServer->GetNetworkServer()
             ? Server::g_integratedServer->GetNetworkServer()->GetPort() : 0;
         Log::Info("[Headless] serving '%s' on port %u — Ctrl+C to stop", o.world.c_str(), static_cast<unsigned>(port));
@@ -2932,10 +3362,32 @@ static uint16_t     s_lastPresencePort = 0;
             }
         }
 
+        // The terrain library's block table (Blocks::bootstrap, ~150 ms, once
+        // per process) is built here in the background while textures, models
+        // and sounds load, rather than on the server thread when a world opens
+        // (MyTerrainGenerator::Initialize) - it was most of the time between
+        // choosing a world and its first chunk load. bootstrap is call_once:
+        // a world opened before this finishes waits for it. Joined when Run
+        // returns, so it never outlives the registries it fills.
+        struct JoinOnReturn {
+            std::thread thread;
+            ~JoinOnReturn() { if (thread.joinable()) thread.join(); }
+        };
+        JoinOnReturn blockTableWarmup{std::thread([] {
+            minecraft::world::level::block::Blocks::bootstrap();
+        })};
+
         // Parse command-line arguments
         bool useVulkan = false;
         bool vanillaPortals = false;   // --vanilla-portals: block portals instead of immersive ones
         bool crashTest = false;
+        // --crash-test=stack-overflow: unbounded recursion on a worker thread
+        // (checks the per-thread alternate signal stack: the report must
+        // still carry the backtrace). --crash-test=concurrent: two worker
+        // threads fault at the same moment (checks that the second one waits
+        // for the first to finish the report instead of killing the process
+        // mid-write, which left an EMPTY report on 2026-09-28).
+        std::string crashTestKind;
         bool isRemoteClient = false;
         std::string remoteServerAddress;
         uint16_t remoteServerPort = 25565;
@@ -3001,7 +3453,9 @@ static uint16_t     s_lastPresencePort = 0;
         double devRemeshAtSec   = 0.0;
         bool   devRemeshDone    = false;
         // ── Stress testing ──────────────────────────────────────────────
-        //   --headless-server --world <name> [--port N] [--guest-commands]
+        //   --headless-server --world <name> [--port N] [--guest-commands|--no-guest-commands]
+        //                         (guests have commands unless the world or
+        //                         --no-guest-commands turns them off)
         //                         run the world's server with no window (a
         //                         dedicated server); see RunHeadlessServer
         //   --bots <N> --server host[:port]
@@ -3020,7 +3474,7 @@ static uint16_t     s_lastPresencePort = 0;
         //     --bot-prefix <name>        (default "Bot")
         //   --quit-after applies to both.
         bool headlessServer = false;
-        bool headlessGuestCommands = false;
+        std::optional<bool> headlessGuestCommands;
         uint16_t headlessPort = 0;
         Dev::BotSwarmOptions botOptions;
         botOptions.count = 0;
@@ -3036,6 +3490,26 @@ static uint16_t     s_lastPresencePort = 0;
             }
             if (arg == "--ui-test") { UiTest::s_ui.enabled = true; continue; }
             if (arg == "--ui-test-pause") { UiTest::s_ui.enabled = true; UiTest::s_ui.pauseOnly = true; continue; }
+            if (arg == "--ui-test-leave" && i + 1 < argc) {
+                UiTest::s_ui.enabled = true;
+                UiTest::s_ui.leave = true;
+                UiTest::s_ui.leaveHoldSec = std::atof(argv[++i]);
+                continue;
+            }
+            // --ui-test-rejoin <n>: with --world, leave to title and re-open
+            // the world n times in one process, then quit (see UiTest::Driver).
+            if (arg == "--ui-test-rejoin" && i + 1 < argc) {
+                UiTest::s_ui.enabled = true;
+                UiTest::s_ui.leave = true;
+                UiTest::s_ui.leaveHoldSec = 1.0;
+                UiTest::s_ui.rejoinTotal = std::max(0, std::atoi(argv[++i]));
+                continue;
+            }
+            // --ui-test-rejoin-alt <name>: re-opens alternate with this world.
+            if (arg == "--ui-test-rejoin-alt" && i + 1 < argc) {
+                UiTest::s_ui.rejoinAltWorld = argv[++i];
+                continue;
+            }
             if (arg == "--exec-late" && i + 1 < argc) {
                 devExecLateCommands.emplace_back(argv[++i]);
                 continue;
@@ -3089,7 +3563,8 @@ static uint16_t     s_lastPresencePort = 0;
                 continue;
             }
             if (arg == "--headless-server") { headlessServer = true; continue; }
-            if (arg == "--guest-commands")  { headlessGuestCommands = true; continue; }
+            if (arg == "--guest-commands")    { headlessGuestCommands = true;  continue; }
+            if (arg == "--no-guest-commands") { headlessGuestCommands = false; continue; }
             if (arg == "--port" && i + 1 < argc) {
                 headlessPort = static_cast<uint16_t>(std::clamp(std::atoi(argv[++i]), 0, 65535));
                 continue;
@@ -3118,6 +3593,10 @@ static uint16_t     s_lastPresencePort = 0;
             }
             if (arg == "--crash-test") {
                 crashTest = true;
+            }
+            if (arg.rfind("--crash-test=", 0) == 0) {
+                crashTest = true;
+                crashTestKind = arg.substr(std::strlen("--crash-test="));
             }
             if (arg == "--server" && i + 1 < argc) {
                 isRemoteClient = true;
@@ -3218,9 +3697,28 @@ static uint16_t     s_lastPresencePort = 0;
         // --crash-test). Exercises BOTH reporters: Sentry via crashpad, and
         // the local handler above.
         if (crashTest) {
-            Log::Info("Crash test requested — crashing in 3 seconds...");
+            Log::Info("Crash test requested (%s) — crashing in 3 seconds...",
+                      crashTestKind.empty() ? "null dereference" : crashTestKind.c_str());
             Log::Info("Expect a report at: %s", Platform::CrashReportPath());
             std::this_thread::sleep_for(std::chrono::seconds(3));
+            if (crashTestKind == "stack-overflow") {
+                std::thread([] {
+                    Platform::InstallThreadCrashStack();
+                    CrashTestRecurse(0);
+                }).join();
+            } else if (crashTestKind == "concurrent") {
+                std::atomic<int> ready{0};
+                auto fault = [&ready] {
+                    Platform::InstallThreadCrashStack();
+                    ready.fetch_add(1);
+                    while (ready.load() < 2) {}
+                    volatile int* p = nullptr;
+                    *p = 42;  // SIGSEGV on both threads at once
+                };
+                std::thread a(fault), b(fault);
+                a.join();
+                b.join();
+            }
             volatile int* p = nullptr;
             *p = 42;  // SIGSEGV
         }
@@ -3526,7 +4024,9 @@ static uint16_t     s_lastPresencePort = 0;
         // CLI --server bypasses the title screen for the FIRST session only;
         // after a quit-to-title the menu shows normally.
         isRemoteClient = cliRemoteClient && firstSession;
-        const bool devAutoWorld = !devWorldName.empty() && firstSession && !isRemoteClient;
+        std::string devSessionWorld = devWorldName;
+        const bool devAutoWorld = !devWorldName.empty() && !isRemoteClient &&
+            (firstSession || UiTest::ConsumeRejoin(devWorldName, devSessionWorld));
         firstSession = false;
 
         // No world session yet — the options menu's World Settings entry
@@ -3548,12 +4048,12 @@ static uint16_t     s_lastPresencePort = 0;
                           static_cast<unsigned>(remoteServerPort));
             }
             SetCursorCaptured(window, true);
-        } else if (devAutoWorld && DevHarnessWorldAction(devWorldName, titleAction)) {
+        } else if (devAutoWorld && DevHarnessWorldAction(devSessionWorld, titleAction)) {
             // --world: the matching worlds.json entry, launched exactly as
             // SelectWorldScreen would, without the title screen. An unknown
             // name logs and falls through to the normal title screen.
             Log::Info("[Harness] --world: loading \"%s\" without the title screen",
-                      devWorldName.c_str());
+                      devSessionWorld.c_str());
             SetCursorCaptured(window, true);
         } else if (!isRemoteClient) {
             titleAction = RunTitleScreenPhase(window);
@@ -3579,6 +4079,7 @@ static uint16_t     s_lastPresencePort = 0;
                 Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
                 Render::g_skyRenderer.Shutdown();
                 Render::g_cloudRenderer.Shutdown();
+                Render::g_weatherEffectRenderer.Shutdown();
                 Render::g_atlasBuilder.reset();
                 Render::g_itemAtlasBuilder.reset();
                 if (Client::g_friendsClient) {
@@ -3631,9 +4132,23 @@ static uint16_t     s_lastPresencePort = 0;
         Render::RegisterBannerItemRenderer();
         Render::RegisterHeadItemRenderer();
         Render::RegisterShieldItemRenderer();
+        Render::RegisterDecoratedPotItemRenderer();
 
         // Initialize remote player tracking and renderer
         Client::g_remotePlayerManager = std::make_unique<Client::RemotePlayerManager>();
+        // A new session's player list and spectator menu start empty.
+        Client::PlayerInfoMap().clear();
+        Render::GetSpectatorGui().Reset();
+        // PlayerMenuItem.selectItem: ServerboundTeleportToEntityPacket.
+        Render::GetSpectatorGui().SetTeleportCallback([](uint32_t playerId) {
+            if (!Client::g_networkClient || !Client::g_networkClient->IsConnected()) return;
+            if (auto conn = Client::g_networkClient->GetConnection()) {
+                Network::TeleportToEntityC2SPacket packet;
+                packet.playerId = playerId;
+                conn->SendPacket(static_cast<uint8_t>(Network::PacketId::TeleportToEntityC2S),
+                                 Network::Serialization::Serialize(packet));
+            }
+        });
         Render::PlayerRenderer playerRenderer;
         // The join's own zones (Join.*): the first world of a session costs
         // ~0.4 s of main-thread setup and used to be one blank gap in a
@@ -3660,6 +4175,8 @@ static uint16_t     s_lastPresencePort = 0;
         if (!itemEntityRenderer.Initialize()) {
             Log::Warning("Failed to initialize item entity renderer, dropped items won't be visible");
         }
+        // The vault's display item draws through it.
+        Render::VaultRenderer::SetItemRenderer(&itemEntityRenderer);
         }
         // Falling blocks and primed TNT. A separate renderer from MobRenderer
         // because those two ARE blocks, and MobRenderer is built around
@@ -3735,8 +4252,10 @@ static uint16_t     s_lastPresencePort = 0;
             xpOrbRenderer.Shutdown();
             lightningBoltRenderer.Shutdown();
             Render::SpawnerRenderer::SetMobRenderer(nullptr);
+            Render::VaultRenderer::SetItemRenderer(nullptr);
             mobRenderer.Shutdown();
             Render::EntityOutline::Get().Shutdown();
+            Render::PostEffects::Get().Shutdown();
             Render::SetInventoryScreenPlayer(nullptr);
             Game::g_world = nullptr;
 
@@ -3850,6 +4369,10 @@ static uint16_t     s_lastPresencePort = 0;
             // integrated server at all.
             serverConfig.singleplayerProfileName = playerName;
             serverConfig.hasSingleplayerOwner    = true;
+            // Back into the panorama's world: it holds still (paused, chunks
+            // still streaming) until the hand-over frame releases it — see
+            // IntegratedServer::ReleaseOwnerJoinHold and the hand-over below.
+            serverConfig.holdOwnerJoin           = joinTransition.active;
 
             { PROFILE_ZONE_N("Join.ServerInit");
             Server::InitializeIntegratedServer(serverConfig);
@@ -3933,8 +4456,21 @@ static uint16_t     s_lastPresencePort = 0;
             // (16 per thread: 32 on a 2-thread, 64 on a 4-thread, 96 on a
             // 6-thread machine); 8 threads and up keep the exact formula
             // they had, so the tuned machines are untouched.
-            const size_t permitCount = hw >= 8 ? std::max<size_t>(128, hw * 8)
-                                               : std::max<size_t>(32, hw * 16);
+            //
+            // 2026-09-26: 128 -> 256 floor. Uploads drain once a frame, so the
+            // pool caps meshing at permits x fps: 128 x 60 = 7,680 sections/s,
+            // the flat 768 per 100 ms the leave-capture warm-up and joins sat
+            // at. 192 still pinned it (191 jobs started a frame, the 5 mesh
+            // workers 83% busy at 0.37 ms a section = ~225 a frame); 256 sits
+            // just above what the workers can build in a 60 fps frame, so they
+            // are the limit. The upload cost follows what the workers deliver
+            // (~2 ms a frame at 190), not the permit count.
+            size_t permitCount = hw >= 8 ? std::max<size_t>(256, hw * 8)
+                                         : std::max<size_t>(32, hw * 16);
+            // A/B switch: OBEY_MESH_PERMITS=<n> replaces the count.
+            if (const char* env = std::getenv("OBEY_MESH_PERMITS")) {
+                if (const long n = std::strtol(env, nullptr, 10); n > 0) permitCount = static_cast<size_t>(n);
+            }
             Render::GetMeshUploadPermits().Initialize(permitCount);
             Log::Info("✓ Mesh upload permits: %zu (%zu logical cores)", permitCount, hw);
         }
@@ -3976,6 +4512,8 @@ static uint16_t     s_lastPresencePort = 0;
 
         // 5. Initialize player and controller
         Game::ClientPlayer player;
+        // A mount this client's player steers reads its keys and view here.
+        Client::Vehicles::Install();
         player.color = playerColor;
         // Entity-bound sounds (a sound following the local player, a mob or
         // another player) look entities up through this session's stores.
@@ -3988,6 +4526,9 @@ static uint16_t     s_lastPresencePort = 0;
         Game::ClientPlayerController playerController;
         playerController.SetPlayer(&player);
         Render::SetInventoryScreenPlayer(&player);
+        // A firework rocket attached to this player boosts its glide from
+        // the rocket's client tick (ClientFireworks.hpp).
+        Client::Fireworks::Install(&player);
         // Interaction block reads come from the CLIENT chunk cache in both
         // modes, for the same reason physics and raycasting do (see the note
         // above `blockAccessForPhysics`). The host used to read the server's
@@ -4161,6 +4702,9 @@ static uint16_t     s_lastPresencePort = 0;
                 + titleAction.relayTicket + "\"}\n");
             Log::Info("Joining through the friends relay");
         }
+
+        // Chunk streaming allowance: our own integrated server vs a remote one.
+        if (auto handler = networkClient->GetPacketHandler()) handler->SetLocalServer(!isRemoteClient);
 
         // Start async connection (all socket ops on I/O thread)
         Log::Info("Connecting to %s:%d...", connectHost.c_str(), serverPort);
@@ -4442,9 +4986,12 @@ static uint16_t     s_lastPresencePort = 0;
             // exists is not a position worth telling the server about.
             // Nor is one from a paused world: sendPosition() lives inside the
             // same LocalPlayer.tick the pause skips.
+            // And not while the join transition holds the body still (the
+            // physics step below): nothing has moved, and nothing may be
+            // reported as moved before the hand-over.
             if (!networkClient || !networkClient->IsConnected() ||
                 !Client::g_levelLoadTracker.IsLoaded() ||
-                Client::g_clientTickRate.IsWorldPaused()) {
+                Client::g_clientTickRate.IsWorldPaused() || joinTransition.active) {
                 return;
             }
             const glm::dvec3 playerPos = player.physics.position;
@@ -4456,12 +5003,17 @@ static uint16_t     s_lastPresencePort = 0;
             // shift held used to send nothing, so the server kept the stale
             // flag and the gun sometimes fired. A flag change is a move.
             static uint8_t lastSentMorphAnim = 0;
+            // The elytra glide flag (START_FALL_FLYING / its end) is a move too.
+            static bool lastSentFallFlying = false;
             if (!force && playerPos == lastSentMovePos && rotation == lastSentMoveRot &&
                 player.physics.isOnGround == lastSentOnGround && crouching == lastSentCrouch &&
-                player.MorphAnimByte() == lastSentMorphAnim) {
+                player.MorphAnimByte() == lastSentMorphAnim && !player.swungSinceMoveSend &&
+                player.physics.isFallFlying == lastSentFallFlying &&
+                player.flyIntoWallSinceMoveSend <= 0.0f) {
                 return;
             }
             lastSentMorphAnim = player.MorphAnimByte();
+            lastSentFallFlying = player.physics.isFallFlying;
             Network::PlayerMoveC2SPacket movePacket;
             movePacket.position = playerPos;
             movePacket.rotation = rotation;
@@ -4470,6 +5022,11 @@ static uint16_t     s_lastPresencePort = 0;
             movePacket.isSprinting = player.physics.isSprinting;
             movePacket.jumpedThisTick = player.jumpedSinceMoveSend;
             player.jumpedSinceMoveSend = false;
+            movePacket.swungMainHand = player.swungSinceMoveSend;
+            player.swungSinceMoveSend = false;
+            movePacket.fallFlying = player.physics.isFallFlying;
+            movePacket.flyIntoWallDamage = player.flyIntoWallSinceMoveSend;
+            player.flyIntoWallSinceMoveSend = 0.0f;
             // A chicken morph takes no fall damage (MC Chicken.causeFallDamage).
             movePacket.fallDistance = Game::Morph::IsMob(player.morph, Game::EntityTypeId::Chicken)
                                           ? 0.0f : player.landedFallSinceMoveSend;
@@ -4528,6 +5085,7 @@ static uint16_t     s_lastPresencePort = 0;
         // world is still here for those frames, which is what lets a host
         // that shut down its server leave a picture too.
         constexpr int kLeaveTiles = 2;   // tiles per axis of a captured face (see LeaveCapture::tile)
+        constexpr size_t kLeaveRowsInFlight = 3;   // tile rows requested and not yet taken (see PendingRow)
 
         struct LeaveCapture {
             enum class Then { Title, Quit };
@@ -4541,7 +5099,18 @@ static uint16_t     s_lastPresencePort = 0;
             bool prepass      = false;
             bool prepassStop  = false;   // the menu closed: drop it once no read-back is outstanding
             bool captured     = false;
-            bool viaPauseMenu = false;   // the leave came through the pause menu (its prewarm has run)
+            // Per face, its sections still waiting for a mesh when the warm-up
+            // last recorded it (-1 = not recorded since the warm-up began).
+            std::array<int, 6> facePending{ -1, -1, -1, -1, -1, -1 };
+            // Per face, the sections its FIRST recording found waiting — the
+            // ones the eye could already see. Only these are waited for:
+            // meshing a section lets the occlusion flood past it, so every
+            // mesh reveals a little more (cave interiors, layer by layer), and
+            // chasing those kept the warm-up going ~2 s after the player had
+            // looked all around. They are hidden behind other terrain from
+            // the eye, which is why they were not visible to begin with.
+            std::array<std::unordered_set<uint64_t>, 6> faceWaitFor;
+            std::array<bool, 6> faceWaitRecorded{};
             Then then     = Then::Title;
             // Warm-up first: the mesher only ever compiled what some view
             // reached, so the sections behind the player may have no mesh.
@@ -4562,6 +5131,11 @@ static uint16_t     s_lastPresencePort = 0;
             float baseYaw    = 0.0f;
             float clickYaw   = 0.0f;   // the look at the click, before the turn
             float clickPitch = 0.0f;
+            // The instant the portal rims are drawn at on every tile of every
+            // face (and the gun sparks hold still meanwhile), so a rim that
+            // crosses a tile or face seam matches across it. Set when the
+            // capture proper begins; -1 = not capturing.
+            double portalClock = -1.0;
             int  face     = 0;       // face being captured, 0..6
             // Resolution: a face is drawn as kTiles×kTiles off-axis tiles,
             // each the size of the square viewport, so the panorama holds
@@ -4569,23 +5143,24 @@ static uint16_t     s_lastPresencePort = 0;
             // title it is magnified (90° of face over ~70° of screen, and
             // more at the edges), and at 1× it read softer than the world
             // it continues. 2× covers that with headroom.
-            int  tile     = 0;       // tile within the face, row-major, 0..kTiles²
-            int  tileSide = 0;       // one tile's side (the viewport square)
-            bool awaitingTake = false;   // a read-back is outstanding
-            // Frames since the request. The tile is taken on the SECOND
-            // frame after it: the backend's frame N+2 has already waited on
-            // frame N's fence, so the take costs nothing — taken one frame
-            // after, it stalls the CPU on the GPU every capture frame and
-            // the outro turn stutters through it.
-            int  framesSinceRequest = 0;
-            // Frames to sit out after a take before the next tile is drawn.
-            // Zero now: the next tile goes out on the take frame, two
-            // frames a tile. (One rest frame kept the outro's frame time
-            // nearer play's on a GPU-bound machine, at a third more frames
-            // between the click and the title.)
-            int  restFrames = 0;
+            int  tile     = 0;       // next tile within the face, row-major, 0..kTiles²
+            // A row of tiles is drawn side by side into the window's bottom
+            // left (as many of the face's row as fit across it) and read back
+            // as one rectangle; a row is requested every frame and taken two
+            // frames later — by then the backend's frame N+2 has waited on
+            // frame N's fence, so the take costs no wait. It was one tile per
+            // two frames (one read-back outstanding): 48 frames for the six
+            // faces, now 12 rows in ~14.
+            struct PendingRow {
+                int face = 0;
+                int firstTile = 0;   // row-major index of the row's first tile
+                int count = 0;       // tiles side by side in the read-back
+                int side = 0;        // one tile's side (the viewport square)
+                int age = 0;         // frames since the request
+            };
+            std::deque<PendingRow> pendingRows;
             bool complete = true;    // every tile came back
-            int  size     = 0;       // face side, pixels (= tileSide × kTiles)
+            int  size     = 0;       // face side, pixels (= a tile's side × kTiles)
             std::array<std::vector<uint8_t>, 6> faces;   // the face being assembled
             // A face's GPU texture and CPU buffer are made during the
             // warm-up, one face a frame (those frames only draw), so the
@@ -4619,17 +5194,22 @@ static uint16_t     s_lastPresencePort = 0;
             leaveCapture.prepassStop  = false;
             leaveCapture.active       = true;
             leaveCapture.then         = then;
-            leaveCapture.viaPauseMenu =
-                dynamic_cast<Render::PauseScreen*>(Render::GetScreenManager().Current()) != nullptr;
             if (!resume) {
                 leaveCapture.warming      = true;
+                leaveCapture.facePending.fill(-1);
+                leaveCapture.faceWaitRecorded.fill(false);
                 leaveCapture.warmFrames   = 0;
                 leaveCapture.idleFrames   = 0;
                 leaveCapture.warmStart    = std::chrono::steady_clock::now();
                 leaveCapture.face         = 0;
                 leaveCapture.tile         = 0;
-                leaveCapture.restFrames   = 0;
-                leaveCapture.awaitingTake = false;
+                // Nothing should be in flight here; if something is, take
+                // it so the backend's queue stays in step with ours.
+                for (size_t n = leaveCapture.pendingRows.size(); n > 0; --n) {
+                    std::vector<uint8_t> px; int pw = 0, ph = 0;
+                    if (Render::g_renderBackend) Render::g_renderBackend->TakeBackbufferReadback(px, pw, ph);
+                }
+                leaveCapture.pendingRows.clear();
                 leaveCapture.complete     = Render::g_renderBackend != nullptr;
                 leaveCapture.baseYaw      = camera.yaw;
             }
@@ -4958,7 +5538,8 @@ static uint16_t     s_lastPresencePort = 0;
                 s_debugContext.controller = &playerController;
                 s_debugContext.camera = &camera;
                 Render::DebugScreen::SetDebugContext(&s_debugContext);
-                Render::DebugScreen::KeyHandler().NotifyGameMode(player.gameModeKnown ? static_cast<int>(player.gameMode) : -1);
+                Render::DebugScreen::KeyHandler().NotifyGameMode(player.gameModeKnown ? static_cast<int>(player.gameMode) : -1,
+                                                                 player.gameModeKnown ? static_cast<int>(player.previousGameMode) : -2);
                 Render::WorldOptionsScreen::SetClientGameMode(player.gameModeKnown ? static_cast<int>(player.gameMode) : -1);
                 Render::DebugScreen::KeyHandler().ProcessFrame();
             }
@@ -5248,32 +5829,16 @@ static uint16_t     s_lastPresencePort = 0;
                 while (Input::HasCharInput()) {
                     g_chatScreen.OnCharInput(Input::PopCharInput());
                 }
-                // Paste and copy: Cmd on macOS, Ctrl elsewhere (both accepted
-                // everywhere). GLFW sends no character event for a chorded
-                // key, so the letter never lands in the box on its own.
+                // The wheel scrolls the completion list (MC
+                // CommandSuggestions.mouseScrolled) and is consumed either
+                // way, so it never reaches the hotbar behind the chat.
                 {
-                    static bool pasteHeld = false, copyHeld = false;
-                    const bool chord =
-                        Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SUPER) ||
-                        Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SUPER) ||
-                        Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL) ||
-                        Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_CONTROL);
-                    const bool pasteDown = chord && Input::IsGlfwKeyDown(GLFW_KEY_V);
-                    const bool copyDown  = chord && Input::IsGlfwKeyDown(GLFW_KEY_C);
-                    if (pasteDown && !pasteHeld) {
-                        if (const char* clip = glfwGetClipboardString(window)) g_chatScreen.InsertText(clip);
-                    }
-                    if (copyDown && !copyHeld && !g_chatScreen.InputText().empty()) {
-                        glfwSetClipboardString(window, g_chatScreen.InputText().c_str());
-                    }
-                    pasteHeld = pasteDown;
-                    copyHeld  = copyDown;
+                    auto [chatScrollX, chatScrollY] = Input::GetScrollOffset();
+                    (void)chatScrollX;
+                    if (chatScrollY != 0.0) g_chatScreen.OnMouseScrolled(chatScrollY);
+                    Input::ResetScrollOffset();
                 }
-                // Keys typed here arrive through the char queue and the
-                // polled keys below; the UI key queue would only hoard them
-                // for the next screen. Drop them.
-                Input::ClearUiKeyPresses();
-                // Route key input (Enter, Escape, Backspace, arrows)
+                // Route key input. ESC first, from the shared edge.
                 if (escPressedThisFrame) {
                     if (inBedChat) {
                         // MC InBedChatScreen.onClose → sendWakeUp: ESC gets
@@ -5284,39 +5849,46 @@ static uint16_t     s_lastPresencePort = 0;
                         g_chatScreen.OnKeyDown(GLFW_KEY_ESCAPE);
                     }
                 }
-                // Check raw GLFW keys for Enter/Backspace (need glfwGetKey for repeat)
-                static bool enterHeld = false, backspaceHeld = false;
-                bool enterDown = Input::IsGlfwKeyDown(GLFW_KEY_ENTER);
-                bool backspaceDown = Input::IsGlfwKeyDown(GLFW_KEY_BACKSPACE);
-                if (enterDown && !enterHeld) g_chatScreen.OnKeyDown(GLFW_KEY_ENTER);
-                if (backspaceDown && !backspaceHeld) g_chatScreen.OnKeyDown(GLFW_KEY_BACKSPACE);
-                enterHeld = enterDown;
-                backspaceHeld = backspaceDown;
-                // Up/down for history, Left/Right for cursor, Home/End for jump, Delete
-                static bool upHeld = false, downHeld = false;
-                static bool leftHeld = false, rightHeld = false;
-                static bool homeHeld = false, endHeld = false, deleteHeld = false;
-                bool upDown    = Input::IsGlfwKeyDown(GLFW_KEY_UP);
-                bool downDown  = Input::IsGlfwKeyDown(GLFW_KEY_DOWN);
-                bool leftDown  = Input::IsGlfwKeyDown(GLFW_KEY_LEFT);
-                bool rightDown = Input::IsGlfwKeyDown(GLFW_KEY_RIGHT);
-                bool homeDown  = Input::IsGlfwKeyDown(GLFW_KEY_HOME);
-                bool endDown   = Input::IsGlfwKeyDown(GLFW_KEY_END);
-                bool deleteDown = Input::IsGlfwKeyDown(GLFW_KEY_DELETE);
-                bool tabDown    = Input::IsGlfwKeyDown(GLFW_KEY_TAB);
-                static bool tabHeld = false;
-                if (upDown    && !upHeld)    g_chatScreen.OnKeyDown(GLFW_KEY_UP);
-                if (downDown  && !downHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_DOWN);
-                if (leftDown  && !leftHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_LEFT);
-                if (rightDown && !rightHeld) g_chatScreen.OnKeyDown(GLFW_KEY_RIGHT);
-                if (homeDown  && !homeHeld)  g_chatScreen.OnKeyDown(GLFW_KEY_HOME);
-                if (endDown   && !endHeld)   g_chatScreen.OnKeyDown(GLFW_KEY_END);
-                if (deleteDown && !deleteHeld) g_chatScreen.OnKeyDown(GLFW_KEY_DELETE);
-                if (tabDown && !tabHeld)     g_chatScreen.OnKeyDown(GLFW_KEY_TAB);
-                upHeld = upDown; downHeld = downDown;
-                leftHeld = leftDown; rightHeld = rightDown;
-                homeHeld = homeDown; endHeld = endDown; deleteHeld = deleteDown;
-                tabHeld = tabDown;
+                // Then every other key press, from the GLFW callback, in
+                // order (MC ChatScreen.keyPressed gets each one). These used
+                // to be polled edges on glfwGetKey, which lost a tap that
+                // went down and up between two frames — on a slow machine a
+                // quick Backspace or Enter simply did not happen. Backspace,
+                // Delete and the arrows arrive with their auto-repeats, as
+                // in MC's EditBox.
+                {
+                    int uiKey = 0, uiMods = 0;
+                    while (Input::PopUiKeyPress(uiKey, uiMods)) {
+                        switch (uiKey) {
+                            case GLFW_KEY_ENTER:  case GLFW_KEY_KP_ENTER:
+                            case GLFW_KEY_BACKSPACE: case GLFW_KEY_DELETE:
+                            case GLFW_KEY_UP:     case GLFW_KEY_DOWN:
+                            case GLFW_KEY_LEFT:   case GLFW_KEY_RIGHT:
+                            case GLFW_KEY_HOME:   case GLFW_KEY_END:
+                            case GLFW_KEY_TAB:
+                                g_chatScreen.OnKeyDown(uiKey);
+                                break;
+                            case GLFW_KEY_V:
+                            case GLFW_KEY_C:
+                                // Paste and copy: Cmd on macOS, Ctrl elsewhere
+                                // (both accepted everywhere). GLFW sends no
+                                // character event for a chorded key, so the
+                                // letter never lands in the box on its own.
+                                if (uiMods & (GLFW_MOD_SUPER | GLFW_MOD_CONTROL)) {
+                                    if (uiKey == GLFW_KEY_V) {
+                                        if (const char* clip = glfwGetClipboardString(window)) g_chatScreen.InsertText(clip);
+                                    } else if (!g_chatScreen.InputText().empty()) {
+                                        glfwSetClipboardString(window, g_chatScreen.InputText().c_str());
+                                    }
+                                }
+                                break;
+                            default:
+                                // Printable keys type through the char queue
+                                // above; nothing else is the chat's.
+                                break;
+                        }
+                    }
+                }
 
                 g_chatScreen.Update(1.0f / 60.0f); // Approximate frame dt for cursor blink
 
@@ -5455,16 +6027,8 @@ static uint16_t     s_lastPresencePort = 0;
                 // Char input → search box
                 while (Input::HasCharInput()) inv.OnCharInput(Input::PopCharInput());
 
-                // Edge-detect keys (E/ESC/Q close or drop, 1-9 swap, arrows/etc edit search).
-                // NOTE: eHeld is the SHARED static defined just below the chain so that pressing
-                // E to open the inventory in the game branch doesn't immediately retrigger
-                // OnKeyDown(E) here on the next frame (which would close it).
-                extern bool s_eKeyHeld;
-                static bool qHeld=false;
-                static bool num1=false, num2=false, num3=false, num4=false,
-                            num5=false, num6=false, num7=false, num8=false, num9=false;
-                static bool ileftH=false, irightH=false, ihomeH=false, iendH=false,
-                            ibsH=false, idelH=false;
+                // Modifier state for the mouse handlers below (keys carry
+                // their own mods from the callback).
                 int mods = ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SHIFT)) ||
                             (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SHIFT))) ? GLFW_MOD_SHIFT : 0;
                 mods |= ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_CONTROL)) ||
@@ -5474,52 +6038,36 @@ static uint16_t     s_lastPresencePort = 0;
                 mods |= ((Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SUPER)) ||
                          (Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SUPER))) ? GLFW_MOD_SUPER : 0;
 
-                auto edge = [&](bool& held, int key, int glfwKey) {
-                    bool down = Input::IsGlfwKeyDown(key);
-                    if (down && !held) inv.OnKeyDown(glfwKey, mods);
-                    held = down;
-                };
-                edge(s_eKeyHeld, GLFW_KEY_E,    GLFW_KEY_E);
-                // ESC uses the SHARED edge (s_escKeyHeld, sampled once per
-                // frame above) for exactly the reason the note about `eHeld`
-                // gives for E — it just never got the same treatment.
+                // Every key press, from the GLFW callback, in order — MC hands
+                // each one to AbstractContainerScreen.keyPressed (the
+                // inventory key closes, 1-9 swap, F offhand, Q drop, and a
+                // focused text box takes the rest, Ctrl/Cmd+A/C/V/X included,
+                // with the press's own modifiers).
                 //
-                // With a private `escHeld` here, this branch and the
-                // screen-manager branch each kept their own idea of whether ESC
-                // was down. They are mutually exclusive, so the branch that did
-                // not run held a stale `false`, and the next press it DID see
-                // edged a second time. That is the "one press closes the pause
-                // menu straight back up" report, and it showed up on the first
-                // press because that is when the two flags are furthest apart.
+                // This replaced polled edges on a fixed key list, which lost
+                // any tap that went down and up between two frames: on a slow
+                // machine a quick E did not close the inventory and a quick
+                // number did not swap. The E that OPENED the inventory cannot
+                // close it: it landed before the screen was up, as a gameplay
+                // click, and the screen opening emptied this queue
+                // (Input::ReleaseAll). ESC keeps the shared edge below.
+                {
+                    int uiKey = 0, uiMods = 0;
+                    while (Input::PopUiKeyPress(uiKey, uiMods)) {
+                        if (uiKey == GLFW_KEY_ESCAPE) continue;
+                        inv.OnKeyDown(uiKey, uiMods);
+                    }
+                }
+                // ESC uses the SHARED edge (s_escKeyHeld, sampled once per
+                // frame above). With a private `escHeld` here, this branch and
+                // the screen-manager branch each kept their own idea of whether
+                // ESC was down. They are mutually exclusive, so the branch that
+                // did not run held a stale `false`, and the next press it DID
+                // see edged a second time. That is the "one press closes the
+                // pause menu straight back up" report, and it showed up on the
+                // first press because that is when the two flags are furthest
+                // apart.
                 if (escPressedThisFrame) inv.OnKeyDown(GLFW_KEY_ESCAPE, mods);
-                // Same as chat: the inventory takes its keys by its own route,
-                // so the UI key queue must not hoard them for the next screen.
-                Input::ClearUiKeyPresses();
-                edge(qHeld,    GLFW_KEY_Q,      GLFW_KEY_Q);
-                edge(num1, GLFW_KEY_1, GLFW_KEY_1);
-                edge(num2, GLFW_KEY_2, GLFW_KEY_2);
-                edge(num3, GLFW_KEY_3, GLFW_KEY_3);
-                edge(num4, GLFW_KEY_4, GLFW_KEY_4);
-                edge(num5, GLFW_KEY_5, GLFW_KEY_5);
-                edge(num6, GLFW_KEY_6, GLFW_KEY_6);
-                edge(num7, GLFW_KEY_7, GLFW_KEY_7);
-                edge(num8, GLFW_KEY_8, GLFW_KEY_8);
-                edge(num9, GLFW_KEY_9, GLFW_KEY_9);
-                edge(ileftH,  GLFW_KEY_LEFT,      GLFW_KEY_LEFT);
-                edge(irightH, GLFW_KEY_RIGHT,     GLFW_KEY_RIGHT);
-                edge(ihomeH,  GLFW_KEY_HOME,      GLFW_KEY_HOME);
-                edge(iendH,   GLFW_KEY_END,       GLFW_KEY_END);
-                edge(ibsH,    GLFW_KEY_BACKSPACE, GLFW_KEY_BACKSPACE);
-                edge(idelH,   GLFW_KEY_DELETE,    GLFW_KEY_DELETE);
-                // Select all / copy / paste / cut, for a text box in a
-                // container screen (the anvil's name, the creative search).
-                // Only meaningful with Ctrl/Cmd; the plain letters arrive as
-                // characters above.
-                static bool iaH=false, icH=false, ivH=false, ixH=false;
-                edge(iaH, GLFW_KEY_A, GLFW_KEY_A);
-                edge(icH, GLFW_KEY_C, GLFW_KEY_C);
-                edge(ivH, GLFW_KEY_V, GLFW_KEY_V);
-                edge(ixH, GLFW_KEY_X, GLFW_KEY_X);
 
                 // Mouse position: feed in window-pixel coords + GUI virtual size.
                 // Use the same GUI-scale formula as the render path (line 167).
@@ -5646,16 +6194,20 @@ static uint16_t     s_lastPresencePort = 0;
                 }
 
                 // The inventory binding opens the inventory (MC key.inventory,
-                // default E). The inventory branch still edge-detects the raw
-                // key to CLOSE, so mark that latch held here — otherwise the
-                // same physical press would immediately close what it opened.
-                extern bool s_eKeyHeld;
+                // default E). The inventory branch closes it on a later
+                // PRESS event of the same binding; this press was a gameplay
+                // click and never reaches that queue.
                 if (Input::ConsumeClick(*Input::Binds::Inventory)) {
-                    // Survival panel or creative picker, depending on game mode
-                    // (MC InventoryScreen.init hands over to
-                    // CreativeModeInventoryScreen for infinite-materials players).
-                    Render::OpenInventoryScreen();
-                    s_eKeyHeld = true;
+                    if (Client::Vehicles::RidesServerControlledInventory(player)) {
+                        // MC isServerControlledInventory: riding a chest
+                        // boat, the key asks the server for its chest.
+                        playerController.SendPlayerAction(Network::PlayerAction::OPEN_VEHICLE_INVENTORY);
+                    } else {
+                        // Survival panel or creative picker, depending on game mode
+                        // (MC InventoryScreen.init hands over to
+                        // CreativeModeInventoryScreen for infinite-materials players).
+                        Render::OpenInventoryScreen();
+                    }
                 }
 
                 // ESC opens the pause menu (MC Game Menu). Uses the shared
@@ -5746,7 +6298,10 @@ static uint16_t     s_lastPresencePort = 0;
             // still fully suppressed while it's up, but by
             // HandlePlayerInput below (which zeroes movement and drains
             // attack/use), so bindings keep working the whole time.
-            Input::SetUiActive(screenOpen);
+            // The owner string only labels key-press lines in the log.
+            Input::SetUiActive(screenOpen,
+                               g_chatScreen.IsOpen() ? "chat"
+                               : Render::GetInventoryScreen().IsOpen() ? "container" : "screen");
 
             // MC Minecraft.java:1284 — the pause flag. Vanilla reads it
             // straight off the embedded client and refuses to pause at all
@@ -5770,11 +6325,20 @@ static uint16_t     s_lastPresencePort = 0;
                 // player too (physics, move packets, mobs, sky). With another
                 // player still playing the server never pauses, and neither
                 // does this body — a published vanilla world's rule.
+                //
+                // The join transition holds the world the same way: until the
+                // hand-over frame the panorama IS the world, so nothing in it
+                // may move. On the host the server is held paused for exactly
+                // that long (IntegratedServer::ReleaseOwnerJoinHold), and this
+                // client freezes with it — mobs, particles, block animate
+                // ticks, the sky clock, texture animations and its own body.
+                // Joining someone else's server nothing can pause the world;
+                // only the local player is held (the physics step below).
                 {
                     const bool serverPaused = Server::g_integratedServer
                         ? Server::g_integratedServer->IsPaused()
                         : Client::g_clientTickRate.IsServerPaused();
-                    Client::g_clientTickRate.SetWorldPaused(nowPaused && serverPaused);
+                    Client::g_clientTickRate.SetWorldPaused((nowPaused || joinTransition.active) && serverPaused);
                 }
                 if (nowPaused != sentPaused) {
                     // `sentPaused` advances ONLY when the packet actually went
@@ -5807,6 +6371,12 @@ static uint16_t     s_lastPresencePort = 0;
                 static bool s_prevUiActive = false;
                 if (screenOpen && !s_prevUiActive) {
                     Input::ReleaseAll();
+                    // MC starts a text field's input with the composition
+                    // cleared (TextInputManager.startTextInput →
+                    // SDL_ClearComposition). A dead key pressed during
+                    // gameplay must not eat the first vowel of the chat
+                    // line or sign being opened.
+                    Input::DiscardTextComposition();
                 } else if (!screenOpen && s_prevUiActive) {
                     Input::RestoreKeyboardState();
                 }
@@ -5945,6 +6515,7 @@ static uint16_t     s_lastPresencePort = 0;
                         freeCam.yaw      = camera.yaw;
                         freeCam.pitch    = camera.pitch;
                         player.physics.velocity = glm::vec3(0.0f);
+                        player.physics.pushVelocity = glm::vec3(0.0f);
                         Log::Info("[FreeCam] Detached - culling %s; F+C to return",
                                   Debug::DebugSystem::FreeCamCullFromPlayer()
                                       ? "frozen at the player view (Render Controls)"
@@ -6033,6 +6604,7 @@ static uint16_t     s_lastPresencePort = 0;
             // Frame counter for debugging
             static uint64_t frameCounter = 0;
             frameCounter++;
+            ++g_shoulderPartyFrame;
 
             // === CLIENT TICK (20 TPS, matches Minecraft.java runTick()) ===
             // Minecraft pattern: process ALL queued packets, then run game tick.
@@ -6085,7 +6657,15 @@ static uint16_t     s_lastPresencePort = 0;
                 // TICK (MC drives it from the packet listener's tick, not from
                 // runTick), and still after the drain — which now happened just
                 // above, for the whole frame.
-                Client::g_levelLoadTracker.Tick(player.physics.position);
+                // With the view: the portals it faces close by count toward
+                // "ready" too (bounded — see LevelLoadTracker::Tick), so the
+                // join hand-over reveals their far side already drawn.
+                {
+                    Client::LevelLoadTracker::ViewInfo loadView;
+                    loadView.eye     = glm::dvec3(camera.position);
+                    loadView.forward = camera.GetForward();
+                    Client::g_levelLoadTracker.Tick(player.physics.position, &loadView);
+                }
                 // /morph: the own body's walk animation and creeper swell,
                 // per tick; a full swell is the creeper's bang, done by the
                 // server so everyone's world agrees on the crater.
@@ -6116,15 +6696,22 @@ static uint16_t     s_lastPresencePort = 0;
                 //     feeds the crosshair indicator has to count in TICKS, or
                 //     the bar fills at frame rate.
                 player.Tick();
+                // The elytra glide's looping sound (ClientFireworks.hpp).
+                Client::Fireworks::TickLocalPlayer(player);
                 g_hudRenderer.Tick();   // MC Gui.tick — the status bars' 20 Hz clock
                 // MC LivingEntity.tickEffects' client particle roll for the
-                // local and remote players (mobs roll their own).
-                Client::TickPlayerEffectParticles(player);
+                // local and remote players (mobs roll their own). Both this
+                // and the block entities below sit in MC's
+                // `if (!this.pause) level.tickEntities()` (Minecraft.tick):
+                // nothing new appears or moves in a paused world (the pause
+                // menu; the join transition's hold).
+                const bool worldPausedTick = Client::g_clientTickRate.IsWorldPaused();
+                if (!worldPausedTick) Client::TickPlayerEffectParticles(player);
 
                 // MC ClientLevel.tickBlockEntities: the moving piston cells the
                 // client built from block events advance here — and push the
                 // local player, which is how vanilla moves you on a piston.
-                if (Client::g_clientChunkManager && Client::g_clientBlockAccess) {
+                if (!worldPausedTick && Client::g_clientChunkManager && Client::g_clientBlockAccess) {
                     Client::g_clientBlockAccess->SetLocalPlayer(&player);
                     // A moving cell that outlives the server's final block
                     // writes the carried block itself — a local write.
@@ -6183,6 +6770,34 @@ static uint16_t     s_lastPresencePort = 0;
                         Network::InventoryCloseC2SPacket close{};
                         conn->SendPacket(static_cast<uint8_t>(Network::PacketId::InventoryCloseC2S),
                                          Network::Serialization::Serialize(close));
+                    }
+                }
+                // MC ClientPacketListener.handleSetEntityPassengersPacket: the
+                // moment this player is seated, "Press <sneak> to get up" on
+                // the action bar (mount.sit for a cushion, mount.onboard for
+                // anything else).
+                {
+                    static int32_t s_lastVehicle = 0;
+                    if (player.vehicleId != s_lastVehicle) {
+                        if (player.vehicleId != 0 && s_lastVehicle == 0) {
+                            bool cushion = true;
+                            if (Client::g_clientMobManager) {
+                                if (const Client::ClientMob* v = Client::g_clientMobManager->GetMob(player.vehicleId);
+                                    v && v->mob) {
+                                    cushion = v->mob->GetType() == Game::EntityTypeId::Cushion;
+                                }
+                            }
+                            std::string text = Game::Language::Get(cushion ? "mount.sit" : "mount.onboard");
+                            const std::string key = Input::Binds::Sneak ? Input::Binds::Sneak->key.DisplayName()
+                                                                        : std::string("Shift");
+                            if (const size_t at = text.find("%1$s"); at != std::string::npos) {
+                                text.replace(at, 4, key);
+                            } else if (const size_t at2 = text.find("%s"); at2 != std::string::npos) {
+                                text.replace(at2, 2, key);
+                            }
+                            g_hudRenderer.SetOverlayMessage(text);
+                        }
+                        s_lastVehicle = player.vehicleId;
                     }
                 }
                 if (player.IsSleeping()) {
@@ -6252,11 +6867,23 @@ static uint16_t     s_lastPresencePort = 0;
                         Client::g_clientMobManager->SetPickOrigin(
                             glm::dvec3(player.physics.position));
                         Client::g_clientMobManager->RefreshPickCandidates();
+                        // A paused world (not a /tick freeze): land the moves
+                        // that arrived just before the server stopped, so the
+                        // mobs stand where the server — and the save, and the
+                        // last-world panorama captured now — has them.
+                        if (Client::g_clientTickRate.IsWorldPaused()) {
+                            Client::g_clientMobManager->SettleInterpolation();
+                        }
                     }
                     if (!entitiesFrozen) {
                         Client::g_clientMobManager->SetPickOrigin(
                             glm::dvec3(player.physics.position));
+                        // A driven boat takes the keys before it ticks; the
+                        // moved vehicle, its paddles and the keys go out
+                        // after (Client::Vehicles).
+                        Client::Vehicles::BeforeEntityTick(player, camera.yaw, camera.pitch);
                         Client::g_clientMobManager->Tick();
+                        Client::Vehicles::AfterEntityTick(player);
                         if (Client::g_clientFallingBlocks) {
                             Client::g_clientFallingBlocks->SetBlockAccess(Client::g_clientBlockAccess);
                             Client::g_clientFallingBlocks->Tick();
@@ -6334,6 +6961,20 @@ static uint16_t     s_lastPresencePort = 0;
                             Client::g_clientMobManager->Level(),
                             s_animateRandom,
                             Client::MarkerParticleTarget(player));
+                        // MC ClientLevel.tickWeatherEffects' rain splashes and
+                        // the client block-entity particle tickers (the
+                        // campfires' smoke) — client/world/ClientParticleTicks.
+                        Client::ParticleTicks::TickWeather(camPos, *Client::g_clientBlockAccess,
+                                                           Client::g_clientMobManager->Level());
+                        if (Client::g_clientChunkManager) {
+                            Client::ParticleTicks::TickBlockEntities(*Client::g_clientChunkManager,
+                                                                     *Client::g_clientBlockAccess,
+                                                                     Client::g_clientMobManager->Level());
+                        }
+                        // Entity.baseTick's sprint dust and water-entry
+                        // splash for the local and the remote players.
+                        Client::ParticleTicks::TickPlayers(player, *Client::g_clientBlockAccess,
+                                                           Client::g_clientMobManager->Level());
                     }
                 }
 
@@ -6519,6 +7160,9 @@ static uint16_t     s_lastPresencePort = 0;
                     // permanent-tilt bug the note below describes). The
                     // controlled client banks its swings for its view frame.
                     bool  heldSwing = lmbEdge || placeEdge || armSwing;
+                    // LocalPlayer.swing → ServerboundSwingPacket: the others
+                    // see the arm go (PlayerMoveC2S's swung flag → PlayerSwingS2C).
+                    if (heldSwing) player.swungSinceMoveSend = true;
                     float heldPitch = camera.pitch, heldYaw = camera.yaw;
                     if ((Client::Control::IsControlled() || Client::Control::IsWatched()) && heldSwing) {
                         Client::Control::Get().pendingSwing = true;
@@ -6532,6 +7176,18 @@ static uint16_t     s_lastPresencePort = 0;
                             heldYaw   = cs.view.yaw;
                         }
                     }
+                    // The hands' map ids (DataComponents.MAP_ID): a held map
+                    // draws as a map, not as its item sprite.
+                    Render::g_heldItemRenderer.SetHandMapIds(
+                        player.inventory.GetSelectedStack().get(Game::DataComponents::MAP_ID),
+                        player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).get(Game::DataComponents::MAP_ID));
+                    // The hands' live stacks (a crossbow's load, a star's
+                    // colour).
+                    Render::g_heldItemRenderer.SetHandStacks(
+                        player.inventory.GetSelectedStack(),
+                        player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN),
+                        Game::Inventory::HotbarToIndex(player.inventory.GetSelectedSlot()),
+                        Game::Inventory::OFFHAND_BEGIN);
                     Render::g_heldItemRenderer.Tick(
                         player.inventory.GetSelectedItem(),
                         player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).itemId,
@@ -6664,11 +7320,19 @@ static uint16_t     s_lastPresencePort = 0;
             // 30-second escape hatch, so this cannot strand the player.
             if (player.health <= 0 || !Client::g_levelLoadTracker.IsLoaded()) {
                 player.physics.velocity = glm::vec3(0.0f);
+                player.physics.pushVelocity = glm::vec3(0.0f);
             } else if (Client::g_clientTickRate.IsWorldPaused()) {
                 // MC Minecraft.java:1959 `if (!this.pause)` around the level
                 // tick: the paused player is simply not ticked. Velocity is
                 // kept, as an unticked entity's is — a fall resumes on
                 // unpause instead of restarting from rest.
+            } else if (joinTransition.active) {
+                // The join transition's hold: the body stays exactly where
+                // the panorama was taken from until the hand-over frame.
+                // On the host the world pause above already covers this;
+                // joining a server nothing can pause, this is the one hold
+                // there is (its world keeps running under the panorama).
+                // Velocity is kept, as in the pause branch.
             } else if (poseReplayer.Active()) {
                 // Replay owns the pose: the recorded path is written in
                 // place of the physics step. Everything downstream — the
@@ -6677,6 +7341,18 @@ static uint16_t     s_lastPresencePort = 0;
                 poseReplayer.Apply(player, camera, dt,
                     static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())));
             } else {
+                // A rider's view and seat follow the vehicle as it is drawn
+                // this frame (Client::Vehicles): the partial tick is the one
+                // the entity renderers lerp with.
+                if (player.vehicleId != 0) {
+                    const float remainingSec =
+                        std::chrono::duration<float>(nextClientTick - std::chrono::steady_clock::now()).count();
+                    const float tickSec = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                    const float framePartial = Client::g_clientTickRate.IsEntityFrozen()
+                        ? 1.0f : std::clamp(1.0f - remainingSec / tickSec, 0.0f, 1.0f);
+                    Client::Vehicles::FrameUpdate(player, camera.yaw, dt, framePartial);
+                    s_riderFramePartial = framePartial;
+                }
                 player.UpdatePhysics(dt, Client::g_clientBlockAccess);
             }
 
@@ -6694,6 +7370,9 @@ static uint16_t     s_lastPresencePort = 0;
                     prevVel, camera.yaw, camera.pitch,
                     player.physics.GetCurrentHeight(),
                     Game::PlayerPhysics::WIDTH * 0.5f);
+                // A rider does not cross on its own: the vehicle takes it
+                // through (server EntityPortalTravel, Client::Vehicles).
+                if (player.vehicleId != 0) pred.valid = false;
                 if (pred.valid) {
                     player.physics.position = pred.newFeet;
                     player.physics.velocity = pred.newVelocity;
@@ -6724,7 +7403,9 @@ static uint16_t     s_lastPresencePort = 0;
             // not yet gone through. Skipped on a frame the gun's prediction
             // already moved the player.
             {
-                const bool canCross = player.health > 0 && Client::g_levelLoadTracker.IsLoaded()
+                // A rider crosses with its vehicle, never on its own.
+                const bool canCross = player.health > 0 && Client::g_levelLoadTracker.IsLoaded() &&
+                                      player.vehicleId == 0
 #if ENABLE_PORTAL_GUN
                                       && !justTeleportedThisFrame
 #endif
@@ -6889,6 +7570,50 @@ static uint16_t     s_lastPresencePort = 0;
                     poseCrossedThisFrame);
             }
 
+            // Spectating an entity (MC Minecraft.cameraEntity): the body rides
+            // along at the entity's eye — the server snaps it there every
+            // tick (ServerPlayer.tick) — so the view, the crosshair ray, the
+            // chunk streaming centre and the render origin all come from it.
+            std::optional<SpectatedView> spectatedView;
+            std::string spectatedPostEffect;   // "" = clearSpectatedEntityPostEffect
+            s_outlineViewerSpectator = player.IsSpectator();
+            if (player.IsSpectator() && player.IsCameraDetached()) {
+                const float remaining = std::chrono::duration<float>(
+                    nextClientTick - std::chrono::steady_clock::now()).count();
+                const float tickSeconds = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                const float partial = Client::g_clientTickRate.IsEntityFrozen()
+                                          ? 1.0f : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                SpectatedView view;
+                // MC GameRenderer.checkEntityPostEffect (on setCameraEntity):
+                // a creeper's eyes see creeper, a spider's (and a cave
+                // spider's) spider, an enderman's invert.
+                if (Client::g_clientMobManager) {
+                    if (const Client::ClientMob* entry = Client::g_clientMobManager->GetMob(player.cameraEntityId);
+                        entry && entry->mob) {
+                        switch (entry->mob->GetType()) {
+                            case Game::EntityTypeId::Creeper:    spectatedPostEffect = "minecraft:creeper"; break;
+                            case Game::EntityTypeId::Spider:
+                            case Game::EntityTypeId::CaveSpider: spectatedPostEffect = "minecraft:spider";  break;
+                            case Game::EntityTypeId::Enderman:   spectatedPostEffect = "minecraft:invert";  break;
+                            default: break;
+                        }
+                    }
+                }
+                if (ResolveSpectatedView(player.cameraEntityId, partial, view)) {
+                    player.physics.position = view.eye - glm::dvec3(0.0, player.GetEyeHeight(), 0.0);
+                    player.physics.velocity = glm::vec3(0.0f);
+                    player.physics.pushVelocity = glm::vec3(0.0f);
+                    player.physics.stepVisualOffset = 0.0f;
+                    player.predictedPos = player.physics.position;
+                    player.visualPos    = player.physics.position;
+                    spectatedView = view;
+                }
+            }
+
+            Render::PostEffects::Get().SetSpectatedEntity(
+                player.IsSpectator() && player.IsCameraDetached() ? player.cameraEntityId : -1,
+                spectatedPostEffect);
+
             camera.position = player.GetEyePosition();
             if (freeCamActive) {
                 // Detached: the mouse belongs to the fly camera. The player
@@ -6955,6 +7680,13 @@ static uint16_t     s_lastPresencePort = 0;
                 camera.position.y += 0.15;
             } else {
                 camera.Update(dt);
+            }
+            // The spectated entity's look replaces the mouse's (Camera.setup's
+            // getViewYRot / getViewXRot); the crosshair ray below follows it.
+            if (spectatedView) {
+                camera.position = spectatedView->eye;
+                camera.yaw      = spectatedView->yaw;
+                camera.pitch    = spectatedView->pitch;
             }
             player.UpdateRaycast(camera);
 #if ENABLE_IMMERSIVE_PORTALS
@@ -7044,9 +7776,22 @@ static uint16_t     s_lastPresencePort = 0;
             // right arrows swing the third-person camera around the player
             // while held; the player keeps facing where they look, so WASD
             // still moves them the way they face.
+            //
+            // The I/O distance is the zoom's own and never F5's: F5 (or any
+            // other perspective change made outside this block) drops it,
+            // and the view is back at MC's fixed distance — Camera.setup's
+            // CAMERA_DISTANCE attribute, 4 for a player (this port has no
+            // such attribute), times the body's scale below.
             {
-                static float s_tpZoom   = 4.0f;    // body heights; MC's default distance
+                constexpr float kMcCameraDistance = 4.0f;   // MC Camera.DEFAULT_CAMERA_DISTANCE
+                static float s_tpZoom   = kMcCameraDistance;   // body heights
+                static bool  s_zoomOwnsDistance = false;   // I/O set the distance this view
+                static Render::Perspective s_zoomLastPerspective = camera.perspective;
                 static float s_orbitYaw = 0.0f;    // degrees around the player
+                if (camera.perspective != s_zoomLastPerspective) {
+                    s_zoomOwnsDistance = false;
+                    s_tpZoom = kMcCameraDistance;
+                }
                 constexpr float kZoomStep = 1.25f, kMinZoom = 0.75f, kMaxZoom = 24.0f;
                 constexpr float kRepeatDelay = 0.35f, kRepeatEvery = 0.08f;
                 constexpr float kOrbitDegPerSec = 120.0f;
@@ -7071,6 +7816,7 @@ static uint16_t     s_lastPresencePort = 0;
                 if (!freeCamActive) {
                     for (int i = zoomClicks(Input::Binds::ZoomIn, 0); i > 0; --i) {
                         if (camera.IsFirstPerson()) break;
+                        s_zoomOwnsDistance = true;
                         s_tpZoom /= kZoomStep;
                         if (s_tpZoom < kMinZoom) {
                             camera.perspective = Render::Perspective::FirstPerson;
@@ -7084,6 +7830,7 @@ static uint16_t     s_lastPresencePort = 0;
                         } else {
                             s_tpZoom = std::min(s_tpZoom * kZoomStep, kMaxZoom);
                         }
+                        s_zoomOwnsDistance = true;
                     }
                     if (!camera.IsFirstPerson()) {
                         if (Input::Binds::CameraLeft  && Input::IsDown(*Input::Binds::CameraLeft))  s_orbitYaw -= kOrbitDegPerSec * dt;
@@ -7096,7 +7843,8 @@ static uint16_t     s_lastPresencePort = 0;
                         s_orbitYaw = 0.0f;
                     }
                 }
-                s_thirdPersonZoom = s_tpZoom;
+                s_zoomLastPerspective = camera.perspective;
+                s_thirdPersonZoom = s_zoomOwnsDistance ? s_tpZoom : kMcCameraDistance;
                 s_thirdPersonOrbit = s_orbitYaw;
             }
 
@@ -7111,6 +7859,15 @@ static uint16_t     s_lastPresencePort = 0;
             const glm::dvec3 tpSavedPos = camera.position;
             const float     tpSavedYaw  = camera.yaw;
             const float     tpSavedPitch = camera.pitch;
+            // A lead the local player holds ends in the stick figure's hand
+            // when the body is on screen, else where the hand is on screen.
+            Render::LeashRenderer::SetLocalView(tpActive || freeCamActive || controlView,
+                                                tpSavedPos, tpSavedYaw, tpSavedPitch);
+            // A fishing line the local player casts leaves the same hand —
+            // or, in first person, the rod tip on screen (MC's near-plane
+            // point, which needs the FOV).
+            Render::FishingHookRenderer::SetLocalView(tpActive || freeCamActive || controlView,
+                                                      tpSavedPos, tpSavedYaw, tpSavedPitch, camera.fov);
             if (tpActive) {
                 if (camera.perspective == Render::Perspective::ThirdFront) {
                     camera.yaw   = tpSavedYaw + 180.0f;
@@ -7124,7 +7881,9 @@ static uint16_t     s_lastPresencePort = 0;
                 // camera ray started a few centimetres off the ground and
                 // hit it at once, so F5 seemed to do nothing.
                 const float bodyScale = std::max(player.physics.scale, 0.05f);
-                float maxZoom = s_thirdPersonZoom * bodyScale;   // I/O zoom; MC's default is 4
+                // MC's 4 (Camera.setup: scale × CAMERA_DISTANCE), or the
+                // I/O zoom's own distance while it holds one.
+                float maxZoom = s_thirdPersonZoom * bodyScale;
                 for (int i = 0; i < 8; ++i) {             // MC Camera.getMaxZoom
                     const glm::vec3 off(((i & 1) * 2 - 1) * 0.1f * bodyScale,
                                         ((i >> 1 & 1) * 2 - 1) * 0.1f * bodyScale,
@@ -7173,6 +7932,9 @@ static uint16_t     s_lastPresencePort = 0;
             glm::vec3 playerPos = controlView ? glm::vec3(Client::Control::Get().view.playerPos)
                                               : glm::vec3(player.physics.position);
             Render::SetClientMeshPlayerPosition(playerPos);
+            // The portal-aware half of the same order: routes through the
+            // portals this eye can look through (MeshPriority.hpp).
+            Render::UpdateMeshPortalRoutes(glm::dvec3(camera.position));
 
             // 6b. Schedule mesh builds — a FRAME phase, like MC's
             // LevelRenderer compiling sections every frame.
@@ -7232,9 +7994,13 @@ static uint16_t     s_lastPresencePort = 0;
             { PROFILE_ZONE_N("TexAnimation");
             PROFILE_TIMER_START(texanim);
             DEBUG_PIE_ZONE("textures");
+            // MC Minecraft.tick: `if (!this.pause) textureManager.tick()` —
+            // water, lava, fire and portals stand still in a paused world
+            // (and through the join transition's hold).
+            const float texAnimDt = Client::g_clientTickRate.IsWorldPaused() ? 0.0f : dt;
             for (int i = 0; i < Render::kAtlasCount; ++i) {
                 if (Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i))) {
-                    atlas->UpdateAnimations(dt);
+                    atlas->UpdateAnimations(texAnimDt);
                 }
             }
             PROFILE_TIMER_END(texanim, metrics.textureAnimationTime);
@@ -7245,6 +8011,385 @@ static uint16_t     s_lastPresencePort = 0;
             Frustum frustum;
             { PROFILE_ZONE_N("Render");
             PROFILE_TIMER_START(render);
+            // ── Remote players' layers, one definition for every view ──────
+            //
+            // The stick figure is PlayerRenderer's; everything a remote player
+            // carries beyond it — a /morph body, the elytra (WingsLayer), the
+            // riptide swirl (SpinAttackEffectLayer), the shoulder parrots
+            // (ParrotOnShoulderLayer, dancing included) — is drawn here, so
+            // the main view and every portal view (gun portals, immersive
+            // far views and their crossers, the panorama faces) show the same
+            // player. Each view passes its own matrices, eye and frustum; the
+            // positions go through the render origin the view has active
+            // (RenderOrigin.hpp).
+            //
+            // drawMorphIn: /morph, one body by kind. Items and orbs draw at
+            // once through their own renderers; mobs and blocks collect for
+            // one mob-renderer call. `seed` gives an item its own bob phase.
+            auto drawMorphIn = [&](const glm::mat4& P, const glm::mat4& V, const glm::dvec3& camPos,
+                                   const Render::MobRenderer::MorphPose& pose, uint32_t seed,
+                                   std::vector<Render::MobRenderer::MorphPose>& mobsAndBlocks) {
+                // INVISIBILITY: an item, orb or block-entity body has no
+                // layers to keep — nothing is drawn (MC: the body render
+                // type is null). Mob and block bodies go on: the mob
+                // renderer keeps their layers and outlines a glowing one.
+                const Game::Morph::Kind morphKind = Game::Morph::KindOf(pose.code);
+                if (pose.invisible && (morphKind == Game::Morph::Kind::Item ||
+                                       morphKind == Game::Morph::Kind::Xp)) {
+                    return;
+                }
+                // A bed is a block entity, not a block model: its own
+                // renderer draws it, foot in the player's cell, head one
+                // cell along the morph's turn (Shift+Alt).
+                if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
+                    Game::IsBedBlock(static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)))) {
+                    if (pose.invisible) return;
+                    static constexpr Game::Direction kTurns[4] = {
+                        Game::Direction::South, Game::Direction::West,
+                        Game::Direction::North, Game::Direction::East };
+                    Render::g_bedRenderer.RenderSingle(
+                        static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)),
+                        kTurns[Game::Morph::BlockRotationOf(pose.code)],
+                        pose.position - glm::dvec3(0.5, 0.0, 0.5), P, V,
+                        glm::dvec3(camPos));
+                    return;
+                }
+                // Any other block whose look is a block-entity renderer's
+                // (chest, shulker box…): its block MODEL has no faces of
+                // its own, so the model path drew an atlas-sized nothing.
+                // The renderer's item form (BEWLR — the same mesh the hand
+                // and the inventory icon use, in MC pixel space [0,16]³)
+                // is placed in the cell and turned by the morph's
+                // rotation about the cell's centre.
+                if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
+                    Render::g_blockEntityRenderDispatcher) {
+                    const auto blockId = static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code));
+                    const Game::BlockEntityType* beType = Game::BlockEntityTypes::ForBlock(blockId);
+                    Render::BlockEntityRenderer* beRenderer =
+                        beType ? Render::g_blockEntityRenderDispatcher->GetRenderer(beType->TypeId()) : nullptr;
+                    if (beRenderer && beRenderer->SupportsBEWLR()) {
+                        if (pose.invisible) return;
+                        glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                            Render::ToRender(pose.position - glm::dvec3(0.5, 0.0, 0.5)));
+                        model = glm::translate(model, glm::vec3(0.5f, 0.0f, 0.5f));
+                        model = glm::rotate(model, glm::radians(-90.0f * static_cast<float>(Game::Morph::BlockRotationOf(pose.code))),
+                                            glm::vec3(0.0f, 1.0f, 0.0f));
+                        model = glm::translate(model, glm::vec3(-0.5f, 0.0f, -0.5f));
+                        model = glm::scale(model, glm::vec3(1.0f / 16.0f));
+                        // A body in the level: the frame's fog and light.
+                        Render::BEWLRLight light;
+                        light.world = true;
+                        light.localToRender = model;
+                        light.cameraWorld = glm::dvec3(camPos);
+                        beRenderer->RenderBEWLR(blockId, P * V * model, light);
+                        return;
+                    }
+                }
+                switch (Game::Morph::KindOf(pose.code)) {
+                    case Game::Morph::Kind::Item:
+                        itemEntityRenderer.RenderSingle(
+                            Game::ItemStack(static_cast<Game::ItemID>(Game::Morph::IdOf(pose.code)), 1),
+                            pose.position, pose.ageTicks,
+                            static_cast<float>(seed % 32) / 32.0f * 6.2831853f,
+                            P, V, camPos);
+                        break;
+                    case Game::Morph::Kind::Xp:
+                        xpOrbRenderer.RenderSingle(5, pose.position, pose.ageTicks, P, V, camPos);
+                        break;
+                    default:
+                        mobsAndBlocks.push_back(pose);
+                        break;
+                }
+            };
+            // The local player's own body with every layer — the stick
+            // figure (or spectator head, or /morph body with its held items
+            // and armour), the elytra, the riptide swirl, the shoulder
+            // parrots. One definition for the third-person main view and
+            // every portal view that shows you (a gun portal's far side, an
+            // immersive portal looking back). `feet`/`yaw`/`pitch` are the
+            // body's; `portalModel`/`portalClip` draw it transformed through
+            // a portal pair and clipped at a surface (a straddling body's two
+            // halves) — the stick figure takes them directly, the layer
+            // renderers through a bridged view (Render::FarRenderView) and
+            // the entity clip plane.
+            auto drawLocalBody = [&](const glm::mat4& P, const glm::mat4& V, const glm::dvec3& camPos,
+                                     const Frustum& fr, float pt, const glm::dvec3& feet,
+                                     float yaw, float pitch,
+                                     const glm::dmat4* portalModel = nullptr,
+                                     const glm::dvec4* portalClip = nullptr) {
+                PortalLayerScope scope(P, V, camPos, fr, portalModel, portalClip);
+                const glm::mat4& Vl = scope.view;
+                const Frustum& frl = scope.frustum;
+                const glm::dvec3& camL = scope.eye;
+                const glm::dmat4 stickModel = (portalModel ? *portalModel : glm::dmat4(1.0)) *
+                                              BodyScaleModel(feet, player.physics.scale);
+                const glm::dvec4 stickClip = portalClip ? *portalClip : glm::dvec4(0.0);
+                if (player.IsMorphed()) {
+                    // /morph: your own body is the morph too, with the same
+                    // lagged body yaw the other clients draw (TickMorph) and
+                    // the camera's look for the head.
+                    Render::MobRenderer::MorphPose pose;
+                    pose.code      = player.morph;
+                    pose.variant   = player.morphVariant;
+                    pose.position  = feet;
+                    pose.bodyYaw   = Game::Mth::RotLerp(pt, player.morphBodyYawOld, player.morphBodyYaw);
+                    pose.headYaw   = yaw;
+                    pose.pitch     = pitch;
+                    pose.walkPos   = player.morphWalk.PositionAt(pt);
+                    pose.walkSpeed = player.morphWalk.SpeedAt(pt);
+                    pose.ageTicks  = static_cast<float>(player.morphTicks) + pt;
+                    pose.scale     = player.physics.scale;
+                    pose.hurtTime  = player.hurtTime;
+                    pose.deathTime = player.deathTime;
+                    pose.swell     = Game::Mth::Lerp(pt, static_cast<float>(player.morphSwellOld),
+                                                     static_cast<float>(player.morphSwell)) /
+                                     static_cast<float>(Game::Morph::kCreeperSwellTicks);
+                    pose.animTick  = Game::Mth::Lerp(pt, static_cast<float>(player.morphAnimTicksOld),
+                                                     static_cast<float>(player.morphAnimTicks));
+                    // MC Player.isCrouching: the sneak pose, which flight and a
+                    // seat never take (LocalPlayer.aiStep's crouching rule).
+                    pose.crouching = player.physics.isSneaking && !player.physics.isFlying &&
+                                     !player.IsPassenger();
+                    pose.passenger = player.IsPassenger();
+                    pose.elytraFlags = Game::ElytraLayerFlags(player.inventory.GetSlot(
+                        Game::InventoryIndexFor(Game::EquipmentSlot::CHEST)));
+                    pose.elytraRotX  = player.elytraAnim.RotX(pt);
+                    pose.elytraRotY  = player.elytraAnim.RotY(pt);
+                    pose.elytraRotZ  = player.elytraAnim.RotZ(pt);
+                    // The swing (LivingEntity.getAttackAnim) and the held-item
+                    // arm poses (AvatarRenderer.getArmPose) of the local body.
+                    pose.attackTime = Render::g_heldItemRenderer.AttackAnim(pt);
+                    {
+                        const bool usingNow = player.usingItem && player.useItemRemaining > 0;
+                        Game::PlayerArmPose::Compute(player.inventory.GetSelectedStack(),
+                                                     player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN),
+                                                     usingNow, player.usingHand,
+                                                     pose.rightArmPose, pose.leftArmPose,
+                                                     Render::g_heldItemRenderer.IsSwinging());
+                        pose.maxCrossbowCharge = Game::PlayerArmPose::MaxCrossbowCharge(
+                            player.usingHand ? player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN)
+                                             : player.inventory.GetSelectedStack());
+                        pose.usingItem      = usingNow;
+                        pose.useItemHand    = static_cast<int>(player.usingHand ? 1 : 0);
+                        pose.ticksUsingItem = usingNow
+                            ? static_cast<float>(player.useItemDuration - player.useItemRemaining) + pt
+                            : 0.0f;
+                    }
+                    pose.autoSpinAttack = player.IsAutoSpinAttack();
+                    pose.ticksSinceKineticHitFeedback = player.GetTicksSinceKineticHitFeedback(pt);
+                    // MC renders the camera entity like any other in third
+                    // person: its own INVISIBILITY and GLOWING apply.
+                    pose.invisible = player.HasEffect(Game::MobEffectId::Invisibility);
+                    pose.glowing   = player.HasEffect(Game::MobEffectId::Glowing);
+                    // What you hold and wear, for the body's hands and armour.
+                    pose.equipment[static_cast<int>(Game::EquipmentSlot::MAINHAND)] =
+                        player.inventory.GetSelectedStack();
+                    pose.equipment[static_cast<int>(Game::EquipmentSlot::OFFHAND)] =
+                        player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN);
+                    for (const Game::EquipmentSlot slot : { Game::EquipmentSlot::FEET, Game::EquipmentSlot::LEGS,
+                                                            Game::EquipmentSlot::CHEST, Game::EquipmentSlot::HEAD }) {
+                        pose.equipment[static_cast<int>(slot)] =
+                            player.inventory.GetSlot(Game::InventoryIndexFor(slot));
+                    }
+                    std::vector<Render::MobRenderer::MorphPose> own;
+                    drawMorphIn(P, Vl, camL, pose, 0, own);
+                    if (!own.empty()) {
+                        mobRenderer.RenderMorphs(P, Vl, camL, frl, own, pt);
+                    }
+                } else if (player.IsSpectator()) {
+                    // A spectator in third person: the translucent floating
+                    // head (PlayerModel with isSpectator; the body is
+                    // invisible and the viewer — you — a spectator).
+                    playerRenderer.RenderSingle(
+                        P, V, feet,
+                        yaw, yaw, pitch,
+                        /*isCrouching=*/false,
+                        static_cast<uint8_t>(player.color),
+                        stickModel, stickClip,
+                        /*deathFlipDeg=*/0.0f, /*glowing=*/false, /*drawBody=*/true,
+                        /*isSitting=*/false, /*spectatorHead=*/true);
+                } else {
+                    // MC renders the camera entity like any other in third
+                    // person: INVISIBILITY hides the body (the stick figure
+                    // has no layers to keep), GLOWING outlines it — both at
+                    // once leave the outline alone.
+                    const bool ownInvisible = player.HasEffect(Game::MobEffectId::Invisibility);
+                    const bool ownGlowing   = player.HasEffect(Game::MobEffectId::Glowing);
+                    if (!ownInvisible || ownGlowing) {
+                        playerRenderer.RenderSingle(
+                            P, V, feet,
+                            yaw, yaw, pitch,
+                            player.physics.isSneaking,
+                            static_cast<uint8_t>(player.color),
+                            stickModel, stickClip,
+                            // Your own corpse topples too — MC renders the camera
+                            // entity like any other while the camera is detached.
+                            Render::MobRenderer::DeathFlipDegrees(player.deathTime,
+                                                                  pt),
+                            ownGlowing, /*drawBody=*/!ownInvisible,
+                            /*isSitting=*/player.IsPassenger(), /*spectatorHead=*/false,
+                            player.physics.isFallFlying ? static_cast<float>(player.fallFlyTicks) + pt
+                                                        : 0.0f,
+                            // A riptide spins the body along its look.
+                            player.IsAutoSpinAttack() ? static_cast<float>(player.tickCount) + pt
+                                                      : -1.0f);
+                    }
+                    // MC WingsLayer on your own body (a layer: kept under
+                    // INVISIBILITY, outlined with a GLOWING body).
+                    {
+                        const uint8_t elytra = Game::ElytraLayerFlags(player.inventory.GetSlot(
+                            Game::InventoryIndexFor(Game::EquipmentSlot::CHEST)));
+                        if ((elytra & Game::kElytraWorn) && !player.IsSleeping()) {
+                            Render::MobRenderer::ElytraPose wings;
+                            wings.position  = feet;
+                            wings.bodyYaw   = yaw;
+                            wings.pitch     = pitch;
+                            wings.scale     = player.physics.scale;
+                            wings.crouching = player.physics.isSneaking && !player.IsPassenger();
+                            wings.rotX = player.elytraAnim.RotX(pt);
+                            wings.rotY = player.elytraAnim.RotY(pt);
+                            wings.rotZ = player.elytraAnim.RotZ(pt);
+                            wings.glint = (elytra & Game::kElytraGlint) != 0;
+                            wings.deathFlipDeg = Render::MobRenderer::DeathFlipDegrees(player.deathTime, pt);
+                            wings.fallFlyTicks = player.physics.isFallFlying
+                                ? static_cast<float>(player.fallFlyTicks) + pt : 0.0f;
+                            wings.glowing = ownGlowing;
+                            mobRenderer.RenderElytras(P, Vl, camL, frl, { wings });
+                        }
+                    }
+                    // MC SpinAttackEffectLayer on your own body: the riptide's
+                    // swirl (a layer — kept under INVISIBILITY).
+                    if (player.IsAutoSpinAttack()) {
+                        Render::MobRenderer::RiptidePose swirl;
+                        swirl.position   = feet;
+                        swirl.bodyYaw    = yaw;
+                        swirl.pitch      = pitch;
+                        swirl.ageInTicks = static_cast<float>(player.tickCount) + pt;
+                        swirl.scale      = player.physics.scale;
+                        swirl.glowing    = ownGlowing;
+                        mobRenderer.RenderRiptideSwirls(P, Vl, camL, frl, { swirl });
+                    }
+                    // MC ParrotOnShoulderLayer on your own body: the parrots
+                    // the server says ride you (a layer — kept under
+                    // INVISIBILITY, outlined with a GLOWING body).
+                    const auto conn = Client::g_networkClient ? Client::g_networkClient->GetConnection() : nullptr;
+                    const Client::ShoulderParrots::Pair ownParrots =
+                        conn ? Client::ShoulderParrots::Get(conn->GetPlayerId()) : Client::ShoulderParrots::Pair{};
+                    if (ownParrots.Any()) {
+                        Render::MobRenderer::MorphPose body;
+                        body.position  = feet;
+                        body.bodyYaw   = yaw;
+                        body.headYaw   = yaw;
+                        body.pitch     = pitch;
+                        body.ageTicks  = static_cast<float>(player.tickCount) + pt;
+                        body.scale     = player.physics.scale;
+                        body.deathTime = player.deathTime;
+                        body.seed      = conn->GetPlayerId();
+                        body.crouching = player.physics.isSneaking;
+                        body.glowing   = ownGlowing;
+                        std::vector<Render::MobRenderer::MorphPose> own;
+                        AppendShoulderParrotPoses(body, conn->GetPlayerId(), ownParrots, own);
+                        mobRenderer.RenderMorphs(P, Vl, camL, frl, own, pt);
+                    }
+                }
+            };
+            // `onlyIds` limits the pass to those players (a straddler's
+            // half); `portalModel`/`portalClip` as drawLocalBody's.
+            auto drawRemotePlayerLayers = [&](const glm::mat4& P, const glm::mat4& Vin, const glm::dvec3& camIn,
+                                              const Frustum& frIn, float pt,
+                                              const std::unordered_set<uint32_t>* skipIds,
+                                              const std::unordered_set<uint32_t>* onlyIds = nullptr,
+                                              const glm::dmat4* portalModel = nullptr,
+                                              const glm::dvec4* portalClip = nullptr) {
+                PortalLayerScope scope(P, Vin, camIn, frIn, portalModel, portalClip);
+                const glm::mat4& V = scope.view;
+                const Frustum& fr = scope.frustum;
+                const glm::dvec3& camPos = scope.eye;
+                // /morph: a morphed remote player is their body, drawn
+                // with the player's pose (the stick figure pass skipped
+                // them): a mob or block by the mob renderer, an item or
+                // orb by theirs.
+                if (Client::g_remotePlayerManager && !Render::DevSkip("players")) {
+                    std::vector<Render::MobRenderer::MorphPose> morphs;
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        if (!rp.IsMorphed() || rp.invisible || !rp.positionInitialized) continue;
+                        if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                        if ((skipIds && skipIds->count(id)) || (onlyIds && !onlyIds->count(id))) continue;
+                        drawMorphIn(P, V, camPos, MorphPoseOf(rp, pt), id, morphs);
+                    }
+                    if (!morphs.empty()) {
+                        PROFILE_ZONE_N("Render.Morphs");
+                        mobRenderer.RenderMorphs(P, V, camPos, fr, morphs, pt);
+                    }
+                    // MC WingsLayer on the other (stick-figure) players:
+                    // a layer, so an INVISIBILITY-effect body keeps it;
+                    // an /invisible or hidden spectator shows nothing.
+                    std::vector<Render::MobRenderer::ElytraPose> wings;
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        if (!(rp.elytraFlags & Game::kElytraWorn)) continue;
+                        if (rp.IsMorphed() || !rp.positionInitialized || rp.sleepingPos) continue;
+                        if (rp.invisible && !rp.effects.Invisible()) continue;
+                        if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                        if ((skipIds && skipIds->count(id)) || (onlyIds && !onlyIds->count(id))) continue;
+                        Render::MobRenderer::ElytraPose w;
+                        w.position  = glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(pt));
+                        w.bodyYaw   = Client::RotLerp(pt, rp.renderPrevBodyYaw, rp.bodyYaw);
+                        w.pitch     = glm::mix(rp.renderPrevRotation.y, rp.rotation.y, pt);
+                        w.scale     = rp.scale;
+                        w.crouching = rp.isCrouching && rp.vehicleId == 0;
+                        w.rotX = rp.elytraAnim.RotX(pt);
+                        w.rotY = rp.elytraAnim.RotY(pt);
+                        w.rotZ = rp.elytraAnim.RotZ(pt);
+                        w.glint = (rp.elytraFlags & Game::kElytraGlint) != 0;
+                        w.deathFlipDeg = Render::MobRenderer::DeathFlipDegrees(rp.deathTime, pt);
+                        w.fallFlyTicks = rp.fallFlying ? static_cast<float>(rp.fallFlyTicks) + pt : 0.0f;
+                        w.glowing = rp.effects.Glowing();
+                        wings.push_back(w);
+                    }
+                    if (!wings.empty()) {
+                        PROFILE_ZONE_N("Render.Elytras");
+                        mobRenderer.RenderElytras(P, V, camPos, fr, wings);
+                    }
+                    // MC SpinAttackEffectLayer on the other (stick-figure)
+                    // players: the riptide's swirl.
+                    std::vector<Render::MobRenderer::RiptidePose> swirls;
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        if (!rp.autoSpinAttack) continue;
+                        if (rp.IsMorphed() || !rp.positionInitialized || rp.sleepingPos) continue;
+                        if (rp.invisible && !rp.effects.Invisible()) continue;
+                        if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                        if ((skipIds && skipIds->count(id)) || (onlyIds && !onlyIds->count(id))) continue;
+                        Render::MobRenderer::RiptidePose r;
+                        r.position   = glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(pt));
+                        r.bodyYaw    = Client::RotLerp(pt, rp.renderPrevBodyYaw, rp.bodyYaw);
+                        r.pitch      = glm::mix(rp.renderPrevRotation.y, rp.rotation.y, pt);
+                        r.ageInTicks = static_cast<float>(rp.tickCount) + pt;
+                        r.scale      = rp.scale;
+                        r.glowing    = rp.effects.Glowing();
+                        swirls.push_back(r);
+                    }
+                    if (!swirls.empty()) {
+                        mobRenderer.RenderRiptideSwirls(P, V, camPos, fr, swirls);
+                    }
+                    // MC ParrotOnShoulderLayer on the other players. A
+                    // layer of the PLAYER model: not drawn on a /morph
+                    // body, nor on an /invisible player (who is not drawn
+                    // at all); an INVISIBILITY-effect player keeps it.
+                    std::vector<Render::MobRenderer::MorphPose> shoulders;
+                    for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
+                        const Client::ShoulderParrots::Pair pair = Client::ShoulderParrots::Get(id);
+                        if (!pair.Any()) continue;
+                        if (rp.IsMorphed() || rp.invisible || !rp.positionInitialized) continue;
+                        if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
+                        if ((skipIds && skipIds->count(id)) || (onlyIds && !onlyIds->count(id))) continue;
+                        AppendShoulderParrotPoses(MorphPoseOf(rp, pt), id, pair, shoulders);
+                    }
+                    if (!shoulders.empty()) {
+                        PROFILE_ZONE_N("Render.ShoulderParrots");
+                        mobRenderer.RenderMorphs(P, V, camPos, fr, shoulders, pt);
+                    }
+                }
+            };
             DEBUG_PIE_ZONE("render");
             Render::DebugScreen::FrameProfiler::Push("world");
             Render::DebugScreen::FrameProfiler::Push("level");
@@ -7268,6 +8413,13 @@ static uint16_t     s_lastPresencePort = 0;
             if (Render::g_renderBackend) {
                 Render::g_renderBackend->BeginFrame();
             }
+            // The particle systems' stream buffers: a fresh set per frame, so
+            // no upload this frame lands in a buffer the previous (still
+            // executing) frame draws from — see MobParticleSystem::StreamSlot.
+            Render::g_mobParticleSystem.BeginFrame();
+#if ENABLE_PORTAL_GUN
+            Render::g_portalParticleSystem.BeginFrame();
+#endif
 
             Debug::DebugSystem::BeginFrame();
 
@@ -7296,6 +8448,8 @@ static uint16_t     s_lastPresencePort = 0;
 
             // Get framebuffer size — needed for viewport.
             glfwGetFramebufferSize(window, &width, &height);
+            // The fishing line's pixel width (Window.getAppropriateLineWidth).
+            Render::FishingHookRenderer::SetFramebufferSize(width, height);
             // A shader pack: the level draws into the pack's scene target
             // from here until EndScene, just before the hand. Not while the
             // leave capture is drawing its panorama faces: those are read
@@ -7329,8 +8483,14 @@ static uint16_t     s_lastPresencePort = 0;
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
                 const float tickSeconds =
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
-                const float envPartialTick =
-                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                // Held at 1 while the world is paused, as the entities'
+                // partial is (MC's DeltaTracker keeps its paused residual):
+                // the clock no longer ticks, so a cycling partial would rock
+                // the sun and the sky colour back and forth within a tick
+                // (the pause menu; the join transition's hold).
+                const float envPartialTick = Client::g_clientTickRate.IsWorldPaused()
+                    ? 1.0f
+                    : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
                 {
                     // MC Camera.getFluidInCamera: the fluid the eye is in
                     // (the player's own fluid scan, camera-height rule
@@ -7505,13 +8665,27 @@ static uint16_t     s_lastPresencePort = 0;
                 camera.yaw   = Render::PanoramaRenderer::LastWorldLeaveYaw();
                 camera.pitch = Render::PanoramaRenderer::LastWorldLeavePitch();
                 if (joinTransition.easing) {
-                    if (Render::g_panoramaRenderer.EaseDone()) {
+                    // The ease is at most ~1.2 s and finishes in the
+                    // panorama's own Render; should that stop being reached
+                    // (a frame path that skips it), hand over anyway rather
+                    // than hold the world forever.
+                    const bool easeOverdue = std::chrono::steady_clock::now() - joinTransition.easeAt >
+                                             std::chrono::seconds(3);
+                    const bool easeDone = Render::g_panoramaRenderer.EaseDone();
+                    if (easeDone || easeOverdue) {
                         joinTransition.active = false;
                         joinTransition.easing = false;
                         Render::g_panoramaRenderer.Shutdown();   // the world owns the screen now
-                        Log::Info("[Join] hand-over %.2f s after the click",
+                        // The world starts HERE: the server's hold ends (its
+                        // next tick is the ordinary resume — "Resuming game"
+                        // and a time sync), and from the next frame this
+                        // client's world pause lifts with it (the pause
+                        // block reads joinTransition.active).
+                        if (Server::g_integratedServer) Server::g_integratedServer->ReleaseOwnerJoinHold();
+                        Log::Info("[Join] hand-over %.2f s after the click%s; world resumed",
                                   std::chrono::duration<float>(std::chrono::steady_clock::now() -
-                                                               joinTransition.startedAt).count());
+                                                               joinTransition.startedAt).count(),
+                                  easeDone ? "" : " (ease overdue)");
                     }
                 } else if (Client::g_levelLoadTracker.IsLoaded()) {
                     const auto now = std::chrono::steady_clock::now();
@@ -7559,6 +8733,274 @@ static uint16_t     s_lastPresencePort = 0;
                                       joinTransition.active;   // and joining: the same bare view
             s_hideHudForLeave = leavingWorld;
 
+#if ENABLE_IMMERSIVE_PORTALS
+            // The two callbacks of the immersive portal pass (the pass itself
+            // is further down, after the frame's own level): one level drawn
+            // from one viewpoint, and the far side's entities sticking out of
+            // a portal. Defined here because the leave capture draws its
+            // panorama faces' portals with them too. `portalViewSkyProj`
+            // gives a view's sky the face TILE's off-axis projection;
+            // `portalViewForCapture` leaves out what belongs to the viewer
+            // there (their own body seen back through a portal, the block
+            // outline).
+            std::function<glm::mat4(float, float)> portalViewSkyProj;
+            bool portalViewForCapture = false;
+            auto renderLevelView = [&](const Render::ImmersivePortalRenderer::ViewContext& ctx) {
+                // Sky first, depth off, inside the mask: the far
+                // dimension's sky from the far camera's rotation.
+                {
+                    // The panorama's faces are off-axis tiles: their
+                    // sky takes the tile's own projection.
+                    const glm::mat4 skyProjIm = portalViewSkyProj
+                        ? portalViewSkyProj(0.05f, 2048.0f)
+                        : glm::perspective(glm::radians(ctx.camera.fov), aspect, 0.05f, 2048.0f);
+                    const glm::mat4 viewRotIm = glm::mat4(glm::mat3(ctx.view));
+                    Render::g_skyRenderer.RenderForDimension(
+                        Game::DimensionToRaw(ctx.dimension), skyProjIm, viewRotIm);
+                }
+                // Terrain of the bound level. For a level the player is
+                // not in, this view is its main view: record it so its
+                // mesh scheduler compiles what the portal reveals.
+                if (Render::g_chunkRenderer) {
+                    Render::g_chunkRenderer->SetRecordMainView(
+                        ctx.dimension != Client::ClientLevels::ActiveDimension());
+                }
+                // On a panorama face the view's projection is the face
+                // TILE's off-axis one and must be honoured as given: without
+                // `exact`, Vulkan draws a portal view's terrain with a
+                // window-aspect perspective instead (ChunkRenderer::
+                // SetupOpaquePass), which in a tile misplaced it outside the
+                // surface — the through-view came out empty but for scraps.
+                // (The immersive far view's projection is never oblique; the
+                // far clip rides uPortalClipPlane, so exact is safe on VK.)
+                Render::RenderChunksAll(ctx.camera, ctx.frustum, ctx.projection,
+                                        /*exactProjection=*/portalViewForCapture);
+                if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetRecordMainView(false);
+
+                // Entities of the bound level, gated by the same frustum.
+                itemEntityRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                          ctx.partialTick);
+                {
+                    // Only under OBEY_PORTAL_DIAG=1, like the other
+                    // [PortalDiag] lines. It used to fire on its own
+                    // whenever a far store held items, which after the
+                    // immersive-portal work is just every session with a
+                    // dropped item in another level.
+                    static const bool kPortalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
+                    static auto lastItemDiag = std::chrono::steady_clock::now();
+                    const auto nowDiag = std::chrono::steady_clock::now();
+                    if (kPortalDiag && nowDiag - lastItemDiag >= std::chrono::seconds(2)) {
+                        lastItemDiag = nowDiag;
+                        const auto& t = itemEntityRenderer.LastTally();
+                        std::string where;
+                        if (Client::g_itemEntityManager) {
+                            int n = 0;
+                            for (const auto& [id, ce] : Client::g_itemEntityManager->GetEntities()) {
+                                if (n++ >= 3) break;
+                                char b[96];
+                                std::snprintf(b, sizeof(b), " #%d(%.1f,%.1f,%.1f)", id, ce.sim.pos.x, ce.sim.pos.y, ce.sim.pos.z);
+                                where += b;
+                            }
+                        }
+                        Log::Info("[PortalDiag] items in %s: store=%d drawn=%d cull dist=%d frustum=%d section=%d farCam=(%.1f,%.1f,%.1f)%s",
+                                  std::string(Game::DimensionName(ctx.dimension)).c_str(),
+                                  t.entities, t.drawn, t.cullDistance, t.cullFrustum, t.cullSection,
+                                  ctx.camera.position.x, ctx.camera.position.y, ctx.camera.position.z, where.c_str());
+                    }
+                }
+                Render::g_blockCubeEntityRenderer.Render(ctx.projection, ctx.view,
+                                                         ctx.camera.position, ctx.partialTick);
+                xpOrbRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                     ctx.frustum, ctx.partialTick);
+                if (Client::g_clientMobManager) {
+                    mobRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                       ctx.frustum, *Client::g_clientMobManager,
+                                       ctx.partialTick);
+                    // The far level's lightning bolts, clipped at the surface
+                    // (the renderer reads the view's portal clip plane).
+                    lightningBoltRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                                 *Client::g_clientMobManager);
+                }
+                // Entities of the NEAR level that stick through this
+                // portal (an item lying on the plane, a block mid-fall):
+                // their far half belongs to this view. They are drawn
+                // from the outer camera (view · M⁻¹ · M) with the far
+                // clip plane pulled back into near space, so exactly the
+                // part behind the surface survives — the mod renders its
+                // crossing entities the same way. Every renderer here
+                // honours the clip plane (the mob shader through
+                // uEntityClipPlane).
+                if (ctx.through && !ctx.through->IsMirror()) {
+                    const Game::Immersive::Portal& thr = *ctx.through;
+                    // The near level is drawn relative to the near eye's
+                    // own render origin; the view bridges the two render
+                    // spaces in double (RenderOrigin.hpp).
+                    const glm::dmat4 M = thr.TransformMatrix();
+                    const glm::dvec3 nearEyeD = thr.InverseTransformPoint(ctx.camera.position);
+                    const glm::dvec3 nearOrigin = Render::RenderOriginFor(nearEyeD);
+                    const glm::mat4 crossView = Render::FarRenderView(ctx.view, M, ctx.camera.renderOrigin, nearOrigin);
+                    const glm::vec3 nearEye(nearEyeD);
+                    const glm::dvec4 farClip = Render::ChunkRenderer::PortalClipPlaneWorld();
+                    Render::ChunkRenderer::SetPortalClipPlane(glm::transpose(M) * farClip);
+                    // Culling stays in world space.
+                    const Frustum crossFrustum = Frustum::FromMatrix(ctx.projection * ctx.camera.GetWorldViewMatrix() * glm::mat4(M));
+                    // Only what is IN the surface — see EntityCulling::g_crossingFilter.
+                    Render::EntityCulling::g_crossingFilter =
+                        [&thr](const glm::vec3& lo, const glm::vec3& hi) {
+                            return thr.IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25);
+                        };
+                    Client::ClientLevels::WithLevel(thr.dimension, [&]() {
+                        Render::SetRenderOrigin(nearOrigin);
+                        if (Client::g_remotePlayerManager) {
+                            // The entity plane (the surface plus the mark
+                            // band's margin), as the mobs use: the exact
+                            // plane left the band the mark wiped undrawn.
+                            playerRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
+                                                  *Client::g_remotePlayerManager, ctx.partialTick, nullptr,
+                                                  Render::ChunkRenderer::PortalEntityClipPlane());
+                            drawRemotePlayerLayers(ctx.projection, crossView, nearEye, crossFrustum,
+                                                   ctx.partialTick, nullptr);
+                            g_playerDrawDiag.Add(g_playerDrawDiag.crossers, playerRenderer.LastTally());
+                        }
+                        itemEntityRenderer.Render(ctx.projection, crossView, nearEye, ctx.partialTick);
+                        Render::g_blockCubeEntityRenderer.Render(ctx.projection, crossView, nearEye,
+                                                                 ctx.partialTick);
+                        xpOrbRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
+                                             ctx.partialTick);
+                        if (Client::g_clientMobManager) {
+                            mobRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
+                                               *Client::g_clientMobManager, ctx.partialTick);
+                        }
+                        ctx.camera.ActivateRenderOrigin();
+                    });
+                    Render::EntityCulling::g_crossingFilter = nullptr;
+                    Render::ChunkRenderer::SetPortalClipPlane(farClip);
+                }
+                // Clipped at the surface like the terrain: a player who
+                // has just arrived stands half behind it, and that half
+                // — between the surface and the far camera — filled
+                // the view for a frame.
+                if (Client::g_remotePlayerManager) {
+                    playerRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                          ctx.frustum, *Client::g_remotePlayerManager,
+                                          ctx.partialTick, nullptr,
+                                          Render::ChunkRenderer::PortalEntityClipPlane());
+                    drawRemotePlayerLayers(ctx.projection, ctx.view, ctx.camera.position,
+                                           ctx.frustum, ctx.partialTick, nullptr);
+                    g_playerDrawDiag.Add(g_playerDrawDiag.farView, playerRenderer.LastTally());
+                }
+                // The viewer's own body, when the view shows the level
+                // they stand in (a portal looking back, or a same-
+                // dimension portal) — the mod's renderYourselfInPortal.
+                if (!portalViewForCapture &&
+                    ctx.dimension == Client::ClientLevels::ActiveDimension() &&
+                    ctx.through && ctx.through->Has(Game::Immersive::PortalFlag::RenderPlayer)) {
+                    // The whole body with its layers (drawLocalBody).
+                    drawLocalBody(ctx.projection, ctx.view, ctx.camera.position, ctx.frustum,
+                                  ctx.partialTick, player.physics.position,
+                                  camera.yaw, camera.pitch);
+                }
+                // Block entities and End portals of the bound level.
+                if (Render::g_blockEntityRenderDispatcher) {
+                    Render::g_blockEntityRenderDispatcher->RenderAll(
+                        Client::g_clientChunkManager, ctx.projection, ctx.view,
+                        ctx.camera.position, ctx.partialTick);
+                }
+                Render::g_endPortalRenderer.Render(
+                    Client::g_clientChunkManager, ctx.projection, ctx.view,
+                    ctx.camera.position, ctx.partialTick);
+                Render::g_bedRenderer.Render(
+                    Client::g_clientChunkManager, ctx.projection, ctx.view,
+                    ctx.camera.position, ctx.partialTick);
+                // This view's translucent terrain, after its entities.
+                Render::RenderChunksDeferredTranslucent();
+                // The particles that live in this level, billboarded to
+                // the far camera.
+                if (!Render::DevSkip("particles")) {
+                    Render::g_mobParticleSystem.Render(ctx.projection, ctx.view,
+                                                       ctx.camera.position, ctx.dimension);
+                }
+                // The far level's rain and snow — its own weather (a view
+                // into the Nether has none), from the far camera, clipped at
+                // the surface; after its translucent terrain, as the frame.
+                if (!Render::DevSkip("weather")) {
+                    Render::g_weatherEffectRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                                           ctx.partialTick, ctx.dimension,
+                                                           Render::ChunkRenderer::PortalClipPlane());
+                }
+#if ENABLE_PORTAL_GUN
+                // The gun's rims and sparks that live in this level —
+                // a pair with one end in the Nether shows that end's
+                // rim through the nether portal, not only once you are
+                // standing there. In immersive mode the renderer draws
+                // rims only, so the scene callback never fires.
+                // Not the rim (nor the sparks) of the surface this view
+                // comes out of: that surface is never drawn in its own
+                // view, and its rim lies on the view's clip plane — the
+                // other colour's ring around the edge at grazing angles.
+                const glm::dvec3 viewExit = ctx.through
+                    ? (ctx.through->IsMirror() ? ctx.through->origin : ctx.through->destination)
+                    : glm::dvec3(0.0);
+                // Culled against THIS view's own section list (its chunk
+                // pass above was the last one).
+                const auto outerOcclusion = Render::g_portalRenderer.SetOcclusion(
+                    Render::PortalRenderer::Occlusion::CurrentView);
+                Render::g_portalRenderer.Render(
+                    ctx.projection, ctx.view, ctx.camera, ctx.frustum, aspect, farPlane,
+                    static_cast<int8_t>(Game::DimensionToRaw(ctx.dimension)),
+                    [](const Render::Camera&, const Frustum&, const glm::mat4&) {},
+                    ctx.through ? &viewExit : nullptr);
+                Render::g_portalRenderer.SetOcclusion(outerOcclusion);
+                Render::g_portalParticleSystem.Render(ctx.projection, ctx.view,
+                                                      ctx.camera.position, ctx.dimension,
+                                                      ctx.through ? &viewExit : nullptr);
+#endif
+                // The block under the crosshair, when the crosshair got
+                // there through THIS portal: outline and crack overlay
+                // drawn inside the view, in the far level's space.
+                if (!portalViewForCapture &&
+                    ctx.through && ctx.through->id == player.lastBlockHitPortalId &&
+                    ctx.dimension == player.lastBlockHitDimension) {
+                    RenderBlockHighlight(player.lastBlockHit, ctx.projection, ctx.view,
+                                         playerController.PickEntity() != 0,
+                                         ctx.camera.position, ctx.camera.fov, width, height);
+                    RenderBlockBreakOverlay(playerController.GetDestroyStage(), playerController.GetBreakingPos(),
+                                            ctx.projection, ctx.view);
+                }
+            };
+
+            // The far side's entities that stick out of a portal into the
+            // world being drawn (see ImmersivePortalRenderer::Render).
+            auto renderCrossers = [&](const Render::ImmersivePortalRenderer::ViewContext& ctx) {
+                // Far-space entities: bring the box back to the near side
+                // (corner-wise, then its AABB) and ask the surface.
+                const Game::Immersive::Portal* thr = ctx.through;
+                Render::EntityCulling::g_crossingFilter =
+                    [thr](const glm::vec3& lo, const glm::vec3& hi) {
+                        if (!thr) return true;
+                        glm::dvec3 mn(1e300), mx(-1e300);
+                        for (int i = 0; i < 8; ++i) {
+                            const glm::dvec3 c((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z);
+                            const glm::dvec3 nearC = thr->InverseTransformPoint(c);
+                            mn = glm::min(mn, nearC);
+                            mx = glm::max(mx, nearC);
+                        }
+                        return thr->IntersectsBox(mn, mx, 0.25);
+                    };
+                itemEntityRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                          ctx.partialTick);
+                Render::g_blockCubeEntityRenderer.Render(ctx.projection, ctx.view,
+                                                         ctx.camera.position, ctx.partialTick);
+                xpOrbRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
+                                     ctx.frustum, ctx.partialTick);
+                if (Client::g_clientMobManager) {
+                    mobRenderer.Render(ctx.projection, ctx.view, ctx.camera.position, ctx.frustum,
+                                       *Client::g_clientMobManager, ctx.partialTick);
+                }
+                Render::EntityCulling::g_crossingFilter = nullptr;
+            };
+#endif
+
 
             // ── The pause menu's capture ─────────────────────────────────
             // The six faces are taken while the pause menu is up, through
@@ -7581,13 +9023,20 @@ static uint16_t     s_lastPresencePort = 0;
                         leaveCapture.prepass      = true;
                         leaveCapture.prepassStop  = false;
                         leaveCapture.warming      = true;
+                        leaveCapture.facePending.fill(-1);
+                        leaveCapture.faceWaitRecorded.fill(false);
                         leaveCapture.warmFrames   = 0;
                         leaveCapture.idleFrames   = 0;
                         leaveCapture.warmStart    = std::chrono::steady_clock::now();
                         leaveCapture.face         = 0;
                         leaveCapture.tile         = 0;
-                        leaveCapture.restFrames   = 0;
-                        leaveCapture.awaitingTake = false;
+                        // Nothing should be in flight here; if something is, take
+                        // it so the backend's queue stays in step with ours.
+                        for (size_t n = leaveCapture.pendingRows.size(); n > 0; --n) {
+                            std::vector<uint8_t> px; int pw = 0, ph = 0;
+                            if (Render::g_renderBackend) Render::g_renderBackend->TakeBackbufferReadback(px, pw, ph);
+                        }
+                        leaveCapture.pendingRows.clear();
                         leaveCapture.complete     = true;
                         leaveCapture.baseYaw      = camera.yaw;
                         leaveCapture.facePrepared.fill(false);
@@ -7597,7 +9046,7 @@ static uint16_t     s_lastPresencePort = 0;
                     // outstanding read-back (if any) has been taken — a
                     // request left pending would land in the next
                     // capture's first tile.
-                    if (leaveCapture.prepass && leaveCapture.prepassStop && !leaveCapture.awaitingTake) {
+                    if (leaveCapture.prepass && leaveCapture.prepassStop && leaveCapture.pendingRows.empty()) {
                         Render::PanoramaRenderer::DiscardAdoptedFaces();
                         leaveCapture.pack.reset();
                         for (auto& f : leaveCapture.faces) { f.clear(); f.shrink_to_fit(); }
@@ -7628,148 +9077,139 @@ static uint16_t     s_lastPresencePort = 0;
             //    view. Drawn square in the bottom-left, read back, cleared. ──
             if ((leaveCapture.active || leaveCapture.prepass) && Render::g_renderBackend) {
                 auto& backend = *Render::g_renderBackend;
-                // A finished face's mip (a 9.5 MB upload) only on the idle
-                // frame between a tile's request and its take, or once the
-                // capture is over. Landing it on a take frame stacked it on
-                // the next face's first tile and dropped that frame.
-                const bool idleFrame = leaveCapture.awaitingTake && leaveCapture.framesSinceRequest == 0;
-                if (idleFrame || leaveCapture.face >= 6 || !leaveCapture.complete) {
-                    Render::PanoramaRenderer::PumpLastWorldMips();
-                }
-                // Rest frames count down before the take: decremented after
-                // it, the frame that took a tile drew the next one too, and
-                // the "one every third frame" pacing was really every other.
-                if (leaveCapture.restFrames > 0) --leaveCapture.restFrames;
-                if (leaveCapture.awaitingTake && ++leaveCapture.framesSinceRequest >= 2) {
-                    // The tile requested two frames ago: into its place in the
-                    // face (the tile counter has already moved on, so the
-                    // one just taken is the previous index).
+                // Rows requested two frames ago: into their places in the
+                // face, oldest first (the backend hands read-backs over in
+                // request order).
+                bool tookRow = false;
+                for (auto& row : leaveCapture.pendingRows) ++row.age;
+                while (!leaveCapture.pendingRows.empty() && leaveCapture.pendingRows.front().age >= 2) {
+                    const LeaveCapture::PendingRow row = leaveCapture.pendingRows.front();
+                    leaveCapture.pendingRows.pop_front();
+                    tookRow = true;
                     int rw = 0, rh = 0;
                     std::vector<uint8_t> pixels;
-                    const int tiles   = kLeaveTiles;
-                    const int tileIdx = (leaveCapture.tile + tiles * tiles - 1) % (tiles * tiles);
-                    const int faceIdx = leaveCapture.tile == 0 ? leaveCapture.face - 1 : leaveCapture.face;
+                    const int tiles = kLeaveTiles;
+                    PROFILE_ZONE_N("LeaveCapture.TakeRow");
                     if (backend.TakeBackbufferReadback(pixels, rw, rh) &&
-                        rw == leaveCapture.tileSide && rh == leaveCapture.tileSide &&
-                        faceIdx >= 0 && faceIdx < 6) {
-                        auto& face = leaveCapture.faces[static_cast<size_t>(faceIdx)];
+                        rw == row.count * row.side && rh == row.side &&
+                        row.face >= 0 && row.face < 6) {
+                        auto& face = leaveCapture.faces[static_cast<size_t>(row.face)];
                         const size_t faceStride = static_cast<size_t>(leaveCapture.size) * 4u;
-                        const size_t tileStride = static_cast<size_t>(rw) * 4u;
+                        const size_t rowStride  = static_cast<size_t>(rw) * 4u;
                         if (face.size() != faceStride * static_cast<size_t>(leaveCapture.size)) {
                             face.assign(faceStride * static_cast<size_t>(leaveCapture.size), 0);
                         }
-                        const int tx = tileIdx % tiles, ty = tileIdx / tiles;
+                        // The row's tiles sit side by side in the read-back,
+                        // exactly as they sit in the face: one copy per pixel row.
+                        const int tx0 = row.firstTile % tiles, ty = row.firstTile / tiles;
                         for (int r = 0; r < rh; ++r) {
-                            std::memcpy(&face[(static_cast<size_t>(ty) * rh + r) * faceStride + static_cast<size_t>(tx) * tileStride],
-                                        &pixels[static_cast<size_t>(r) * tileStride], tileStride);
+                            std::memcpy(&face[(static_cast<size_t>(ty) * rh + r) * faceStride +
+                                              static_cast<size_t>(tx0) * static_cast<size_t>(row.side) * 4u],
+                                        &pixels[static_cast<size_t>(r) * rowStride], rowStride);
                         }
-                        // Onto the GPU a tile at a time (the immediate path,
-                        // ~8 MB each), so no frame carries a whole face;
-                        // the face's texture was made on tile 0's request
+                        // Onto the GPU a row at a time (the immediate path,
+                        // ~8 MB a tile), so no frame carries a whole face;
+                        // the face's texture was made on its first request
                         // frame and its mip job starts at its last tile.
-                        Render::PanoramaRenderer::UploadLastWorldRegion(faceIdx, tx * rw, ty * rh, rw, rh, pixels.data());
-                        if (tileIdx == tiles * tiles - 1) {
+                        Render::PanoramaRenderer::UploadLastWorldRegion(row.face, tx0 * row.side, ty * rh, rw, rh,
+                                                                        pixels.data());
+                        if (row.firstTile + row.count == tiles * tiles) {
                             if (!leaveCapture.pack) leaveCapture.pack = std::make_shared<Render::PanoramaRenderer::LastWorldFaces>();
                             leaveCapture.pack->size = leaveCapture.size;
-                            leaveCapture.pack->rgba[static_cast<size_t>(faceIdx)] = std::move(face);
-                            Render::PanoramaRenderer::FinishLastWorldFace(faceIdx, leaveCapture.pack);
+                            leaveCapture.pack->rgba[static_cast<size_t>(row.face)] = std::move(face);
+                            Render::PanoramaRenderer::FinishLastWorldFace(row.face, leaveCapture.pack);
                         }
                     } else {
                         leaveCapture.complete = false;
                     }
-                    leaveCapture.awaitingTake = false;
-                    // No rest frame: the next tile is drawn on this same
-                    // frame, so a tile costs two frames (request, idle+take)
-                    // and the six faces are in within about fifty frames.
-                    // The rest frame kept the outro's frame time nearer
-                    // play's on a GPU-bound machine; the seconds it added
-                    // between the click and the title were the worse deal.
-                    leaveCapture.restFrames   = 0;
+                }
+                // A finished face's mip (a 9.5 MB upload) only on a frame that
+                // took no row, or once the capture is over: stacked on a
+                // take it dropped a frame.
+                if (!tookRow || leaveCapture.face >= 6 || !leaveCapture.complete) {
+                    Render::PanoramaRenderer::PumpLastWorldMips();
                 }
                 // Warm-up: is the mesher caught up? Six faces must have been
                 // shown to the scheduler, then a few quiet frames — or the
                 // cap, so a slow machine still leaves promptly.
                 if (leaveCapture.warming) {
-                    // Through the pause menu the prewarm has already meshed
-                    // every direction and this only mops up, so it is
-                    // short. The window's close button (or Quit Game) had
-                    // no pause menu first: give the mesher time — the
-                    // picture is wanted before the game goes.
-                    constexpr int  kMinWarmFrames = 2;
+                    // Every face's sections must be meshed before it is
+                    // captured: the panorama is the whole horizon, around
+                    // 20,000 sections at render distance 32 against the ~3,400
+                    // of the view the player was looking at, and the mesher
+                    // does ~7,700 a second (the per-frame upload limit). So a
+                    // full warm-up is ~3 s; it ends the moment the faces are
+                    // meshed, and the caps only stop a face that never
+                    // finishes from holding the leave. Under the pause menu
+                    // (the world paused, nothing to hurry for) the capture
+                    // runs while the menu is up and Save and Quit finds it
+                    // done; a click before it finishes, the window's close
+                    // button and Quit Game carry on warming here.
+                    constexpr int  kMinWarmFrames = 6 + 1;   // six faces recorded, then scheduled
                     constexpr int  kQuietFrames   = 2;
-                    // The trace shows the worker pool never idles at a
-                    // large render distance (the scheduler keeps ~2000 jobs
-                    // queued the whole time), so the quiet test never
-                    // passes and the title path always ran to its cap.
-                    // The pause menu has done the near work by the time
-                    // of the click; a quarter second is enough of a mop-up
-                    // (it was half, and every warm-up ran to the cap).
-                    const auto kWarmCap = leaveCapture.then == LeaveCapture::Then::Quit
-                        ? std::chrono::milliseconds(3000)
-                        : std::chrono::milliseconds(250);
-                    const size_t queued = Render::ClientMeshManager::GetPendingMeshBuildCount() +
-                                          Render::ClientMeshManager::GetCompletedResultCount();
-                    leaveCapture.idleFrames = queued == 0 ? leaveCapture.idleFrames + 1 : 0;
+                    const auto kWarmCap = leaveCapture.prepass ? std::chrono::milliseconds(15000)
+                        : leaveCapture.then == LeaveCapture::Then::Quit
+                        ? std::chrono::milliseconds(6000)
+                        : std::chrono::milliseconds(5000);
+                    // Caught up = every face has been recorded since the
+                    // warm-up began and its last recording found nothing of
+                    // it still waiting for a mesh. The global queue is not
+                    // the test: at a large render distance it never empties,
+                    // and early on it is empty only because the faces have
+                    // not been scheduled yet.
+                    bool facesMeshed = true;
+                    for (const int p : leaveCapture.facePending) facesMeshed = facesMeshed && p == 0;
+                    leaveCapture.idleFrames = facesMeshed ? leaveCapture.idleFrames + 1 : 0;
                     const bool caughtUp = leaveCapture.warmFrames >= kMinWarmFrames &&
                                           leaveCapture.idleFrames >= kQuietFrames;
                     const bool capped   = std::chrono::steady_clock::now() - leaveCapture.warmStart >= kWarmCap;
-                    // Through the pause menu its prewarm has been feeding a
-                    // face a frame to the scheduler the whole time it was
-                    // up; the minimum is all the leave needs.
-                    const bool prewarmed = leaveCapture.active && leaveCapture.viaPauseMenu &&
-                                           leaveCapture.warmFrames >= kMinWarmFrames;
-                    if (caughtUp || capped || prewarmed) {
+                    // (A leave through the pause menu used to skip ahead here
+                    // on the assumption the menu's prewarm had meshed every
+                    // face; a click soon after opening the menu captured the
+                    // faces unmeshed. The per-face test above finds a
+                    // prewarmed view caught up within a few frames anyway.)
+                    if (caughtUp || capped) {
                         leaveCapture.warming = false;
                         leaveCapture.face    = 0;
                         leaveCapture.tile    = 0;
                         leaveCapture.baseYaw = camera.yaw;   // the six faces are about this
-                        Log::Info("Leave capture: meshes %s after %d warm-up frame(s)",
-                                  caughtUp ? "caught up" : "still building (capped)", leaveCapture.warmFrames);
+                        // PortalRenderer's own clock (the world clock).
+                        leaveCapture.portalClock = Client::g_clientTickRate.WorldClockSeconds();
+                        const auto& fp = leaveCapture.facePending;
+                        Log::Info("Leave capture: meshes %s after %d warm-up frame(s) "
+                                  "(sections still waiting per face: %d %d %d %d %d %d)",
+                                  caughtUp ? "caught up" : "still building (capped)", leaveCapture.warmFrames,
+                                  fp[0], fp[1], fp[2], fp[3], fp[4], fp[5]);
                     }
                 }
                 // Warm-up frames draw nothing extra: the face-a-frame cull
                 // that feeds the scheduler runs after the portal pass, the
                 // same one the pause menu uses (see there). Counted here.
                 if (leaveCapture.warming) ++leaveCapture.warmFrames;
-                const bool drawFace = !leaveCapture.warming && !leaveCapture.prepassStop &&
-                                      leaveCapture.face < 6 && leaveCapture.complete &&
-                                      !leaveCapture.awaitingTake && leaveCapture.restFrames == 0;
-                if (drawFace) {
-                    // One face per frame either way; warm-up cycles 0..5
-                    // and only feeds the scheduler, the capture reads back.
-                    const int faceIndex = leaveCapture.warming ? (leaveCapture.warmFrames % 6) : leaveCapture.face;
+                const bool drawRow = !leaveCapture.warming && !leaveCapture.prepassStop &&
+                                     leaveCapture.face < 6 && leaveCapture.complete &&
+                                     leaveCapture.pendingRows.size() < kLeaveRowsInFlight;
+                if (drawRow) {
+                    const int faceIndex = leaveCapture.face;
                     // Tile side. The world at the hand-over shows ~70° over
                     // the window's height; a face is 90° wide, so the face
                     // that matches the world pixel for pixel is about 1.44×
                     // the height (2·tan45° / 2·tan35°). Two tiles of 0.72
                     // heights make exactly that: neither the soft magnified
                     // 1× nor the sparkling minified 2× it used to be.
-                    const int side = std::max(1, static_cast<int>(std::lround(std::min(width, height) * 0.72)));
-                    // Warm-up faces follow the turning view (any direction
-                    // serves the scheduler); the captured six are about the
-                    // yaw the capture began at, so they join up.
-                    const Render::Camera faceCam = makeFaceCamera(
-                        faceIndex, leaveCapture.warming ? camera.yaw : leaveCapture.baseYaw,
-                        /*publishOrigin=*/true);
-                    // The projection: the whole 90° face for a warm-up
-                    // frame; for the capture, the off-axis frustum of this
-                    // tile of it (a kTiles×kTiles cut of the same 90° near
-                    // plane), so the tiles butt together into one face.
-                    const int  tiles = leaveCapture.warming ? 1 : kLeaveTiles;
-                    const int  tx    = leaveCapture.warming ? 0 : leaveCapture.tile % tiles;
-                    const int  ty    = leaveCapture.warming ? 0 : leaveCapture.tile / tiles;
-                    auto tileProjection = [&](float nearPlane, float farPlaneZ) {
-                        // 90° both ways: the near plane's half-extent is
-                        // the near distance. Rows top-down (ty 0 = top).
-                        const float l = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx)     / static_cast<float>(tiles));
-                        const float r = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx + 1) / static_cast<float>(tiles));
-                        const float t = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty)     / static_cast<float>(tiles));
-                        const float b = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty + 1) / static_cast<float>(tiles));
-                        return glm::frustum(l, r, b, t, nearPlane, farPlaneZ);
-                    };
-                    const glm::mat4 faceProj = tileProjection(Render::ChunkRenderer::NearPlane(), farPlane);
+                    const int side  = std::max(1, static_cast<int>(std::lround(std::min(width, height) * 0.72)));
+                    const int tiles = kLeaveTiles;
+                    const int tx0   = leaveCapture.tile % tiles;
+                    const int ty    = leaveCapture.tile / tiles;
+                    // As many of this row's remaining tiles as fit across the
+                    // window, side by side (two on a 16:9 or 16:10 window;
+                    // one on a narrow one).
+                    const int count = std::max(1, std::min(tiles - tx0, width / side));
+                    // The six faces are about the yaw the capture began at,
+                    // so they join up.
+                    const Render::Camera faceCam = makeFaceCamera(faceIndex, leaveCapture.baseYaw,
+                                                                  /*publishOrigin=*/true);
                     const glm::mat4 faceView = faceCam.GetViewMatrix();
-                    const Frustum faceFrustum = Frustum::FromMatrix(faceProj * faceCam.GetWorldViewMatrix());
                     const float facePartial = [&] {
                         const float remaining = std::chrono::duration<float>(
                             nextClientTick - std::chrono::steady_clock::now()).count();
@@ -7777,56 +9217,195 @@ static uint16_t     s_lastPresencePort = 0;
                         return std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
                     }();
 
-                    backend.SetViewport(0, 0, side, side);
+                    // One clear for the whole row (a clear covers the whole
+                    // target); each tile draws inside its own square.
+                    backend.SetViewport(0, 0, width, height);
                     backend.Clear(true, true, true);
-                    {
-                        const glm::mat4 skyProj = tileProjection(0.05f, 2048.0f);
-                        Render::g_skyRenderer.Render(skyProj, glm::mat4(glm::mat3(faceView)));
-                    }
-                    // Exact: the square 90° projection on every backend
-                    // (the Vulkan path otherwise substitutes the window's).
-                    // No chunk fade-in on a face: the warm-up meshed these
-                    // sections moments ago, and the panorama is a finished
-                    // picture, not a view still arriving.
-                    if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSectionFadeSuppressed(true);
-                    Render::RenderChunksAll(faceCam, faceFrustum, faceProj, /*exactProjection=*/true);
-                    itemEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
-                    Render::g_blockCubeEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
-                    xpOrbRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum, facePartial);
-                    if (Client::g_clientMobManager) {
-                        mobRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
-                                           *Client::g_clientMobManager, facePartial);
-                    }
-                    if (Client::g_remotePlayerManager) {
-                        playerRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
-                                              *Client::g_remotePlayerManager, facePartial, nullptr,
-                                              Render::ChunkRenderer::PortalEntityClipPlane());
-                    }
-                    if (Render::g_blockEntityRenderDispatcher) {
-                        Render::g_blockEntityRenderDispatcher->RenderAll(
-                            Client::g_clientChunkManager, faceProj, faceView, faceCam.position, facePartial);
-                    }
-                    Render::g_endPortalRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
-                                                       faceCam.position, facePartial);
-                    Render::g_bedRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
-                                                 faceCam.position, facePartial);
-                    // Translucent terrain after the entities, as the frame does.
-                    Render::RenderChunksDeferredTranslucent();
-                    if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSectionFadeSuppressed(false);
-                    // Clouds, as the frame draws them after the level — and
-                    // only where the frame draws them: the panorama is of
-                    // the ACTIVE dimension (the sky above is g_skyRenderer's
-                    // own), so the Overworld's cloud layer must not be
-                    // painted over a Hush or End horizon.
-                    if (Render::g_skyRenderer.HasClouds()) {
-                        Render::g_cloudRenderer.Render(faceProj, faceView, faceCam.position,
-                                                       effectiveRenderDist, facePartial);
+                    for (int k = 0; k < count; ++k) {
+                        const int tx = tx0 + k;
+                        // The off-axis frustum of this tile of the face (a
+                        // kTiles×kTiles cut of the same 90° near plane), so
+                        // the tiles butt together into one face.
+                        auto tileProjection = [&](float nearPlane, float farPlaneZ) {
+                            // 90° both ways: the near plane's half-extent is
+                            // the near distance. Rows top-down (ty 0 = top).
+                            const float l = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx)     / static_cast<float>(tiles));
+                            const float r = nearPlane * (-1.0f + 2.0f * static_cast<float>(tx + 1) / static_cast<float>(tiles));
+                            const float t = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty)     / static_cast<float>(tiles));
+                            const float b = nearPlane * ( 1.0f - 2.0f * static_cast<float>(ty + 1) / static_cast<float>(tiles));
+                            return glm::frustum(l, r, b, t, nearPlane, farPlaneZ);
+                        };
+                        const glm::mat4 faceProj = tileProjection(Render::ChunkRenderer::NearPlane(), farPlane);
+                        const Frustum faceFrustum = Frustum::FromMatrix(faceProj * faceCam.GetWorldViewMatrix());
+
+                        backend.SetViewport(k * side, 0, side, side);
+                        {
+                            const glm::mat4 skyProj = tileProjection(0.05f, 2048.0f);
+                            Render::g_skyRenderer.Render(skyProj, glm::mat4(glm::mat3(faceView)));
+                        }
+                        // Exact: the square 90° projection on every backend
+                        // (the Vulkan path otherwise substitutes the window's).
+                        // No chunk fade-in on a face: the warm-up meshed these
+                        // sections moments ago, and the panorama is a finished
+                        // picture, not a view still arriving.
+                        if (Render::g_chunkRenderer) {
+                            Render::g_chunkRenderer->SetSectionFadeSuppressed(true);
+                            // What the player's eye can see in this direction
+                            // (occlusion from the eye, as the warm-up recorded
+                            // it), not every section in the frustum.
+                            Render::g_chunkRenderer->SetPortalViewSeed(glm::vec3(faceCam.position));
+                        }
+                        Render::RenderChunksAll(faceCam, faceFrustum, faceProj, /*exactProjection=*/true);
+                        itemEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
+                        Render::g_blockCubeEntityRenderer.Render(faceProj, faceView, faceCam.position, facePartial);
+                        xpOrbRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum, facePartial);
+                        if (Client::g_clientMobManager) {
+                            mobRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
+                                               *Client::g_clientMobManager, facePartial);
+                            // Lightning, as the frame draws it with the mobs.
+                            lightningBoltRenderer.Render(faceProj, faceView, faceCam.position,
+                                                         *Client::g_clientMobManager);
+                        }
+                        if (Client::g_remotePlayerManager) {
+                            playerRenderer.Render(faceProj, faceView, faceCam.position, faceFrustum,
+                                                  *Client::g_remotePlayerManager, facePartial, nullptr,
+                                                  Render::ChunkRenderer::PortalEntityClipPlane());
+                            drawRemotePlayerLayers(faceProj, faceView, faceCam.position, faceFrustum,
+                                                   facePartial, nullptr);
+                        }
+                        if (Render::g_blockEntityRenderDispatcher) {
+                            Render::g_blockEntityRenderDispatcher->RenderAll(
+                                Client::g_clientChunkManager, faceProj, faceView, faceCam.position, facePartial);
+                        }
+                        Render::g_endPortalRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
+                                                           faceCam.position, facePartial);
+                        Render::g_bedRenderer.Render(Client::g_clientChunkManager, faceProj, faceView,
+                                                     faceCam.position, facePartial);
+                        // Translucent terrain after the entities, as the frame does.
+                        Render::RenderChunksDeferredTranslucent();
+                        // The eye's seed is this level's; a far view floods
+                        // from its own camera.
+                        if (Render::g_chunkRenderer) Render::g_chunkRenderer->ClearPortalViewSeed();
+                        // Portals, as the frame draws them after its level:
+                        // the immersive surfaces see-through (the gun rims
+                        // of the levels they show included), then the gun's
+                        // own pass — its rims, and in vanilla mode its
+                        // stencil see-through — and its sparks. Every view
+                        // through a portal uses this TILE's projection and
+                        // the face camera's render origin; its far side is
+                        // drawn at the effective render distance.
+                        {
+                            PROFILE_ZONE_N("LeaveCapture.Portals");
+                            // The far side at the player's full render
+                            // distance, as the frame draws it (user decision
+                            // 2026-09-28: no shorter panorama cap).
+                            const int   portalChunks = std::max(2, effectiveRenderDist);
+                            const float portalFar    = static_cast<float>(portalChunks) * 16.0f * 4.0f;
+#if ENABLE_PORTAL_GUN
+                            // Which gun portals this tile's own section list
+                            // shows — taken now, before the immersive pass
+                            // replaces the list with its far views'.
+                            Render::g_portalRenderer.SnapshotVisibility();
+#endif
+#if ENABLE_IMMERSIVE_PORTALS
+                            portalViewSkyProj    = [&](float n, float f) { return tileProjection(n, f); };
+                            portalViewForCapture = true;
+                            Render::g_immersivePortalRenderer.RenderCapture(
+                                faceProj, faceView, faceCam, faceFrustum, 1.0f, portalChunks, facePartial,
+                                renderLevelView, renderCrossers);
+                            portalViewSkyProj    = nullptr;
+                            portalViewForCapture = false;
+                            faceCam.ActivateRenderOrigin();
+#endif
+#if ENABLE_PORTAL_GUN
+                            const glm::mat4 gunBaseProj = tileProjection(0.05f, portalFar);
+                            Render::g_portalRenderer.SetCaptureOverrides(&gunBaseProj, leaveCapture.portalClock);
+                            const auto outerGunOcclusion = Render::g_portalRenderer.SetOcclusion(
+                                Render::PortalRenderer::Occlusion::Snapshot);
+                            Render::g_portalRenderer.Render(
+                                faceProj, faceView, faceCam, faceFrustum, 1.0f, portalFar,
+                                static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())),
+                                [&](const Render::Camera& virtCam, const Frustum& virtFrust,
+                                    const glm::mat4& obliqueProj) {
+                                    // The far side, as the frame's gun pass
+                                    // draws it (bodies straddling the plane
+                                    // are drawn whole: a still picture).
+                                    // The tile's projection, exactly (see
+                                    // renderLevelView). On Vulkan the plain
+                                    // one, as the frame's gun pass effectively
+                                    // uses: the oblique near plane breaks VK's
+                                    // depth there, and the far-side clip rides
+                                    // gl_ClipDistance (uPortalClipPlane).
+                                    const bool vk = Render::g_renderBackend &&
+                                        Render::g_renderBackend->GetType() == Render::BackendType::Vulkan;
+                                    Render::RenderChunksAll(virtCam, virtFrust, vk ? gunBaseProj : obliqueProj,
+                                                            /*exactProjection=*/true);
+                                    const glm::mat4 virtView = virtCam.GetViewMatrix();
+                                    itemEntityRenderer.Render(obliqueProj, virtView, virtCam.position, facePartial);
+                                    Render::g_blockCubeEntityRenderer.Render(obliqueProj, virtView,
+                                                                             virtCam.position, facePartial);
+                                    xpOrbRenderer.Render(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                         facePartial);
+                                    if (Client::g_clientMobManager) {
+                                        mobRenderer.Render(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                           *Client::g_clientMobManager, facePartial);
+                                        lightningBoltRenderer.Render(obliqueProj, virtView, virtCam.position,
+                                                                     *Client::g_clientMobManager);
+                                    }
+                                    if (Client::g_remotePlayerManager) {
+                                        playerRenderer.Render(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                              *Client::g_remotePlayerManager, facePartial, nullptr,
+                                                              Render::ChunkRenderer::PortalEntityClipPlane());
+                                        drawRemotePlayerLayers(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                               facePartial, nullptr);
+                                    }
+                                    if (Render::g_blockEntityRenderDispatcher) {
+                                        Render::g_blockEntityRenderDispatcher->RenderAll(
+                                            Client::g_clientChunkManager, obliqueProj, virtView,
+                                            virtCam.position, facePartial);
+                                    }
+                                    Render::RenderChunksDeferredTranslucent();
+                                    Render::g_weatherEffectRenderer.Render(
+                                        obliqueProj, virtView, virtCam.position, facePartial,
+                                        Client::ClientLevels::ActiveDimension(),
+                                        Render::ChunkRenderer::PortalClipPlane());
+                                });
+                            Render::g_portalRenderer.SetOcclusion(outerGunOcclusion);
+                            Render::g_portalRenderer.ClearCaptureOverrides();
+                            faceCam.ActivateRenderOrigin();
+                            Render::g_portalParticleSystem.Render(faceProj, faceView, faceCam.position,
+                                                                  Client::ClientLevels::ActiveDimension());
+#endif
+                        }
+                        // Every live world particle of this level (all sheets
+                        // and layers — spore blossom motes, rain splashes,
+                        // smoke, geysers, spell swirls …), as the frame draws
+                        // them after the portal sparks: billboarded to THIS
+                        // face's camera with the tile's projection, no cull
+                        // against the player's view. The simulation is held
+                        // still for the whole capture (see Particles.Update).
+                        if (!Render::DevSkip("particles")) {
+                            Render::g_mobParticleSystem.Render(faceProj, faceView, faceCam.position,
+                                                               Client::ClientLevels::ActiveDimension());
+                        }
+                        if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSectionFadeSuppressed(false);
+                        // Clouds, as the frame draws them after the level — and
+                        // only where the frame draws them: the panorama is of
+                        // the ACTIVE dimension (the sky above is g_skyRenderer's
+                        // own), so the Overworld's cloud layer must not be
+                        // painted over a Hush or End horizon.
+                        if (Render::g_skyRenderer.HasClouds()) {
+                            Render::g_cloudRenderer.Render(faceProj, faceView, faceCam.position,
+                                                           effectiveRenderDist, facePartial);
+                        }
+                        // The rain and snow, after the clouds as in the frame.
+                        Render::g_weatherEffectRenderer.Render(faceProj, faceView, faceCam.position,
+                                                               facePartial);
                     }
 
                     // A face's 38 MB CPU buffer (zero-filled, page-faulted
-                    // in) and its 48 MB GPU texture, on a frame that does
-                    // nothing else: one face per warm-up frame, else the
-                    // face's own request frame. Never a take frame.
+                    // in) and its 48 MB GPU texture, on the face's first
+                    // request frame.
                     auto prepareFace = [&](int f, int faceSize) {
                         if (f < 0 || f >= 6 || leaveCapture.facePrepared[static_cast<size_t>(f)]) return;
                         auto& faceBuf = leaveCapture.faces[static_cast<size_t>(f)];
@@ -7835,29 +9414,28 @@ static uint16_t     s_lastPresencePort = 0;
                         Render::PanoramaRenderer::BeginLastWorldFace(f, faceSize);
                         leaveCapture.facePrepared[static_cast<size_t>(f)] = true;
                     };
-                    if (leaveCapture.warming) {
-                        if (leaveCapture.warmFrames < 6) prepareFace(leaveCapture.warmFrames, side * tiles);
-                        ++leaveCapture.warmFrames;
+                    if (backend.RequestBackbufferReadback(0, 0, count * side, side)) {
+                        LeaveCapture::PendingRow row;
+                        row.face      = faceIndex;
+                        row.firstTile = leaveCapture.tile;
+                        row.count     = count;
+                        row.side      = side;
+                        leaveCapture.pendingRows.push_back(row);
+                        leaveCapture.size = side * tiles;
+                        if (leaveCapture.tile == 0) prepareFace(faceIndex, leaveCapture.size);
                     } else {
-                        if (backend.RequestBackbufferReadback(0, 0, side, side)) {
-                            leaveCapture.awaitingTake = true;
-                            leaveCapture.framesSinceRequest = 0;
-                            leaveCapture.tileSide = side;
-                            leaveCapture.size     = side * tiles;
-                            if (leaveCapture.tile == 0) prepareFace(leaveCapture.face, leaveCapture.size);
-                        } else {
-                            leaveCapture.complete = false;
-                        }
-                        if (++leaveCapture.tile >= tiles * tiles) {
-                            leaveCapture.tile = 0;
-                            ++leaveCapture.face;
-                        }
+                        leaveCapture.complete = false;
+                    }
+                    leaveCapture.tile += count;
+                    if (leaveCapture.tile >= tiles * tiles) {
+                        leaveCapture.tile = 0;
+                        ++leaveCapture.face;
                     }
                     // Gone before the frame's own view; the main camera's
                     // PrepareRender below restores the render origin.
                     backend.Clear(true, true, true);
                     backend.SetViewport(0, 0, width, height);
-                } else if (!leaveCapture.warming && !leaveCapture.awaitingTake &&
+                } else if (!leaveCapture.warming && leaveCapture.pendingRows.empty() &&
                            (leaveCapture.face >= 6 || !leaveCapture.complete)) {
                     // Finished: every face is in (or one could not be). Not
                     // on a warm-up frame, and not on a rest frame between
@@ -7983,6 +9561,23 @@ static uint16_t     s_lastPresencePort = 0;
             // set is still the player's, since nothing about loading reads
             // the camera. The frozen-at-player override is the
             // culling-verification mode.
+            // MC Camera.extractRenderState: a spectator whose camera is in a
+            // solid-render block turns smart culling off for the frame.
+            if (Render::g_chunkRenderer) {
+                bool inSolid = false;
+                if (player.IsSpectator() && Client::g_clientBlockAccess) {
+                    const glm::ivec3 cell(static_cast<int>(std::floor(camera.position.x)),
+                                          static_cast<int>(std::floor(camera.position.y)),
+                                          static_cast<int>(std::floor(camera.position.z)));
+                    const Game::BlockState state =
+                        Client::g_clientBlockAccess->GetBlockState(cell.x, cell.y, cell.z);
+                    // BlockState.isSolidRender: an occluding full cube.
+                    inSolid = state.Block() != Game::BlockID::Air &&
+                              Game::BlockRegistry::Get(state.Block()).opaque &&
+                              Game::BlockRegistry::GetBlockShapeSet(state).IsFullCube();
+                }
+                Render::g_chunkRenderer->SetSmartCullSuppressed(inSolid);
+            }
             const bool freeCamCullAtPlayer = freeCamActive && Debug::DebugSystem::FreeCamCullFromPlayer();
             if (freeCamCullAtPlayer) {
                 Render::Camera playerViewCam = camera;   // keeps fov + viewTilt
@@ -7994,6 +9589,17 @@ static uint16_t     s_lastPresencePort = 0;
                     Render::g_chunkRenderer->SetCullOverride(playerViewCam, frustum);
                 }
             }
+
+            // Improved Transparency (Video Settings, MC options.
+            // improvedTransparency — 26.3's wavelet OIT): whether this frame
+            // resolves its translucency order-independently. Off — the
+            // default — this makes nothing and every Defer below declines,
+            // so each feature draws where it always has. A shader pack owns
+            // the transparency pipeline, as in OptiFine.
+            Render::ImprovedTransparency::Get().BeginFrame(
+                Platform::g_gameSettings.GetImprovedTransparency() &&
+                    !Render::ShaderPipeline::Get().Active(),
+                width, height);
 
             // Sky pass (MC addSkyPass): camera-centered, before terrain.
             // Own projection — the 512-radius sky disc would be clipped by
@@ -8106,6 +9712,21 @@ static uint16_t     s_lastPresencePort = 0;
                 Render::EntityOutline::Get().BeginFrame();
                 Render::EntityOutline::Get().SetCollecting(true);
                 g_playerDrawDiag.Reset();
+                // Spectator viewing rules for this frame's entity passes: a
+                // spectator sees INVISIBLE bodies translucent (MC
+                // Entity.isInvisibleTo), holding key.spectatorOutlines makes
+                // players glow (Minecraft.shouldEntityAppearGlowing), and the
+                // entity the camera is inside is not drawn in first person.
+                {
+                    const bool viewerSpectator = player.IsSpectator();
+                    playerRenderer.SetViewerSeesInvisible(viewerSpectator);
+                    playerRenderer.SetOutlinePlayers(viewerSpectator && Input::Binds::SpectatorOutlines &&
+                                                     Input::IsDown(*Input::Binds::SpectatorOutlines));
+                    mobRenderer.SetViewerSeesInvisible(viewerSpectator);
+                    s_hiddenCameraEntityId = viewerSpectator && player.IsCameraDetached() && !tpActive
+                                                 ? player.cameraEntityId : -1;
+                    mobRenderer.SetHiddenEntity(s_hiddenCameraEntityId);
+                }
                 const auto nowForPartial = std::chrono::steady_clock::now();
                 const float remaining =
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
@@ -8119,10 +9740,14 @@ static uint16_t     s_lastPresencePort = 0;
                 // Letting partialTick keep cycling 0..1 would replay that last
                 // tick's movement forever, so a frozen mob would sit there
                 // twitching back and forth once every 50 ms.
-                const float partialTick =
+                float partialTick =
                     Client::g_clientTickRate.IsEntityFrozen()
                         ? 1.0f
                         : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                // A rider's frame: the partial its seat was placed with (see
+                // s_riderFramePartial), so the vehicle and the view agree.
+                if (player.vehicleId != 0 && s_riderFramePartial >= 0.0f) partialTick = s_riderFramePartial;
+                s_riderFramePartial = -1.0f;
                 s_entityPartialTick = partialTick;
 #if ENABLE_PORTAL_GUN
                 // Phase G (remote): for each remote player straddling an
@@ -8158,6 +9783,15 @@ static uint16_t     s_lastPresencePort = 0;
                     controlSkipIds.insert(Client::Control::Get().otherId);
                     bulkSkipIds = &controlSkipIds;
                 }
+                // Spectating another player from inside their head: their
+                // body is the camera entity, not drawn in first person.
+                std::unordered_set<uint32_t> spectateSkipIds;
+                if (player.IsSpectator() && player.IsCameraDetached() && !tpActive &&
+                    player.cameraEntityId >= 0) {
+                    if (bulkSkipIds) spectateSkipIds = *bulkSkipIds;
+                    spectateSkipIds.insert(static_cast<uint32_t>(player.cameraEntityId));
+                    bulkSkipIds = &spectateSkipIds;
+                }
                 Client::g_remotePlayerManager->UpdateBubbles(dt);
 
                 // Dropped items, drawn with the same partialTick the remote
@@ -8167,77 +9801,7 @@ static uint16_t     s_lastPresencePort = 0;
                 // renderer call. `seed` gives an item its own bob phase.
                 auto drawMorph = [&](const Render::MobRenderer::MorphPose& pose, uint32_t seed,
                                      std::vector<Render::MobRenderer::MorphPose>& mobsAndBlocks) {
-                    // INVISIBILITY: an item, orb or block-entity body has no
-                    // layers to keep — nothing is drawn (MC: the body render
-                    // type is null). Mob and block bodies go on: the mob
-                    // renderer keeps their layers and outlines a glowing one.
-                    const Game::Morph::Kind morphKind = Game::Morph::KindOf(pose.code);
-                    if (pose.invisible && (morphKind == Game::Morph::Kind::Item ||
-                                           morphKind == Game::Morph::Kind::Xp)) {
-                        return;
-                    }
-                    // A bed is a block entity, not a block model: its own
-                    // renderer draws it, foot in the player's cell, head one
-                    // cell along the morph's turn (Shift+Alt).
-                    if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
-                        Game::IsBedBlock(static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)))) {
-                        if (pose.invisible) return;
-                        static constexpr Game::Direction kTurns[4] = {
-                            Game::Direction::South, Game::Direction::West,
-                            Game::Direction::North, Game::Direction::East };
-                        Render::g_bedRenderer.RenderSingle(
-                            static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code)),
-                            kTurns[Game::Morph::BlockRotationOf(pose.code)],
-                            pose.position - glm::dvec3(0.5, 0.0, 0.5), proj, view,
-                            glm::dvec3(camera.position));
-                        return;
-                    }
-                    // Any other block whose look is a block-entity renderer's
-                    // (chest, shulker box…): its block MODEL has no faces of
-                    // its own, so the model path drew an atlas-sized nothing.
-                    // The renderer's item form (BEWLR — the same mesh the hand
-                    // and the inventory icon use, in MC pixel space [0,16]³)
-                    // is placed in the cell and turned by the morph's
-                    // rotation about the cell's centre.
-                    if (Game::Morph::KindOf(pose.code) == Game::Morph::Kind::Block &&
-                        Render::g_blockEntityRenderDispatcher) {
-                        const auto blockId = static_cast<Game::BlockID>(Game::Morph::BlockOf(pose.code));
-                        const Game::BlockEntityType* beType = Game::BlockEntityTypes::ForBlock(blockId);
-                        Render::BlockEntityRenderer* beRenderer =
-                            beType ? Render::g_blockEntityRenderDispatcher->GetRenderer(beType->TypeId()) : nullptr;
-                        if (beRenderer && beRenderer->SupportsBEWLR()) {
-                            if (pose.invisible) return;
-                            glm::mat4 model = glm::translate(glm::mat4(1.0f),
-                                Render::ToRender(pose.position - glm::dvec3(0.5, 0.0, 0.5)));
-                            model = glm::translate(model, glm::vec3(0.5f, 0.0f, 0.5f));
-                            model = glm::rotate(model, glm::radians(-90.0f * static_cast<float>(Game::Morph::BlockRotationOf(pose.code))),
-                                                glm::vec3(0.0f, 1.0f, 0.0f));
-                            model = glm::translate(model, glm::vec3(-0.5f, 0.0f, -0.5f));
-                            model = glm::scale(model, glm::vec3(1.0f / 16.0f));
-                            // A body in the level: the frame's fog and light.
-                            Render::BEWLRLight light;
-                            light.world = true;
-                            light.localToRender = model;
-                            light.cameraWorld = glm::dvec3(camera.position);
-                            beRenderer->RenderBEWLR(blockId, proj * view * model, light);
-                            return;
-                        }
-                    }
-                    switch (Game::Morph::KindOf(pose.code)) {
-                        case Game::Morph::Kind::Item:
-                            itemEntityRenderer.RenderSingle(
-                                Game::ItemStack(static_cast<Game::ItemID>(Game::Morph::IdOf(pose.code)), 1),
-                                pose.position, pose.ageTicks,
-                                static_cast<float>(seed % 32) / 32.0f * 6.2831853f,
-                                proj, view, camera.position);
-                            break;
-                        case Game::Morph::Kind::Xp:
-                            xpOrbRenderer.RenderSingle(5, pose.position, pose.ageTicks, proj, view, camera.position);
-                            break;
-                        default:
-                            mobsAndBlocks.push_back(pose);
-                            break;
-                    }
+                    drawMorphIn(proj, view, camera.position, pose, seed, mobsAndBlocks);
                 };
                 auto drawWorldEntities = [&]() {
                     DEBUG_PIE_ZONE("renderSolidFeatures");
@@ -8253,7 +9817,15 @@ static uint16_t     s_lastPresencePort = 0;
                     g_playerDrawDiag.Add(g_playerDrawDiag.main, playerRenderer.LastTally()); }
                     if (!Render::DevSkip("items")) {
                     { PROFILE_ZONE_N("Render.ItemEntities");
-                    itemEntityRenderer.Render(proj, view, camera.position, partialTick); }
+                    // Improved Transparency: drawn by the OIT stages at the
+                    // end of the level (MC OIT_ITEM) instead of here.
+                    if (!Render::ImprovedTransparency::Get().Defer(
+                            Render::ImprovedTransparency::Feature::Items,
+                            [&itemEntityRenderer, proj, view, pos = camera.position, partialTick] {
+                                itemEntityRenderer.Render(proj, view, pos, partialTick);
+                            })) {
+                        itemEntityRenderer.Render(proj, view, camera.position, partialTick);
+                    } }
                     { PROFILE_ZONE_N("Render.BlockCubeEntities");
                     Render::g_blockCubeEntityRenderer.Render(proj, view, camera.position,
                                                              partialTick); }
@@ -8270,23 +9842,10 @@ static uint16_t     s_lastPresencePort = 0;
                         lightningBoltRenderer.Render(proj, view, camera.position,
                                                      *Client::g_clientMobManager);
                     }
-                    // /morph: a morphed remote player is their body, drawn
-                    // with the player's pose (the stick figure pass skipped
-                    // them): a mob or block by the mob renderer, an item or
-                    // orb by theirs.
-                    if (Client::g_remotePlayerManager && !Render::DevSkip("players")) {
-                        std::vector<Render::MobRenderer::MorphPose> morphs;
-                        for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
-                            if (!rp.IsMorphed() || rp.invisible || !rp.positionInitialized) continue;
-                            if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
-                            if (bulkSkipIds && bulkSkipIds->count(id)) continue;
-                            drawMorph(MorphPoseOf(rp, partialTick), id, morphs);
-                        }
-                        if (!morphs.empty()) {
-                            PROFILE_ZONE_N("Render.Morphs");
-                            mobRenderer.RenderMorphs(proj, view, camera.position, frustum, morphs, partialTick);
-                        }
-                    }
+                    // Every layer a remote player carries beyond the stick
+                    // figure — shared with every portal view (see
+                    // drawRemotePlayerLayers).
+                    drawRemotePlayerLayers(proj, view, camera.position, frustum, partialTick, bulkSkipIds);
                 };
 #if ENABLE_IMMERSIVE_PORTALS
                 // An entity half-way through a surface is CUT at it on this
@@ -8413,6 +9972,8 @@ static uint16_t     s_lastPresencePort = 0;
                                     playerRenderer.Render(proj, backView, farEye, backFrustum,
                                                           *Client::g_remotePlayerManager, partialTick, nullptr,
                                                           Render::PlaneToRender(behind.AsClipPlane()));
+                                    drawRemotePlayerLayers(proj, backView, farEye, backFrustum,
+                                                           partialTick, nullptr);
                                     g_playerDrawDiag.Add(g_playerDrawDiag.reverse, playerRenderer.LastTally());
                                     Render::EntityCulling::g_crossingFilter =
                                         [r](const glm::vec3& lo, const glm::vec3& hi) {
@@ -8449,60 +10010,15 @@ static uint16_t     s_lastPresencePort = 0;
                 // draw: it is invisible, in the holder's hand.)
                 // (Nor a block morph locked into a cell the real block now
                 // fills — the block is the body.)
+                // (Nor while the view comes from a spectated entity: the body
+                // rides inside it, and it is the one on screen.)
                 const bool ownBodyVisible = (tpActive || freeCamActive || controlView) &&
                                             player.heldByPlayer == 0 &&
+                                            !player.IsCameraDetached() &&
                                             !(player.morphGridLock && player.morphLockBlockSeen);
-                if (ownBodyVisible && player.IsMorphed()) {
-                    // /morph: your own body is the morph too, with the same
-                    // lagged body yaw the other clients draw (TickMorph) and
-                    // the camera's look for the head.
-                    Render::MobRenderer::MorphPose pose;
-                    pose.code      = player.morph;
-                    pose.position  = player.visualPos;
-                    pose.bodyYaw   = Game::Mth::RotLerp(partialTick, player.morphBodyYawOld, player.morphBodyYaw);
-                    pose.headYaw   = tpSavedYaw;
-                    pose.pitch     = tpSavedPitch;
-                    pose.walkPos   = player.morphWalk.PositionAt(partialTick);
-                    pose.walkSpeed = player.morphWalk.SpeedAt(partialTick);
-                    pose.ageTicks  = static_cast<float>(player.morphTicks) + partialTick;
-                    pose.scale     = player.physics.scale;
-                    pose.hurtTime  = player.hurtTime;
-                    pose.deathTime = player.deathTime;
-                    pose.swell     = Game::Mth::Lerp(partialTick, static_cast<float>(player.morphSwellOld),
-                                                     static_cast<float>(player.morphSwell)) /
-                                     static_cast<float>(Game::Morph::kCreeperSwellTicks);
-                    pose.animTick  = Game::Mth::Lerp(partialTick, static_cast<float>(player.morphAnimTicksOld),
-                                                     static_cast<float>(player.morphAnimTicks));
-                    pose.crouching = player.physics.isSneaking;
-                    // MC renders the camera entity like any other in third
-                    // person: its own INVISIBILITY and GLOWING apply.
-                    pose.invisible = player.HasEffect(Game::MobEffectId::Invisibility);
-                    pose.glowing   = player.HasEffect(Game::MobEffectId::Glowing);
-                    std::vector<Render::MobRenderer::MorphPose> own;
-                    drawMorph(pose, 0, own);
-                    if (!own.empty()) {
-                        mobRenderer.RenderMorphs(proj, view, camera.position, frustum, own, partialTick);
-                    }
-                } else if (ownBodyVisible) {
-                    // MC renders the camera entity like any other in third
-                    // person: INVISIBILITY hides the body (the stick figure
-                    // has no layers to keep), GLOWING outlines it — both at
-                    // once leave the outline alone.
-                    const bool ownInvisible = player.HasEffect(Game::MobEffectId::Invisibility);
-                    const bool ownGlowing   = player.HasEffect(Game::MobEffectId::Glowing);
-                    if (!ownInvisible || ownGlowing) {
-                        playerRenderer.RenderSingle(
-                            proj, view, player.visualPos,
-                            tpSavedYaw, tpSavedYaw, tpSavedPitch,
-                            player.physics.isSneaking,
-                            static_cast<uint8_t>(player.color),
-                            BodyScaleModel(player.visualPos, player.physics.scale), glm::dvec4(0.0),
-                            // Your own corpse topples too — MC renders the camera
-                            // entity like any other while the camera is detached.
-                            Render::MobRenderer::DeathFlipDegrees(player.deathTime,
-                                                                  partialTick),
-                            ownGlowing, /*drawBody=*/!ownInvisible);
-                    }
+                if (ownBodyVisible) {
+                    drawLocalBody(proj, view, camera.position, frustum, partialTick,
+                                  player.visualPos, tpSavedYaw, tpSavedPitch);
                 }
 
 #if ENABLE_PORTAL_GUN
@@ -8518,11 +10034,11 @@ static uint16_t     s_lastPresencePort = 0;
                 {
                     auto& portals = Client::GetClientPortalManager();
                     for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
-                        // No portal ghost for an invisible body either
-                        // (/invisible or INVISIBILITY — a stick figure has
-                        // no layers to keep).
-                        if (rp.invisible || rp.effects.Invisible()) continue;
-                        if (rp.IsMorphed()) continue; // a morph is drawn by the mob renderer
+                        // /invisible: nothing at all. INVISIBILITY or a
+                        // morph: no stick figure, but the layers (the morph
+                        // body, elytra, shoulder parrots) still split.
+                        if (rp.invisible) continue;
+                        const bool drawStick = !rp.effects.Invisible() && !rp.IsMorphed();
                         // Double all the way into the ghost test, RenderSingle
                         // and BodyScaleModel.
                         const glm::dvec3 renderPos =
@@ -8548,23 +10064,32 @@ static uint16_t     s_lastPresencePort = 0;
                             continue;
                         }
                         const glm::dmat4 bodyScale = BodyScaleModel(renderPos, rp.scale);
-                        // 1) Entry-side body, clipped to the half on the
-                        //    source side of the source portal plane. Uses
-                        //    identity model — same world position as the
-                        //    bulk render would have produced.
-                        playerRenderer.RenderSingle(
-                            proj, view, renderPos,
-                            headYaw, bodyYaw, pitch, rp.isCrouching,
-                            static_cast<uint8_t>(rp.color),
-                            bodyScale, g.entryClipPlane);
-                        // 2) Exit-side ghost, transformed through the
-                        //    portal pair matrix and clipped to the
-                        //    emerged half on the destination side.
-                        playerRenderer.RenderSingle(
-                            proj, view, renderPos,
-                            headYaw, bodyYaw, pitch, rp.isCrouching,
-                            static_cast<uint8_t>(rp.color),
-                            g.transform * bodyScale, g.exitClipPlane);
+                        if (drawStick) {
+                            // 1) Entry-side body, clipped to the half on the
+                            //    source side of the source portal plane. Uses
+                            //    identity model — same world position as the
+                            //    bulk render would have produced.
+                            playerRenderer.RenderSingle(
+                                proj, view, renderPos,
+                                headYaw, bodyYaw, pitch, rp.isCrouching,
+                                static_cast<uint8_t>(rp.color),
+                                bodyScale, g.entryClipPlane);
+                            // 2) Exit-side ghost, transformed through the
+                            //    portal pair matrix and clipped to the
+                            //    emerged half on the destination side.
+                            playerRenderer.RenderSingle(
+                                proj, view, renderPos,
+                                headYaw, bodyYaw, pitch, rp.isCrouching,
+                                static_cast<uint8_t>(rp.color),
+                                g.transform * bodyScale, g.exitClipPlane);
+                        }
+                        // The same two halves of every layer.
+                        const std::unordered_set<uint32_t> only{id};
+                        const glm::dmat4 identity(1.0);
+                        drawRemotePlayerLayers(proj, view, camera.position, frustum, partialTick,
+                                               nullptr, &only, &identity, &g.entryClipPlane);
+                        drawRemotePlayerLayers(proj, view, camera.position, frustum, partialTick,
+                                               nullptr, &only, &g.transform, &g.exitClipPlane);
                     }
 
                     // Local-player ghost — when straddling, render the
@@ -8580,14 +10105,10 @@ static uint16_t     s_lastPresencePort = 0;
                     if (!justTeleportedThisFrame && gLocal.valid &&
                         BodyStraddlesEntryPlane(player.physics.position,
                                                 gLocal.entryClipPlane, 1.8f)) {
-                        const bool isCrouching =
-                            Input::IsKeyDown(Input::Key::LeftShift);
-                        playerRenderer.RenderSingle(
-                            proj, view, player.physics.position,
-                            camera.yaw, camera.yaw, camera.pitch,
-                            isCrouching,
-                            static_cast<uint8_t>(player.color),
-                            gLocal.transform, gLocal.exitClipPlane);
+                        // The whole body with its layers (drawLocalBody).
+                        drawLocalBody(proj, view, camera.position, frustum, partialTick,
+                                      player.physics.position, camera.yaw, camera.pitch,
+                                      &gLocal.transform, &gLocal.exitClipPlane);
                     }
                 }
 #endif
@@ -8623,6 +10144,15 @@ static uint16_t     s_lastPresencePort = 0;
                 // Shield-raise predicate feed (BLOCK use animation running).
                 ctx.usingItemBlock = player.usingItem
                     && player.useAnim == Game::ItemUseAnimation::BLOCK;
+                // The item in use, per stack (using_item / use_duration /
+                // crossbow/pull): the using hand's slot and the ticks in.
+                if (player.usingItem) {
+                    ctx.useSlot = player.usingHand == 0
+                        ? Game::Inventory::HotbarToIndex(player.inventory.GetSelectedSlot())
+                        : Game::Inventory::OFFHAND_BEGIN;
+                    ctx.useItemId = player.inventory.GetSlot(ctx.useSlot).itemId;
+                    ctx.useTicks = std::max(0, player.useItemDuration - player.useItemRemaining);
+                }
                 Game::ItemRegistry::SetRenderContext(ctx);
                 // Step the wobble simulation (MC: CompassAngleState ticks at 20 TPS).
                 Game::ItemRegistry::TickAnimated(dt);
@@ -8734,7 +10264,14 @@ static uint16_t     s_lastPresencePort = 0;
             // after it is hidden behind every pane of glass and every pool;
             // the mobs and players above are exactly what must show through.
             { PROFILE_ZONE_N("ChunkPass.Translucent");
-            Render::RenderChunksDeferredTranslucent();
+            // Improved Transparency: the parked pass is captured and drawn
+            // by the OIT stages at the end of the level (MC OIT_TERRAIN).
+            if (!(Render::ImprovedTransparency::Get().Active() &&
+                  Render::CaptureChunksDeferredTranslucentForOit() &&
+                  Render::ImprovedTransparency::Get().Defer(Render::ImprovedTransparency::Feature::Terrain,
+                                                            [] { Render::ReplayChunksTranslucentForOit(); }))) {
+                Render::RenderChunksDeferredTranslucent();
+            }
             if (Render::DebugScreen::FrameProfiler::IsActive()) {
                 if (auto* rs = Render::GetChunkRendererStats()) {
                     Render::DebugScreen::FrameProfiler::AddChildTime("translucentTerrain", rs->translucentPassTimeMs);
@@ -8796,228 +10333,9 @@ static uint16_t     s_lastPresencePort = 0;
                     Client::g_clientTickRate.IsEntityFrozen()
                         ? 1.0f
                         : std::clamp(1.0f - remainingImm / tickSecondsImm, 0.0f, 1.0f);
-                const bool localCrouching = Input::IsKeyDown(Input::Key::LeftShift);
-
-                auto renderLevelView = [&](const Render::ImmersivePortalRenderer::ViewContext& ctx) {
-                    // Sky first, depth off, inside the mask: the far
-                    // dimension's sky from the far camera's rotation.
-                    {
-                        const glm::mat4 skyProjIm =
-                            glm::perspective(glm::radians(ctx.camera.fov), aspect, 0.05f, 2048.0f);
-                        const glm::mat4 viewRotIm = glm::mat4(glm::mat3(ctx.view));
-                        Render::g_skyRenderer.RenderForDimension(
-                            Game::DimensionToRaw(ctx.dimension), skyProjIm, viewRotIm);
-                    }
-                    // Terrain of the bound level. For a level the player is
-                    // not in, this view is its main view: record it so its
-                    // mesh scheduler compiles what the portal reveals.
-                    if (Render::g_chunkRenderer) {
-                        Render::g_chunkRenderer->SetRecordMainView(
-                            ctx.dimension != Client::ClientLevels::ActiveDimension());
-                    }
-                    Render::RenderChunksAll(ctx.camera, ctx.frustum, ctx.projection);
-                    if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetRecordMainView(false);
-
-                    // Entities of the bound level, gated by the same frustum.
-                    itemEntityRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                              ctx.partialTick);
-                    {
-                        // Only under OBEY_PORTAL_DIAG=1, like the other
-                        // [PortalDiag] lines. It used to fire on its own
-                        // whenever a far store held items, which after the
-                        // immersive-portal work is just every session with a
-                        // dropped item in another level.
-                        static const bool kPortalDiag = std::getenv("OBEY_PORTAL_DIAG") != nullptr;
-                        static auto lastItemDiag = std::chrono::steady_clock::now();
-                        const auto nowDiag = std::chrono::steady_clock::now();
-                        if (kPortalDiag && nowDiag - lastItemDiag >= std::chrono::seconds(2)) {
-                            lastItemDiag = nowDiag;
-                            const auto& t = itemEntityRenderer.LastTally();
-                            std::string where;
-                            if (Client::g_itemEntityManager) {
-                                int n = 0;
-                                for (const auto& [id, ce] : Client::g_itemEntityManager->GetEntities()) {
-                                    if (n++ >= 3) break;
-                                    char b[96];
-                                    std::snprintf(b, sizeof(b), " #%d(%.1f,%.1f,%.1f)", id, ce.sim.pos.x, ce.sim.pos.y, ce.sim.pos.z);
-                                    where += b;
-                                }
-                            }
-                            Log::Info("[PortalDiag] items in %s: store=%d drawn=%d cull dist=%d frustum=%d section=%d farCam=(%.1f,%.1f,%.1f)%s",
-                                      std::string(Game::DimensionName(ctx.dimension)).c_str(),
-                                      t.entities, t.drawn, t.cullDistance, t.cullFrustum, t.cullSection,
-                                      ctx.camera.position.x, ctx.camera.position.y, ctx.camera.position.z, where.c_str());
-                        }
-                    }
-                    Render::g_blockCubeEntityRenderer.Render(ctx.projection, ctx.view,
-                                                             ctx.camera.position, ctx.partialTick);
-                    xpOrbRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                         ctx.frustum, ctx.partialTick);
-                    if (Client::g_clientMobManager) {
-                        mobRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                           ctx.frustum, *Client::g_clientMobManager,
-                                           ctx.partialTick);
-                    }
-                    // Entities of the NEAR level that stick through this
-                    // portal (an item lying on the plane, a block mid-fall):
-                    // their far half belongs to this view. They are drawn
-                    // from the outer camera (view · M⁻¹ · M) with the far
-                    // clip plane pulled back into near space, so exactly the
-                    // part behind the surface survives — the mod renders its
-                    // crossing entities the same way. Every renderer here
-                    // honours the clip plane (the mob shader through
-                    // uEntityClipPlane).
-                    if (ctx.through && !ctx.through->IsMirror()) {
-                        const Game::Immersive::Portal& thr = *ctx.through;
-                        // The near level is drawn relative to the near eye's
-                        // own render origin; the view bridges the two render
-                        // spaces in double (RenderOrigin.hpp).
-                        const glm::dmat4 M = thr.TransformMatrix();
-                        const glm::dvec3 nearEyeD = thr.InverseTransformPoint(ctx.camera.position);
-                        const glm::dvec3 nearOrigin = Render::RenderOriginFor(nearEyeD);
-                        const glm::mat4 crossView = Render::FarRenderView(ctx.view, M, ctx.camera.renderOrigin, nearOrigin);
-                        const glm::vec3 nearEye(nearEyeD);
-                        const glm::dvec4 farClip = Render::ChunkRenderer::PortalClipPlaneWorld();
-                        Render::ChunkRenderer::SetPortalClipPlane(glm::transpose(M) * farClip);
-                        // Culling stays in world space.
-                        const Frustum crossFrustum = Frustum::FromMatrix(ctx.projection * ctx.camera.GetWorldViewMatrix() * glm::mat4(M));
-                        // Only what is IN the surface — see EntityCulling::g_crossingFilter.
-                        Render::EntityCulling::g_crossingFilter =
-                            [&thr](const glm::vec3& lo, const glm::vec3& hi) {
-                                return thr.IntersectsBox(glm::dvec3(lo), glm::dvec3(hi), 0.25);
-                            };
-                        Client::ClientLevels::WithLevel(thr.dimension, [&]() {
-                            Render::SetRenderOrigin(nearOrigin);
-                            if (Client::g_remotePlayerManager) {
-                                // The entity plane (the surface plus the mark
-                                // band's margin), as the mobs use: the exact
-                                // plane left the band the mark wiped undrawn.
-                                playerRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
-                                                      *Client::g_remotePlayerManager, ctx.partialTick, nullptr,
-                                                      Render::ChunkRenderer::PortalEntityClipPlane());
-                                g_playerDrawDiag.Add(g_playerDrawDiag.crossers, playerRenderer.LastTally());
-                            }
-                            itemEntityRenderer.Render(ctx.projection, crossView, nearEye, ctx.partialTick);
-                            Render::g_blockCubeEntityRenderer.Render(ctx.projection, crossView, nearEye,
-                                                                     ctx.partialTick);
-                            xpOrbRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
-                                                 ctx.partialTick);
-                            if (Client::g_clientMobManager) {
-                                mobRenderer.Render(ctx.projection, crossView, nearEye, crossFrustum,
-                                                   *Client::g_clientMobManager, ctx.partialTick);
-                            }
-                            ctx.camera.ActivateRenderOrigin();
-                        });
-                        Render::EntityCulling::g_crossingFilter = nullptr;
-                        Render::ChunkRenderer::SetPortalClipPlane(farClip);
-                    }
-                    // Clipped at the surface like the terrain: a player who
-                    // has just arrived stands half behind it, and that half
-                    // — between the surface and the far camera — filled
-                    // the view for a frame.
-                    if (Client::g_remotePlayerManager) {
-                        playerRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                              ctx.frustum, *Client::g_remotePlayerManager,
-                                              ctx.partialTick, nullptr,
-                                              Render::ChunkRenderer::PortalEntityClipPlane());
-                        g_playerDrawDiag.Add(g_playerDrawDiag.farView, playerRenderer.LastTally());
-                    }
-                    // The viewer's own body, when the view shows the level
-                    // they stand in (a portal looking back, or a same-
-                    // dimension portal) — the mod's renderYourselfInPortal.
-                    if (ctx.dimension == Client::ClientLevels::ActiveDimension() &&
-                        ctx.through && ctx.through->Has(Game::Immersive::PortalFlag::RenderPlayer)) {
-                        playerRenderer.RenderSingle(
-                            ctx.projection, ctx.view, player.physics.position,
-                            camera.yaw, camera.yaw, camera.pitch, localCrouching,
-                            static_cast<uint8_t>(player.color),
-                            BodyScaleModel(player.physics.position, player.physics.scale), glm::vec4(0.0f));
-                    }
-                    // Block entities and End portals of the bound level.
-                    if (Render::g_blockEntityRenderDispatcher) {
-                        Render::g_blockEntityRenderDispatcher->RenderAll(
-                            Client::g_clientChunkManager, ctx.projection, ctx.view,
-                            ctx.camera.position, ctx.partialTick);
-                    }
-                    Render::g_endPortalRenderer.Render(
-                        Client::g_clientChunkManager, ctx.projection, ctx.view,
-                        ctx.camera.position, ctx.partialTick);
-                    Render::g_bedRenderer.Render(
-                        Client::g_clientChunkManager, ctx.projection, ctx.view,
-                        ctx.camera.position, ctx.partialTick);
-                    // This view's translucent terrain, after its entities.
-                    Render::RenderChunksDeferredTranslucent();
-                    // The particles that live in this level, billboarded to
-                    // the far camera.
-                    if (!Render::DevSkip("particles")) {
-                        Render::g_mobParticleSystem.Render(ctx.projection, ctx.view,
-                                                           ctx.camera.position, ctx.dimension);
-                    }
-#if ENABLE_PORTAL_GUN
-                    // The gun's rims and sparks that live in this level —
-                    // a pair with one end in the Nether shows that end's
-                    // rim through the nether portal, not only once you are
-                    // standing there. In immersive mode the renderer draws
-                    // rims only, so the scene callback never fires.
-                    // Not the rim (nor the sparks) of the surface this view
-                    // comes out of: that surface is never drawn in its own
-                    // view, and its rim lies on the view's clip plane — the
-                    // other colour's ring around the edge at grazing angles.
-                    const glm::dvec3 viewExit = ctx.through
-                        ? (ctx.through->IsMirror() ? ctx.through->origin : ctx.through->destination)
-                        : glm::dvec3(0.0);
-                    Render::g_portalRenderer.Render(
-                        ctx.projection, ctx.view, ctx.camera, ctx.frustum, aspect, farPlane,
-                        static_cast<int8_t>(Game::DimensionToRaw(ctx.dimension)),
-                        [](const Render::Camera&, const Frustum&, const glm::mat4&) {},
-                        ctx.through ? &viewExit : nullptr);
-                    Render::g_portalParticleSystem.Render(ctx.projection, ctx.view,
-                                                          ctx.camera.position, ctx.dimension,
-                                                          ctx.through ? &viewExit : nullptr);
-#endif
-                    // The block under the crosshair, when the crosshair got
-                    // there through THIS portal: outline and crack overlay
-                    // drawn inside the view, in the far level's space.
-                    if (ctx.through && ctx.through->id == player.lastBlockHitPortalId &&
-                        ctx.dimension == player.lastBlockHitDimension) {
-                        RenderBlockHighlight(player.lastBlockHit, ctx.projection, ctx.view,
-                                             playerController.PickEntity() != 0,
-                                             ctx.camera.position, ctx.camera.fov, width, height);
-                        RenderBlockBreakOverlay(playerController.GetDestroyStage(), playerController.GetBreakingPos(),
-                                                ctx.projection, ctx.view);
-                    }
-                };
-
-                // The far side's entities that stick out of a portal into the
-                // world being drawn (see ImmersivePortalRenderer::Render).
-                auto renderCrossers = [&](const Render::ImmersivePortalRenderer::ViewContext& ctx) {
-                    // Far-space entities: bring the box back to the near side
-                    // (corner-wise, then its AABB) and ask the surface.
-                    const Game::Immersive::Portal* thr = ctx.through;
-                    Render::EntityCulling::g_crossingFilter =
-                        [thr](const glm::vec3& lo, const glm::vec3& hi) {
-                            if (!thr) return true;
-                            glm::dvec3 mn(1e300), mx(-1e300);
-                            for (int i = 0; i < 8; ++i) {
-                                const glm::dvec3 c((i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z);
-                                const glm::dvec3 nearC = thr->InverseTransformPoint(c);
-                                mn = glm::min(mn, nearC);
-                                mx = glm::max(mx, nearC);
-                            }
-                            return thr->IntersectsBox(mn, mx, 0.25);
-                        };
-                    itemEntityRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                              ctx.partialTick);
-                    Render::g_blockCubeEntityRenderer.Render(ctx.projection, ctx.view,
-                                                             ctx.camera.position, ctx.partialTick);
-                    xpOrbRenderer.Render(ctx.projection, ctx.view, ctx.camera.position,
-                                         ctx.frustum, ctx.partialTick);
-                    if (Client::g_clientMobManager) {
-                        mobRenderer.Render(ctx.projection, ctx.view, ctx.camera.position, ctx.frustum,
-                                           *Client::g_clientMobManager, ctx.partialTick);
-                    }
-                    Render::EntityCulling::g_crossingFilter = nullptr;
-                };
+                // renderLevelView / renderCrossers are defined above, beside
+                // the leave capture, which draws its panorama faces' portals
+                // with them too.
                 Render::g_immersivePortalRenderer.Render(proj, view, camera, frustum, aspect,
                                                          effectiveRenderDist, partialTickImm, renderLevelView,
                                                          renderCrossers);
@@ -9030,15 +10348,10 @@ static uint16_t     s_lastPresencePort = 0;
                 // own (longer) warm-up instead. Here, after the portal
                 // pass: the visible-section list it overwrites is not read
                 // again this frame.
-                // Join transition: the title panorama, still turning, over
-                // whatever of the world has arrived so far (depth off — it
-                // covers everything until the hand-over frame).
-                if (joinTransition.active && Render::g_renderBackend) {
-                    const float dtSec = std::clamp(metrics.frameTime / 1000.0f, 0.0f, 0.1f);
-                    Render::g_panoramaRenderer.Render(
-                        width, height, dtSec,
-                        Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f));
-                }
+                // (The join transition's panorama is drawn at the END of the
+                // level — see "Join transition: the title panorama" below —
+                // not here: everything the level draws after this point
+                // would land on top of it.)
                 // The leave's own warm-up feeds the scheduler the same way —
                 // one face a frame, never all six at once: with the list
                 // PINNED and six faces dumped in together, the scheduler
@@ -9057,7 +10370,82 @@ static uint16_t     s_lastPresencePort = 0;
                     const glm::mat4 faceProj = glm::perspective(glm::radians(90.0f), 1.0f,
                                                                 Render::ChunkRenderer::NearPlane(), farPlane);
                     const Frustum faceFrustum = Frustum::FromMatrix(faceProj * faceCam.GetWorldViewMatrix());
-                    Render::g_chunkRenderer->RecordViewForScheduler(faceCam, faceFrustum);
+                    // Seeded at the eye: the face's sections are the ones the
+                    // occlusion flood from the player reaches (the main view's
+                    // cached result — the same section), not everything in
+                    // its 90° frustum. Unseeded, the faces took in every cave
+                    // and underground section in their cones — sections play
+                    // never meshes, because nothing can see them — and the
+                    // warm-up waited on thousands of them (~2 s after the
+                    // player had looked all around, 2026-09-26).
+                    Render::g_chunkRenderer->SetPortalViewSeed(glm::vec3(faceCam.position));
+                    std::vector<uint64_t> pendingKeys;
+                    Render::g_chunkRenderer->RecordViewForScheduler(faceCam, faceFrustum,
+                                                                    prewarmForLeave ? &pendingKeys : nullptr);
+                    Render::g_chunkRenderer->ClearPortalViewSeed();
+                    // The face is in the scheduler's view lists for the next
+                    // pass only. The pass that found nothing to submit sets a
+                    // three-frame idle backoff, and with one face recorded a
+                    // frame most faces landed in skipped frames: they drained
+                    // a few sections per cycle, over ~2 s, with the mesh
+                    // workers idle.
+                    if (Client::g_clientChunkManager) Client::g_clientChunkManager->WakeMeshScheduler();
+                    if (prewarmForLeave) {
+                        const size_t f = static_cast<size_t>(faceIndex);
+                        auto& waitFor = leaveCapture.faceWaitFor[f];
+                        if (!leaveCapture.faceWaitRecorded[f]) {
+                            waitFor.clear();
+                            waitFor.insert(pendingKeys.begin(), pendingKeys.end());
+                            leaveCapture.faceWaitRecorded[f] = true;
+                            leaveCapture.facePending[f] = static_cast<int>(waitFor.size());
+                            // What this face has to wait for, and where it is:
+                            // the facing is the F3 screen's (MC yaw: 0 south,
+                            // 90 west, 180 north, -90 east; pitch + is down), so
+                            // it can be checked against where the player looked.
+                            static constexpr const char* kFaceNames[6] = {
+                                "front", "right", "back", "left", "up", "down" };
+                            Log::Info("Leave capture: face %d (%s) waits for %zu section(s)",
+                                      faceIndex, kFaceNames[f], waitFor.size());
+                            int listed = 0;
+                            for (const uint64_t key : pendingKeys) {
+                                if (++listed > 12) {
+                                    Log::Info("Leave capture:   ... and %zu more", pendingKeys.size() - 12);
+                                    break;
+                                }
+                                // VisibleSectionKey: 27-bit chunk x and z, then the section index.
+                                auto signExtend27 = [](uint64_t v) {
+                                    const int32_t x = static_cast<int32_t>(v & 0x7FFFFFFu);
+                                    return (x & 0x4000000) ? x - 0x8000000 : x;
+                                };
+                                const Game::Math::ChunkPos cp{ signExtend27(key >> 37), signExtend27(key >> 10) };
+                                const int sy = static_cast<int>(key & 0x3FFu);
+                                const int minY = Config::MinY + sy * 16;
+                                const double dx = cp.x * 16 + 8 - faceCam.position.x;
+                                const double dy = minY + 8 - faceCam.position.y;
+                                const double dz = cp.z * 16 + 8 - faceCam.position.z;
+                                const double horiz = std::sqrt(dx * dx + dz * dz);
+                                double mcYaw = std::atan2(dz, dx) * 180.0 / M_PI - 90.0;
+                                while (mcYaw > 180.0) mcYaw -= 360.0;
+                                while (mcYaw <= -180.0) mcYaw += 360.0;
+                                const double mcPitch = -std::atan2(dy, horiz) * 180.0 / M_PI;
+                                const Client::SectionInfo* si = Client::g_clientChunkManager
+                                    ? Client::g_clientChunkManager->GetSectionInfo(cp, sy) : nullptr;
+                                const char* state = !si ? "?"
+                                    : si->state == Client::SectionState::MESHING ? "already being meshed"
+                                    : si->builtOnce ? "re-mesh (its blocks or light changed since it was meshed)"
+                                    : "never meshed";
+                                Log::Info("Leave capture:   chunk (%d, %d) y %d..%d, %.1f chunks away, "
+                                          "facing yaw %.0f pitch %.0f - %s",
+                                          cp.x, cp.z, minY, minY + 15, horiz / 16.0, mcYaw, mcPitch, state);
+                            }
+                        } else {
+                            // Still waiting = still pending AND in the first set;
+                            // one that has meshed (or left the view) is done.
+                            int still = 0;
+                            for (const uint64_t k : pendingKeys) still += waitFor.count(k) ? 1 : 0;
+                            leaveCapture.facePending[f] = still;
+                        }
+                    }
                 }
                 // OBEY_PORTAL_DIAG=1: one line per frame for each remote
                 // player within a few blocks of a surface — where they are
@@ -9111,6 +10499,10 @@ static uint16_t     s_lastPresencePort = 0;
                 const float partialTickPortal =
                     std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
 
+                // Culled against the main view's section list: the immersive
+                // pass above has replaced the current one with its far views'.
+                const auto outerMainOcclusion = Render::g_portalRenderer.SetOcclusion(
+                    Render::PortalRenderer::Occlusion::MainView);
                 Render::g_portalRenderer.Render(
                     proj, view, camera, frustum, aspect, farPlane,
                     static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())),
@@ -9147,6 +10539,8 @@ static uint16_t     s_lastPresencePort = 0;
                                                virtFrust,
                                                *Client::g_clientMobManager,
                                                partialTickPortal);
+                            lightningBoltRenderer.Render(obliqueProj, virtView, virtCam.position,
+                                                         *Client::g_clientMobManager);
                         }
 
                         // Remote players (no nametags / bubbles — those are
@@ -9170,6 +10564,11 @@ static uint16_t     s_lastPresencePort = 0;
                                                   virtCam.position, virtFrust,
                                                   *Client::g_remotePlayerManager,
                                                   partialTickPortal, &stRemote);
+                            // The same layers as the main view (shoulder
+                            // parrots, elytra, riptide, /morph bodies) —
+                            // they were missing through gun portals.
+                            drawRemotePlayerLayers(obliqueProj, virtView, virtCam.position,
+                                                   virtFrust, partialTickPortal, &stRemote);
                         }
 
                         // Local player as a stick figure — invisible in the
@@ -9187,8 +10586,6 @@ static uint16_t     s_lastPresencePort = 0;
                         // on the dst side — both visible simultaneously,
                         // breaking the "body bisects at the portal plane"
                         // iconic Portal trick.
-                        const bool isCrouching =
-                            Input::IsKeyDown(Input::Key::LeftShift);
                         auto& portalsST = Client::GetClientPortalManager();
                         auto gLocalST = portalsST.GetStraddlingGhost(
                             player.physics.position, 1.8f);
@@ -9212,14 +10609,15 @@ static uint16_t     s_lastPresencePort = 0;
                         // again places the local body at a junk screen
                         // position for one frame; the next frame's
                         // render produces the correct view.
+                        // The whole body with its layers (drawLocalBody) —
+                        // the shoulder parrots, elytra, a /morph body.
+                        const glm::dmat4 identityST(1.0);
                         if (!justTeleportedThisFrame) {
-                            playerRenderer.RenderSingle(
-                                obliqueProj, virtView,
-                                player.physics.position,
-                                camera.yaw, camera.yaw, camera.pitch,
-                                isCrouching,
-                                static_cast<uint8_t>(player.color),
-                                glm::mat4(1.0f), entryClip);
+                            drawLocalBody(obliqueProj, virtView, virtCam.position, virtFrust,
+                                          partialTickPortal, player.physics.position,
+                                          camera.yaw, camera.pitch,
+                                          straddlesEntry ? &identityST : nullptr,
+                                          straddlesEntry ? &entryClip : nullptr);
                         }
 
                         // Ghost render for through-portal visibility:
@@ -9234,13 +10632,10 @@ static uint16_t     s_lastPresencePort = 0;
                         // render above. Also skip on the teleport
                         // frame (same reason as the body render).
                         if (straddlesEntry && !justTeleportedThisFrame) {
-                            playerRenderer.RenderSingle(
-                                obliqueProj, virtView,
-                                player.physics.position,
-                                camera.yaw, camera.yaw, camera.pitch,
-                                isCrouching,
-                                static_cast<uint8_t>(player.color),
-                                gLocalST.transform, gLocalST.exitClipPlane);
+                            drawLocalBody(obliqueProj, virtView, virtCam.position, virtFrust,
+                                          partialTickPortal, player.physics.position,
+                                          camera.yaw, camera.pitch,
+                                          &gLocalST.transform, &gLocalST.exitClipPlane);
                         }
                         if (Client::g_remotePlayerManager) {
                             for (const auto& [id, rp] :
@@ -9282,12 +10677,30 @@ static uint16_t     s_lastPresencePort = 0;
                                     rp.isCrouching,
                                     static_cast<uint8_t>(rp.color),
                                     gR.transform, gR.exitClipPlane);
+                                // Every layer, split the same way.
+                                const std::unordered_set<uint32_t> onlyR{id};
+                                drawRemotePlayerLayers(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                       partialTickPortal, nullptr, &onlyR,
+                                                       &identityST, &gR.entryClipPlane);
+                                drawRemotePlayerLayers(obliqueProj, virtView, virtCam.position, virtFrust,
+                                                       partialTickPortal, nullptr, &onlyR,
+                                                       &gR.transform, &gR.exitClipPlane);
                             }
                         }
                         // The recursion's translucent terrain, after its
                         // entities, under the same stencil and projection.
                         Render::RenderChunksDeferredTranslucent();
+                        // Then its rain and snow, from the virtual camera,
+                        // under the recursion's clip plane (a gun portal pair
+                        // lives in one level: the active one's weather).
+                        if (!Render::DevSkip("weather")) {
+                            Render::g_weatherEffectRenderer.Render(
+                                obliqueProj, virtView, virtCam.position, partialTickPortal,
+                                Client::ClientLevels::ActiveDimension(),
+                                Render::ChunkRenderer::PortalClipPlane());
+                        }
                     });
+                Render::g_portalRenderer.SetOcclusion(outerMainOcclusion);
             }
             // Tick + render the portal particle system. Tick uses dt
             // (frame time) so spawn rate is FPS-independent; render
@@ -9295,7 +10708,16 @@ static uint16_t     s_lastPresencePort = 0;
             // see-through view (additive blending).
             { PROFILE_ZONE_N("PortalParticles");
             DEBUG_PIE_ZONE("renderTranslucentFeatures");
-            Render::g_portalParticleSystem.Update(dt, Client::GetClientPortalManager());
+            // Held still while the leave capture draws its faces: the
+            // sparks on every tile are the same sparks (LeaveCapture::
+            // portalClock). Nothing of the frame's own view is seen then.
+            if (!(leaveCapture.active && !leaveCapture.warming && leaveCapture.portalClock >= 0.0)) {
+                // A paused world's sparks, motes and fizzles hang where they
+                // are (a zero step), like the world particles below.
+                Render::g_portalParticleSystem.Update(
+                    Client::g_clientTickRate.IsWorldPaused() ? 0.0f : dt, Client::GetClientPortalManager());
+            }
+            // (Additive sparks: drawn here even with Improved Transparency.)
             Render::g_portalParticleSystem.Render(proj, view, camera.position,
                                                   Client::ClientLevels::ActiveDimension());
             }
@@ -9306,15 +10728,34 @@ static uint16_t     s_lastPresencePort = 0;
             // this tick (ClientLevelBridge), step the 20 Hz simulation, and
             // draw. After the world pass (depth-tested, no depth write),
             // before the clouds — MC's particle pass sits the same way.
-            { PROFILE_ZONE_N("Particles.Update");
+            // MC Minecraft.tick runs particleEngine.tick() only `if
+            // (!this.pause)`: a paused world's particles hang where they
+            // are (the pause menu, and the join transition's hold, whose
+            // hand-over frame has to match the panorama). Spawns are still
+            // drained; a zero step just does not advance them.
+            // Held entirely (no step, no new spawns drained) while a leave
+            // capture runs: every panorama tile, drawn over several frames,
+            // shows the same particles in the same places; the queued spawns
+            // wait in their levels.
+            if (!leaveCapture.active) {
+            PROFILE_ZONE_N("Particles.Update");
             DEBUG_PIE_ZONE("particles");
-            Render::g_mobParticleSystem.Update(dt, camera.position);
+            Render::g_mobParticleSystem.Update(Client::g_clientTickRate.IsWorldPaused() ? 0.0f : dt,
+                                               camera.position);
             }
             if (!Render::DevSkip("particles")) {
                 PROFILE_ZONE_N("Particles.Render");
                 DEBUG_PIE_ZONE("renderTranslucentFeatures");
-                Render::g_mobParticleSystem.Render(proj, view, camera.position,
-                                                   Client::ClientLevels::ActiveDimension());
+                // Improved Transparency: drawn by the OIT stages at the end
+                // of the level (MC OIT_PARTICLE) instead of here.
+                const Game::DimensionId particleDim = Client::ClientLevels::ActiveDimension();
+                if (!Render::ImprovedTransparency::Get().Defer(
+                        Render::ImprovedTransparency::Feature::Particles,
+                        [proj, view, pos = camera.position, particleDim] {
+                            Render::g_mobParticleSystem.Render(proj, view, pos, particleDim);
+                        })) {
+                    Render::g_mobParticleSystem.Render(proj, view, camera.position, particleDim);
+                }
             }
 
             // Clouds — MC's cloud pass runs after terrain and particles
@@ -9333,19 +10774,85 @@ static uint16_t     s_lastPresencePort = 0;
                     std::chrono::duration<float>(nextClientTick - nowForPartial).count();
                 const float tickSeconds =
                     std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
-                const float cloudPartialTick =
-                    std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                // Held with the world's clock while paused (see envPartialTick).
+                const float cloudPartialTick = Client::g_clientTickRate.IsWorldPaused()
+                    ? 1.0f
+                    : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
                 // A chosen sky pack's own clouds.png (usually blank: the
                 // clouds are painted into its sky). Empty = vanilla.
                 Render::g_cloudRenderer.SetCloudTexture(Render::g_skyRenderer.PackCloudTexture());
-                Render::g_cloudRenderer.Render(proj, view, camera.position,
-                                               effectiveRenderDist, cloudPartialTick);
+                // Improved Transparency: drawn by the OIT stages at the end
+                // of the level (MC CloudRenderer.renderOit) instead of here.
+                if (!Render::ImprovedTransparency::Get().Defer(
+                        Render::ImprovedTransparency::Feature::Clouds,
+                        [proj, view, pos = camera.position, effectiveRenderDist, cloudPartialTick] {
+                            Render::g_cloudRenderer.Render(proj, view, pos, effectiveRenderDist, cloudPartialTick);
+                        })) {
+                    Render::g_cloudRenderer.Render(proj, view, camera.position,
+                                                   effectiveRenderDist, cloudPartialTick);
+                }
             }
+            // Rain and snow — MC WeatherEffectRenderer, drawn right after the
+            // clouds (LevelRenderer.executeClassicTransparency: clouds, then
+            // weather): translucent columns, depth-tested against the world,
+            // no depth write. Nothing unless the active dimension can have
+            // weather and the rain level is above 0 (the renderer checks).
+            if (!Render::DevSkip("weather")) {
+                PROFILE_ZONE_N("WeatherPass");
+                DEBUG_PIE_ZONE("Weather");
+                const auto nowForPartial = std::chrono::steady_clock::now();
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
+                const float tickSeconds =
+                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                // Held with the world's clock while paused (see envPartialTick):
+                // the streaks scroll by game time + partial, and game time
+                // stops with the pause (menu, or the join transition's hold);
+                // a cycling partial would jiggle them within one tick. Their
+                // splash/drip particles (ParticleTicks::TickWeather) already
+                // stop with the other animate ticks.
+                const float weatherPartialTick = Client::g_clientTickRate.IsWorldPaused()
+                    ? 1.0f
+                    : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                // Improved Transparency: drawn by the OIT stages at the end
+                // of the level (MC OIT_WEATHER) instead of here.
+                if (!Render::ImprovedTransparency::Get().Defer(
+                        Render::ImprovedTransparency::Feature::Weather,
+                        [proj, view, pos = camera.position, weatherPartialTick] {
+                            Render::g_weatherEffectRenderer.Render(proj, view, pos, weatherPartialTick);
+                        })) {
+                    Render::g_weatherEffectRenderer.Render(proj, view, camera.position, weatherPartialTick);
+                }
+            }
+            // Improved Transparency: MC LevelRenderer.executeOit — every
+            // deferred feature through the depth-bounds, transmittance and
+            // accumulate stages, then the composite over the frame. Before
+            // the hand, where MC's main pass ends. No-op when off.
+            Render::ImprovedTransparency::Get().Resolve(proj);
             // A shader pack's composite and final passes, over the level
             // just drawn; the backbuffer holds the result for the hand and
             // the HUD to draw over.
             if (Render::ShaderPipeline::Get().Active()) {
                 Render::ShaderPipeline::Get().EndScene(shaderFrameInput());
+            }
+            // Join transition: the title panorama, still turning (then easing
+            // to the leave look), over the WHOLE level — depth off, opaque,
+            // the full frame — until the hand-over frame. It is drawn LAST in
+            // the level for that reason: it used to sit after the immersive
+            // portal pass, and everything drawn after that point (gun portal
+            // views, portal sparks, particles, clouds, weather, Improved
+            // Transparency's resolve) landed on top of the picture from the
+            // live camera, visibly sliding against the panorama's baked-in
+            // copies as it eased. There is no crossfade: the hand-over is a
+            // cut at a matched view, so nothing of the live world may show
+            // before it. The hand, post effects, HUD and crosshair that follow
+            // are all off while joining (leavingWorld / s_hideHudForLeave).
+            if (joinTransition.active && Render::g_renderBackend) {
+                PROFILE_ZONE_N("JoinPanorama");
+                const float dtSec = std::clamp(metrics.frameTime / 1000.0f, 0.0f, 0.1f);
+                Render::g_panoramaRenderer.Render(
+                    width, height, dtSec,
+                    Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f));
             }
             // "level" ends before the viewmodels: MC renderLevel is level, then hand.
             Render::DebugScreen::FrameProfiler::Pop();   // level
@@ -9366,7 +10873,7 @@ static uint16_t     s_lastPresencePort = 0;
             // Still after the particle system, so the rim sparks composite
             // behind the gun. Hidden unless the gun is actually held (and
             // never in third person).
-            if (camera.IsFirstPerson() && !freeCamActive && !leavingWorld &&
+            if (camera.IsFirstPerson() && !freeCamActive && !leavingWorld && !player.IsSpectator() &&
                 player.inventory.GetSelectedItem() == Game::Items::PortalGun) {
                 const float fbAspect = (height > 0)
                     ? static_cast<float>(width) / static_cast<float>(height)
@@ -9395,7 +10902,11 @@ static uint16_t     s_lastPresencePort = 0;
             // No viewmodel while the free camera is detached — the hands
             // belong to the frozen player, whose body is drawn in the world
             // instead (the forced third-person render above).
+            // MC GameRenderer.renderLevel: no hand at all in spectator
+            // (`getPlayerMode() != GameType.SPECTATOR`) — its own or, while
+            // spectating, the watched player's.
             const bool drawHeldItem = camera.IsFirstPerson() && !freeCamActive &&
+                !player.IsSpectator() &&
                 !leavingWorld &&   // the panorama has no hand; neither does the way into it
                 (renderMainHand ||
                  !player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).IsEmpty());
@@ -9439,6 +10950,10 @@ static uint16_t     s_lastPresencePort = 0;
                         player.useItemRemaining,
                         player.useItemDuration);
                 }
+                // The riptide's spin pose and a charging spear's hit recoil.
+                Render::g_heldItemRenderer.SetAvatarState(
+                    !controlHud && player.IsAutoSpinAttack(),
+                    controlHud ? 0.0f : player.GetTicksSinceKineticHitFeedback(partialTickHeld));
                 // Live view angles, MC convention — and they MUST be the same
                 // ones Tick() was given. The sway is a lag term,
                 // `(viewXRot - xBob) * 0.1` (ItemInHandRenderer), where xBob is
@@ -9459,6 +10974,12 @@ static uint16_t     s_lastPresencePort = 0;
             // is why it waits until nothing in the world needs depth.
             if (!Render::DevSkip("outline")) {
                 Render::EntityOutline::Get().Composite(width, height);
+            }
+            // MC GameRenderer.render: applyPostEffects right after the outline
+            // blit, before the GUI — the spectated creeper / spider / enderman
+            // view (Render::PostEffects). Not into the leave panorama.
+            if (!leavingWorld && !Render::DevSkip("post")) {
+                Render::PostEffects::Get().Apply(width, height, Render::ShaderPipeline::Get().Active());
             }
             // Push the server-synced stat triple into the HUD before drawing
             // (health/hunger bars read these; SetHealthS2C writes the player).
@@ -9505,6 +11026,14 @@ static uint16_t     s_lastPresencePort = 0;
                 g_hudRenderer.SetArmor(armor);
             }
             g_hudRenderer.SetExperience(player.xpProgress, player.xpLevel);
+            {
+                // The ridden mount's hearts and the jump bar (Client::Vehicles).
+                int vehicleHearts = 0, vehicleHealth = 0;
+                bool jumpable = false, jumpCooldown = false;
+                float jumpScale = 0.0f;
+                Client::Vehicles::GetHudState(player, vehicleHearts, vehicleHealth, jumpable, jumpScale, jumpCooldown);
+                g_hudRenderer.SetVehicleHud(vehicleHearts, vehicleHealth, jumpable, jumpScale, jumpCooldown);
+            }
             // MC Gui gates the survival stat block on gameMode.canHurtPlayer()
             // (Gui.java:524). The extra !gameModeKnown term covers a window MC
             // doesn't have: our render loop spins from the moment the socket
@@ -9515,12 +11044,34 @@ static uint16_t     s_lastPresencePort = 0;
                                              ? Client::Control::Get().view.statsHidden
                                              : (!player.gameModeKnown ||
                                                 player.IsCreative() || player.IsSpectator()));
+            // Spectator HUD — MC Hud: the spectator menu in place of the
+            // item hotbar, and the crosshair only over something a spectator
+            // can use (canRenderCrosshairForSpectator: a MenuProvider entity
+            // — none exist here — or a block with a menu or a portal).
+            bool spectatorCrosshair = false;
+            if (player.IsSpectator()) {
+                if (playerController.PickEntity() == 0 && player.lastBlockHit && Client::g_clientBlockAccess) {
+                    const glm::ivec3 p = player.lastBlockHit->blockPos;
+                    spectatorCrosshair = Game::ShowAsInteractableInSpectatorMode(
+                        Client::g_clientBlockAccess->GetBlockState(p.x, p.y, p.z));
+                }
+            } else if (Render::GetSpectatorGui().IsMenuActive()) {
+                Render::GetSpectatorGui().Reset();   // left spectator with the menu open
+            }
+            g_hudRenderer.SetSpectator(player.IsSpectator() && !controlHud, spectatorCrosshair);
+            // MC Hud.extractTabList: held key.playerlist shows the tab list,
+            // except alone in a single-player world (`!isLocalServer() ||
+            // players > 1`; no scoreboard objective exists here).
+            Render::GetPlayerTabOverlay().SetVisible(
+                Input::Binds::PlayerList && Input::IsDown(*Input::Binds::PlayerList) &&
+                (isRemoteClient || Client::PlayerInfoMap().size() > 1));
             // MC LevelExtractor: the water overlay while the eyes are in
             // water, at the lightmap brightness of the eye's light. With no
             // light engine the sky's day/night brightness stands in.
             // First person only, as MC's `getCameraType().isFirstPerson()`.
+            // ScreenEffectRenderer.submit: `isFirstPerson && !isSpectator`.
             g_hudRenderer.SetWaterOverlay((controlHud ? Client::Control::Get().view.eyeInWater
-                                                       : player.physics.isEyeInWater) &&
+                                                       : (player.physics.isEyeInWater && !player.IsSpectator())) &&
                                               Platform::g_gameSettings.GetUnderwaterEffects() &&
                                               camera.perspective == Render::Perspective::FirstPerson,
                                           Render::EnvironmentState::Get().Frame().skyBrightness,
@@ -9549,7 +11100,10 @@ static uint16_t     s_lastPresencePort = 0;
                         s_debugContext.refreshRate = mode ? mode->refreshRate : 0;
                     }
                     s_debugContext.vsync = Platform::g_gameSettings.GetVSync();
-                    s_debugContext.maxFps = Platform::g_gameSettings.GetMaxFPS();
+                    // MC DebugEntryFps "T:" is the tracker's limit; the FPS
+                    // chart's line is the option (FpsDebugChart).
+                    s_debugContext.maxFps = GameFramerateLimit(window);
+                    s_debugContext.maxFpsOption = Platform::g_gameSettings.GetMaxFPS();
                     s_debugContext.effectiveRenderDistance = effectiveRenderDist;
                     s_debugContext.simulationDistance = Platform::g_gameSettings.GetSimulationDistance();
                     s_debugContext.entitiesRendered = Render::EntityCulling::g_renderedThisFrame;
@@ -9567,6 +11121,7 @@ static uint16_t     s_lastPresencePort = 0;
                 !leavingWorld &&            // bare view on the way out
                 !freeCamActive &&           // detached camera cannot interact
                 camera.IsFirstPerson() &&   // MC: crosshair only in first person
+                (!player.IsSpectator() || spectatorCrosshair) &&   // MC Hud.extractCrosshair
                 // MC Gui.renderCrosshair: the 3D axes replace the 2D crosshair
                 // while the debug screen shows them.
                 !(Render::DebugScreen::Overlay().ShowDebugScreen() &&
@@ -10029,7 +11584,10 @@ static uint16_t     s_lastPresencePort = 0;
             }
             Render::DevSkipFrameMark();
 
-            // Max Framerate option (Video Settings). 260 = Unlimited. Applied
+            // Max Framerate option (Video Settings), through MC's
+            // FramerateLimitTracker: minimized 10, AFK (no input for 60 s)
+            // min(limit, 30), long AFK (600 s) 10 — the AFK rows only with
+            // "Reduce FPS When: AFK". 260 = Unlimited. Applied
             // whether or not VSync is on, as MC does (Minecraft.renderFrame:
             // 1342 limits whenever framerateLimit < 260): with VSync at 60 Hz
             // and a 120 cap the swap already ate the budget and this never
@@ -10043,18 +11601,9 @@ static uint16_t     s_lastPresencePort = 0;
             // used to be disabled under VSync).
             {
                 DEBUG_PIE_ZONE("frameLimiter");
-                const int maxFps = Platform::g_gameSettings.GetMaxFPS();
-                if (maxFps > 0 && maxFps < 260) {
-                    static auto s_nextFrameDeadline = std::chrono::steady_clock::now();
-                    const auto frameBudget = std::chrono::nanoseconds(1'000'000'000LL / maxFps);
-                    const auto nowClock = std::chrono::steady_clock::now();
-                    s_nextFrameDeadline += frameBudget;
-                    if (s_nextFrameDeadline < nowClock) {
-                        s_nextFrameDeadline = nowClock; // overran the budget: no sleep
-                    } else {
-                        std::this_thread::sleep_until(s_nextFrameDeadline);
-                    }
-                }
+                static auto s_nextFrameDeadline = std::chrono::steady_clock::now();
+                Client::FramerateLimitTracker::LimitDisplayFps(GameFramerateLimit(window),
+                                                               s_nextFrameDeadline);
             }
 
             // Restore the logical eye camera after the third-person render
@@ -10186,8 +11735,42 @@ static uint16_t     s_lastPresencePort = 0;
         // MC updateLevelInEngines(null): the world's sounds stop with it, and
         // nothing may look up this session's player or mobs any more.
         Client::SoundHost::OnSessionEnd();
+        // The riding state (and the local player it pointed at) goes too.
+        Client::Vehicles::Reset();
         // The cities this session knew (AurelithS2C) belong to its server.
         Client::AurelithState::Clear();
+
+        // 0. The host's view of the mobs, to the server before it saves: the
+        //    last-world panorama (captured by now) shows the CLIENT's mobs —
+        //    body yaw computed here, head, pitch, limb swing, animation age —
+        //    and the rejoined world has to be that picture, not the server's
+        //    slightly different copy (IntegratedServer::SubmitClientMobViews).
+        //    Before the disconnect, so it lands ahead of any unload.
+        if (!isRemoteClient && Server::g_integratedServer && Client::g_clientMobManager) {
+            PROFILE_ZONE_N("Exit.MobViews");
+            std::vector<Server::IntegratedServer::ClientMobView> views;
+            const Game::DimensionId dim = Client::ClientLevels::ActiveDimension();
+            views.reserve(Client::g_clientMobManager->MobList().size());
+            for (const Client::ClientMob* entry : Client::g_clientMobManager->MobList()) {
+                if (!entry || !entry->mob) continue;
+                const Game::Mob& m = *entry->mob;
+                Server::IntegratedServer::ClientMobView v;
+                v.id           = m.GetId();
+                v.dimension    = dim;
+                v.yRot         = m.yRot;
+                v.xRot         = m.xRot;
+                v.yHeadRot     = m.yHeadRot;
+                v.yBodyRot     = m.yBodyRot;
+                v.walkPosition = m.walkAnimation.position;
+                v.walkSpeed    = m.walkAnimation.speed;
+                v.walkSpeedOld = m.walkAnimation.speedOld;
+                v.walkScale    = m.walkAnimation.positionScale;
+                v.age          = m.tickCount;
+                v.phaseCount   = m.GetRenderPhase(v.phase);   // beg tilt, shake, lie-down …
+                views.push_back(v);
+            }
+            Server::g_integratedServer->SubmitClientMobViews(std::move(views));
+        }
 
         // Every step of the teardown carries a zone: the "leave to title"
         // hitch is this sequence, and without them it was one blank gap.
@@ -10288,8 +11871,10 @@ static uint16_t     s_lastPresencePort = 0;
         xpOrbRenderer.Shutdown();
         lightningBoltRenderer.Shutdown();
         Render::SpawnerRenderer::SetMobRenderer(nullptr);
+        Render::VaultRenderer::SetItemRenderer(nullptr);
         mobRenderer.Shutdown();
         Render::EntityOutline::Get().Shutdown();
+        Render::PostEffects::Get().Shutdown();
         }
         // The inventory screens are singletons but their menu is bound to this
         // session's ClientPlayer, which is about to go out of scope.
@@ -10342,6 +11927,7 @@ static uint16_t     s_lastPresencePort = 0;
         Render::SkyboxThumbnails::Get().Shutdown();   // preview cards, before the backend goes
         Render::g_skyRenderer.Shutdown();
         Render::g_cloudRenderer.Shutdown();
+        Render::g_weatherEffectRenderer.Shutdown();
         Render::g_atlasBuilder.reset();
         Render::g_itemAtlasBuilder.reset();
 

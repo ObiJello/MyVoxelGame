@@ -37,6 +37,9 @@ namespace Game {
         // MC AbstractHurtingProjectile.shouldBurn — fireballs render (and
         // are) on fire; skulls and wind charges are not.
         virtual bool ShouldBurn() const { return true; }
+        // MC getTrailParticle: what createParticleTrail drops half a block
+        // above the projectile every tick (SMOKE by default). False = none.
+        virtual bool GetTrailParticle(ParticleOptions& out) const;
 
         double m_accelerationPower = 0.1;   // MC INITAL_ACCELERATION_POWER
     };
@@ -121,13 +124,15 @@ namespace Game {
 
     protected:
         bool ShouldBurn() const override { return false; }
+        bool GetTrailParticle(ParticleOptions& out) const override;
         void OnHit(const HitResult& hit) override;
     };
 
     // MC AbstractWindCharge / WindCharge / BreezeWindCharge — zero gravity,
-    // zero drag, straight line; on impact a knockback-only burst (no block
-    // damage per project policy — creeper precedent — and none of MC's
-    // trigger-tag block interactions either).
+    // zero drag, straight line; on impact a knockback-only burst
+    // (ConfigureWindChargeExplosion: TRIGGER interaction — buttons, levers,
+    // wooden doors / trapdoors / fence gates, candles, bells — no block
+    // damage, no entity damage, the gust particles).
     class AbstractWindCharge : public HurtingProjectile {
     public:
         AbstractWindCharge(EntityTypeId type, EntityLevel* level)
@@ -141,9 +146,9 @@ namespace Game {
         float GetInertia() const override { return 1.0f; }
         float GetLiquidInertia() const override { return GetInertia(); }
         bool  ShouldBurn() const override { return false; }
+        bool  GetTrailParticle(ParticleOptions&) const override { return false; }
 
-        // MC canHitEntity: never another wind charge. (The end-crystal
-        // exclusion waits for end crystals.)
+        // MC canHitEntity: never another wind charge, never an end crystal.
         bool CanHitEntity(const Entity& entity) const override;
 
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
@@ -153,29 +158,37 @@ namespace Game {
         virtual void Explode(const glm::dvec3& at) = 0;
     };
 
-    // The player-thrown wind charge: radius 1.2, knockback ×1.22. (The
-    // 5-tick no-deflect window is deflection machinery this port does not
-    // model — nothing can deflect projectiles yet.)
+    // The player-thrown wind charge (WindChargeItem, dispensers): radius
+    // 1.2, knockback ×1.22. (The 5-tick no-deflect window is deflection
+    // machinery this port does not model — nothing deflects projectiles yet.)
     class WindCharge : public AbstractWindCharge {
     public:
         explicit WindCharge(EntityLevel* level)
             : AbstractWindCharge(EntityTypeId::WindCharge, level) {}
 
+        // MC WindCharge.RADIUS and the WindCharge.EXPLOSION_DAMAGE_CALCULATOR's
+        // Optional.of(1.22F).
+        static constexpr float kRadius = 1.2f;
+        static constexpr float kKnockbackMultiplier = 1.22f;
+        // MC WindChargeItem.PROJECTILE_SHOOT_POWER.
+        static constexpr float kShootPower = 1.5f;
+
     protected:
         void Explode(const glm::dvec3& at) override {
-            // MC's wind charge: an explosion with entity damage OFF and a 1.22
-            // knockback multiplier — it launches, it does not hurt. Radius 1.2
-            // and TRIGGER interaction, so it flips levers and pops buttons
-            // without breaking anything.
+            // MC WindCharge.explode: level.explode(this, null,
+            // EXPLOSION_DAMAGE_CALCULATOR, pos, 1.2, false, TRIGGER,
+            // GUST_EMITTER_SMALL, GUST_EMITTER_LARGE, [], WIND_CHARGE_BURST)
+            // — it launches, it does not hurt. The blast's SOURCE is this
+            // charge, which is what ServerPlayer.onExplosionHit reads to
+            // forgive the launched player's fall.
             if (!m_level) return;
             ExplosionParams p;
+            ConfigureWindChargeExplosion(p);
             p.center              = at;
-            p.radius              = 1.2f;
+            p.radius              = kRadius;
             p.source              = this;
             p.attributedTo        = GetOwner();
-            p.interaction         = ExplosionInteraction::Trigger;
-            p.damageEntities      = false;
-            p.knockbackMultiplier = 1.22f;
+            p.knockbackMultiplier = kKnockbackMultiplier;
             p.explosionSound      = SoundEvents::WIND_CHARGE_BURST;
             // Qualified: the virtual we are inside shadows the free function.
             Game::Explode(*m_level, p);
@@ -196,12 +209,11 @@ namespace Game {
             // AbstractWindCharge damage calculator has none).
             if (!m_level) return;
             ExplosionParams p;
+            ConfigureWindChargeExplosion(p);
             p.center              = at;
             p.radius              = 3.0f;
             p.source              = this;
             p.attributedTo        = GetOwner();
-            p.interaction         = ExplosionInteraction::Trigger;
-            p.damageEntities      = false;
             p.knockbackMultiplier = 1.0f;
             p.explosionSound      = SoundEvents::BREEZE_WIND_CHARGE_BURST;
             // Qualified: the virtual we are inside shadows the free function.

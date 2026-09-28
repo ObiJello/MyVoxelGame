@@ -44,8 +44,9 @@ namespace Game {
         // NOT start the particle burst — see ArmAgeLockParticles.
         void SetAgeLocked(bool locked) override { m_ageLocked = locked; }
         // MC AgeableMob.canAgeUp — the one gate on growth, and what feeding
-        // tests before it spends the food.
-        bool CanAgeUp() const { return IsBaby() && !m_ageLocked; }
+        // tests before it spends the food. Virtual as MC's is: the skeleton
+        // and zombie horse never grow up.
+        virtual bool CanAgeUp() const { return IsBaby() && !m_ageLocked; }
         // MC AgeableMob.canUseGoldenDandelion, verbatim: the item, a baby,
         // no burst still playing (the 40-tick cooldown between toggles),
         // and a type outside EntityTypeTags.CANNOT_BE_AGE_LOCKED.

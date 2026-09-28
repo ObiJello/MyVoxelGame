@@ -16,6 +16,7 @@
 #include "MultifaceBlock.hpp"
 #include "FenceGate.hpp"
 #include "AercloudBlock.hpp"
+#include "SnowLayerBlock.hpp"
 #include "entity/BlockEntityTypes.hpp"
 #include "common/world/lighting/BlockLightProperties.hpp"
 #include "../../core/Log.hpp"
@@ -723,6 +724,12 @@ namespace Game {
         // InitBlockStates for the same reason growth is — every hook reads
         // `level` — and before the random-tick table below is published.
         BlockRegistry_RegisterFluids(blockDefinitions);
+
+        // Snow (SnowLayerBlock.hpp): the layer's survival, block-light melt
+        // and the `snowy` flag of the grass under it all read properties, so
+        // after InitBlockStates; the layer random-ticks, so before the
+        // random-tick table below is published.
+        BlockRegistry_RegisterSnow(blockDefinitions);
 
         // The Choir Hall puzzle blocks (ChoirPuzzle.hpp): the chime's strike
         // and dimming read its `lit` property, so after InitBlockStates.
@@ -1579,7 +1586,7 @@ namespace Game {
             const IBlockAccess& world, const glm::ivec3& pos, BlockState state) {
         const BlockID id = state.Block();
         BlockShape shape = GetBlockShape(state);
-        if (id != BlockID::Chest && id != BlockID::TrappedChest) return shape;
+        if (!IsChestBlock(id)) return shape;   // chest, trapped chest, copper chests
 
         const auto pair = FindChestPartner(world, pos);
         if (!pair) return shape;
@@ -1643,7 +1650,7 @@ namespace Game {
         // single box — so the extension applies to box 0 and nothing else in
         // the set can be affected. Routed through GetBlockShapeAt rather than
         // repeating its arithmetic so the two cannot drift.
-        if (id == BlockID::Chest || id == BlockID::TrappedChest) {
+        if (IsChestBlock(id)) {
             set.boxes[0] = GetBlockShapeAt(world, pos, state);
             set.count    = 1;
         }
@@ -1749,6 +1756,10 @@ namespace Game {
             return nullptr;
         }
         if (HasMultiBoxShape(id)) return nullptr;
+        // Snow layers collide one layer LOWER than they look (SnowLayerBlock
+        // .getCollisionShape = SHAPES[layers - 1]). A single layer's shape is
+        // empty, which only the set can say, so it returns null here too.
+        if (id == BlockID::SnowLayer) return SnowLayer::CollisionBox(state);
         // The Aether's aerclouds: the entity-less collision shape, not the
         // model's cube (see GetBlockCollisionShapeSet).
         if (Aercloud::IsAercloud(id)) {
@@ -1783,6 +1794,18 @@ namespace Game {
             BlockShapeSet set = MultiBoxShape(state, /*collision=*/true);
             cache.sets[slot] = set;
             cache.computed[slot].store(true, std::memory_order_release);
+            return set;
+        }
+        // MC SnowLayerBlock.getCollisionShape: SHAPES[layers - 1] — a pile
+        // is walked on 2 px below its top, and a single layer (Shapes.empty())
+        // not at all. The outline, raycast and support shape stay the
+        // model's SHAPES[layers].
+        if (id == BlockID::SnowLayer) {
+            BlockShapeSet set;
+            if (const BlockShape* box = SnowLayer::CollisionBox(state)) {
+                set.boxes[0] = *box;
+                set.count    = 1;
+            }
             return set;
         }
         // The Aether's aerclouds (AercloudBlock.getCollisionShape) draw and
@@ -1902,7 +1925,9 @@ namespace Game {
             return shapes[slot];
         }
 
-        if (id == BlockID::Chest || id == BlockID::TrappedChest || id == BlockID::EnderChest) {
+        // ChestBlock.SHAPE — every ChestBlock (the copper chests too) and
+        // the ender chest: Block.column(14, 0, 14).
+        if (IsChestBlock(id) || id == BlockID::EnderChest) {
             static const BlockShape kChestShape =
                 BlockShape{ glm::vec3(1.0f / 16.0f, 0.0f, 1.0f / 16.0f),
                             glm::vec3(15.0f / 16.0f, 14.0f / 16.0f, 15.0f / 16.0f) };

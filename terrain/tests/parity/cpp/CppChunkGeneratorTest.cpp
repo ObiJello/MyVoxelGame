@@ -482,6 +482,7 @@ void printUsage(const char* programName) {
     std::cerr << "  --save-all         With --storage: save every proto chunk before exiting\n";
     std::cerr << "  --bench-save-copy  Time SerializableChunkData::copyOf / write on every proto chunk\n";
     std::cerr << "  --request-limit <n> Request only the first n chunks of the raster order\n";
+    std::cerr << "  --dedicated-lane   Run the worldgen lane on two threads of its own, as the game does\n";
     std::cerr << "  --center <x> <z>   Center chunk position (default: 0 0)\n";
     std::cerr << "  --output <file>    Output file path\n";
     std::cerr << "  --feature-log <f>  Log each feature placement to file\n";
@@ -803,6 +804,7 @@ int main(int argc, char* argv[]) {
     bool saveAll = false;
     bool benchSaveCopy = false;
     int requestLimit = -1;
+    bool dedicatedLane = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -875,6 +877,8 @@ int main(int argc, char* argv[]) {
             saveAll = true;
         } else if (arg == "--request-limit" && i + 1 < argc) {
             requestLimit = std::atoi(argv[++i]);
+        } else if (arg == "--dedicated-lane") {
+            dedicatedLane = true;
         } else if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             return 0;
@@ -1059,6 +1063,11 @@ int main(int argc, char* argv[]) {
         // ========== Step 3: Create executors ==========
         std::cout << "Step 3: Creating executors..." << std::endl;
         BackgroundExecutor backgroundExecutor;
+        // --dedicated-lane: the dispatcher mailbox + worldgen lane on their
+        // own two threads (the game's SharedLaneExecutor); output must not
+        // depend on which threads the lane runs on.
+        std::optional<BackgroundExecutor> laneExecutor;
+        if (dedicatedLane) laneExecutor.emplace(2);
         MainThreadExecutor mainThreadExecutor;
         std::cout << "  Background threads: " << std::thread::hardware_concurrency() << std::endl;
 
@@ -1070,7 +1079,7 @@ int main(int argc, char* argv[]) {
             SEED,
             backgroundExecutor.getExecutor(),
             mainThreadExecutor.getExecutor(),
-            nullptr,   // lane executor: share the background pool, as the game does
+            laneExecutor ? laneExecutor->getExecutor() : nullptr,   // null: the lane shares the background pool
             worldGen.registry,
             worldGen.airBlock,
             worldGen.stoneBlock,

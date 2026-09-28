@@ -115,7 +115,12 @@ namespace Game {
             s_nameToBlockId["minecraft:grass"] = BlockID::Grass;
             s_nameToBlockId["minecraft:cave_air"] = BlockID::Air;
             s_nameToBlockId["minecraft:void_air"] = BlockID::Air;
-            s_nameToBlockId["minecraft:snow"] = BlockID::Snow;
+            // No alias for "minecraft:snow": BlockDefs.inc already maps it to
+            // BlockID::SnowLayer (MC Blocks.SNOW, the 1-8 `layers` block).
+            // An old alias here rerouted it to snow_block, which is why every
+            // generated snow layer (SnowAndFreezeFeature, snowy flat presets,
+            // structures) and every imported one came out as a full block,
+            // and why `layers` never survived a load.
 
             // ── Specific block-state overrides ──────────────────────────────
             // MC's `NbtBlockState.toString()` shape is `minecraft:<name>{p1:v1,p2:v2}`,

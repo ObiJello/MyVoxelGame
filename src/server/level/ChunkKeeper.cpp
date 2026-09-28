@@ -29,6 +29,7 @@ namespace Server {
         constexpr const char* kIndexFile  = "obeycraft_redstone_chunks.dat";  // ours
         constexpr const char* kForcedId   = "forceload";
         constexpr const char* kRedstoneId = "redstone";
+        constexpr const char* kCommandId  = "command";
 
         // MC ChunkPos.asLong.
         int64_t PackPos(Game::Math::ChunkPos p) {
@@ -150,7 +151,22 @@ namespace Server {
         };
         for (const ChunkPos& c : m_forced) halo(c);
         if (m_redstoneEnabled) for (const ChunkPos& c : m_redstone) halo(c);
+        for (const auto& [c, count] : m_commandHolds) { (void)count; m_kept.insert(c); }
         m_keptDirty = false;
+    }
+
+    // ── command holds ────────────────────────────────────────────────────────
+
+    void ChunkKeeper::HoldForCommand(ChunkPos pos) {
+        if (m_commandHolds[pos]++ == 0) AddTicket(pos, kCommandId);
+    }
+
+    void ChunkKeeper::ReleaseCommandHold(ChunkPos pos) {
+        auto it = m_commandHolds.find(pos);
+        if (it == m_commandHolds.end()) return;
+        if (--it->second > 0) return;
+        m_commandHolds.erase(it);
+        RemoveTicket(pos, kCommandId);
     }
 
     // ── /forceload ───────────────────────────────────────────────────────────

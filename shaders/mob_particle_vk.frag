@@ -4,6 +4,9 @@
 // draw's light — the sky dim, or 1 for the fullbright explosion and portal
 // motes), then the terrain's fog.
 #version 450
+#ifdef OIT
+#extension GL_GOOGLE_include_directive : require
+#endif
 
 layout(set = 0, binding = 0) uniform sampler2D uSprite;
 
@@ -41,7 +44,17 @@ layout (std140, set = 1, binding = 0) uniform Common {
 layout(location = 0) in vec2 vUV;
 layout(location = 1) in vec4 vColor;
 layout(location = 2) in vec3 vRenderPos;
+#ifndef OIT_ALPHA_ONLY
 layout(location = 0) out vec4 FragColor;
+#endif
+
+// Improved Transparency (MC 26.3 OIT, Render::ImprovedTransparency): the
+// OIT variants are this file compiled with -DOIT and a stage define
+// (<name>_oit_{db,tr,ac}_vk.frag.spv, CMake). The engine's own compile never
+// sees any of it.
+#ifdef OIT
+#include "oit_lib.glsl"
+#endif
 
 float linearFog(float d, float s, float e) {
     if (d <= s) return 0.0;
@@ -53,6 +66,10 @@ void main() {
     vec4 s = texture(uSprite, vUV);
     vec4 c = s * vColor;
     if (c.a < 0.1) discard;
+#ifdef OIT_ALPHA_ONLY
+    // MC particle.fsh: the depth-bounds / transmittance stages read alpha only.
+    executeAlphaOnlyPhase(gl_FragCoord.z, c.a);
+#else
     c.rgb *= pc.uScalars.xyz;
     vec3 fogDelta = vRenderPos - U.uCamPosBright_.xyz;
     float sph = length(fogDelta);
@@ -61,4 +78,10 @@ void main() {
                          linearFog(cyl, U.uFogEnv_.z, U.uFogEnv_.w));
     c.rgb = mix(c.rgb, U.uFogColor_.rgb, fogValue * U.uFogColor_.a);
     FragColor = c;
+#ifdef OIT_ACCUMULATE
+    // MC calculateFinalColor: premultiplied, weighted by the transmittance
+    // in front of it (the fog is already in the colour).
+    FragColor = sampleColorForAccumulation(FragColor);
+#endif
+#endif
 }

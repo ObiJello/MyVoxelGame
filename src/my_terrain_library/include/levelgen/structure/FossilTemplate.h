@@ -15,7 +15,7 @@
 #include <vector>
 #include <fstream>
 #include <sstream>
-#include <zlib.h>
+#include "util/Deflate.h"
 
 #include "core/BlockPos.h"
 
@@ -74,24 +74,10 @@ inline std::vector<uint8_t> gunzipFile(const std::string& path) {
     ss << in.rdbuf();
     std::string raw = ss.str();
 
-    std::vector<uint8_t> out;
-    z_stream zs{};
-    if (inflateInit2(&zs, 15 + 32) != Z_OK)  // gzip or zlib
-        throw std::runtime_error("inflateInit failed");
-    zs.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(raw.data()));
-    zs.avail_in = static_cast<uInt>(raw.size());
-    std::vector<uint8_t> buf(1 << 16);
-    int rc;
-    do {
-        zs.next_out = buf.data();
-        zs.avail_out = static_cast<uInt>(buf.size());
-        rc = inflate(&zs, Z_NO_FLUSH);
-        if (rc != Z_OK && rc != Z_STREAM_END)
-            { inflateEnd(&zs); throw std::runtime_error("inflate failed: " + path); }
-        out.insert(out.end(), buf.data(), buf.data() + (buf.size() - zs.avail_out));
-    } while (rc != Z_STREAM_END);
-    inflateEnd(&zs);
-    return out;
+    std::vector<char> inflated;
+    if (!::minecraft::util::deflate::decompress(raw.data(), raw.size(), inflated))  // gzip or zlib
+        throw std::runtime_error("inflate failed: " + path);
+    return std::vector<uint8_t>(inflated.begin(), inflated.end());
 }
 
 // Generic skip/parse of an NBT payload by tag id, capturing what we need.

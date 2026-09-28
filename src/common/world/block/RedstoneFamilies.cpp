@@ -131,7 +131,7 @@ namespace Game {
             case BlockID::ActivatorRail:     case BlockID::TripwireHook:     case BlockID::Tripwire:
             case BlockID::DaylightDetector:  case BlockID::Target:           case BlockID::Tnt:
             case BlockID::Lectern:           case BlockID::CopperBulb:       case BlockID::Crafter:
-            case BlockID::SculkSensor:       case BlockID::LightningRod:
+            case BlockID::SculkSensor:       case BlockID::LightningRod:     case BlockID::CalibratedSculkSensor:
                 return true;
             default:
                 break;

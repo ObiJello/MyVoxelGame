@@ -167,6 +167,11 @@ namespace Render {
 
         bool GetDrawCommand(const MegaBufferSectionKey& key, DrawCommand& outCmd) const;
 
+        // A section's first vertex in its slab — what its section-relative
+        // uint16 indices are rebased by. For callers that build their own
+        // absolute indices over the slab VBO (per-view translucent sorts).
+        bool GetSectionVertexOffset(const MegaBufferSectionKey& key, size_t& outVertexOffset) const;
+
         // DEBUG ONLY (F8 CullDump): raw region bookkeeping + slab buffer
         // handles, so the dump can read the actual GPU-side index/vertex data
         // for a section and prove whether the bytes are alive.

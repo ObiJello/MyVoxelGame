@@ -166,9 +166,17 @@ namespace Server {
             uint8_t lastPose = 0xFF;
             uint8_t lastAnimState = 0xFF;
             uint32_t lastCarriedBlock = 0xFFFFFFFFu;   // Mob::GetCarriedBlockRaw
+            // The syncable attributes' signature last looked at
+            // (UpdateAttributesS2C, Mob::SyncsAttributesToClient mobs only).
+            uint64_t lastAttributesSignature = 0;
+            bool     attributesSignatureKnown = false;
             // Sentinel distinct from every real value (-1 means "no vehicle"),
             // so the first data send always carries the riding link.
             int32_t lastVehicleId = INT32_MIN;
+            // The lead holder id last linked to the watchers
+            // (SetEntityLinkS2C); Game::Leash::kNoHolder (-1) = none, which
+            // is also what a watcher assumes before any link.
+            int32_t lastLeashHolderId = -1;
             float   lastScale = -1.0f;
             // The last synched effect visuals (MC DATA_EFFECT_PARTICLES and the
             // invisible / glowing flags). Starts empty, which is also the
@@ -178,6 +186,10 @@ namespace Server {
             // Unnamed is also what AddEntity carried for an unnamed mob.
             std::optional<std::string> lastCustomName;
             bool    lastCustomNameVisible = false;
+            // A mount's passenger order last sent in SetPassengersS2C
+            // (players by player id) — boats and carts keep their own on
+            // VehicleEntity.
+            std::vector<int32_t> lastPassengerWire;
 
             std::unordered_set<uint32_t> watchers;
         };

@@ -179,8 +179,37 @@ namespace Server {
     } // namespace
 
     void PortalCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("portal", PortalCommand::Execute);
-        dispatcher.RegisterCommand("scale",  PortalCommand::ExecuteScale);
+        namespace Cmd = Game::Cmd;
+        using Cmd::Arg;
+        const auto size = [](const char* name) {
+            return Cmd::Argument(name, Arg::Float).Suggests({"1", "2", "3", "4"});
+        };
+        const auto number = [](const char* name, std::vector<std::string> examples) {
+            return Cmd::Argument(name, Arg::Float).Suggests(std::move(examples));
+        };
+        const Cmd::Node destination = size("width").Then(size("height")
+            .Then(Cmd::Argument("dimension", Arg::Dimension)
+                .Then(Cmd::Argument("pos", Arg::Vec3).Executes())));
+        dispatcher.RegisterCommand("portal", PortalCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literals({"make", "make_biway", "make_full"}, false, &destination))
+                .Then(Cmd::Literal("make_loop").Then(size("width").Then(size("height")
+                    .Then(number("dx", {"0", "-8", "8"}).Then(number("dy", {"0", "-8", "8"})
+                        .Then(number("dz", {"0", "-8", "8"}).Executes()
+                            .Then(number("turn", {"0", "90", "180", "-90"}).Executes())))))))
+                .Then(Cmd::Literal("make_mirror").Then(size("width").Then(size("height").Executes())))
+                .Then(Cmd::Literal("set_rotation").Then(number("ax", {"0", "1"}).Then(number("ay", {"0", "1"})
+                    .Then(number("az", {"0", "1"}).Then(number("degrees", {"45", "90", "180"}).Executes())))))
+                .Then(Cmd::Literal("set_scale").Then(number("scale", {"0.5", "2", "4"}).Executes()))
+                .Then(Cmd::Literals({"list", "info", "remove_all"}))
+                .Then(Cmd::Literal("remove").Executes()
+                    .Then(Cmd::Argument("id", Arg::Integer).Executes())));
+        // /scale [<scale>] [<player>|<radius>]
+        dispatcher.RegisterCommand("scale", PortalCommand::ExecuteScale,
+            Cmd::Root().Executes()
+                .Then(number("scale", {"0.5", "1", "2", "4"}).Executes()
+                    .Then(Cmd::Argument("target", Arg::PlayerName)
+                        .Suggests({"@s", "8", "16", "32"}).Executes())));
     }
 
     void PortalCommand::ExecuteScale(const CommandSourceStack& source,

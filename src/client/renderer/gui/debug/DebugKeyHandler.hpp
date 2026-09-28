@@ -10,6 +10,7 @@
 //   F3+F4        game-mode switcher      F3+F6 debug options   F3+P  pause on lost focus
 //   F3+S         dump dynamic textures   F3+T  reload packs    F3+L  start/stop profiling
 //   F3+V         version info            F3+1/2/3/4 charts     F3+X  improved transparency
+//   F3+M         fill in the held map / again: cancel (not vanilla: /mapfill, cheats only)
 //   F3+Esc       pause without the pause menu
 //
 // Every key that fired a chord is cancelled as a gameplay binding for that
@@ -69,7 +70,10 @@ namespace Render::DebugScreen {
 
         // The player's current game mode byte, so F3+N / F3+F4 know what
         // "previous" is (MC MultiPlayerGameMode.previousPlayerMode).
-        void NotifyGameMode(int mode);
+        // `serverPrevious` is the server's own record (the abilities packet's
+        // previous mode, -1 = none) when there is one — it survives a rejoin,
+        // where the locally tracked change does not.
+        void NotifyGameMode(int mode, int serverPrevious = -2);
         int  PreviousGameMode() const { return m_previousGameMode; }
 
         bool IsDebugModifierDown() const { return m_modifierDown; }

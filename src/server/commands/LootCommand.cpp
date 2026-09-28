@@ -26,7 +26,14 @@ namespace Server {
     } // namespace
 
     void LootCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("loot", LootCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC LootCommand, its one target/source pair here:
+        // give <players> loot <loot_table>.
+        dispatcher.RegisterCommand("loot", LootCommand::Execute,
+            Cmd::Root().Then(Cmd::Literal("give")
+                .Then(Cmd::Argument("players", Cmd::Arg::Players)
+                    .Then(Cmd::Literal("loot")
+                        .Then(Cmd::Argument("loot_table", Cmd::Arg::LootTable).Executes())))));
     }
 
     void LootCommand::Execute(const CommandSourceStack& source,
@@ -55,7 +62,12 @@ namespace Server {
         static Game::JavaRandom s_random(static_cast<int64_t>(
             std::chrono::steady_clock::now().time_since_epoch().count()));
         std::vector<Game::ItemStack> items;
-        if (!Game::ChestLoot::GetRandomItems(table, s_random, 0.0f, items)) {
+        // LootParams ORIGIN = source.getPosition(), in the source's level —
+        // what an exploration_map in the table searches from.
+        Game::ChestLoot::LootLevelContext lootLevel;
+        lootLevel.dimensionId = Game::DimensionToRaw(source.dimension);
+        lootLevel.origin = source.position;
+        if (!Game::ChestLoot::GetRandomItems(table, s_random, 0.0f, items, &lootLevel)) {
             connection.SendChatMessage("Unknown loot table: " + table, 1);
             return;
         }

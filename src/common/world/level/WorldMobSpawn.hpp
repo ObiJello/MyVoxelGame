@@ -10,6 +10,7 @@
 
 #include "common/world/level/DimensionId.hpp"
 #include "common/entity/EntityType.hpp"
+#include "common/entity/SpawnReason.hpp"
 
 #include <glm/glm.hpp>
 #include <functional>
@@ -35,10 +36,19 @@ namespace Game {
     class Mob;
     // `configure` runs on the new mob after finalizeSpawn and before it joins
     // the level — MC MobBucketItem.spawn's loadFromBucketTag slot.
+    // `reason` is the EntitySpawnReason finalizeSpawn sees (SPAWN_ITEM_USE
+    // for an egg, BUCKET for a mob bucket).
     bool SpawnMobFromItem(EntityTypeId type, const glm::ivec3& spawnPos,
                           bool tryMoveDown, bool movedUp, DimensionId dimension,
                           int portalCooldownTicks = 0,
-                          const std::function<void(Mob&)>& configure = {});
+                          const std::function<void(Mob&)>& configure = {},
+                          SpawnReason reason = SpawnReason::SpawnItemUse);
+
+    // MC ServerLevel.anyPlayerCloseEnoughForSpawning(pos) — a non-spectator
+    // player of the dimension within 128 blocks (horizontally) of the
+    // centre of pos's chunk (ChunkMap.playerIsCloseEnoughForSpawning). The
+    // nether portal's zombified-piglin spawn asks it. False with no server.
+    bool AnyPlayerCloseEnoughForSpawning(DimensionId dimension, const glm::ivec3& pos);
 
     struct ItemStack;
 
@@ -73,5 +83,11 @@ namespace Game {
     // player, -20.0F, 0.5F, 1.0F). A lingering_potion stack makes it the
     // lingering kind. Same bridge shape and return contract as the pearl.
     bool ThrowPotion(int dimensionId, IUsePlayer& player, const ItemStack& stack);
+
+    // MC WindChargeItem.use's server half: a WindCharge owned by the player,
+    // at (x, eyeY, z) — the eye height itself, not the throwables' eye - 0.1
+    // — then Projectile.spawnProjectileFromRotation(…, 0.0F, 1.5F, 1.0F).
+    // Same bridge shape and return contract as the pearl.
+    bool ThrowWindCharge(int dimensionId, IUsePlayer& player);
 
 } // namespace Game

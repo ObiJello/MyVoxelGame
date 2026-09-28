@@ -1,5 +1,6 @@
 // File: src/server/level/LevelEntityStore.cpp
 #include "server/level/LevelEntityStore.hpp"
+#include "server/level/NamedEntityIndex.hpp"
 
 #include "server/level/ServerLevel.hpp"
 #include "server/entity/ExperienceOrbManager.hpp"
@@ -499,8 +500,11 @@ namespace Server {
 
             // MC StructureTemplate.createEntityIgnoreException /
             // EntityType.create: an id this build cannot construct is dropped
-            // quietly (a TF gazebo's text_display, an item frame), the same as
-            // a failed create in Java.
+            // quietly (a TF gazebo's text_display), the same as a failed
+            // create in Java. Non-mob entities the pipeline does build —
+            // the mineshaft's chest minecarts, the end ship's elytra item
+            // frame, template armor stands — arrive through it like mobs
+            // and skip finalizeSpawn below.
             Game::EntityTypeId type{};
             if (Game::Anvil::ClassifyEntity(*tag, type) != Game::Anvil::EntityKind::Mob) {
                 ++skipped;
@@ -683,12 +687,15 @@ namespace Server {
             if (m_onDisk.erase(pos) > 0) {
                 Io().Store(pos, {});   // clear, on the I/O worker
             }
+            // The named-entity index follows what the file now holds.
+            NamedEntities::NoteChunkSaved(m_level.Dimension(), pos, {});
             return true;
         }
 
         // Compression and the region write happen on the I/O worker.
         Io().Store(pos, std::move(nbt));
         m_onDisk.insert(pos);
+        NamedEntities::NoteChunkSaved(m_level.Dimension(), pos, contents.mobs);
         return true;
     }
 

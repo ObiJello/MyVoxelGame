@@ -27,6 +27,12 @@ namespace Server {
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
+
+        // MC TimeArgument.parse with its minimum (TimeArgument.time(min)) —
+        // shared with /weather's duration (min 1). False with `error` set to
+        // MC's message when the value is refused.
+        static bool ParseTimeArgumentTicks(const std::string& raw, int minimum,
+                                           int& ticks, std::string& error);
     };
 
 } // namespace Server

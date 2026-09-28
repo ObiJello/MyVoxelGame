@@ -47,7 +47,10 @@ namespace Client {
 
         // Main thread.
         void GetCompleteBuffer(const std::string& path, BufferCallback callback);
-        void GetStream(const std::string& path, bool looping, StreamCallback callback);
+        // `startSeconds` > 0 opens the stream that far in (a jukebox song
+        // joined part-way through; Global jukebox range).
+        void GetStream(const std::string& path, bool looping, StreamCallback callback,
+                       double startSeconds = 0.0);
         void Preload(const std::vector<std::string>& paths);
 
         // Main thread, with the sound executor idle (MC destroy path): drop

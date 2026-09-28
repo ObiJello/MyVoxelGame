@@ -98,6 +98,7 @@ namespace Server {
         }
         m_status  = std::make_unique<ChunkStatusManager>();
         m_items   = std::make_unique<ItemEntityManager>();
+        m_items->SetDimension(m_config.dimension);
         m_orbs    = std::make_unique<ExperienceOrbManager>();
 
         // The bridge is built before the manager because the manager holds a
@@ -240,14 +241,9 @@ namespace Server {
     // category split, which is why the Nether's 32 matters: with 63 the
     // spawner treats the whole lava sea as "above sea level".
     int ServerLevel::SeaLevel() const {
-        switch (m_config.dimension) {
-            case Game::DimensionId::Nether:    return 32;
-            case Game::DimensionId::End:       return 0;
-            case Game::DimensionId::Hush:      return 50;   // MyTerrainGenerator's hush settings
-            case Game::DimensionId::TwilightForest: return 0;    // twilight_noise_gen.json sea_level
-            case Game::DimensionId::Aether:    return -64;  // skylands.json sea_level (no sea)
-            case Game::DimensionId::Overworld: return 63;
-        }
+        // One table for the whole engine (DimensionId.hpp), which the
+        // precipitation tick in common code reads too.
+        return Game::DimensionSeaLevel(m_config.dimension);
     }
 
     bool ServerLevel::HasWork(const PlayerSessionManager& sessions) const {

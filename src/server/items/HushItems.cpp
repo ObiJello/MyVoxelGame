@@ -583,6 +583,7 @@ namespace Game::HushItems {
         const int count = EnchantmentHelper::ProcessProjectileCount(bridge, bow, *view, 1);
         const ItemStack projectileCopy = projectile;
         std::vector<ItemStack> drawn;
+        std::vector<bool> intangible;
         for (int i = 0; i < count; ++i) {
             const bool forceInfinite = i > 0;
             const ItemStack& source = i == 0 ? projectile : projectileCopy;
@@ -602,6 +603,7 @@ namespace Game::HushItems {
                 }
             }
             drawn.push_back(std::move(used));
+            intangible.push_back(ammoToUse == 0);
         }
         if (drawn.empty()) return;
 
@@ -633,6 +635,13 @@ namespace Game::HushItems {
             // copied onto the arrow; a full draw is a crit.
             if (ammo.itemId == Items::TippedArrow) arrow->SetPotionFromPickupStack(ammo);
             arrow->SetFiredFromWeapon(bow);
+            // The pickup: the drawn arrow, ALLOWED (a player owner) —
+            // CREATIVE_ONLY when it was an INTANGIBLE_PROJECTILE (useAmmo
+            // spent nothing: infinite materials, Infinity, Multishot's
+            // extras).
+            arrow->SetPickupItemStack(ammo);
+            arrow->SetPickup(intangible[static_cast<size_t>(i)] ? Arrow::Pickup::CreativeOnly
+                                                                : Arrow::Pickup::Allowed);
             if (power == 1.0f) arrow->SetCritArrow(true);
             arrow->position = glm::dvec3(pos.x, pos.y + player->getEyeHeight() - 0.1, pos.z);
             // BowItem.shootProjectile: shootFromRotation(player, xRot, yRot +

@@ -22,7 +22,9 @@ namespace Server {
     } // namespace
 
     void InvisibleCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("invisible", InvisibleCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("invisible", InvisibleCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Literals({"on", "off"})));
     }
 
     void InvisibleCommand::Execute(const CommandSourceStack& /*source*/,

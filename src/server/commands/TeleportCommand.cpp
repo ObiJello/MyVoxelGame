@@ -30,8 +30,26 @@
 namespace Server {
 
     void TeleportCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("tp", TeleportCommand::Execute);
-        dispatcher.RegisterCommand("teleport", TeleportCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        using Cmd::Arg;
+        // MC TeleportCommand's tree.
+        const Cmd::Node location = Cmd::Argument("location", Arg::Vec3).Executes()
+            .Then(Cmd::Argument("rotation", Arg::Rotation).Executes())
+            .Then(Cmd::Literal("facing")
+                .Then(Cmd::Argument("facingLocation", Arg::Vec3).Executes())
+                .Then(Cmd::Literal("entity").Then(Cmd::Argument("facingEntity", Arg::Entity).Executes()
+                    .Then(Cmd::Literals({"eyes", "feet"})))));
+        // Player-name branches before the coordinate ones: completion lists
+        // branches in this order, so Tab after "/tp " or "/tp Alice " lands
+        // on a player name rather than "~".
+        const Cmd::Node tree = Cmd::Root()
+            .Then(Cmd::Argument("destination", Arg::Entity).Executes())
+            .Then(Cmd::Argument("location", Arg::Vec3).Executes())
+            .Then(Cmd::Argument("targets", Arg::Entities)
+                .Then(Cmd::Argument("destination", Arg::Entity).Executes())
+                .Then(location));
+        dispatcher.RegisterCommand("tp", TeleportCommand::Execute, tree);
+        dispatcher.RegisterCommand("teleport", TeleportCommand::Execute, tree);
     }
 
     namespace {

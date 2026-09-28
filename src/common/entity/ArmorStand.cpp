@@ -1,9 +1,11 @@
 // File: src/common/entity/ArmorStand.cpp
 #include "common/entity/ArmorStand.hpp"
+#include "common/particle/ParticleOptions.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -90,8 +92,18 @@ namespace Game {
     void ArmorStand::SetItemSlot(EquipmentSlot slot, const ItemStack& stack) {
         const int i = SlotIndex(slot);
         if (i < 0) return;
+        const ItemStack previous = m_equipment[static_cast<size_t>(i)];
         m_equipment[static_cast<size_t>(i)] = stack;
         MarkDataDirty();
+        // MC setItemSlot → onEquipItem: server side, not a spectator, not the
+        // first tick, and only for a different item (isSameItemSameComponents
+        // by item id here) — gameEvent(EQUIP when the new stack is
+        // equippable, else UNEQUIP).
+        if (m_level && !m_level->IsClientSide() && tickCount > 0 &&
+            (previous.IsEmpty() ? Items::Air : previous.itemId) != (stack.IsEmpty() ? Items::Air : stack.itemId)) {
+            const bool equippable = !stack.IsEmpty() && stack.get(DataComponents::EQUIPPABLE);
+            GameEvent(equippable ? GameEventId::Equip : GameEventId::Unequip);
+        }
     }
 
     bool ArmorStand::CanUseSlot(EquipmentSlot slot) const {
@@ -196,10 +208,10 @@ namespace Game {
     }
 
     void ArmorStand::Kill(Entity* attributedTo) {
-        // MC kill(level, attributedTo): remove as KILLED; the ENTITY_DIE game
-        // event has no listener here.
-        (void)attributedTo;
+        // MC kill(level, attributedTo): remove as KILLED, then
+        // gameEvent(ENTITY_DIE) sourced from whoever broke it (else itself).
         Remove(RemovalReason::Killed);
+        GameEvent(GameEventId::EntityDie, attributedTo ? attributedTo : this);
     }
 
     void ArmorStand::PlayBrokenSound() const {
@@ -209,9 +221,13 @@ namespace Game {
     }
 
     void ArmorStand::ShowBreakingParticles() const {
-        // MC: ten BLOCK particles of oak planks around the body. No block
-        // particle kind exists client-side (see the header); the sound and
-        // the drop are the visible half.
+        // MC: ten BLOCK particles of oak planks around the body (y + 2/3 h),
+        // spread w/4, h/4, w/4 at speed 0.05.
+        if (!m_level) return;
+        const double w = static_cast<double>(GetBbWidth()), h = static_cast<double>(GetBbHeight());
+        m_level->SendParticles(ParticleOptions::Block(BlockStates::Default(BlockID::OakPlanks)), position.x,
+                               position.y + h * 0.6666666666666666, position.z, 10, w / 4.0, h / 4.0, w / 4.0,
+                               0.05);
     }
 
     void ArmorStand::CauseDamage(MobDamageSource source, Entity* attacker, float dmg) {
@@ -223,6 +239,7 @@ namespace Game {
         } else {
             SetHealth(health);
             (void)source;
+            GameEvent(GameEventId::EntityDamage, attacker);
         }
     }
 
@@ -273,7 +290,8 @@ namespace Game {
         }
         if (IsInvulnerable() || IsInvisible() || IsMarker()) return false;
 
-        if (source == MobDamageSource::Explosion) {
+        // #is_explosion: explosion, player_explosion and fireworks.
+        if (source == MobDamageSource::Explosion || source == MobDamageSource::Fireworks) {
             BrokenByAnything(attacker);
             Kill(attacker);
             return false;
@@ -290,6 +308,7 @@ namespace Game {
 
         const bool allowIncrementalBreaking =
             source == MobDamageSource::PlayerAttack || source == MobDamageSource::MobAttack ||
+            source == MobDamageSource::MaceSmash || source == MobDamageSource::Spear ||
             source == MobDamageSource::Projectile;
         const bool shouldKill = source == MobDamageSource::Projectile;
         if (!allowIncrementalBreaking && !shouldKill) return false;
@@ -307,6 +326,7 @@ namespace Game {
         const int64_t time = m_level->GetGameTime();
         if (time - m_lastHit > static_cast<int64_t>(kWobbleTime) && !shouldKill) {
             m_level->BroadcastEntityEvent(*this, kEventHit);
+            GameEvent(GameEventId::EntityDamage, attacker);
             m_lastHit = time;
         } else {
             BrokenByPlayer(attacker);

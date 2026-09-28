@@ -85,22 +85,31 @@ namespace Game {
         Panda* m_panda;
     };
 
-    // MC Panda.PandaSitGoal — sit down to eat what the panda holds or spots
-    // on the ground. Every trigger is a mob-held item or an ItemEntity query
-    // (canPickUpAndEat), and this port has no mob item pickup, so MC's own
-    // canUse never opens. (The worried thunderstorm sit is Panda::Tick's, and
-    // the FED-bamboo sit is Panda::MobInteract's TryToSit — both real; only
-    // this goal's hold-and-chew loop is inert until the item layer lands.)
+    // MC Panda.PandaSitGoal — sit down to chew what the panda holds, or
+    // walk (1.2) to bamboo / cake lying within 8 blocks (spotted within 6)
+    // for Mob's looting to pick up. Off the cooldown, adult, dry, free to
+    // act, not unhappy. Continues until the water or a 1-in-600 (lazy
+    // pandas: never) and a 1-in-2000 roll; on stop the held food is dropped
+    // and the goal cools for 10..59 s (lazy) or 10..159 s.
     class PandaSitGoal : public Goal {
     public:
         explicit PandaSitGoal(Panda* panda) : m_panda(panda) {
             SetFlags(static_cast<uint8_t>(GoalFlag::Move));
         }
-        bool CanUse() override { return false; }
+        bool CanUse() override;
+        bool CanContinueToUse() override;
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
         const char* Name() const override { return "PandaSitGoal"; }
 
     private:
+        // The first pickup-ready #panda_eats_from_ground item entity within
+        // the panda's box inflated by `range`.
+        bool FindFood(double range, glm::dvec3& out) const;
+
         Panda* m_panda;
+        int    m_cooldown = 0;
     };
 
     // MC Panda.PandaLieOnBackGoal — lazy pandas flop onto their backs.

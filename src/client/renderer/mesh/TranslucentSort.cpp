@@ -9,13 +9,13 @@ namespace Render::TranslucentSort {
     namespace {
         // MC SectionPos.blockToSectionCoord — arithmetic shift so negatives
         // floor rather than truncate toward zero.
-        inline int BlockToSection(float v) {
+        inline int BlockToSection(double v) {
             return static_cast<int>(std::floor(v)) >> 4;
         }
     }
 
-    PointOfView MakePointOfView(const glm::vec3& cameraPos, const glm::ivec3& sectionOrigin) {
-        auto axis = [](float camera, int originBlock) -> int8_t {
+    PointOfView MakePointOfView(const glm::dvec3& cameraPos, const glm::ivec3& sectionOrigin) {
+        auto axis = [](double camera, int originBlock) -> int8_t {
             const int rel = BlockToSection(camera) - (originBlock >> 4);
             return static_cast<int8_t>(std::clamp(rel, -1, 1));
         };

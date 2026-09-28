@@ -5,6 +5,7 @@
 // TICKER, CLIENT_GEYSER_PLUME_TICKER), dispatched per state as PotentSulfur-
 // Block.getTicker does. See the header for the split and the deviations.
 #include "PotentSulfurBlockEntity.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/entity/Entity.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -134,8 +135,10 @@ namespace Game {
                 const State next = dormant ? State::Erupting : State::Dormant;
                 world.SetBlock(pos.x, pos.y, pos.z, PotentSulfur::WithState(state, next),
                                World::UpdateFlags::All);
-                // DORMANT: level.gameEvent(BLOCK_DEACTIVATE) — no game-event
-                // system here (see PotentSulfurBlock.cpp).
+                // DORMANT: level.gameEvent(BLOCK_DEACTIVATE, pos, Context.of(state)).
+                if (next == State::Dormant) {
+                    world.GameEvent(GameEventId::BlockDeactivate, pos, GameEventContext::Of(state));
+                }
             }
         }
 
@@ -172,6 +175,10 @@ namespace Game {
                     entities->AddItemEntityDeltaMovement(item.id, launch);
                 }
             }
+            // …and experience orbs, which are not Entities here either.
+            entities->AddExperienceOrbDeltaMovementInBox(
+                box, PotentSulfurBlockEntity::kGeyserBaseLaunchSpeed + static_cast<double>(waterBlocks) * 0.1,
+                launch);
         }
 
         // ── Client tickers ────────────────────────────────────────────────

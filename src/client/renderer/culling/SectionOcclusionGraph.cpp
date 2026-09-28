@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include "common/world/math/ChunkViewDistance.hpp"
+#include "platform/CrashHandler.hpp"
 
 namespace Render {
 
@@ -254,6 +255,7 @@ namespace Render {
         // The frame renders the previous result while this runs, but a late BFS
         // means rendering a stale visibility set — short deadline, not throughput.
         Core::SetCurrentThreadPriority(Core::ThreadPriorityClass::Elevated);
+        Platform::InstallThreadCrashStack();
         for (;;) {
             std::unique_ptr<BfsJob> job;
             {
@@ -912,9 +914,7 @@ namespace Render {
         // filter preserves this order (translucent iterates in reverse).
         if (job.result.size() > 1) {
             std::sort(job.result.begin(), job.result.end(),
-                      [](const SectionRenderData& a, const SectionRenderData& b) {
-                          return a.distanceToCamera < b.distanceToCamera;
-                      });
+                      &SectionRenderData::NearerFirst);
         }
 
         job.visitedCount = visitedCount;

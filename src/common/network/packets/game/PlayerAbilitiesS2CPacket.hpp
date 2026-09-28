@@ -40,6 +40,15 @@ namespace Network {
         // walks at that speed. Trailing, optional.
         uint32_t morph       = 0xFFFFFFFFu;
         float    morphSpeed  = 0.0f;
+        // MC ClientboundLoginPacket / CommonPlayerSpawnInfo.previousGameType
+        // (-1 = none): the mode Debug Modifier+N goes back to from spectator. Rides here
+        // because the gameMode byte above already stands in for MC's
+        // CHANGE_GAME_MODE game event. Trailing, optional.
+        int8_t   previousGameMode = -1;
+        // /morph: the morph's look beyond the code (Game::Morph
+        // DefaultVariantOf). Trailing, optional.
+        int32_t  morphVariant = 0;
+        bool     hasMorphVariant = false;   // read side: the field was on the wire
 
         bool invulnerable() const { return (flags & FLAG_INVULNERABLE) != 0; }
         bool flying()       const { return (flags & FLAG_FLYING) != 0; }
@@ -59,6 +68,8 @@ namespace Network {
             buffer.WriteFloat(packet.scale);
             buffer.WriteVarInt(packet.morph);
             buffer.WriteFloat(packet.morphSpeed);
+            buffer.WriteByte(static_cast<uint8_t>(packet.previousGameMode));
+            buffer.WriteVarInt(static_cast<uint32_t>(packet.morphVariant));
             return buffer.GetData();
         }
 
@@ -72,6 +83,10 @@ namespace Network {
             packet.scale        = reader.HasMore() ? reader.ReadFloat() : 1.0f;
             packet.morph        = reader.HasMore() ? reader.ReadVarInt() : 0xFFFFFFFFu;
             packet.morphSpeed   = reader.HasMore() ? reader.ReadFloat() : 0.0f;
+            packet.previousGameMode = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte()) : int8_t(-1);
+            packet.hasMorphVariant = reader.HasMore();
+            packet.morphVariant = packet.hasMorphVariant
+                ? static_cast<int32_t>(reader.ReadVarInt()) : 0;
             return packet;
         }
 

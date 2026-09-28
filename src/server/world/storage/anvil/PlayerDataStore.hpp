@@ -17,16 +17,22 @@
 #include "server/world/storage/anvil/PlayerUuid.hpp"
 #include "server/world/storage/anvil/SaveRoot.hpp"
 
+#include "common/core/Uuid.hpp"
+
 #include <string>
 
 namespace Server { class ServerPlayer; }
+namespace Game { class Mob; }
 
 namespace Game::Anvil {
 
     // Writes playerdata/<uuid>.dat via temp + rename, keeping the previous
     // generation as <uuid>.dat_old. Returns false only on a real I/O failure.
+    // `rootVehicle` (with the UUID of the entity the player sits on) is the
+    // vehicle leaving with the player — MC's "RootVehicle"; null when none.
     bool WritePlayerData(const SaveRoot& root, const Server::ServerPlayer& player,
-                         int dataVersion, std::string& error);
+                         int dataVersion, std::string& error,
+                         const Game::Mob* rootVehicle = nullptr, const Game::Uuid* attachUuid = nullptr);
 
     // Restores position, rotation, health, food, XP, game mode and inventory.
     // Returns false with an EMPTY error when the player has simply never been

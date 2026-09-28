@@ -6,6 +6,7 @@
 // with the count, recheck every 5 ticks. Client half: the lid eases toward
 // the count's verdict in ClientTick.
 #include "ChestBlockEntity.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "DoubleChest.hpp"
 #include "common/core/JavaRandom.hpp"
@@ -29,10 +30,11 @@ namespace Game {
     }
 
     // MC ContainerOpenersCounter.incrementOpeners.
-    void ChestBlockEntity::StartOpen(ILevelWrite& level) {
+    void ChestBlockEntity::StartOpen(ILevelWrite& level, Entity* user) {
         const int previous = m_openCount++;
         if (previous == 0) {
             OnOpen(level);
+            level.GameEvent(user, GameEventId::ContainerOpen, GetWorldPos());
             ScheduleRecheck(level);
         }
         OpenerCountChanged(level, previous, m_openCount);
@@ -42,10 +44,13 @@ namespace Game {
     // MC's: there a stopOpen always pairs a startOpen on the same object,
     // while here a recheck may already have settled the count to zero before
     // the matching close arrives.
-    void ChestBlockEntity::StopOpen(ILevelWrite& level) {
+    void ChestBlockEntity::StopOpen(ILevelWrite& level, Entity* user) {
         if (m_openCount <= 0) return;
         const int previous = m_openCount--;
-        if (m_openCount == 0) OnClose(level);
+        if (m_openCount == 0) {
+            OnClose(level);
+            level.GameEvent(user, GameEventId::ContainerClose, GetWorldPos());
+        }
         OpenerCountChanged(level, previous, m_openCount);
     }
 
@@ -59,8 +64,10 @@ namespace Game {
             const bool wasOpen = prevCount != 0;
             if (isOpen && !wasOpen) {
                 OnOpen(level);
+                level.GameEvent(nullptr, GameEventId::ContainerOpen, GetWorldPos());
             } else if (!isOpen) {
                 OnClose(level);
+                level.GameEvent(nullptr, GameEventId::ContainerClose, GetWorldPos());
             }
             m_openCount = openCount;
         }
@@ -72,7 +79,11 @@ namespace Game {
         // MC scheduleRecheck: level.scheduleTick(pos, block, 5) — the block's
         // tick (ChestBlock / EnderChestBlock.tick) calls RecheckOpen.
         if (ScheduledTickAccess* ticks = level.Ticks()) {
-            ticks->ScheduleTick(GetWorldPos(), GetBlockId(), kCheckTickDelay);
+            // The block in the world, not the one this entity was made for:
+            // a copper chest keeps its block entity as it oxidizes
+            // (CopperChestBlock.shouldChangedStateKeepBlockEntity).
+            const glm::ivec3 p = GetWorldPos();
+            ticks->ScheduleTick(p, level.GetBlock(p.x, p.y, p.z), kCheckTickDelay);
         }
     }
 
@@ -83,7 +94,10 @@ namespace Game {
     // override): the count goes to every watching client as block event 1,
     // and a trapped chest's redstone output (its opener count) re-reads.
     void ChestBlockEntity::OpenerCountChanged(ILevelWrite& level, int previous, int current) {
-        level.BlockEvent(GetWorldPos(), GetBlockId(), kEventSetOpenCount, current);
+        {
+            const glm::ivec3 p = GetWorldPos();
+            level.BlockEvent(p, level.GetBlock(p.x, p.y, p.z), kEventSetOpenCount, current);
+        }
         if (GetBlockId() == BlockID::TrappedChest && previous != current) {
             const glm::ivec3 pos = GetWorldPos();
             level.UpdateNeighborsAt(pos, BlockID::TrappedChest);
@@ -106,8 +120,17 @@ namespace Game {
                 at.z += static_cast<double>(step.z) * 0.5;
             }
         }
-        const char* event = ender ? (open ? SoundEvents::ENDER_CHEST_OPEN : SoundEvents::ENDER_CHEST_CLOSE)
-                                  : (open ? SoundEvents::CHEST_OPEN : SoundEvents::CHEST_CLOSE);
+        // ChestBlock.getOpenChestSound / getCloseChestSound of the block in
+        // the world (a copper chest's block changes as it oxidizes while its
+        // block entity stays): CopperChestBlock.getHingeSound — weathered and
+        // oxidized creak, unaffected and exposed share the base hinge.
+        const int weather = CopperChestWeatherState(level.GetBlock(pos.x, pos.y, pos.z));
+        const char* event =
+            ender        ? (open ? SoundEvents::ENDER_CHEST_OPEN : SoundEvents::ENDER_CHEST_CLOSE)
+          : weather == 2 ? (open ? SoundEvents::COPPER_CHEST_WEATHERED_OPEN : SoundEvents::COPPER_CHEST_WEATHERED_CLOSE)
+          : weather == 3 ? (open ? SoundEvents::COPPER_CHEST_OXIDIZED_OPEN : SoundEvents::COPPER_CHEST_OXIDIZED_CLOSE)
+          : weather >= 0 ? (open ? SoundEvents::COPPER_CHEST_OPEN : SoundEvents::COPPER_CHEST_CLOSE)
+                         : (open ? SoundEvents::CHEST_OPEN : SoundEvents::CHEST_CLOSE);
         JavaRandom* random = level.Random();
         const float pitch = random ? random->NextFloat() * 0.1f + 0.9f : 1.0f;
         // MC: level.playSound(null, x, y, z, sound, BLOCKS, 0.5F, pitch).

@@ -114,6 +114,7 @@ namespace Render {
         effective.headYawDeg   = xAngle * 20.0f;
         effective.headPitchDeg = -yAngle * 20.0f;
         effective.isCrouching  = false;
+        effective.isSitting    = pose.isSitting;   // MC draws the entity as it is: seated stays seated
 
         // ─── Build the stick figure ──────────────────────────────────────────
         // ringTris holds the head outline + smile as flat annular ring triangles
@@ -128,7 +129,7 @@ namespace Render {
                          /*feetPos*/ glm::vec3(0.0f),
                          effective.headYawDeg, effective.bodyYawDeg,
                          effective.headPitchDeg, effective.isCrouching,
-                         color);
+                         color, effective.isSitting);
 
         // ─── Outer view rotation ─────────────────────────────────────────────
         // We negate Y inside ProjectToScreen (world-Y-up → screen-Y-down) so we

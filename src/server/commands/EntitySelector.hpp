@@ -28,6 +28,7 @@
 #pragma once
 
 #include "common/physics/Physics.hpp"
+#include "server/level/NamedEntityIndex.hpp"
 
 #include <glm/glm.hpp>
 #include "common/world/level/DimensionId.hpp"
@@ -142,6 +143,20 @@ namespace Server {
         // nothing forks into nothing rather than failing the command.
         OptionalEntities,
     };
+
+    // ── Named entities in unloaded chunks (engine deviation from MC) ───────
+    //
+    // While `allowed` (the dispatcher sets it around a player's command, and
+    // clears it for the re-run), a `name=` selector whose match includes a
+    // custom-named entity saved in an unloaded chunk FAILS with a
+    // "Loading N named entities..." message and adds the chunks to `chunks`;
+    // the dispatcher holds them loaded and runs the whole command again once
+    // their entities are in. Thread-local: commands run on the server thread.
+    struct NamedEntityDeferral {
+        bool allowed = false;
+        std::vector<NamedEntities::ChunkRef> chunks;
+    };
+    NamedEntityDeferral& CurrentNamedEntityDeferral();
 
     // Parse `token` and resolve it against the live world.
     //

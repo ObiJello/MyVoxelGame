@@ -61,6 +61,9 @@ namespace Render {
             { "XRot",                 StateRef::XRot },
             { "YRot",                 StateRef::YRot },
             { "AttackTime",           StateRef::AttackTime },
+            { "TicksUsingItem",       StateRef::TicksUsingItem },
+            { "MaxCrossbowCharge",    StateRef::MaxCrossbowCharge },
+            { "UseItemHand",          StateRef::UseItemHand },
             { "AgeScale",             StateRef::AgeScale },
             { "Flap",                 StateRef::Flap },
             { "FlapSpeed",            StateRef::FlapSpeed },
@@ -170,6 +173,9 @@ namespace Render {
             case StateRef::XRot:                 return s.xRot;
             case StateRef::YRot:                 return s.yRot;
             case StateRef::AttackTime:           return s.attackTime;
+            case StateRef::TicksUsingItem:       return s.ticksUsingItem;
+            case StateRef::MaxCrossbowCharge:    return s.maxCrossbowChargeDuration;
+            case StateRef::UseItemHand:          return static_cast<float>(s.useItemHand);
             case StateRef::AgeScale:             return s.ageScale;
             case StateRef::Flap:                 return s.flap;
             case StateRef::FlapSpeed:            return s.flapSpeed;

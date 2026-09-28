@@ -30,6 +30,9 @@ public:
 
 protected:
     float sampleValueUnchecked(int blockX, int blockY, int blockZ) const;
+    // One piece's / junction's term of sampleValueUnchecked's sum.
+    static float rigidContribution(const levelgen::Rigid& rigid, int blockX, int blockY, int blockZ);
+    static float junctionContribution(const levelgen::JigsawJunction& junction, int blockX, int blockY, int blockZ);
 
 private:
     static float getBuryContribution(float dx, float dy, float dz);

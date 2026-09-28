@@ -20,6 +20,13 @@
 //   long seed
 // New fields go on the end (trailing-field extension; readers check HasMore).
 //
+// Trailing on ClientboundSoundPacket — MC's ClientboundStopSoundPacket folded
+// in (no packet id of its own): byte stopFlags, written only for a stop.
+//   bit 0  stop: this is /stopsound, not a sound — nothing plays
+//   bit 1  the stop names a source (`source`); clear = every source
+// A stop's `event` is the sound to stop, empty = every sound; its position,
+// volume, pitch and seed are unused.
+//
 // Both are world-scoped (sent with SendPacketIn), and the client plays them
 // only when their scope is the level it stands in.
 #pragma once
@@ -45,6 +52,20 @@ namespace Network {
         float             volume = 1.0f;
         float             pitch  = 1.0f;
         int64_t           seed   = 0;
+        // Trailing (see the header note): a /stopsound request.
+        bool              stop = false;
+        bool              stopHasSource = false;
+
+        // MC ClientboundStopSoundPacket(name, source): `event` empty stops
+        // every sound, `source` nullopt every source.
+        static SoundS2CPacket Stop(std::string event, bool hasSource, Game::SoundSource source) {
+            SoundS2CPacket p;
+            p.event = std::move(event);
+            p.source = source;
+            p.stop = true;
+            p.stopHasSource = hasSource;
+            return p;
+        }
 
         // MC's (int)(x * 8.0F) — fixed-point eighths of a block.
         void SetPosition(const glm::dvec3& pos) {
@@ -103,6 +124,7 @@ namespace Network {
             b.WriteFloat(p.volume);
             b.WriteFloat(p.pitch);
             b.WriteLong(static_cast<uint64_t>(p.seed));
+            if (p.stop) b.WriteByte(static_cast<uint8_t>(1 | (p.stopHasSource ? 2 : 0)));
             return b.GetData();
         }
 
@@ -117,6 +139,11 @@ namespace Network {
             p.volume = r.ReadFloat();
             p.pitch  = r.ReadFloat();
             p.seed   = static_cast<int64_t>(r.ReadLong());
+            if (r.HasMore()) {
+                const uint8_t flags = r.ReadByte();
+                p.stop          = (flags & 1) != 0;
+                p.stopHasSource = (flags & 2) != 0;
+            }
             return p;
         }
 

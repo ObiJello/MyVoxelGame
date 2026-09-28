@@ -18,7 +18,28 @@
 
 #include <memory>
 
+namespace Game {
+    class BrushableBlockEntity;
+    class DecoratedPotBlockEntity;
+    class BannerBlockEntity;
+    class CopperGolemStatueBlockEntity;
+}
+
 namespace Game::Anvil {
+
+    // The type-specific halves ReadBlockEntity runs, reachable on their own
+    // so a generated block entity (MyTerrainGenerator's canonical payloads)
+    // loads through the same code as a saved one.
+    //   ReadDecoratedPot    — sherds (26.3 compound or the older id list) and,
+    //                         without a LootTable, `item`.
+    //   ReadBrushableBlock  — LootTable / LootTableSeed or `item`, and
+    //                         hit_direction.
+    void ReadDecoratedPot(const ::World::NBTTagCompound& tag, DecoratedPotBlockEntity& pot);
+    void ReadBrushableBlock(const ::World::NBTTagCompound& tag, BrushableBlockEntity& brushable);
+    //   ReadBanner          — patterns, CustomName, the kept components.
+    //   ReadCopperGolemStatue — the golem's custom_name component.
+    void ReadBanner(const ::World::NBTTagCompound& tag, BannerBlockEntity& banner);
+    void ReadCopperGolemStatue(const ::World::NBTTagCompound& tag, CopperGolemStatueBlockEntity& statue);
 
     // Appends one element to an open `block_entities` list. Returns false —
     // writing nothing — for a block entity with no vanilla-known type, so a

@@ -18,28 +18,41 @@
 // PlayerSession::HandleUseItemOn checks `ConsumesAction(r)` to decide
 // whether to stop the dispatch chain or fall through.
 
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/entity/SpearItem.hpp"
+#include "common/entity/WeaponItems.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
 #include "Item.hpp"
+#include "common/particle/LevelParticles.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "GeneratedItemList.hpp"
 #include "SpawnEggs.hpp"
 #include "common/entity/decoration/HangingEntity.hpp"
+#include "common/entity/decoration/BlockAttachedEntity.hpp"
 #include "EndCrystal.hpp"
 #include "FallingBlockEntity.hpp"
 #include "PrimedTnt.hpp"
 #include "projectile/Projectile.hpp"
 #include "mobs/SulfurCube.hpp"
+#include "mobs/Fish.hpp"
+#include "mobs/AnimatedMobs.hpp"
+#include "Bucketable.hpp"
 #include "../world/level/WorldMobSpawn.hpp"
 #include "mobs/Animals.hpp"
 #include "ArmorStand.hpp"
 #include "../data/DataComponents.hpp"
 #include "../world/block/BlockRegistry.hpp"
 #include "../world/block/BlockPlacement.hpp"
+#include "../world/block/CandleBlocks.hpp"
+#include "../world/block/CopperChestBlock.hpp"
 #include "../world/fluid/FlowingFluid.hpp"
 #include "../world/level/DimensionId.hpp"
 #include "../world/level/World.hpp"
 #include "../world/level/WorldDrops.hpp"
 #include "../world/level/HushItems.hpp"
+#include "../world/map/MapItem.hpp"
+#include "FoodOnAStickItem.hpp"
 #include "../world/level/AurelithQuest.hpp"
 #include "../world/portal/ModPortalBehaviors.hpp"
 #include "../world/portal/PortalFamily.hpp"
@@ -50,8 +63,12 @@
 #include "../core/Mth.hpp"
 #include "../core/Log.hpp"
 #include "IUsePlayer.hpp"
+#include "projectile/FishingHook.hpp"
 #include "../world/block/entity/SpawnerBlockEntity.hpp"
+#include "../world/block/entity/TrialSpawnerBlockEntity.hpp"
 #include "../world/level/GameRules.hpp"
+#include "ArchaeologyItems.hpp"
+#include "Instruments.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -80,6 +97,8 @@ namespace Game {
     // the stew's SUSPICIOUS_STEW_EFFECTS.
     void ItemRegistry_RegisterPotionItems(std::unordered_map<ItemID, Item>& pureItems);
     void ItemRegistry_RegisterBookItems(std::unordered_map<ItemID, Item>& pureItems);   // BookItems.cpp
+    void ItemRegistry_RegisterTrialItems(std::unordered_map<ItemID, Item>& pureItems);  // TrialItems.cpp
+    void ItemRegistry_RegisterVehicleItems(std::unordered_map<ItemID, Item>& pureItems); // vehicle/VehicleItems.cpp
 
     namespace {
 
@@ -98,12 +117,22 @@ namespace Game {
             return r ? r->NextFloat() : 0.5f;
         }
 
-        // Mirrors MC `Level.gameEvent(GameEvent, BlockPos, Context)`
-        // (Level.java:1129). Sculk sensors / wardens listen on these. We don't
-        // simulate them yet; this is a no-op marker that captures the intent.
-        void GameEventEmit(const char* eventName, const glm::ivec3& pos) {
-            (void)eventName; (void)pos;
-            // TODO(game-events): once GameEvent system exists, broadcast here.
+        // MC `level.gameEvent(player, event, pos)` — Context.of(player). The
+        // player is the server's entity for them (IUsePlayer::
+        // GameEventSource); on the client's prediction the level has no
+        // dispatcher and this is a no-op, as ClientLevel.gameEvent is.
+        void GameEventEmit(ILevelWrite* level, IUsePlayer* player, GameEventId event, const glm::ivec3& pos) {
+            if (!level) return;
+            level->GameEvent(player ? player->GameEventSource() : nullptr, event, pos);
+        }
+
+        // MC `level.gameEvent(event, pos, Context.of(player, state))` — with
+        // the affected state; `state` defaults to what now sits at `pos`.
+        void GameEventEmitState(ILevelWrite* level, IUsePlayer* player, GameEventId event, const glm::ivec3& pos,
+                                std::optional<BlockState> state = std::nullopt) {
+            if (!level) return;
+            const BlockState s = state ? *state : level->GetBlockState(pos.x, pos.y, pos.z);
+            level->GameEvent(event, pos, GameEventContext::Of(player ? player->GameEventSource() : nullptr, s));
         }
 
         // Mirrors MC `itemStack.hurtAndBreak(amount, player, hand)` from an
@@ -220,8 +249,23 @@ namespace Game {
             // CampfireBlock.canLight also requires !WATERLOGGED; this engine
             // has no waterlogging, so that term is always true here.
             //
-            // Candles and candle cakes are still missing — they need their own
-            // `lit` (and `candles`) properties, which nothing declares yet.
+            // CandleBlock.canLight / CandleCakeBlock.canLight: the same relight
+            // branch, `state.setValue(LIT, true)` with flags 11.
+            {
+                const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+                if (Candles::CanLight(cur)) {
+                    ctx.world->PlaySound(ctx.player, pos, SoundEvents::FLINTANDSTEEL_USE, SoundSource::Blocks,
+                                         1.0f, LevelRandomFloat(ctx.world) * 0.4f + 0.8f);
+                    if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, Candles::WithLit(cur, true),
+                                             World::UpdateFlags::All)) {
+                        return UseResult::Fail;
+                    }
+                    // FlintAndSteelItem.useOn:53 — gameEvent(player, BLOCK_CHANGE, pos).
+                    GameEventEmit(ctx.world, ctx.player, GameEventId::BlockChange, pos);
+                    UseOnHurtAndBreak(stack, 1, ctx);
+                    return UseResult::Success;
+                }
+            }
             if (here == BlockID::Campfire || here == BlockID::SoulCampfire) {
                 const auto& def = BlockRegistry::GetStateDefinition(here);
                 const BlockState cur = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
@@ -238,7 +282,8 @@ namespace Game {
                                              def.IndexOf(props))) {
                         return UseResult::Fail;
                     }
-                    GameEventEmit("block_change", pos);
+                    // FlintAndSteelItem.useOn:53 — gameEvent(player, BLOCK_CHANGE, pos).
+                    GameEventEmit(ctx.world, ctx.player, GameEventId::BlockChange, pos);
                     UseOnHurtAndBreak(stack, 1, ctx);
                     return UseResult::Success;
                 }
@@ -270,13 +315,71 @@ namespace Game {
 
             // MC: `level.gameEvent(player, GameEvent.BLOCK_PLACE, pos)`
             //  — note MC uses the CLICKED pos, not the fire's pos.
-            GameEventEmit("block_place", pos);
+            GameEventEmit(ctx.world, ctx.player, GameEventId::BlockPlace, pos);
 
             // TODO(advancements): CriteriaTriggers.PLACED_BLOCK.trigger(serverPlayer, firePos, itemStack);
 
             // MC: `if (player instanceof ServerPlayer) itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot());`
             UseOnHurtAndBreak(stack, 1, ctx);
 
+            return UseResult::Success;
+        }
+
+        // ── FireChargeItem.useOn — mirrors FireChargeItem.java:31-57 ────────
+        //
+        // Flint and steel's twin with two differences: the charge is used up
+        // rather than worn, and its sound is FIRECHARGE_USE for everyone
+        // (`playSound(null, …)`), pitched (r - r) * 0.2 + 1.
+        UseResult UseOn_FireCharge(const UseOnContext& ctx, ItemStack& stack) {
+            if (!ctx.world) return UseResult::Pass;
+            ILevelWrite& level = *ctx.world;
+            glm::ivec3 pos = ctx.hitResult.blockPos;
+            const BlockState state = level.GetBlockState(pos.x, pos.y, pos.z);
+
+            auto playSound = [&level](const glm::ivec3& at) {
+                JavaRandom* r = level.Random();
+                const float a = r ? r->NextFloat() : 0.5f;
+                const float b = r ? r->NextFloat() : 0.5f;
+                level.PlaySound(nullptr, at, SoundEvents::FIRECHARGE_USE, SoundSource::Blocks,
+                                1.0f, (a - b) * 0.2f + 1.0f);
+            };
+
+            // CampfireBlock.canLight: a #campfires block with LIT and
+            // WATERLOGGED, neither set.
+            const bool campfireCanLight =
+                (state.Is(BlockID::Campfire) || state.Is(BlockID::SoulCampfire)) &&
+                state.HasProperty(PropertyId::LIT) && state.HasProperty(PropertyId::WATERLOGGED) &&
+                state.GetName(PropertyId::LIT) == "false" &&
+                state.GetName(PropertyId::WATERLOGGED) == "false";
+
+            bool used = false;
+            if (!campfireCanLight && !Candles::CanLight(state)) {
+                // pos = pos.relative(clickedFace); canBePlacedAt(level, pos,
+                // context.getHorizontalDirection()) — the LOOK direction picks
+                // the portal axis here, where flint and steel passes the face.
+                pos = ctx.getPlacementPos();
+                if (CanFireBePlacedAt(ctx.world, pos, static_cast<int>(ctx.getHorizontalDirection()))) {
+                    playSound(pos);
+                    level.SetBlock(pos.x, pos.y, pos.z, Fluids::FireStateFor(level, pos),
+                                   World::UpdateFlags::All);
+                    // FireChargeItem.useOn:41 — gameEvent(player, BLOCK_PLACE, pos).
+                    GameEventEmit(ctx.world, ctx.player, GameEventId::BlockPlace, pos);
+                    used = true;
+                }
+            } else {
+                playSound(pos);
+                level.SetBlock(pos.x, pos.y, pos.z, state.SetName(PropertyId::LIT, "true"),
+                               World::UpdateFlags::All);
+                // FireChargeItem.useOn:47 — gameEvent(player, BLOCK_CHANGE, pos).
+                GameEventEmit(ctx.world, ctx.player, GameEventId::BlockChange, pos);
+                used = true;
+            }
+
+            if (!used) return UseResult::Fail;
+            // context.getItemInHand().shrink(1) — creative is restored by the
+            // dispatch's whole-stack snapshot, as for bone meal.
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
             return UseResult::Success;
         }
 
@@ -501,8 +604,9 @@ namespace Game {
                                                 World::UpdateFlags::All);
             if (!ok) return UseResult::Fail;
 
-            // MC `changeIntoState`: gameEvent BLOCK_CHANGE.
-            GameEventEmit("block_change", pos);
+            // MC BlockTransformer.transformBlock: gameEvent(BLOCK_CHANGE, pos,
+            // Context.of(player, updatedShape)).
+            GameEventEmitState(ctx.world, ctx.player, GameEventId::BlockChange, pos);
 
             // MC `changeIntoStateAndDropItem`: also pop the drop item from the clicked face.
             if (dropItem != BlockID::Air) {
@@ -569,6 +673,23 @@ namespace Game {
                 if (!ctx.world->IsClientSide()) {
                     PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::SOUND_EXTINGUISH_FIRE, pos, 0,
                                         ctx.world->Random());
+                } else if (JavaRandom* random = ctx.world->Random()) {
+                    // CampfireBlock.dowse on the predicting client: 20 ×
+                    // makeParticles(signal, smoking) — the doused smoke.
+                    const bool signal = cur.GetValueByName("signal_fire") == "true";
+                    const ParticleOptions smoke(signal ? ParticleKind::CampfireSignalSmoke
+                                                       : ParticleKind::CampfireCosySmoke);
+                    JavaRandom& r = *random;
+                    for (int j = 0; j < 20; ++j) {
+                        const double sx = pos.x + 0.5 + r.NextDouble() / 3.0 * (r.NextBool() ? 1 : -1);
+                        const double sy = pos.y + r.NextDouble() + r.NextDouble();
+                        const double sz = pos.z + 0.5 + r.NextDouble() / 3.0 * (r.NextBool() ? 1 : -1);
+                        ctx.world->DoAddParticle(smoke, true, true, sx, sy, sz, 0.0, 0.07, 0.0);
+                        const double px = pos.x + 0.5 + r.NextDouble() / 4.0 * (r.NextBool() ? 1 : -1);
+                        const double pz = pos.z + 0.5 + r.NextDouble() / 4.0 * (r.NextBool() ? 1 : -1);
+                        ctx.world->AddParticle(ParticleOptions(ParticleKind::Smoke), px, pos.y + 0.4, pz, 0.0, 0.005,
+                                               0.0);
+                    }
                 }
                 BlockRegistry::BlockStateDefinition::PropertyMap props;
                 props["facing"] = std::string(cur.GetValueByName("facing"));
@@ -577,11 +698,11 @@ namespace Game {
                                          World::UpdateFlags::All, def.IndexOf(props))) {
                     return UseResult::Fail;
                 }
-                GameEventEmit("block_change", pos);
+                GameEventEmitState(ctx.world, ctx.player, GameEventId::BlockChange, pos);
                 UseOnHurtAndBreak(stack, 1, ctx);
                 return UseResult::Success;
-                // MC also calls CampfireBlock.dowse, which is particles + a
-                // game event only — the food stays on the fire and simply
+                // CampfireBlock.dowse is the particles above + a game
+                // event only — the food stays on the fire and simply
                 // stops cooking, which falls out of the state change above
                 // because the block state is what picks the cooking ticker.
             } else {
@@ -592,7 +713,8 @@ namespace Game {
             const bool ok = ctx.world->SetBlock(pos.x, pos.y, pos.z, newBlock,
                                                 World::UpdateFlags::All);
             if (!ok) return UseResult::Fail;
-            GameEventEmit("block_change", pos);
+            // BlockTransformer: gameEvent(BLOCK_CHANGE, pos, Context.of(player, updatedShape)).
+            GameEventEmitState(ctx.world, ctx.player, GameEventId::BlockChange, pos);
             UseOnHurtAndBreak(stack, 1, ctx);
             return UseResult::Success;
         }
@@ -672,9 +794,24 @@ namespace Game {
                  {BlockID::WaxedCopperLantern, BlockID::WaxedExposedCopperLantern, BlockID::WaxedWeatheredCopperLantern, BlockID::WaxedOxidizedCopperLantern}},
                 {{BlockID::LightningRod,    BlockID::ExposedLightningRod,     BlockID::WeatheredLightningRod,     BlockID::OxidizedLightningRod},
                  {BlockID::WaxedLightningRod, BlockID::WaxedExposedLightningRod, BlockID::WaxedWeatheredLightningRod, BlockID::WaxedOxidizedLightningRod}},
+                {{BlockID::CopperChest,     BlockID::ExposedCopperChest,      BlockID::WeatheredCopperChest,      BlockID::OxidizedCopperChest},
+                 {BlockID::WaxedCopperChest, BlockID::WaxedExposedCopperChest, BlockID::WaxedWeatheredCopperChest, BlockID::WaxedOxidizedCopperChest}},
+                // WeatheringCopperGolemStatueBlock / the waxed statues.
+                {{BlockID::CopperGolemStatue, BlockID::ExposedCopperGolemStatue, BlockID::WeatheredCopperGolemStatue, BlockID::OxidizedCopperGolemStatue},
+                 {BlockID::WaxedCopperGolemStatue, BlockID::WaxedExposedCopperGolemStatue, BlockID::WaxedWeatheredCopperGolemStatue, BlockID::WaxedOxidizedCopperGolemStatue}},
             };
             count = sizeof(families) / sizeof(families[0]);
             return families;
+        }
+
+        // MC Block.withPropertiesOf(state): `block`'s default state with every
+        // property the two blocks share copied across — how stripping,
+        // scraping, waxing and un-waxing keep a stair's facing, a log's axis,
+        // a door's half or a copper chest's pairing.
+        BlockState WithPropertiesOf(BlockID block, BlockState from) {
+            const auto& src = BlockRegistry::GetStateDefinition(from.Block());
+            const auto& dst = BlockRegistry::GetStateDefinition(block);
+            return BlockStates::FromIndex(block, dst.IndexOf(src.PropertiesOf(from.Index())));
         }
 
         // WeatheringCopper.getPrevious — one oxidation stage back.
@@ -740,25 +877,30 @@ namespace Game {
                 if (newBlock != BlockID::Air) {
                     ctx.world->PlaySound(ctx.player, pos, SoundEvents::AXE_SCRAPE, SoundSource::Blocks,
                                          1.0f, 1.0f);                           // :78
-                    // levelEvent 3005 (scrape particles) — particle system TODO.
+                    ctx.world->PlayLevelEvent(ctx.player, LevelEvent::PARTICLES_SCRAPE, pos, 0);   // :79
                 } else {
                     newBlock = WaxOffVariant(src);
                     if (newBlock != BlockID::Air) {
                         ctx.world->PlaySound(ctx.player, pos, SoundEvents::AXE_WAX_OFF, SoundSource::Blocks,
                                              1.0f, 1.0f);                       // :83
-                        // levelEvent 3004 (wax-off particles) — TODO.
+                        ctx.world->PlayLevelEvent(ctx.player, LevelEvent::PARTICLES_WAX_OFF, pos, 0);  // :84
                     } else {
                         return UseResult::Pass;                         // :86
                     }
                 }
             }
 
-            // :54 setBlock(flags 11) / :55 gameEvent / :57 hurtAndBreak.
-            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, newBlock,
+            // :54 setBlock(flags 11) / :55 gameEvent / :57 hurtAndBreak. The
+            // new state keeps the old one's properties (getStripped /
+            // WeatheringCopper.getPrevious / WAX_OFF_BY_BLOCK all hand back
+            // `block.withPropertiesOf(state)`).
+            const BlockState before = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, WithPropertiesOf(newBlock, before),
                                      World::UpdateFlags::All)) {
                 return UseResult::Fail;
             }
-            GameEventEmit("block_change", pos);
+            // BlockTransformer: gameEvent(BLOCK_CHANGE, pos, Context.of(player, updatedShape)).
+            GameEventEmitState(ctx.world, ctx.player, GameEventId::BlockChange, pos);
             UseOnHurtAndBreak(stack, 1, ctx);
             return UseResult::Success;                                  // :60
         }
@@ -811,14 +953,15 @@ namespace Game {
             // MC's target is a LivingEntity; the hanging entities ride the
             // living pipeline here (HangingEntity.hpp) but are plain Entities
             // in MC, so a name tag passes them by.
-            if (dynamic_cast<const HangingEntity*>(&target)) return UseResult::Pass;
+            if (dynamic_cast<const BlockAttachedEntity*>(&target)) return UseResult::Pass;
             // The same for the other plain Entities this port runs as mobs:
             // primed TNT, a falling block, an End crystal and every
             // projectile never reach interactLivingEntity in MC.
             if (dynamic_cast<const PrimedTnt*>(&target) ||
                 dynamic_cast<const FallingBlockEntity*>(&target) ||
                 dynamic_cast<const EndCrystal*>(&target) ||
-                dynamic_cast<const Projectile*>(&target)) {
+                dynamic_cast<const Projectile*>(&target) ||
+                IsVehicleEntityType(target.GetType())) {   // boats and minecarts
                 return UseResult::Pass;
             }
             if (!target.IsAlive()) return UseResult::Success;
@@ -872,7 +1015,25 @@ namespace Game {
                 JavaRandom fallback(0);
                 spawner->SetEntityId(type, random ? *random : fallback);
                 ctx.world->BlockEntityChanged(clicked);
-                GameEventEmit("block_change", clicked);
+                // SpawnEggItem.useOn:76 — gameEvent(player, BLOCK_CHANGE, pos).
+                GameEventEmit(ctx.world, ctx.player, GameEventId::BlockChange, clicked);
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+                return UseResult::Success;
+            }
+            // The same for a trial spawner (MC TrialSpawnerBlockEntity is a
+            // Spawner too): setEntityId overrides both configs with the
+            // egg's type, resets the spawner and turns it INACTIVE.
+            if (auto* trial = dynamic_cast<TrialSpawnerBlockEntity*>(ctx.world->GetBlockEntity(clicked))) {
+                if (!Rules::GetBool(Rules::Id::SpawnerBlocksWork)) {
+                    if (ctx.player) {
+                        ctx.player->DisplayClientMessage("Spawner blocks are disabled", /*actionBar=*/false);
+                    }
+                    return UseResult::Fail;
+                }
+                trial->SetEntityId(type, *ctx.world);
+                ctx.world->BlockEntityChanged(clicked);
+                GameEventEmit(ctx.world, ctx.player, GameEventId::BlockChange, clicked);
                 stack.count -= 1;
                 if (stack.count <= 0) stack.Clear();
                 return UseResult::Success;
@@ -904,7 +1065,8 @@ namespace Game {
                 // restored by the dispatch's stack snapshot.
                 stack.count -= 1;
                 if (stack.count <= 0) stack.Clear();
-                GameEventEmit("entity_place", spawnPos);
+                // SpawnEggItem.spawnMob:99 — gameEvent(user, ENTITY_PLACE, spawnPos).
+                GameEventEmit(ctx.world, ctx.player, GameEventId::EntityPlace, spawnPos);
             }
 
             // :104 SUCCESS regardless — MC swallows the click either way.
@@ -926,23 +1088,27 @@ namespace Game {
             // the WHOLE stack; see PlayerSession::HandleUseItemOn.
             stack.count -= 1;
             if (stack.count <= 0) stack.Clear();
-            // :58 setBlock(11); :60 levelEvent 3003 (wax-on particles) TODO.
-            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, waxed,
+            // :58 setBlock(11); :60 levelEvent 3003 (the wax-on particles).
+            // HoneycombItem: waxed.withPropertiesOf(state).
+            const BlockState before = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, WithPropertiesOf(waxed, before),
                                      World::UpdateFlags::All)) {
                 return UseResult::Fail;
             }
+            ctx.world->PlayLevelEvent(ctx.player, LevelEvent::PARTICLES_WAX_ON, pos, 0);
             // HoneycombItem.useOn:71 — playSound(player, pos, HONEYCOMB_WAX_ON,
             // BLOCKS, 1.0, 1.0).
             ctx.world->PlaySound(ctx.player, pos, SoundEvents::HONEYCOMB_WAX_ON, SoundSource::Blocks, 1.0f, 1.0f);
-            GameEventEmit("block_change", pos);
+            // HoneycombItem.useOn:69 — gameEvent(BLOCK_CHANGE, pos, Context.of(player, waxedState)).
+            GameEventEmitState(ctx.world, ctx.player, GameEventId::BlockChange, pos);
             return UseResult::Success;
         }
 
         // ── Bone meal — mirrors BoneMealItem.java:35-61 ─────────────────────
-        // Two of MC's three branches are here: growCrop (any BonemealableBlock
-        // — crops, stems, bamboo, cocoa, berry bushes) and the grass-block
-        // scatter. The water/seagrass branch (:83-136) is still skipped; it
-        // needs fluid simulation and coral biome tags.
+        // growCrop (any BonemealableBlock — crops, stems, bamboo, cocoa, berry
+        // bushes, the grass block, short grass, mushrooms, sea pickles) is
+        // here. The water/seagrass branch (growWaterPlant) is still skipped;
+        // it needs coral biome tags.
         UseResult UseOn_BoneMeal(const UseOnContext& ctx, ItemStack& stack) {
             if (!ctx.world) return UseResult::Pass;
             const glm::ivec3 pos = ctx.hitResult.blockPos;
@@ -955,31 +1121,45 @@ namespace Game {
             //       stack.shrink(1);
             //       return true;
             //   }
-            // isBonemealSuccess is `true` for every block modelled here, so it
-            // folds into the target test — see BlockRegistry.hpp's note on the
-            // bone-meal hook pair.
+            // isBonemealSuccess is vanilla's default `true` unless the block
+            // declares the hook (a mushroom's 40 % roll); the item is spent
+            // whichever way the roll goes.
             {
                 const Block& def = BlockRegistry::Get(src);
                 if (def.performBonemeal && def.isValidBonemealTarget) {
                     const BlockState state = ctx.world->GetBlockState(pos.x, pos.y, pos.z);
                     if (def.isValidBonemealTarget(*ctx.world, pos, state)) {
-                        // Seeded per use rather than kept as a static: this
-                        // runs on the client for prediction too, and a shared
-                        // stream between the two would drift apart anyway.
-                        // Growth amount is re-derived from the server's own
-                        // roll when its block update lands.
-                        JavaRandom random(static_cast<int64_t>(pos.x) * 341873128712LL +
-                                          static_cast<int64_t>(pos.z) * 132897987541LL +
-                                          static_cast<int64_t>(pos.y));
-                        def.performBonemeal(*ctx.world, pos, state, random);
+                        // growCrop: `if (level instanceof ServerLevel)` — the
+                        // growth, its roll and the shrink are the SERVER's.
+                        // The client answers SUCCESS and changes nothing: it
+                        // would roll its own random, draw a different crop
+                        // stage or grass pattern, and the server's blocks
+                        // would visibly replace it a moment later. The
+                        // plants, the particles (levelEvent 1505) and the
+                        // spent bone meal all arrive from the server.
+                        if (ctx.world->IsClientSide()) return UseResult::Success;
+                        JavaRandom fallback(static_cast<int64_t>(pos.x) * 341873128712LL +
+                                            static_cast<int64_t>(pos.z) * 132897987541LL +
+                                            static_cast<int64_t>(pos.y));
+                        JavaRandom* levelRandom = ctx.world->Random();
+                        JavaRandom& random = levelRandom ? *levelRandom : fallback;   // level.getRandom()
+                        if (!def.isBonemealSuccess ||
+                            def.isBonemealSuccess(*ctx.world, pos, state, random)) {
+                            def.performBonemeal(*ctx.world, pos, state, random);
+                        }
 
                         // MC: `level.levelEvent(1505, pos, 15)` →
                         // BoneMealItem.addGrowthParticles spawns 15
-                        // happy_villager particles inside the block.
-                        // TODO(particles): no particle system yet. The sound
-                        // half is the server's (`if (!level.isClientSide())`),
-                        // for everyone.
+                        // happy_villager particles inside the block. Sent
+                        // from the server (`if (!level.isClientSide())`) to
+                        // everyone: PlayLevelEventSound carries the particle
+                        // half as well (Client::LevelEvents on the receiver).
                         if (!ctx.world->IsClientSide()) {
+                            // BoneMealItem.useOn:43 — boneMealStack.causeUseVibration(
+                            // player, ITEM_INTERACT_FINISH) (UseEffects.DEFAULT: on).
+                            if (Entity* user = ctx.player ? ctx.player->GameEventSource() : nullptr) {
+                                user->GameEvent(GameEventId::ItemInteractFinish);
+                            }
                             PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::PARTICLES_AND_SOUND_PLANT_GROWTH,
                                                 pos, 15, ctx.world->Random());
                         }
@@ -998,63 +1178,13 @@ namespace Game {
                 }
             }
 
-            if (src != BlockID::Grass) {
-                return UseResult::Pass;
-            }
-
-            // GrassBlock.performBonemeal — 128 random-walk attempts from the
-            // block above; each valid air cell over grass gets short grass,
-            // or 1-in-8 a flower (the biome flower feature collapsed to the
-            // plains dandelion/poppy pair).
-            static std::mt19937 rng{std::random_device{}()};
-            auto nextInt = [&](int bound) {
-                return std::uniform_int_distribution<int>(0, bound - 1)(rng);
-            };
-
-            bool anyPlaced = false;
-            const glm::ivec3 above = pos + glm::ivec3(0, 1, 0);
-            for (int i = 0; i < 128; ++i) {
-                glm::ivec3 current = above;
-                bool walkValid = true;
-                for (int j = 0; j < i / 16; ++j) {
-                    current += glm::ivec3(nextInt(3) - 1,
-                                          (nextInt(3) - 1) * nextInt(3) / 2,
-                                          nextInt(3) - 1);
-                    if (!ctx.world->IsValidPosition(current.x, current.y - 1, current.z)
-                        || ctx.world->GetBlock(current.x, current.y - 1, current.z)
-                               != BlockID::Grass) {
-                        walkValid = false;
-                        break;
-                    }
-                }
-                if (!walkValid) continue;
-                if (!ctx.world->IsValidPosition(current.x, current.y, current.z)) continue;
-                if (ctx.world->GetBlock(current.x, current.y, current.z) != BlockID::Air) continue;
-
-                BlockID plant = BlockID::ShortGrass;
-                if (nextInt(8) == 0) {
-                    plant = (nextInt(2) == 0) ? BlockID::Dandelion : BlockID::Poppy;
-                }
-                if (ctx.world->SetBlock(current.x, current.y, current.z, plant,
-                                        World::UpdateFlags::All)) {
-                    anyPlaced = true;
-                }
-            }
-
-            if (!anyPlaced) return UseResult::Fail;
-
-            // :43 levelEvent 1505 (bone-meal particles — particle system TODO;
-            // its sound, server-side, for everyone).
-            if (!ctx.world->IsClientSide()) {
-                PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::PARTICLES_AND_SOUND_PLANT_GROWTH, pos, 15,
-                                    ctx.world->Random());
-            }
-            // :73 itemStack.shrink(1) — creative restored by the dispatch's
-            // whole-stack snapshot (Clear() wipes the id too, so a count-only
-            // restore would lose the last bone meal).
-            stack.count -= 1;
-            if (stack.count <= 0) stack.Clear();
-            return UseResult::Success;
+            // The grass block is an ordinary BonemealableBlock now
+            // (GrassBlock.performBonemeal, PlantBlocks.cpp), so it went
+            // through growCrop above — server-side, with the level's random,
+            // and with the level event the client's growth particles read.
+            // growWaterPlant (seagrass / coral from bone meal in water) is not
+            // ported yet: PASS, as vanilla returns when neither branch takes.
+            return UseResult::Pass;
         }
 
         // ── Buckets — mirror BucketItem.java:43-95 ──────────────────────────
@@ -1106,7 +1236,8 @@ namespace Game {
 
         std::optional<BucketHit> BucketClip(ILevelWrite* world,
                                             const IUsePlayer& player,
-                                            bool stopOnFluid) {
+                                            bool stopOnFluid,
+                                            float kReach = 5.0f) {   // blockInteractionRange
             // Eye + direction from the server-authoritative rotation (the
             // UseItemC2S handler snapped it to the click's exact aim).
             const glm::dvec3 p = player.getPosition();
@@ -1116,7 +1247,6 @@ namespace Game {
             const glm::vec3 dir =
                 Mth::ViewVector(player.getPitch(), player.getYaw());
 
-            constexpr float kReach = 5.0f;   // blockInteractionRange
 
             // Walk cells with a DDA and test each one's SHAPE, rather than the
             // fixed-step "first non-air cell" march this used to be. That march
@@ -1201,7 +1331,71 @@ namespace Game {
                                   world->GetDimension(), 0, configure)) {
                 return UseResult::Fail;
             }
-            GameEventEmit("entity_place", hit->beforePos);
+            // MobBucketItem.spawn:36 — gameEvent(user, ENTITY_PLACE, pos).
+            GameEventEmit(world, player, GameEventId::EntityPlace, hit->beforePos);
+            if (!player->isCreative()) {
+                stack = ItemStack(Items::Bucket, 1);
+                player->markSlotDirty(player->handSlotIndex(hand));
+            }
+            return UseResult::Success;
+        }
+
+        // Bucket of cod / salmon / pufferfish / tropical fish / axolotl /
+        // tadpole — MC MobBucketItem(type, WATER, emptySound): BucketItem.use
+        // pours the water (with the mob's empty sound, NEUTRAL), then
+        // checkExtraContent → spawn: EntityType.create(…, BUCKET, tryMoveDown
+        // true, movedUp false) at the cell the water went to, the stack's
+        // CUSTOM_NAME and implicit components (AXOLOTL_VARIANT, SALMON_SIZE,
+        // TROPICAL_FISH_*) applied,
+        // loadFromBucketTag(BUCKET_ENTITY_DATA) + setFromBucket(true), the
+        // mob added and its ambient sound played; then the empty bucket.
+        bool EmptyBucketContents(ILevelWrite* world, IUsePlayer* player, const BucketHit& hit,
+                                 bool isLava, const char* emptySound, glm::ivec3& outTarget);   // below
+
+        UseResult Use_MobBucket(ILevelWrite* world, IUsePlayer* player,
+                                uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            const auto mobBucket = Bucketable::MobBucketFor(stack.itemId);
+            if (!mobBucket) return UseResult::Pass;
+            // MobBucketItem.getFluidContext: ClipContext.Fluid.NONE.
+            auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);
+            if (!hit) return UseResult::Pass;
+            glm::ivec3 target;
+            if (!EmptyBucketContents(world, player, *hit, /*isLava=*/false, mobBucket->emptySound, target)) {
+                return UseResult::Fail;
+            }
+            if (!world->IsClientSide()) {
+                const ItemStack bucket = stack;
+                const auto configure = [bucket](Mob& mob) {
+                    // EntityType.createDefaultStackConfig: the custom name
+                    // and the type's implicit components.
+                    if (auto name = bucket.components.get(DataComponents::CUSTOM_NAME)) mob.SetCustomName(*name);
+                    const BucketEntityData data =
+                        bucket.components.get(DataComponents::BUCKET_ENTITY_DATA).value_or(BucketEntityData{});
+                    if (auto* fish = dynamic_cast<Fish*>(&mob)) {
+                        // SALMON_SIZE / TROPICAL_FISH_* (applyImplicitComponents).
+                        fish->ApplyImplicitComponents(bucket);
+                        fish->LoadFromBucket(data);
+                        fish->SetFromBucket(true);
+                    } else if (auto* axolotl = dynamic_cast<Axolotl*>(&mob)) {
+                        if (auto v = bucket.components.get(DataComponents::AXOLOTL_VARIANT);
+                            v && *v >= 0 && *v < Axolotl::kVariantCount) {
+                            axolotl->SetVariant(static_cast<Axolotl::Variant>(*v));
+                        }
+                        axolotl->LoadFromBucket(data);
+                        axolotl->SetFromBucket(true);
+                    } else if (auto* tadpole = dynamic_cast<Tadpole*>(&mob)) {
+                        tadpole->LoadFromBucket(data);   // fromBucket is always true
+                    }
+                    mob.PlayAmbientSound();
+                };
+                if (SpawnMobFromItem(mobBucket->type, target, /*tryMoveDown=*/true, /*movedUp=*/false,
+                                     world->GetDimension(), 0, configure, SpawnReason::Bucket)) {
+                    // MobBucketItem.spawn:36 — gameEvent(user, ENTITY_PLACE, pos).
+                    GameEventEmit(world, player, GameEventId::EntityPlace, target);
+                }
+            }
+            // BucketItem.getEmptySuccessItem — creative keeps the full one.
             if (!player->isCreative()) {
                 stack = ItemStack(Items::Bucket, 1);
                 player->markSlotDirty(player->handSlotIndex(hand));
@@ -1242,6 +1436,10 @@ namespace Game {
 
             // EnderEyeItem.use:103 — at the player, NEUTRAL, pitch
             // lerp(nextFloat, 0.33, 0.5); server-side, for everyone.
+            // EnderEyeItem.use:95 — gameEvent(PROJECTILE_SHOOT, eye position,
+            // Context.of(player)).
+            world->GameEvent(GameEventId::ProjectileShoot, from,
+                             GameEventContext::Of(player->GameEventSource()));
             world->PlaySound(nullptr, player->getPosition(), SoundEvents::ENDER_EYE_LAUNCH, SoundSource::Neutral,
                              1.0f, 0.33f + LevelRandomFloat(world) * (0.5f - 0.33f));
             stack.count -= 1;
@@ -1274,6 +1472,52 @@ namespace Game {
             world->PlaySound(nullptr, player->getPosition(), SoundEvents::ENDER_PEARL_THROW, SoundSource::Neutral,
                              0.5f, 0.4f / (LevelRandomFloat(world) * 0.4f + 0.8f));
             // MC itemStack.consume(1, player) — creative keeps the pearl.
+            if (!player->isCreative()) {
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+            }
+            return UseResult::Success;
+        }
+
+        // ── FishingRod.use — mirrors FishingRodItem.java ───────────────────
+        //
+        // Cast when the player has no hook out, reel in when they do; both
+        // halves are the server's (the hook, the loot, the orbs and the rod's
+        // wear live there — FishingRodUse.cpp). MC's client runs the same
+        // use and gets nothing from it but SUCCESS: its level.playSound(null,
+        // ...) plays nothing client-side, and the hook arrives on the wire.
+        // So the client prediction is exactly that — the arm swing.
+        UseResult Use_FishingRod(ILevelWrite* world, IUsePlayer* player,
+                                 uint32_t hand, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Success;
+            return UseFishingRodServer(world, *player, hand, stack);
+        }
+
+        // ── WindCharge.use — mirrors WindChargeItem.java ───────────────────
+        //
+        // Throw a WindCharge from the player's eye (power 1.5, inaccuracy
+        // 1.0), WIND_CHARGE_THROW for everyone, spend one. The 0.5 s
+        // use_cooldown is applied by the dispatcher (ItemStack.use's
+        // applyAfterUseComponentSideEffects → UseCooldown, ItemCooldowns).
+        UseResult Use_WindCharge(ILevelWrite* world, IUsePlayer* player,
+                                 uint32_t /*hand*/, ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+
+            // `if (level instanceof ServerLevel)` guards the spawn; the
+            // client still answers SUCCESS and waits for the entity (and the
+            // shrunk stack) from the server, as for the pearl.
+            if (world->IsClientSide()) return UseResult::Success;
+
+            if (!ThrowWindCharge(player->getDimensionId(), *player)) {
+                return UseResult::Fail;
+            }
+
+            // WindChargeItem.use:38 — playSound(null, player x/y/z,
+            // WIND_CHARGE_THROW, NEUTRAL, 0.5, 0.4 / (nextFloat * 0.4 + 0.8)).
+            world->PlaySound(nullptr, player->getPosition(), SoundEvents::WIND_CHARGE_THROW, SoundSource::Neutral,
+                             0.5f, 0.4f / (LevelRandomFloat(world) * 0.4f + 0.8f));
+            // stack.consume(1, player) — creative keeps the charge.
             if (!player->isCreative()) {
                 stack.count -= 1;
                 if (stack.count <= 0) stack.Clear();
@@ -1326,6 +1570,8 @@ namespace Game {
                 // BucketItem.use:82 — bucketPickup.getPickupSound() through
                 // player.playSound (the waterlogged block's is water's).
                 PlayerPlaySound(world, player, SoundEvents::BUCKET_FILL, 1.0f, 1.0f);
+                // BucketItem.use:84 — gameEvent(player, FLUID_PICKUP, pos).
+                GameEventEmit(world, player, GameEventId::FluidPickup, hit->pos);
                 {
                     player->CreateFilledResult(stack, ItemStack(filledWater, 1));
                     player->markSlotDirty(player->handSlotIndex(hand));
@@ -1363,6 +1609,8 @@ namespace Game {
             PlayerPlaySound(world, player,
                             hit->block == BlockID::Lava ? SoundEvents::BUCKET_FILL_LAVA : SoundEvents::BUCKET_FILL,
                             1.0f, 1.0f);
+            // BucketItem.use:84 — gameEvent(player, FLUID_PICKUP, pos).
+            GameEventEmit(world, player, GameEventId::FluidPickup, hit->pos);
             // ItemUtils.createFilledResult (:62): creative keeps the empty
             // bucket, survival transforms it. Component patch reset — a
             // fresh filled bucket carries no per-stack state.
@@ -1394,10 +1642,146 @@ namespace Game {
             // BOTTLE_FILL, NEUTRAL, 1.0, 1.0).
             world->PlaySound(player, player->getPosition(), SoundEvents::BOTTLE_FILL, SoundSource::Neutral,
                              1.0f, 1.0f);
-            // GameEvent.FLUID_PICKUP — no game-event system.
+            // BottleItem.use:60 — gameEvent(player, FLUID_PICKUP, pos).
+            GameEventEmit(world, player, GameEventId::FluidPickup, hit->pos);
             player->CreateFilledResult(stack, CreatePotionItemStack(Items::Potion, PotionId::Water));
             player->markSlotDirty(player->handSlotIndex(hand));
             return UseResult::Success;
+        }
+
+        // BucketItem.playEmptySound (BLOCKS) — or, for a MobBucketItem, its
+        // own emptySound on NEUTRAL (MobBucketItem.playEmptySound).
+        void PlayBucketEmptySound(ILevelWrite* world, IUsePlayer* player, const glm::ivec3& pos,
+                                  bool isLava, const char* emptySound) {
+            if (emptySound) {
+                world->PlaySound(player, pos, emptySound, SoundSource::Neutral, 1.0f, 1.0f);
+            } else {
+                world->PlaySound(player, pos, isLava ? SoundEvents::BUCKET_EMPTY_LAVA : SoundEvents::BUCKET_EMPTY,
+                                 SoundSource::Blocks, 1.0f, 1.0f);
+                // BucketItem.playEmptySound:191 — gameEvent(user, FLUID_PLACE,
+                // pos). (MobBucketItem's override plays its sound only.)
+                GameEventEmit(world, player, GameEventId::FluidPlace, pos);
+            }
+        }
+
+        // MC BucketItem.emptyContents (:104-179) for a water or lava bucket
+        // aimed at `hit` (simplified: no fluid simulation, sources are
+        // static cubes). True when the contents went somewhere — poured,
+        // waterlogged into the clicked block, or evaporated in the nether —
+        // with `outTarget` the cell they went to (MobBucketItem spawns its
+        // mob there). `emptySound` null = the plain bucket's sound.
+        bool EmptyBucketContents(ILevelWrite* world, IUsePlayer* player, const BucketHit& hit,
+                                 bool isLava, const char* emptySound, glm::ivec3& outTarget) {
+            // MC BucketItem.java:83-84:
+            //   BlockPos target = state.getBlock() instanceof LiquidBlockContainer
+            //                     && this.content == Fluids.WATER ? pos : relativePos;
+            //
+            // Pouring WATER onto a waterloggable block fills the block itself
+            // rather than the cell in front of it — that is how you waterlog a
+            // fence or a stair. Lava is excluded by the `content == WATER`
+            // clause, exactly as vanilla has it, so a lava bucket still pours
+            // into the adjacent cell.
+            if (!isLava && BlockRegistry::IsWaterloggable(hit.block)) {
+                const BlockState hitState =
+                    world->GetBlockState(hit.pos.x, hit.pos.y, hit.pos.z);
+                // SimpleWaterloggedBlock.placeLiquid:24 refuses when the block
+                // is already waterlogged, and the refusal propagates all the
+                // way out as a failed use — the bucket is not consumed.
+                if (BlockRegistry::ContainsWater(hitState)) {
+                    return false;
+                }
+                world->SetBlock(hit.pos.x, hit.pos.y, hit.pos.z,
+                                BlockRegistry::WithWaterlogged(hitState, true),
+                                World::UpdateFlags::All);
+                // SimpleWaterloggedBlock.placeLiquid's second half: the new
+                // water books its first tick so it can start flowing out of
+                // the block. A no-op on the client (no scheduler).
+                Fluids::ScheduleTick(*world, hit.pos, FluidType::Water);
+                // BucketItem.emptyContents → playEmptySound(user, level, pos).
+                PlayBucketEmptySound(world, player, hit.pos, isLava, emptySound);
+                outTarget = hit.pos;
+                return true;
+            }
+
+            // BucketItem.use:84 — the cell in front of the clicked face
+            // (pos.relative(direction)); the clicked cell itself only for
+            // water into a LiquidBlockContainer, handled above.
+            glm::ivec3 target = hit.beforePos;
+            if (!world->IsValidPosition(target.x, target.y, target.z)) {
+                return false;
+            }
+            const BlockState targetState =
+                world->GetBlockState(target.x, target.y, target.z);
+            const BlockID targetBlock = targetState.Block();
+
+            // emptyContents: `mayReplace = blockState.canBeReplaced(content)`
+            // — BlockBehaviour.canBeReplaced(state, fluid) is
+            // `canBeReplaced() || !isSolid()`: the replaceable flag (water,
+            // lava, tall grass, snow layers, fire…) or no collision at all
+            // (a torch, a flower). `canPlaceFluidInsideBlock = isAir ||
+            // mayReplace` — the shift-key term only matters on the first of
+            // MC's two attempts, and the second retries without it, so the
+            // net rule is exactly this.
+            const bool mayReplace = BlockRegistry::Get(targetBlock).replaceable ||
+                                    !BlockRegistry::HasCollision(targetBlock);
+            if (targetBlock != BlockID::Air && !mayReplace) {
+                return false;                                     // :88
+            }
+
+            // EnvironmentAttributes.WATER_EVAPORATES (the nether's ultrawarm
+            // flag): water poured in the nether hisses away (with eight
+            // LARGE_SMOKE puffs) and the bucket still empties.
+            if (!isLava && world->GetDimension() == DimensionId::Nether) {
+                float pitch = 2.6f;
+                if (JavaRandom* random = world->Random()) {
+                    pitch += (random->NextFloat() - random->NextFloat()) * 0.8f;
+                }
+                // BucketItem.emptyContents:154 — playSound(user, pos, FIRE_EXTINGUISH, …).
+                world->PlaySound(player, target, SoundEvents::FIRE_EXTINGUISH, SoundSource::Blocks, 0.5f, pitch);
+                // :157 — sendParticles(LARGE_SMOKE, x, y, z, 8, 1, 1, 1, 0,
+                // RandomizationType.ALTERNATIVE): the steam over the cell.
+                if (!world->IsClientSide()) {
+                    if (Particles::ServerParticleSink* sink = Particles::GetServerSink()) {
+                        Particles::ParticleBurst burst;
+                        burst.options = ParticleOptions(ParticleKind::LargeSmoke);
+                        burst.pos = glm::dvec3(target);
+                        burst.dist = glm::vec3(1.0f);
+                        burst.count = 8;
+                        burst.randomization = Particles::Randomization::Alternative;
+                        sink->SendParticles(world->GetDimension(), burst);
+                    }
+                }
+                outTarget = target;
+                return true;
+            }
+
+            // `if (!isClientSide && mayReplace && !blockState.liquid())
+            //     level.destroyBlock(pos, true)` — the tall grass the water
+            // displaces drops as an item.
+            const bool targetIsLiquid = targetBlock == BlockID::Water || targetBlock == BlockID::Lava;
+            if (!world->IsClientSide() && mayReplace && !targetIsLiquid &&
+                targetBlock != BlockID::Air) {
+                // Level.destroyBlock's levelEvent 2001 (the plant's puff).
+                PlayLevelEventSound(*world, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, target,
+                                    static_cast<int>(world->GetBlockState(target.x, target.y, target.z).RawId()),
+                                    world->Random());
+                world->DestroyBlock(target, true);
+            }
+
+            // `level.setBlock(pos, content.defaultFluidState().createLegacyBlock(), 11)`
+            // — a SOURCE, flag 11. A write that changes nothing (pouring into
+            // an identical source) still counts as success in vanilla; only
+            // a no-op over a non-source fails.
+            const bool wrote = world->SetBlock(target.x, target.y, target.z,
+                                               isLava ? BlockID::Lava : BlockID::Water,
+                                               World::UpdateFlags::AllImmediate);
+            if (!wrote && !FluidStateOf(targetState).IsSource()) {
+                return false;
+            }
+            // BucketItem.playEmptySound:188 — (user, pos, BUCKET_EMPTY(_LAVA), BLOCKS).
+            PlayBucketEmptySound(world, player, target, isLava, emptySound);   // :175-179
+            outTarget = target;
+            return true;                                      // :90
         }
 
         // Filled bucket — BucketItem.java:76-95 + emptyContents (:104-179,
@@ -1434,105 +1818,11 @@ namespace Game {
                 return UseResult::Success;
             }
 
-            // MC BucketItem.java:83-84:
-            //   BlockPos target = state.getBlock() instanceof LiquidBlockContainer
-            //                     && this.content == Fluids.WATER ? pos : relativePos;
-            //
-            // Pouring WATER onto a waterloggable block fills the block itself
-            // rather than the cell in front of it — that is how you waterlog a
-            // fence or a stair. Lava is excluded by the `content == WATER`
-            // clause, exactly as vanilla has it, so a lava bucket still pours
-            // into the adjacent cell.
-            if (!isLava && BlockRegistry::IsWaterloggable(hit->block)) {
-                const BlockState hitState =
-                    world->GetBlockState(hit->pos.x, hit->pos.y, hit->pos.z);
-                // SimpleWaterloggedBlock.placeLiquid:24 refuses when the block
-                // is already waterlogged, and the refusal propagates all the
-                // way out as a failed use — the bucket is not consumed.
-                if (BlockRegistry::ContainsWater(hitState)) {
-                    return UseResult::Fail;
-                }
-                world->SetBlock(hit->pos.x, hit->pos.y, hit->pos.z,
-                                BlockRegistry::WithWaterlogged(hitState, true),
-                                World::UpdateFlags::All);
-                // SimpleWaterloggedBlock.placeLiquid's second half: the new
-                // water books its first tick so it can start flowing out of
-                // the block. A no-op on the client (no scheduler).
-                Fluids::ScheduleTick(*world, hit->pos, FluidType::Water);
-                // BucketItem.emptyContents → playEmptySound(user, level, pos).
-                world->PlaySound(player, hit->pos, SoundEvents::BUCKET_EMPTY, SoundSource::Blocks, 1.0f, 1.0f);
-                if (!player->isCreative()) {
-                    stack = ItemStack(emptied, 1);
-                    player->markSlotDirty(player->handSlotIndex(hand));
-                }
-                return UseResult::Success;
-            }
-
-            // BucketItem.use:84 — the cell in front of the clicked face
-            // (pos.relative(direction)); the clicked cell itself only for
-            // water into a LiquidBlockContainer, handled above.
-            glm::ivec3 target = hit->beforePos;
-            if (!world->IsValidPosition(target.x, target.y, target.z)) {
+            // MC BucketItem.use:85 — emptyContents, then the success item.
+            glm::ivec3 target;
+            if (!EmptyBucketContents(world, player, *hit, isLava, nullptr, target)) {
                 return UseResult::Fail;
             }
-            const BlockState targetState =
-                world->GetBlockState(target.x, target.y, target.z);
-            const BlockID targetBlock = targetState.Block();
-
-            // emptyContents: `mayReplace = blockState.canBeReplaced(content)`
-            // — BlockBehaviour.canBeReplaced(state, fluid) is
-            // `canBeReplaced() || !isSolid()`: the replaceable flag (water,
-            // lava, tall grass, snow layers, fire…) or no collision at all
-            // (a torch, a flower). `canPlaceFluidInsideBlock = isAir ||
-            // mayReplace` — the shift-key term only matters on the first of
-            // MC's two attempts, and the second retries without it, so the
-            // net rule is exactly this.
-            const bool mayReplace = BlockRegistry::Get(targetBlock).replaceable ||
-                                    !BlockRegistry::HasCollision(targetBlock);
-            if (targetBlock != BlockID::Air && !mayReplace) {
-                return UseResult::Fail;                                     // :88
-            }
-
-            // EnvironmentAttributes.WATER_EVAPORATES (the nether's ultrawarm
-            // flag): water poured in the nether hisses away and the bucket
-            // still empties. MC also spawns eight LARGE_SMOKE here — no
-            // server→client particle channel yet.
-            if (!isLava && world->GetDimension() == DimensionId::Nether) {
-                float pitch = 2.6f;
-                if (JavaRandom* random = world->Random()) {
-                    pitch += (random->NextFloat() - random->NextFloat()) * 0.8f;
-                }
-                // BucketItem.emptyContents:154 — playSound(user, pos, FIRE_EXTINGUISH, …).
-                world->PlaySound(player, target, SoundEvents::FIRE_EXTINGUISH, SoundSource::Blocks, 0.5f, pitch);
-                if (!player->isCreative()) {
-                    stack = ItemStack(emptied, 1);
-                    player->markSlotDirty(player->handSlotIndex(hand));
-                }
-                return UseResult::Success;
-            }
-
-            // `if (!isClientSide && mayReplace && !blockState.liquid())
-            //     level.destroyBlock(pos, true)` — the tall grass the water
-            // displaces drops as an item.
-            const bool targetIsLiquid = targetBlock == BlockID::Water || targetBlock == BlockID::Lava;
-            if (!world->IsClientSide() && mayReplace && !targetIsLiquid &&
-                targetBlock != BlockID::Air) {
-                world->DestroyBlock(target, true);
-            }
-
-            // `level.setBlock(pos, content.defaultFluidState().createLegacyBlock(), 11)`
-            // — a SOURCE, flag 11. A write that changes nothing (pouring into
-            // an identical source) still counts as success in vanilla; only
-            // a no-op over a non-source fails.
-            const bool wrote = world->SetBlock(target.x, target.y, target.z,
-                                               isLava ? BlockID::Lava : BlockID::Water,
-                                               World::UpdateFlags::AllImmediate);
-            if (!wrote && !FluidStateOf(targetState).IsSource()) {
-                return UseResult::Fail;
-            }
-            // BucketItem.playEmptySound:188 — (user, pos, BUCKET_EMPTY(_LAVA), BLOCKS).
-            world->PlaySound(player, target, isLava ? SoundEvents::BUCKET_EMPTY_LAVA : SoundEvents::BUCKET_EMPTY,
-                             SoundSource::Blocks, 1.0f, 1.0f);                // :175-179
             // :97-99 getEmptySuccessItem — creative keeps the filled bucket.
             if (!player->isCreative()) {
                 stack = ItemStack(emptied, 1);
@@ -1573,6 +1863,25 @@ namespace Game {
             return HushItems::BowBegin(*player, hand);
         }
 
+        // The spears' Item.use (a KINETIC_WEAPON): the charge's hold and the
+        // use sound (server: WeaponItems::SpearBegin). The client's own half
+        // — the pose, its local sound — is PlayerController's prediction.
+        UseResult Use_Spear(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                            ItemStack& /*stack*/) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Consume;
+            return WeaponItems::SpearBegin(*player, hand);
+        }
+
+        // TridentItem.use: the draw, unless it would break or Riptide has no
+        // water or rain (server: WeaponItems::TridentBegin).
+        UseResult Use_Trident(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                              ItemStack& /*stack*/) {
+            if (!world || !player) return UseResult::Pass;
+            if (world->IsClientSide()) return UseResult::Consume;
+            return WeaponItems::TridentBegin(*player, hand);
+        }
+
         // Recall chime: start the hold (kRecallUseTicks) if there is a gate
         // to go back to and the chime is not still ringing; the teleport is
         // the finish.
@@ -1597,7 +1906,134 @@ namespace Game {
             Aurelith::HeldNoteFinish(player);
         }
 
+        // ── Goat horn — mirrors InstrumentItem.use ───────────────────────
+        // The stack's INSTRUMENT (the goat horn's default is ponder): no
+        // instrument, FAIL. Otherwise the hold (use_duration * 20 ticks,
+        // TOOT_HORN) and its cooldown are the server's (Archaeology::
+        // GoatHornBegin); InstrumentItem.play runs on both sides here as in
+        // MC — level.playSound(player, player, sound, RECORDS, range / 16, 1)
+        // is this client's own copy while predicting and everyone else's
+        // from the server.
+        UseResult Use_GoatHorn(ILevelWrite* world, IUsePlayer* player, uint32_t hand,
+                               ItemStack& stack) {
+            if (!world || !player) return UseResult::Pass;
+            const std::optional<std::string> id = stack.get(DataComponents::INSTRUMENT);
+            const Instruments::Instrument* instrument = id ? Instruments::Get(*id) : nullptr;
+            if (!instrument) return UseResult::Fail;
+            if (world->IsClientSide()) {
+                world->PlaySound(SoundExcept(player), player->getPosition(), instrument->soundEvent,
+                                 SoundSource::Records, instrument->range / 16.0f, 1.0f);
+                return UseResult::Consume;
+            }
+            const UseResult begun = Archaeology::GoatHornBegin(*player, hand, stack);
+            if (!ConsumesAction(begun)) return begun;
+            world->PlaySound(SoundExcept(player), player->getPosition(), instrument->soundEvent,
+                             SoundSource::Records, instrument->range / 16.0f, 1.0f);
+            // level.gameEvent(GameEvent.INSTRUMENT_PLAY, player.position(),
+            // GameEvent.Context.of(player)).
+            world->GameEvent(GameEventId::InstrumentPlay, player->getPosition(),
+                             GameEventContext::Of(player->GameEventSource()));
+            return begun;
+        }
+
     } // namespace
+
+    // ── Archaeology: the brush's view ray ────────────────────────────────
+    // BrushItem.calculateHitResult (ProjectileUtil.getHitResultOnViewVector
+    // over blockInteractionRange) reduced to its block half: the bucket's
+    // POV clip, fluids ignored, and the face the ray entered through.
+    std::optional<Archaeology::ViewBlockHit> Archaeology::ClipPlayerView(ILevelWrite& world,
+                                                                         const IUsePlayer& player,
+                                                                         float reach) {
+        auto hit = BucketClip(&world, player, /*stopOnFluid=*/false, reach);
+        if (!hit) return std::nullopt;
+        ViewBlockHit out;
+        out.pos = hit->pos;
+        const glm::ivec3 d = hit->beforePos - hit->pos;
+        // Direction 3D data values: down, up, north, south, west, east. A ray
+        // that starts inside its block has no entry face; UP stands in.
+        if      (d.y < 0) out.face = 0;
+        else if (d.y > 0) out.face = 1;
+        else if (d.z < 0) out.face = 2;
+        else if (d.z > 0) out.face = 3;
+        else if (d.x < 0) out.face = 4;
+        else if (d.x > 0) out.face = 5;
+        else              out.face = 1;
+        // BlockHitResult.getLocation: the ray's crossing of the struck face's
+        // plane (the cell's side; the ray starting inside the block keeps the
+        // eye).
+        const glm::dvec3 p = player.getPosition();
+        const glm::dvec3 eye(p.x, p.y + 1.62, p.z);
+        const glm::dvec3 dir = glm::dvec3(Mth::ViewVector(player.getPitch(), player.getYaw()));
+        out.viewVector = dir;
+        out.location = eye;
+        const int axis = (out.face <= 1) ? 1 : (out.face <= 3 ? 2 : 0);
+        const bool positive = out.face == 1 || out.face == 3 || out.face == 5;
+        const double plane = static_cast<double>(out.pos[axis]) + (positive ? 1.0 : 0.0);
+        if (std::abs(dir[axis]) > 1e-9 && d != glm::ivec3(0)) {
+            const double t = (plane - eye[axis]) / dir[axis];
+            if (t >= 0.0) out.location = eye + dir * t;
+        }
+        return out;
+    }
+
+    // WeatheringCopper.getAge for the ChangeOverTimeBlock family — declared in
+    // CopperChestBlock.hpp; answered from the family table above so the
+    // weathering neighbour count and the axe/honeycomb maps cannot disagree.
+    int WeatheringCopperAge(BlockID id) {
+        size_t count = 0;
+        const CopperFamily* families = CopperFamilies(count);
+        for (size_t f = 0; f < count; ++f) {
+            for (int s = 0; s < 4; ++s) {
+                if (families[f].stage[s] == id) return s;
+            }
+        }
+        return -1;
+    }
+
+    BlockState WeatheringCopperPreviousState(BlockState state) {
+        // WeatheringCopper.getPrevious(state): one stage back, properties
+        // kept; the state itself when there is none (unaffected / not copper).
+        const BlockID previous = CopperScrapedVariant(state.Block());
+        return previous == BlockID::Air ? state : WithPropertiesOf(previous, state);
+    }
+
+    BlockState WeatheringCopperFirstState(BlockState state) {
+        // WeatheringCopper.getFirst(state): the family's unaffected stage.
+        size_t count = 0;
+        const CopperFamily* families = CopperFamilies(count);
+        for (size_t f = 0; f < count; ++f) {
+            for (int s = 0; s < 4; ++s) {
+                if (families[f].stage[s] == state.Block()) {
+                    return s == 0 ? state : WithPropertiesOf(families[f].stage[0], state);
+                }
+            }
+        }
+        return state;
+    }
+
+    bool IsWaxedCopperBlock(BlockID id) {
+        // HoneycombItem.WAX_OFF_BY_BLOCK.containsKey — a waxed stage.
+        size_t count = 0;
+        const CopperFamily* families = CopperFamilies(count);
+        for (size_t f = 0; f < count; ++f) {
+            for (int s = 0; s < 4; ++s) {
+                if (families[f].waxed[s] == id) return true;
+            }
+        }
+        return false;
+    }
+
+    BlockID WeatheringCopperNext(BlockID id) {
+        size_t count = 0;
+        const CopperFamily* families = CopperFamilies(count);
+        for (size_t f = 0; f < count; ++f) {
+            for (int s = 0; s < 3; ++s) {
+                if (families[f].stage[s] == id) return families[f].stage[s + 1];
+            }
+        }
+        return BlockID::Air;
+    }
 
     void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems) {
         auto wireUseOn = [&](ItemID id, ItemUseOnFn fn) {
@@ -1652,6 +2088,9 @@ namespace Game {
 
         // FlintAndSteel — single variant.
         wireUseOn(Items::FlintAndSteel, &UseOn_FlintAndSteel);
+        // FireChargeItem.useOn — lights campfires, candles and candle cakes,
+        // else sets a fire; used up either way it succeeds.
+        wireUseOn(Items::FireCharge, &UseOn_FireCharge);
 
         // EnderEye — seats an eye in an end_portal_frame and opens the portal
         // once the ring is complete. Wiring a useOn also takes the eye out of
@@ -1659,6 +2098,33 @@ namespace Game {
         // predict placement for any item that has one), which is what stops it
         // predicting a block that is not a block item at all.
         wireUseOn(Items::EnderEye, &UseOn_EnderEye);
+
+        // Brush — MC BrushItem: useOn starts the 200-tick BRUSH hold (no air
+        // use: Item.use's default passes), and every tick of it is
+        // onUseTick's stroke check (Archaeology::BrushUseTick).
+        wireUseOn(Items::Brush, &Archaeology::BrushUseOn);
+        if (auto it = pureItems.find(Items::Brush); it != pureItems.end()) {
+            it->second.useDuration  = Archaeology::kBrushUseDuration;
+            it->second.useAnimation = ItemUseAnimation::BRUSH;
+            it->second.onUseTick    = &Archaeology::BrushUseTick;
+        }
+
+        // Goat horn — MC InstrumentItem: the default INSTRUMENT
+        // (Instruments.PONDER_GOAT_HORN, Items.java), use plays it and holds
+        // TOOT_HORN for the instrument's use_duration (every vanilla horn:
+        // 7 s = 140 ticks).
+        if (auto it = pureItems.find(Items::GoatHorn); it != pureItems.end()) {
+            it->second.defaultComponents.set(DataComponents::INSTRUMENT,
+                                             std::string(Instruments::kDefaultGoatHorn));
+            it->second.use          = &Use_GoatHorn;
+            it->second.useAnimation = ItemUseAnimation::TOOT_HORN;
+            // InstrumentItem.getUseDuration is floor(use_duration * 20) of
+            // the stack's instrument; the engine's use duration is per item,
+            // and every vanilla goat horn's use_duration is 7.0. (Not read
+            // from the data pack here: item registration can run before the
+            // data root is reachable.)
+            it->second.useDuration = 140;
+        }
 
         // EchoShard — lights a reinforced-deepslate frame as a Hush portal
         // (PortalFamily::Hush). Same prediction note as the eye: a useOn
@@ -1687,6 +2153,21 @@ namespace Game {
                     nullptr, &HushItems::BowRelease);
             setHold(Items::ResonanceBow, &Use_Bow, 72000, ItemUseAnimation::BOW,
                     nullptr, &HushItems::BowRelease);
+            // MC TridentItem: 72000 ticks, TRIDENT, thrown (or riptided) on
+            // release (WeaponItems).
+            setHold(Items::Trident, &Use_Trident, 72000, ItemUseAnimation::TRIDENT,
+                    nullptr, &WeaponItems::TridentRelease);
+            // The spears' KINETIC_WEAPON (Item.getUseDuration 72000,
+            // getUseAnimation SPEAR): the charge, whose every tick is
+            // ItemStack.onUseTick → KineticWeapon.damageEntities.
+            for (ItemID spear : { Items::WoodenSpear, Items::StoneSpear, Items::CopperSpear,
+                                  Items::IronSpear, Items::GoldenSpear, Items::DiamondSpear,
+                                  Items::NetheriteSpear }) {
+                setHold(spear, &Use_Spear, Spear::kUseDuration, ItemUseAnimation::SPEAR, nullptr, nullptr);
+                if (auto it = pureItems.find(spear); it != pureItems.end()) {
+                    it->second.onUseTick = &WeaponItems::SpearUseTick;
+                }
+            }
             // Recall chime: a hold as long as its note (the goat horn's
             // pose), then home to the last hush gate; letting go early only
             // says so. The chime is not used up.
@@ -1783,20 +2264,34 @@ namespace Game {
         };
         wireUse(Items::EnderEye,    &Use_EnderEye);
         wireUse(Items::EnderPearl,  &Use_EnderPearl);
+        wireUse(Items::WindCharge,  &Use_WindCharge);
+        wireUse(Items::FishingRod,  &Use_FishingRod);
         wireUse(Items::Bucket,      &Use_EmptyBucket);
         wireUse(Items::GlassBottle, &Use_GlassBottle);
         wireUse(Items::SulfurCubeBucket, &Use_SulfurCubeBucket);
+        for (ItemID id : { Items::PufferfishBucket, Items::SalmonBucket, Items::CodBucket,
+                           Items::TropicalFishBucket, Items::AxolotlBucket, Items::TadpoleBucket }) {
+            wireUse(id, &Use_MobBucket);
+        }
         wireUse(Items::WaterBucket, &Use_FilledBucket);
         wireUse(Items::LavaBucket,  &Use_FilledBucket);
         // The Aether's skyroot buckets (SkyrootBucketItem): the same use, their
         // own empty/filled pair (see Use_EmptyBucket / Use_FilledBucket).
         wireUse(Items::SkyrootBucket,      &Use_EmptyBucket);
         wireUse(Items::SkyrootWaterBucket, &Use_FilledBucket);
+        // Maps: EmptyMapItem.use on `map`, MapItem.useOn (banner markers) on
+        // filled_map and the 26.3 structure maps.
+        MapItem::RegisterBehaviors(pureItems);
+        // FoodOnAStickItem.use: carrot / warped fungus on a stick boost the
+        // pig / strider they steer.
+        FoodOnAStickItem::RegisterBehaviors(pureItems);
         // Filled buckets stack to 1 (Items.java `.stacksTo(1)` on all buckets;
         // the empty bucket stacks to 16).
         if (auto it = pureItems.find(Items::Bucket); it != pureItems.end())
             it->second.maxStackSize = 16;
-        for (ItemID id : { Items::WaterBucket, Items::LavaBucket }) {
+        for (ItemID id : { Items::WaterBucket, Items::LavaBucket,
+                           Items::PufferfishBucket, Items::SalmonBucket, Items::CodBucket,
+                           Items::TropicalFishBucket, Items::AxolotlBucket, Items::TadpoleBucket }) {
             if (auto it = pureItems.find(id); it != pureItems.end())
                 it->second.maxStackSize = 1;
         }
@@ -1942,6 +2437,23 @@ namespace Game {
             setRarity(Items::Trident,              Rarity::RARE);     // :2941
             setRarity(Items::CreeperBannerPattern, Rarity::UNCOMMON); // :2953
             setRarity(Items::MojangBannerPattern,  Rarity::RARE);     // :2955
+            // The music discs (Items.java:3122-3144): UNCOMMON, except the
+            // four RARE ones — creator, lava_chicken, otherside, pigstep —
+            // and the fragment, UNCOMMON.
+            for (ItemID disc : { Items::MusicDisc13, Items::MusicDiscCat, Items::MusicDiscBlocks,
+                                 Items::MusicDiscBounce, Items::MusicDiscChirp,
+                                 Items::MusicDiscCreatorMusicBox, Items::MusicDiscFar,
+                                 Items::MusicDiscMall, Items::MusicDiscMellohi, Items::MusicDiscStal,
+                                 Items::MusicDiscStrad, Items::MusicDiscWard, Items::MusicDisc11,
+                                 Items::MusicDiscWait, Items::MusicDiscRelic, Items::MusicDisc5,
+                                 Items::MusicDiscPrecipice, Items::MusicDiscTears,
+                                 Items::DiscFragment5 }) {
+                setRarity(disc, Rarity::UNCOMMON);
+            }
+            for (ItemID disc : { Items::MusicDiscCreator, Items::MusicDiscLavaChicken,
+                                 Items::MusicDiscOtherside, Items::MusicDiscPigstep }) {
+                setRarity(disc, Rarity::RARE);
+            }
             // The Hush (docs/the-hush.md): the boss drop and the capstone
             // sword sit with the mace and elytra.
             setRarity(Items::ResonantHeart,        Rarity::EPIC);
@@ -1977,6 +2489,12 @@ namespace Game {
 
         // Book and quill / written book (BookItems.cpp).
         ItemRegistry_RegisterBookItems(pureItems);
+
+        // The ominous bottle's drink and Bad Omen level (TrialItems.cpp).
+        ItemRegistry_RegisterTrialItems(pureItems);
+
+        // BoatItem.use and MinecartItem.useOn (vehicle/VehicleItems.cpp).
+        ItemRegistry_RegisterVehicleItems(pureItems);
 
         Log::Info("[ItemRegistry] Wired use-behaviour callbacks "
                   "(FlintAndSteel, 8 hoes, 8 shovels) + Tool components on 41 tool items");

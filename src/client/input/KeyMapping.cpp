@@ -296,7 +296,13 @@ namespace Input {
         KeyMapping* Inventory = nullptr;
         KeyMapping* Chat = nullptr;
         KeyMapping* Command = nullptr;
+        KeyMapping* PlayerList = nullptr;
+        KeyMapping* SpectatorOutlines = nullptr;
+        KeyMapping* SpectatorHotbar = nullptr;
+        KeyMapping* ToggleSpectatorShaderEffects = nullptr;
         KeyMapping* Hotbar[9] = {};
+        KeyMapping* SaveToolbarActivator = nullptr;
+        KeyMapping* LoadToolbarActivator = nullptr;
         KeyMapping* TogglePerspective = nullptr;
         KeyMapping* ZoomIn      = nullptr;
         KeyMapping* ZoomOut     = nullptr;
@@ -330,6 +336,7 @@ namespace Input {
         KeyMapping* DebugLightmapTexture = nullptr;
         KeyMapping* DebugSwitchTranslucencyMode = nullptr;
         KeyMapping* DebugImGuiPanels = nullptr;
+        KeyMapping* DebugFillMap = nullptr;
     }
 
     bool IsDebugMapping(const KeyMapping& mapping) {
@@ -388,11 +395,35 @@ namespace Input {
                                          BoundKey::Keyboard(kHotbarKeys[i]));
         }
 
+        // MC key.categories.creative: Options.keySaveHotbarActivator (C) and
+        // keyLoadHotbarActivator (X).
+        Binds::SaveToolbarActivator = &Register("key.saveToolbarActivator", "Creative Mode",
+                                                "Save Hotbar Activator", BoundKey::Keyboard(GLFW_KEY_C));
+        Binds::LoadToolbarActivator = &Register("key.loadToolbarActivator", "Creative Mode",
+                                                "Load Hotbar Activator", BoundKey::Keyboard(GLFW_KEY_X));
+
         Binds::Chat    = &Register("key.chat",    "Multiplayer", "Open Chat",
                                    BoundKey::Keyboard(GLFW_KEY_T));
         Binds::Command = &Register("key.command", "Multiplayer", "Open Command",
                                    BoundKey::Keyboard(GLFW_KEY_SLASH));
+        // MC Options.keyPlayerList (key.categories.multiplayer): held, the tab
+        // list. Shares Tab with the engine's cursor toggle by default.
+        Binds::PlayerList = &Register("key.playerlist", "Multiplayer", "List Players",
+                                      BoundKey::Keyboard(GLFW_KEY_TAB));
+        // MC Options.keySpectatorOutlines / keySpectatorHotbar
+        // (key.categories.spectator): held, other players glow for a
+        // spectator; the spectator menu's open/use key (middle click).
+        Binds::SpectatorOutlines = &Register("key.spectatorOutlines", "Spectator",
+                                             "Highlight Players (Spectators)", BoundKey::Unbound());
+        Binds::SpectatorHotbar   = &Register("key.spectatorHotbar", "Spectator", "Select On Hotbar",
+                                             BoundKey::Mouse(GLFW_MOUSE_BUTTON_MIDDLE));
 
+        // MC Options.keyToggleSpectatorShaderEffects (key.categories.misc,
+        // F4), listed after key.toggleGui and before key.screenshot /
+        // key.togglePerspective as MC's keyMappings order has it.
+        Binds::ToggleSpectatorShaderEffects = &Register("key.toggleSpectatorShaderEffects", "Miscellaneous",
+                                                        "Toggle Spectator Shader Effects",
+                                                        BoundKey::Keyboard(GLFW_KEY_F4));
         Binds::TogglePerspective = &Register("key.togglePerspective", "Miscellaneous",
                                              "Toggle Perspective",
                                              BoundKey::Keyboard(GLFW_KEY_F5));
@@ -447,6 +478,10 @@ namespace Input {
         // H, A, N, D, E, F, Q — is not one of macOS's Fn/Globe shortcuts
         // (Fn+M focuses the menu bar, which ate the old chord).
         Binds::DebugImGuiPanels = &Register("key.debug.imguiPanels", "Debug", "Toggle Debug Panels (ImGui)", BoundKey::Keyboard(GLFW_KEY_K));
+        // Not vanilla: fill in the held map's whole area at once (/mapfill,
+        // cheats only). M is free in vanilla's chord table; with the Right
+        // Alt modifier it is not the Fn+M menu-bar shortcut macOS eats.
+        Binds::DebugFillMap = &Register("key.debug.fillMap", "Debug", "Fill In Held Map", BoundKey::Keyboard(GLFW_KEY_M));
 
         Log::Info("Key mappings registered: %zu bindings", s_ordered.size());
     }
@@ -490,21 +525,157 @@ namespace Input {
         return false;
     }
 
+    namespace {
+
+        // Layout of the key_* entries in options.txt ("keyBindingsSchema").
+        //
+        //   1 (absent) — every build before this marker. Two shapes it can
+        //     hold are wrong when read back literally:
+        //       • Up to 2026-08-17 a printable key was saved as the glyph the
+        //         keyboard layout of the moment printed on it: "key.keyboard./",
+        //         "key.keyboard.z" for W on AZERTY, "key.keyboard.е" for T on
+        //         a Russian layout. Read through the name table, a letter that
+        //         layout moved lands on the WRONG physical key.
+        //       • Up to 2026-09-03 a stored name that did not resolve (a
+        //         glyph from another layout or input source) loaded as
+        //         Unbound, and the next save wrote it back as
+        //         "key.keyboard.unknown". A player who never unbound anything
+        //         came back with chat or the inventory silently dead, and
+        //         since "unknown" is also how a real unbind is spelled, every
+        //         later build honoured it.
+        //   2 — MC table names only (InputConstants' key.keyboard.* set), and
+        //     "key.keyboard.unknown" is a chosen unbind.
+        constexpr int kKeyBindingsSchema = 2;
+
+        bool IsUnboundName(std::string_view name) {
+            return name == "key.keyboard.unknown" || name == "key.mouse.unknown";
+        }
+
+        // One UTF-8 code point: how the pre-table writer spelled a printable
+        // key (its glyph), as opposed to a table name like "left.shift".
+        bool IsSingleGlyph(std::string_view s) {
+            if (s.empty()) return false;
+            int leads = 0;
+            for (const char ch : s) {
+                if ((static_cast<unsigned char>(ch) & 0xC0) != 0x80) ++leads;
+            }
+            return leads == 1;
+        }
+
+        bool IsAllDigits(std::string_view s) {
+            if (s.empty()) return false;
+            for (const char ch : s) if (ch < '0' || ch > '9') return false;
+            return true;
+        }
+
+        // A key this build can actually receive: every GLFW key is in the
+        // name table, so a keyboard code outside it (a numeric fallback gone
+        // wrong, a code from another GLFW version) can never be pressed.
+        bool IsReceivable(const BoundKey& key) {
+            switch (key.type) {
+                case BoundKey::Type::Keyboard: return FindNamed(key.code) != nullptr;
+                case BoundKey::Type::Mouse:    return key.code >= 0 && key.code <= GLFW_MOUSE_BUTTON_LAST;
+                default:                       return true;   // Unbound is a valid state
+            }
+        }
+
+        // A glyph written by the pre-table writer, resolved the way it was
+        // written: the key that prints it on the CURRENT layout (normally
+        // the same machine and layout that saved it), and only then the
+        // layout-free table, which is what makes "/" the slash key when this
+        // layout has no unshifted "/".
+        BoundKey ResolveLegacyGlyph(std::string_view glyph) {
+            for (int k = GLFW_KEY_SPACE; k <= GLFW_KEY_LAST; ++k) {
+                // The keypad prints digits on every layout; a stored "1" on a
+                // layout whose number row does not print one (AZERTY) is the
+                // number row, which the table below resolves.
+                if (k >= GLFW_KEY_KP_0 && k <= GLFW_KEY_KP_EQUAL) continue;
+                if (const char* printable = glfwGetKeyName(k, 0)) {
+                    if (glyph == printable) return BoundKey::Keyboard(k);
+                }
+            }
+            return BoundKey::FromName(std::string("key.keyboard.") + std::string(glyph));
+        }
+
+    } // namespace
+
     void LoadKeyBindings() {
         auto& settings = Platform::g_gameSettings;
+        constexpr std::string_view kKeyb = "key.keyboard.";
+
+        const int schema = settings.GetInt("keyBindingsSchema", 1);
+        const bool migrate = schema < kKeyBindingsSchema;
+
+        // A pre-table (glyph) file is recognisable by any keyboard value the
+        // table writer could never have produced: a single glyph that is not
+        // a letter/digit table name ("/", "&", "е"), which every such file
+        // has at least for the command key.
+        bool glyphEra = false;
+        if (migrate) {
+            for (const KeyMapping* m : s_ordered) {
+                const std::string stored = settings.GetString("key_" + m->id, "");
+                if (stored.rfind(kKeyb, 0) != 0) continue;
+                const std::string_view suffix = std::string_view(stored).substr(kKeyb.size());
+                if (suffix == "unknown" || IsAllDigits(suffix) || FindNamedByName(suffix)) continue;
+                if (IsSingleGlyph(suffix)) { glyphEra = true; break; }
+            }
+        }
+
+        int restored = 0, reresolved = 0, invalid = 0;
         for (KeyMapping* m : s_ordered) {
             const std::string stored = settings.GetString("key_" + m->id, "");
             if (stored.empty()) continue;          // never rebound; keep the default
-            const BoundKey parsed = BoundKey::FromName(stored);
+
+            // Old-build "unknown": almost certainly the unresolved-glyph bug,
+            // not a choice (see kKeyBindingsSchema). Back to the default once;
+            // a player who really wants it unbound unbinds it again, and from
+            // schema 2 on that sticks.
+            if (migrate && IsUnboundName(stored) && m->defaultKey.IsBound()) {
+                Log::Warning("[KeyMapping] migrate: '%s' was saved unbound by an older build; restored the default %s",
+                             m->id.c_str(), m->defaultKey.Name().c_str());
+                m->key = m->defaultKey;
+                ++restored;
+                continue;
+            }
+
+            BoundKey parsed;
+            if (glyphEra && stored.rfind(kKeyb, 0) == 0 &&
+                IsSingleGlyph(std::string_view(stored).substr(kKeyb.size()))) {
+                parsed = ResolveLegacyGlyph(std::string_view(stored).substr(kKeyb.size()));
+                if (parsed.IsBound() && parsed != BoundKey::FromName(stored)) {
+                    Log::Info("[KeyMapping] migrate: '%s' glyph '%s' is %s on this keyboard layout",
+                              m->id.c_str(), stored.c_str(), parsed.Name().c_str());
+                    ++reresolved;
+                }
+            } else {
+                parsed = BoundKey::FromName(stored);
+            }
+
             // A stored name that resolves to nothing is a name this build
             // (or this keyboard) cannot read, not a choice to unbind — only
             // "key.keyboard.unknown" means that. The default stays.
-            if (!parsed.IsBound() && stored != "key.keyboard.unknown" && stored != "key.mouse.unknown") {
+            if (!parsed.IsBound() && !IsUnboundName(stored)) {
                 Log::Warning("[KeyMapping] '%s' stored as '%s' could not be resolved; keeping the default '%s'",
                              m->id.c_str(), stored.c_str(), m->defaultKey.Name().c_str());
                 continue;
             }
+            if (!IsReceivable(parsed)) {
+                Log::Warning("[KeyMapping] '%s' stored as '%s' names no key this build can receive; keeping the default '%s'",
+                             m->id.c_str(), stored.c_str(), m->defaultKey.Name().c_str());
+                ++invalid;
+                continue;
+            }
             m->key = parsed;
+        }
+
+        if (migrate) {
+            Log::Info("[KeyMapping] key bindings schema %d -> %d (%s file): %d restored from 'unknown', %d re-read by layout, %d invalid",
+                      schema, kKeyBindingsSchema, glyphEra ? "glyph-era" : "table-era",
+                      restored, reresolved, invalid);
+            // Rewrite every entry in the stable form now, so the next read is
+            // a plain schema-2 read whatever layout the machine is on then.
+            SaveKeyBindings();
+            settings.SetInt("keyBindingsSchema", kKeyBindingsSchema);
         }
     }
 

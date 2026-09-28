@@ -182,7 +182,23 @@ namespace Server {
     } // namespace
 
     void EffectCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("effect", EffectCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        // MC EffectCommands: give <targets> <effect> [<seconds>|infinite]
+        // [<amplifier>] [<hideParticles>] | clear [<targets>] [<effect>].
+        const Cmd::Node hideParticles = Cmd::Argument("hideParticles", Cmd::Arg::Bool).Executes();
+        const Cmd::Node amplifier = Cmd::Argument("amplifier", Cmd::Arg::Integer)
+            .Suggests({"0", "1", "4", "9", "255"}).Executes().Then(hideParticles);
+        dispatcher.RegisterCommand("effect", EffectCommand::Execute,
+            Cmd::Root()
+                .Then(Cmd::Literal("clear").Executes()
+                    .Then(Cmd::Argument("targets", Cmd::Arg::Entities).Executes()
+                        .Then(Cmd::Argument("effect", Cmd::Arg::Effect).Executes())))
+                .Then(Cmd::Literal("give")
+                    .Then(Cmd::Argument("targets", Cmd::Arg::Entities)
+                        .Then(Cmd::Argument("effect", Cmd::Arg::Effect).Executes()
+                            .Then(Cmd::Argument("seconds", Cmd::Arg::Integer)
+                                .Suggests({"10", "30", "60", "600"}).Executes().Then(amplifier))
+                            .Then(Cmd::Literal("infinite").Executes().Then(amplifier))))));
     }
 
     void EffectCommand::Execute(const CommandSourceStack& source,

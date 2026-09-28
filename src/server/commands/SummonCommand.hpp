@@ -1,7 +1,10 @@
 // File: src/server/commands/SummonCommand.hpp
 //
-// /summon <type> [count] — MC's SummonCommand.java, reduced to the mobs this
-// port implements and always spawning at the sender.
+// /summon <entity> [count] [<pos>] [<nbt>] [fuse=n] [delay=n] — MC's
+// SummonCommand.java plus the engine's count and TNT options. <nbt> is MC's
+// CompoundTagArgument (SNBT, SnbtParser.hpp), loaded onto each new entity by
+// the same reader a saved entity goes through (EntityNbt ApplyMobNbt); with
+// one, finalizeSpawn is skipped as in MC, so `{variant:"ashen"}` stands.
 //
 // This exists for testing: natural spawning is deliberately slow and
 // distance-gated (nothing spawns within 24 blocks of a player), so without a

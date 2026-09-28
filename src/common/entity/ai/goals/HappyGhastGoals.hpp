@@ -11,13 +11,16 @@ namespace Game {
     class HappyGhast;
 
     // MC HappyGhast.HappyGhastFloatGoal — FloatGoal gated off during the
-    // still timeout (the harness/rider "parked" state). The still timeout is
-    // only ever set by the riding system, which this port does not model, so
-    // the gate always passes and the base float behaviour is exact.
+    // still timeout (a player standing on it or boarding it: a parked
+    // platform does not bob up out of water).
     class HappyGhastFloatGoal : public FloatGoal {
     public:
         explicit HappyGhastFloatGoal(HappyGhast* ghast);
+        bool CanUse() override;
         const char* Name() const override { return "HappyGhastFloatGoal"; }
+
+    private:
+        HappyGhast* m_ghast;
     };
 
 } // namespace Game

@@ -57,6 +57,11 @@ namespace Game {
         // MC MenuType.MERCHANT — a villager's / wandering trader's trades
         // (MerchantMenu). Entity-backed: opened by the mob, not a block.
         Merchant     = 24,
+        // MC's mount screens (HorseInventoryMenu / NautilusInventoryMenu —
+        // opened by ClientboundMountScreenOpenPacket, MenuType null in MC):
+        // a horse's, donkey's, llama's, camel's or nautilus's saddle / body
+        // slots and chest (MountInventoryMenu). Entity-backed.
+        MountInventory = 25,
     };
 
 } // namespace Game

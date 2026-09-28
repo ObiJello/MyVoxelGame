@@ -127,9 +127,22 @@ namespace Input {
     // ConsumeClick() and reads held state with IsDown().
 
     // Mirrors `minecraft.screen != null`. While true, button/key events are
-    // delivered to the UI and do NOT touch gameplay state.
-    void SetUiActive(bool active);
+    // delivered to the UI and do NOT touch gameplay state. `owner` names
+    // what holds the keyboard ("chat", "container", "screen") for the
+    // key-press diagnostics in the log; a string literal, kept by pointer.
+    // None = the title-screen menus (the in-world loop always names one).
+    void SetUiActive(bool active, const char* owner = nullptr);
     bool IsUiActive();
+
+    // MC TextInputManager.startTextInput → SDL_ClearComposition: a text
+    // field taking the keyboard starts with no half-composed input. GLFW
+    // routes every key through the OS text system even in gameplay, so a
+    // dead key pressed there (^ ´ ` ¨ ~ on many layouts, Option+E/U/I/N/`
+    // on a US Mac) would otherwise swallow the first vowel typed into the
+    // next chat line or sign — "é" instead of "e", which the ASCII-only
+    // fields then drop. Call when a screen takes the keyboard. No-op off
+    // macOS (Windows/X11 keep no composition across GLFW's char path).
+    void DiscardTextComposition();
 
     // MC KeyMapping.consumeClick — pops one queued press, false when empty.
     // Drain in a `while` loop so a burst of clicks in one frame all register.

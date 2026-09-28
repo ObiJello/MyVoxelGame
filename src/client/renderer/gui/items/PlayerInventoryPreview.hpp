@@ -21,6 +21,8 @@ namespace Render {
         float headYawDeg;
         float headPitchDeg;
         bool  isCrouching;
+        // MC isPassenger: the seated pose (a player on a cushion).
+        bool  isSitting = false;
     };
 
     // MC: InventoryScreen.renderEntityInInventoryFollowsMouse (lines 83-108).

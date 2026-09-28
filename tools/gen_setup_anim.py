@@ -130,6 +130,16 @@ STATE_FLOAT = {
     # SwingAnimationType ordinal; runtime default WHACK (1) — the empty-hand
     # swing, which is what every mob in this port attacks with.
     "swingAnimationType": "SwingAnimType",
+    # HumanoidRenderState's item-use clock (the crossbow charge and the
+    # spear's use pose): ticksUsingItem, the used crossbow's
+    # maxCrossbowChargeDuration, and useItemHand as its InteractionHand
+    # ordinal (MAIN_HAND 0, OFF_HAND 1 — see ENUM_ORDINALS). Filled from the
+    # player for a /morph body; a mob that uses nothing carries MC's zeros.
+    "ticksUsingItem": "TicksUsingItem",
+    "maxCrossbowChargeDuration": "MaxCrossbowCharge",
+    # PiglinRenderState spells it this way (sic).
+    "maxCrossbowChageDuration": "MaxCrossbowCharge",
+    "useItemHand": "UseItemHand",
 }
 
 # `state.<method>(...)` calls whose value is a compile-time constant in this
@@ -234,6 +244,8 @@ ENUM_ORDINALS = {
     # state default (ArmedEntityRenderState) is WHACK, which is what an empty
     # hand swings with, so that is the runtime default too.
     "SwingAnimationType": ["NONE", "WHACK", "STAB"],
+    # world/InteractionHand.
+    "InteractionHand": ["MAIN_HAND", "OFF_HAND"],
 }
 
 # Mth / Math calls we implement. argc is fixed per name.

@@ -3,7 +3,7 @@
 #include "ServerConnection.hpp"
 #include "common/core/Log.hpp"
 #include <algorithm>
-#include <zlib.h>
+#include "common/core/Deflate.hpp"
 
 namespace Server {
 
@@ -427,23 +427,12 @@ namespace Server {
             return data;
         }
         
-        // Compress using zlib
-        uLong compressedSize = compressBound(data.size());
-        std::vector<uint8_t> compressed(compressedSize);
-        
-        int result = compress2(
-            compressed.data(),
-            &compressedSize,
-            data.data(),
-            data.size(),
-            Z_DEFAULT_COMPRESSION
-        );
-        
-        if (result == Z_OK) {
-            compressed.resize(compressedSize);
+        // zlib format at zlib's default level (6), through libdeflate.
+        std::vector<uint8_t> compressed;
+        if (Core::Deflate::Compress(data.data(), data.size(), compressed, Core::Deflate::Format::Zlib, 6)) {
             return compressed;
         }
-        
+
         // Return original if compression failed
         return data;
     }

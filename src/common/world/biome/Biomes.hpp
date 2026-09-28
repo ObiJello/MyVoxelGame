@@ -70,6 +70,32 @@ namespace Game {
 
         BiomeId Fallback();          // plains
 
+        // ── MC Biome climate (ClimateSettings + the temperature rules) ──────
+        //
+        // From GeneratedBiomeClimate.inc (tools/gen_biome_climate.py) joined
+        // onto the colour table by slug. The temperature maths is the terrain
+        // library's port of Biome.getHeightAdjustedTemperature — the same code
+        // SnowAndFreezeFeature runs at generation, so a lake that generation
+        // left open is one the precipitation tick also leaves open.
+        enum class Precipitation : uint8_t { None, Rain, Snow };
+
+        // ClimateSettings.hasPrecipitation.
+        bool HasPrecipitation(BiomeId id);
+
+        // Biome.getTemperature(pos, seaLevel): the base temperature, through
+        // the FROZEN modifier's warm patches, cooled with height above
+        // seaLevel + 17 by TEMPERATURE_NOISE.
+        float TemperatureAt(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel);
+
+        // Biome.warmEnoughToRain (temperature >= 0.15) / coldEnoughToSnow.
+        bool WarmEnoughToRain(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel);
+        inline bool ColdEnoughToSnow(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel) {
+            return !WarmEnoughToRain(id, worldX, worldY, worldZ, seaLevel);
+        }
+
+        // Biome.getPrecipitationAt(pos, seaLevel).
+        Precipitation PrecipitationAt(BiomeId id, int worldX, int worldY, int worldZ, int seaLevel);
+
         // Loads textures/colormap/{grass,foliage,dry_foliage}.png into CPU-side
         // 256x256 tables and precomputes each biome's base colours.
         //

@@ -332,6 +332,10 @@ namespace Server {
                                                Game::Math::ChunkPos chunk) const;
 
     private:
+        // MC PlayerList.sendAllPlayerInfoIn — ticks since the last latency
+        // broadcast (BroadcastPlayerPositions runs once a tick).
+        int m_sendAllPlayerInfoIn = 0;
+
 
         // Process individual session tick
         void ProcessSessionTick(std::shared_ptr<PlayerSession> session);

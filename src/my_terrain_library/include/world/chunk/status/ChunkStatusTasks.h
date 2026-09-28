@@ -213,18 +213,29 @@ public:
     // lastResult makes a recomputation order-dependent at biome edges.
     class RegionBiomeSource : public world::biome::BiomeManager::NoiseBiomeSource {
     public:
+        // The grid is fixed for the task, so each chunk is cast once here
+        // rather than once per biome lookup (the material rules ask per block).
         RegionBiomeSource(const std::vector<std::vector<::world::IChunk*>>& chunks, ::world::ChunkPos center)
-            : m_chunks(chunks), m_centerX(center.x()), m_centerZ(center.z()),
-              m_radius((static_cast<int>(chunks.size()) - 1) / 2) {}
+            : m_centerX(center.x()), m_centerZ(center.z()),
+              m_radius((static_cast<int>(chunks.size()) - 1) / 2) {
+            m_protos.reserve(chunks.size());
+            for (const auto& row : chunks) {
+                std::vector<const ::world::ProtoChunk*>& protoRow = m_protos.emplace_back();
+                protoRow.reserve(row.size());
+                for (::world::IChunk* c : row) {
+                    protoRow.push_back(dynamic_cast<const ::world::ProtoChunk*>(c));
+                }
+            }
+        }
 
         world::biome::BiomeHolder getNoiseBiome(int32_t quartX, int32_t quartY, int32_t quartZ) const override {
             const int32_t chunkX = (quartX << 2) >> 4;   // QuartPos.toBlock, then blockToSectionCoord
             const int32_t chunkZ = (quartZ << 2) >> 4;
             const int gridX = chunkX - m_centerX + m_radius;
             const int gridZ = chunkZ - m_centerZ + m_radius;
-            if (gridZ >= 0 && gridZ < static_cast<int>(m_chunks.size()) &&
-                gridX >= 0 && gridX < static_cast<int>(m_chunks[gridZ].size())) {
-                if (auto* proto = dynamic_cast<::world::ProtoChunk*>(m_chunks[gridZ][gridX])) {
+            if (gridZ >= 0 && gridZ < static_cast<int>(m_protos.size()) &&
+                gridX >= 0 && gridX < static_cast<int>(m_protos[gridZ].size())) {
+                if (const ::world::ProtoChunk* proto = m_protos[gridZ][gridX]) {
                     return proto->getNoiseBiome(quartX, quartY, quartZ);
                 }
             }
@@ -234,7 +245,7 @@ public:
         }
 
     private:
-        const std::vector<std::vector<::world::IChunk*>>& m_chunks;
+        std::vector<std::vector<const ::world::ProtoChunk*>> m_protos;
         int m_centerX, m_centerZ, m_radius;
     };
 
@@ -259,6 +270,19 @@ public:
         world::biome::BiomeManager biomeManager(&regionBiomes, world::biome::BiomeManager::obfuscateSeed(context.seed));
         terrain.biomeGetter = [&biomeManager](const core::BlockPos& pos) -> world::biome::BiomeHolder {
             return biomeManager.getBiome(pos);
+        };
+        // The WorldGenRegion handed to buildTerrain as carverBiomeRegion.
+        const ::world::ChunkPos centerPos = chunk->getPos();
+        const int regionRadius = (static_cast<int>(chunks.size()) - 1) / 2;
+        terrain.carverBiomeRegion = [&chunks, centerPos, regionRadius](int32_t chunkX,
+                                                                       int32_t chunkZ) -> ::world::IChunk* {
+            const int gridX = chunkX - centerPos.x() + regionRadius;
+            const int gridZ = chunkZ - centerPos.z() + regionRadius;
+            if (gridZ < 0 || gridZ >= static_cast<int>(chunks.size()) ||
+                gridX < 0 || gridX >= static_cast<int>(chunks[gridZ].size())) {
+                return nullptr;
+            }
+            return chunks[gridZ][gridX];
         };
         context.generator->buildTerrain(context.randomState, terrain, chunk);
         levelgen::Heightmap::primeHeightmaps(chunk, {

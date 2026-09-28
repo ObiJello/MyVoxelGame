@@ -25,6 +25,10 @@ namespace Game {
     protected:
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;
         void OnHitBlock(const HitResult& hit) override;
+
+    private:
+        // The client copy's one-shot arrival puff (recreateFromPacket).
+        bool m_spawnPuffDone = false;
     };
 
 } // namespace Game

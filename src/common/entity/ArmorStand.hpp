@@ -131,7 +131,7 @@ namespace Game {
         int  GetDisabledSlots() const { return m_disabledSlots; }
         void SetDisabledSlots(int v) { m_disabledSlots = v; }
         // MC ArmorStand.canUseSlot.
-        bool CanUseSlot(EquipmentSlot slot) const;
+        bool CanUseSlot(EquipmentSlot slot) const override;
         // MC LivingEntity.getEquipmentSlotForItem: the item's EQUIPPABLE
         // slot when the stand may use it, MAINHAND otherwise.
         EquipmentSlot GetEquipmentSlotForItem(const ItemStack& stack) const;
@@ -151,6 +151,9 @@ namespace Game {
 
         // ── Damage ──────────────────────────────────────────────────────────
         bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+        // MC ArmorStand.thunderHit: empty — lightning neither burns nor
+        // breaks an armor stand.
+        void ThunderHit(Entity* bolt) override { (void)bolt; }
         // MC ArmorStand.getFallSounds: ARMOR_STAND_FALL for both.
         FallSounds GetFallSounds() const override {
             return {"entity.armor_stand.fall", "entity.armor_stand.fall"};
@@ -165,6 +168,9 @@ namespace Game {
         void Travel(const glm::dvec3& input) override;
         bool IsPushable() const override { return false; }
         bool IsPickable() const override { return !IsMarker(); }
+        // MC ArmorStand: `blocksBuilding = !isMarker()` (setMarker) — a marker
+        // stand has no box to speak of and never stops a block going in.
+        bool BlocksBuilding() const override { return !IsMarker(); }
         // MC ignoreExplosion: an invisible stand is passed over; a visible
         // one is broken by the blast (through Hurt).
         bool IgnoreExplosion() const override { return IsInvisible(); }

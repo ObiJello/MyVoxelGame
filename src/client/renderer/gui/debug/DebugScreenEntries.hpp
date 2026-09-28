@@ -68,7 +68,8 @@ namespace Render {
             int   framebufferWidth = 0, framebufferHeight = 0;
             int   refreshRate = 0;          // 0 = unknown
             bool  vsync = false;
-            int   maxFps = 0;               // 0 or >= 260 = unlimited
+            int   maxFps = 0;               // the frame limit in force (FramerateLimitTracker); 0 or >= 260 = unlimited
+            int   maxFpsOption = 0;         // the Max Framerate option itself (the FPS chart's line)
             bool  isRemoteClient = false;
             std::string serverBrand;        // remote server's brand ("MyVoxelGame")
             double gpuUtilization = -1.0;   // < 0 = not measured this frame

@@ -1,5 +1,9 @@
 // File: src/common/world/block/entity/HopperBlockEntity.cpp
 #include "common/world/block/entity/HopperBlockEntity.hpp"
+#include "common/entity/EntityLevel.hpp"
+#include "common/entity/vehicle/VehicleContainer.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
+#include "common/physics/Physics.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/inventory/CompoundContainer.hpp"
@@ -140,9 +144,30 @@ namespace Game {
                                                   std::unique_ptr<IContainer>& owned) {
         BlockEntity* be = level.GetBlockEntity(pos);
         auto* container = dynamic_cast<IContainer*>(be);
-        if (!container) return nullptr;
+        if (!container) {
+            // MC getEntityContainer: a container entity (a chest boat, a
+            // chest or hopper minecart) alive in the cell-sized box centred
+            // on the cell — a random one when several are there.
+            EntityLevel* entities = level.Entities();
+            if (!entities) return nullptr;
+            const glm::vec3 c = glm::vec3(pos) + glm::vec3(0.5f);
+            std::vector<Entity*> found;
+            entities->GetEntitiesInBox(AABB::FromMinMax(c - glm::vec3(0.5f), c + glm::vec3(0.5f)), nullptr, found);
+            std::vector<IContainer*> candidates;
+            for (Entity* e : found) {
+                if (!e || !e->IsAlive() || !IsVehicleEntityType(e->GetType())) continue;
+                auto* vehicle = dynamic_cast<VehicleEntity*>(e);
+                if (IContainer* inventory = vehicle ? vehicle->GetVehicleContainer() : nullptr) {
+                    candidates.push_back(inventory);
+                }
+            }
+            if (candidates.empty()) return nullptr;
+            JavaRandom* random = level.Random();
+            const int pick = random ? random->NextInt(static_cast<int>(candidates.size())) : 0;
+            return candidates[static_cast<size_t>(pick)];
+        }
         const BlockID id = level.GetBlock(pos.x, pos.y, pos.z);
-        if (id == BlockID::Chest || id == BlockID::TrappedChest) {
+        if (IsChestBlock(id)) {   // chest, trapped chest, copper chests
             if (auto pairing = FindChestPartner(level, pos)) {
                 if (auto* partner = dynamic_cast<IContainer*>(level.GetBlockEntity(pairing->partnerPos))) {
                     owned = pairing->selfIsFirst

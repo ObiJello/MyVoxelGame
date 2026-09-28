@@ -4,6 +4,10 @@
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 #include "server/world/storage/anvil/EntityNbt.hpp"
 #include "server/player/ServerPlayer.hpp"
+#include "server/entity/ShoulderEntities.hpp"
+#include "common/entity/decoration/Cushion.hpp"
+#include "common/core/Uuid.hpp"
+#include "common/entity/Mob.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/nbt/NbtWrite.hpp"
@@ -92,7 +96,8 @@ namespace Game::Anvil {
     // ── Write ───────────────────────────────────────────────────────────────
 
     bool WritePlayerData(const SaveRoot& root, const Server::ServerPlayer& player,
-                         int dataVersion, std::string& error) {
+                         int dataVersion, std::string& error,
+                         const Game::Mob* rootVehicle, const Game::Uuid* attachUuid) {
         const auto uuid = OfflinePlayerUuid(player.getName());
         const auto& inventory = player.getInventory();
 
@@ -102,7 +107,15 @@ namespace Game::Anvil {
         w.Int("DataVersion", dataVersion);
 
         {
-            const glm::dvec3 p = player.getPosition();
+            // A seated player (a cushion) is saved where getting up puts
+            // them — on top of the seat (Entity.getDismountLocationForPassenger)
+            // — not at the seat, which sits a third of a block into the block
+            // below. MC instead saves the vehicle with the player
+            // ("RootVehicle"); this engine leaves the cushion in the world.
+            // With a RootVehicle the player is saved in the seat and put
+            // back into it on join (MC).
+            glm::dvec3 p = player.getPosition();
+            if (player.isPassenger() && !rootVehicle) p.y += Game::Cushion::kPlayerVehicleAttachmentY;
             const double pos[3] = {p.x, p.y, p.z};
             auto list = w.BeginList("Pos", Nbt::TagType::Double);
             for (double v : pos) w.ListDouble(list, v);
@@ -165,7 +178,23 @@ namespace Game::Anvil {
         w.Int  ("XpSeed",  player.getEnchantmentSeed());
         w.Int  ("Score",   0);
 
+        // MC ServerPlayer.addAdditionalSaveData: warden_spawn_tracker
+        // (WardenSpawnTracker.CODEC).
+        {
+            const Game::WardenSpawnTracker& tracker = player.getWardenSpawnTracker();
+            w.BeginCompound("warden_spawn_tracker");
+            w.Int("ticks_since_last_warning", tracker.GetTicksSinceLastWarning());
+            w.Int("warning_level",            tracker.GetWarningLevel());
+            w.Int("cooldown_ticks",           tracker.GetCooldownTicks());
+            w.EndCompound();
+        }
+
         w.Int   ("playerGameType", static_cast<int>(player.getGameMode()));
+        // MC ServerPlayer.addAdditionalSaveData: previousPlayerGameType only
+        // when there is one (GameType.createProfileSerializationCodec).
+        if (player.getPreviousGameMode() >= 0) {
+            w.Int("previousPlayerGameType", player.getPreviousGameMode());
+        }
         w.String("Dimension", std::string(Game::DimensionRegistryName(
                                   Game::DimensionFromRaw(player.getDimensionId()))));
         w.Int   ("SelectedItemSlot", inventory.GetSelectedSlot());
@@ -267,6 +296,26 @@ namespace Game::Anvil {
             w.EndCompound();
         }
 
+        // MC ServerPlayer.addAdditionalSaveData: ShoulderEntityLeft /
+        // ShoulderEntityRight, the riding parrots' whole compounds, only when
+        // taken.
+        Server::ShoulderEntities::WritePlayerData(w, player);
+
+        // MC ServerPlayer.addAdditionalSaveData: the vehicle the player rides
+        // leaves with them ("RootVehicle": the root entity with its whole
+        // Passengers tree, and the UUID of the one the player sits on).
+        if (rootVehicle && attachUuid) {
+            w.BeginCompound("RootVehicle");
+            int32_t words[4];
+            UuidToIntArray(*attachUuid, words);
+            w.IntArray("Attach", words, 4);
+            if (!WriteMobCompound(w, "Entity", *rootVehicle)) {
+                Log::Warning("[Anvil] player '%s' rides a vehicle that cannot be saved",
+                             player.getName().c_str());
+            }
+            w.EndCompound();
+        }
+
         w.EndRootCompound();
         if (!w.ok()) { error = "NBT writer refused the player data"; return false; }
 
@@ -365,6 +414,10 @@ namespace Game::Anvil {
             if (mode >= 0 && mode <= 3) {
                 player.setGameMode(static_cast<Server::GameMode>(mode));
             }
+            // Loading is not a change: the previous mode is the saved one
+            // (MC readAdditionalSaveData → setGameModeForPlayer(loaded,
+            // previousPlayerGameType)), -1 when the file has none.
+            player.setPreviousGameMode(data->GetValue<int32_t>("previousPlayerGameType", -1));
         }
         if (auto abilities = std::dynamic_pointer_cast<::World::NBTTagCompound>(
                 data->GetTag("abilities"))) {
@@ -435,6 +488,10 @@ namespace Game::Anvil {
             player.setRespawnConfig(config);
         }
 
+        // MC ServerPlayer.readAdditionalSaveData: the shoulder riders (absent
+        // → empty shoulders).
+        Server::ShoulderEntities::ReadPlayerData(*data, player);
+
         // The last hush gate crossed (see the writer). An unknown dimension
         // name drops the mark rather than guessing a dimension.
         if (auto gate = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("obey_hush_gate"))) {
@@ -461,6 +518,18 @@ namespace Game::Anvil {
         xp.SetProgress(data->GetValue<float>("XpP", 0.0f));
         xp.SetTotal   (data->GetValue<int32_t>("XpTotal", 0));
         player.setEnchantmentSeed(data->GetValue<int32_t>("XpSeed", 0));
+
+        // MC ServerPlayer.readAdditionalSaveData: warden_spawn_tracker, a
+        // fresh tracker when absent.
+        if (auto tracker = std::dynamic_pointer_cast<::World::NBTTagCompound>(
+                data->GetTag("warden_spawn_tracker"))) {
+            player.getWardenSpawnTracker() = Game::WardenSpawnTracker(
+                tracker->GetValue<int32_t>("ticks_since_last_warning", 0),
+                tracker->GetValue<int32_t>("warning_level", 0),
+                tracker->GetValue<int32_t>("cooldown_ticks", 0));
+        } else {
+            player.getWardenSpawnTracker() = Game::WardenSpawnTracker();
+        }
 
         auto& inventory = player.getInventory();
         inventory.Clear();
@@ -507,6 +576,13 @@ namespace Game::Anvil {
         }
 
         inventory.SetSelectedSlot(data->GetValue<int32_t>("SelectedItemSlot", 0));
+
+        // MC PlayerList.placeNewPlayer's RootVehicle: restored once the
+        // player stands in their level (Server::PlayerRiding::Tick).
+        {
+            auto rootVehicle = std::dynamic_pointer_cast<::World::NBTTagCompound>(data->GetTag("RootVehicle"));
+            player.setPendingRootVehicle(rootVehicle && rootVehicle->HasTag("Entity") ? rootVehicle : nullptr);
+        }
 
         Log::Info("[Anvil] restored player '%s' at (%.1f, %.1f, %.1f)",
                   player.getName().c_str(),

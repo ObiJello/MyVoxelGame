@@ -3,6 +3,8 @@
 #include "NetworkServer.hpp"
 #include "../commands/CommandDispatcher.hpp"
 #include "common/world/portal/PortalState.hpp"
+#include "common/network/packets/game/JukeboxSongS2CPacket.hpp"
+#include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "common/world/level/GameRules.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "listeners/HandshakePacketListener.hpp"
@@ -382,6 +384,9 @@ namespace Server {
         // Send time update
         SendCurrentTimeUpdate();
         SendWorldRules();
+        // Every jukebox song playing anywhere, for a client on "Jukebox
+        // Range: Global" to join at the right place in each.
+        SendJukeboxSongs();
 
         // Send player abilities + the world's game mode
         SendPlayerAbilitiesForJoin();
@@ -507,6 +512,21 @@ namespace Server {
         SendPacket(static_cast<uint8_t>(Network::PacketId::WorldRulesS2C), buffer.GetData());
     }
 
+    void ServerConnection::SendJukeboxSongs() {
+        Game::JukeboxSongRegistry::ForEach([this](const Game::JukeboxSongRegistry::Entry& entry) {
+            Network::JukeboxSongS2CPacket packet;
+            packet.dimension = static_cast<int8_t>(entry.dimension);
+            packet.x      = entry.pos.x;
+            packet.y      = entry.pos.y;
+            packet.z      = entry.pos.z;
+            packet.songId = entry.songId;
+            packet.ticks  = entry.ticks;
+            packet.fresh  = false;
+            SendPacket(static_cast<uint8_t>(Network::PacketId::JukeboxSongS2C),
+                       Network::Serialization::Serialize(packet));
+        });
+    }
+
     void ServerConnection::SendServerPaused(bool paused) {
         Network::PacketBuffer buffer;
         buffer.WriteByte(paused ? 1 : 0);
@@ -546,8 +566,10 @@ namespace Server {
                                                                bool noclip = false,
                                                                float scale = 1.0f,
                                                                uint32_t morph = 0xFFFFFFFFu,
-                                                               float morphSpeed = 0.0f) {
+                                                               float morphSpeed = 0.0f,
+                                                               int previousMode = -1) {
             Network::PlayerAbilitiesS2CPacket packet;
+            packet.previousGameMode = static_cast<int8_t>(previousMode);
             packet.scale      = scale;
             packet.morph      = morph;
             packet.morphSpeed = morphSpeed;
@@ -594,10 +616,13 @@ namespace Server {
     }
 
     void ServerConnection::SendPlayerAbilities(const ServerPlayer& player) {
-        auto data = Network::Serialization::Serialize(
+        Network::PlayerAbilitiesS2CPacket packet =
             BuildAbilitiesPacket(player.getGameMode(), player.isFlying(), player.canFly(),
                                  player.isNoclip(), player.getScale(),
-                                 player.getMorph(), player.getMorphSpeed()));
+                                 player.getMorph(), player.getMorphSpeed(),
+                                 player.getPreviousGameMode());
+        packet.morphVariant = player.getMorphVariant();
+        auto data = Network::Serialization::Serialize(packet);
         SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAbilities), data);
     }
 
@@ -1161,6 +1186,32 @@ namespace Server {
                 }
                 break;
 
+            // Riding and vehicles — see VehiclePackets.hpp.
+            case PacketId::PlayerInputC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePlayerInputC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerInputC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::MoveVehicleC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeMoveVehicleC2S(payload);
+                    return std::make_unique<Network::Packets::MoveVehicleC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::PaddleBoatC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializePaddleBoatC2S(payload);
+                    return std::make_unique<Network::Packets::PaddleBoatC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::RidingCommandC2S:
+                if (m_phase == ConnectionPhase::PLAY) {
+                    auto data = Network::Serialization::DeserializeRidingCommandC2S(payload);
+                    return std::make_unique<Network::Packets::RidingCommandC2SPacketImpl>(data);
+                }
+                break;
+
 #if ENABLE_IMMERSIVE_PORTALS
             case PacketId::PortalTeleportC2S:
                 if (m_phase == ConnectionPhase::PLAY) {
@@ -1244,6 +1295,18 @@ namespace Server {
                 if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
                     auto data = Network::Serialization::DeserializeRenameItemC2S(payload);
                     return std::make_unique<Network::Packets::RenameItemC2SPacketImpl>(std::move(data));
+                }
+                break;
+            case PacketId::SpectatorActionC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeSpectatorActionC2S(payload);
+                    return std::make_unique<Network::Packets::SpectatorActionC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::TeleportToEntityC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeTeleportToEntityC2S(payload);
+                    return std::make_unique<Network::Packets::TeleportToEntityC2SPacketImpl>(data);
                 }
                 break;
 
@@ -1330,6 +1393,17 @@ namespace Server {
             m_outboundDimension = dimension;
         }
         SendPacket(packetId, data);
+    }
+
+    void ServerConnection::SendPreparedIn(Game::DimensionId dimension, PreparedPacket&& packet) {
+        if (dimension != m_outboundDimension) {
+            Network::DimensionScopeS2CPacket scope;
+            scope.dimensionId = static_cast<int8_t>(Game::DimensionToRaw(dimension));
+            SendPacket(static_cast<uint8_t>(Network::PacketId::DimensionScopeS2C),
+                       Network::Serialization::Serialize(scope));
+            m_outboundDimension = dimension;
+        }
+        SendPrepared(std::move(packet));
     }
 
 } // namespace Server

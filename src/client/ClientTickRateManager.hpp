@@ -24,6 +24,7 @@
 #pragma once
 
 #include <algorithm>
+#include <chrono>
 
 namespace Client {
 
@@ -60,7 +61,15 @@ namespace Client {
         // nothing, exactly as a published vanilla world.
         void SetServerPaused(bool paused) { m_serverPaused = paused; }
         bool IsServerPaused() const       { return m_serverPaused; }
-        void SetWorldPaused(bool paused)  { m_worldPaused = paused; }
+        void SetWorldPaused(bool paused) {
+            // The world clock below stops and starts on the transitions.
+            if (paused != m_worldPaused) {
+                const auto now = std::chrono::steady_clock::now();
+                if (paused) m_worldClockPausedAt = now;
+                else        m_worldClockPausedTotal += now - m_worldClockPausedAt;
+            }
+            m_worldPaused = paused;
+        }
         bool IsWorldPaused() const        { return m_worldPaused; }
 
         bool RunsNormally() const { return m_runGameElements && !m_worldPaused; }
@@ -72,13 +81,31 @@ namespace Client {
         // rule for mobs and dropped items.
         bool IsEntityFrozen() const { return !m_runGameElements || m_worldPaused; }
 
+        // Seconds of WORLD time on the real-time clock: steady time since the
+        // process started, minus every world pause (the pause menu, the join
+        // transition's hold). For the animations that run on seconds rather
+        // than ticks — the gun portals' breathing, open/close, static ping
+        // and teleport flash — so they hold still with the rest of a paused
+        // world and resume from the same instant, without a jump. Main thread
+        // (it is advanced by SetWorldPaused, which the frame loop calls).
+        double WorldClockSeconds() const {
+            const auto now = std::chrono::steady_clock::now();
+            const auto end = m_worldPaused ? m_worldClockPausedAt : now;
+            return std::chrono::duration<double>(end - m_worldClockEpoch - m_worldClockPausedTotal).count();
+        }
+
     private:
         float m_tickRate         = 20.0f;
         int   m_frozenTicksToRun = 0;
         bool  m_runGameElements  = true;
         bool  m_isFrozen         = false;
         bool  m_serverPaused     = false;   // what the server last reported
-        bool  m_worldPaused      = false;   // serverPaused && this client's menu is open
+        bool  m_worldPaused      = false;   // serverPaused && (this client's menu is open ||
+                                            //   the join transition holds the world — PlatformMain)
+        // WorldClockSeconds' state.
+        std::chrono::steady_clock::time_point m_worldClockEpoch    = std::chrono::steady_clock::now();
+        std::chrono::steady_clock::time_point m_worldClockPausedAt = m_worldClockEpoch;
+        std::chrono::steady_clock::duration   m_worldClockPausedTotal{0};
     };
 
     // One per process — the client has exactly one level at a time, and MC

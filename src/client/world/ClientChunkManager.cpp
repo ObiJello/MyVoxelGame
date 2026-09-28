@@ -32,6 +32,8 @@
 #include <string>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
+#include <cmath>
 #include <glm/glm.hpp>
 
 namespace Client {
@@ -601,10 +603,17 @@ namespace Client {
                 Log::Warning("Failed to decode section %d for chunk (%d, %d)", y, packet.chunkX, packet.chunkZ);
                 continue;
             }
-            section->AdoptStates(std::move(states));
+            section->AdoptStatesFromWire(std::move(states), mutableSection.blockCount);
             section->AdoptBiomes(std::move(biomes));
         }
         AdoptLight(*built, packet.light.get());
+        // MC's chunk packet carries the heightmaps the client keeps
+        // (WORLD_SURFACE, MOTION_BLOCKING) and LevelChunk.setBlockState keeps
+        // them current. They are a pure function of the blocks, so the client
+        // primes its own here, off the main thread, and Chunk::SetBlock
+        // maintains them from then on. The weather reads MOTION_BLOCKING
+        // (ClientWeather::PrecipitationAt, the rain columns and splashes).
+        built->PrimeHeightmaps();
         return built;
     }
 
@@ -828,6 +837,17 @@ namespace Client {
             list.erase(std::remove(list.begin(), list.end(), pos), list.end());
         } else if (prevBlockId != Game::BlockID::EndGateway && blockId == Game::BlockID::EndGateway) {
             chunk->endGateways.push_back(pos);
+        }
+        {
+            const auto isCampfire = [](Game::BlockID id) {
+                return id == Game::BlockID::Campfire || id == Game::BlockID::SoulCampfire;
+            };
+            if (isCampfire(prevBlockId) && !isCampfire(blockId)) {
+                auto& list = chunk->campfires;
+                list.erase(std::remove(list.begin(), list.end(), pos), list.end());
+            } else if (!isCampfire(prevBlockId) && isCampfire(blockId)) {
+                chunk->campfires.push_back(pos);
+            }
         }
         {
             const bool wasBed = IsEntityRenderedBed(prevBlockId);
@@ -1055,6 +1075,7 @@ namespace Client {
         chunk.endPortals.clear();
         chunk.endGateways.clear();
         chunk.beds.clear();
+        chunk.campfires.clear();
         if (!chunk.chunkData) return;
 
         for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
@@ -1075,6 +1096,8 @@ namespace Client {
                         Game::BlockState::FromRawId(rawState).Block();
                     if (id == Game::BlockID::EndPortal ||
                         id == Game::BlockID::EndGateway ||
+                        id == Game::BlockID::Campfire ||
+                        id == Game::BlockID::SoulCampfire ||
                         IsEntityRenderedBed(id)) {
                         present = true;
                         break;
@@ -1089,8 +1112,9 @@ namespace Client {
                     for (int x = 0; x < Game::Math::CHUNK_SIZE_X; ++x) {
                         const Game::BlockID id = section->GetBlockID(x, y, z);
                         const bool bed = IsEntityRenderedBed(id);
+                        const bool campfire = id == Game::BlockID::Campfire || id == Game::BlockID::SoulCampfire;
                         if (id != Game::BlockID::EndPortal &&
-                            id != Game::BlockID::EndGateway && !bed) {
+                            id != Game::BlockID::EndGateway && !bed && !campfire) {
                             continue;
                         }
                         const glm::ivec3 pos{
@@ -1099,6 +1123,8 @@ namespace Client {
                             chunk.position.z * Game::Math::CHUNK_SIZE_Z + z};
                         if (bed) {
                             chunk.beds.push_back(pos);
+                        } else if (campfire) {
+                            chunk.campfires.push_back(pos);
                         } else if (id == Game::BlockID::EndPortal) {
                             chunk.endPortals.push_back(pos);
                         } else {
@@ -1379,6 +1405,12 @@ namespace Client {
         // rebuildSectionSync), while the rest of the loaded world waits to
         // be looked at, MC-style.
         const bool haveView = kScheduleFromVisible && m_renderer;
+        // Portal-aware order (MeshPriority.hpp): this level's routes through
+        // the portals the viewer can look through, the same field the
+        // compile queue polls with, so the far side of a portal beside the
+        // player sorts with the sections beside the player — at first
+        // compile, at every re-mesh, and for sections that arrive later.
+        const ::Render::MeshPriority::Field priorityField = workerPool->GetMeshPriorityField(m_dimension);
         { PROFILE_ZONE_N("MeshSchedule.DirtyWalk");
         for (auto dirtyIt = m_chunksWithDirtySections.begin();
              dirtyIt != m_chunksWithDirtySections.end(); ) {
@@ -1417,7 +1449,15 @@ namespace Client {
             // it is the answer for most dirty columns (everything streamed
             // in behind the player). Ask it once here; the per-section test
             // then runs only for columns some view actually reaches.
-            const bool farColumn = haveView && xzDistSq > 48.0f * 48.0f;
+            // "Near" counts through a portal too: a column just beyond a
+            // portal beside the player is admitted like one beside them
+            // (only ever MORE columns than the plain distance admits).
+            float nearDistSq = xzDistSq;
+            if (priorityField.count > 0) {
+                const float viaPortal = ::Render::MeshPriority::ColumnRouteDistance(priorityField, chunkPos);
+                nearDistSq = std::min(nearDistSq, viaPortal * viaPortal);
+            }
+            const bool farColumn = haveView && nearDistSq > 48.0f * 48.0f;
             const bool columnInView = !farColumn ||
                                       m_renderer->IsMainViewColumn(chunkPos) ||
                                       m_renderer->IsPortalViewColumn(chunkPos);
@@ -1447,9 +1487,10 @@ namespace Client {
                     continue;
                 }
 
-                const float dy = (-64.0f + sectionY * 16.0f + 8.0f) - playerPosition.y;
-                // Squared distance with Y attenuated (0.1 factor squared = 0.01)
-                const float distSq = xzDistSq + dy * dy * 0.01f;
+                // Squared distance with Y attenuated (0.1 factor squared =
+                // 0.01), or the route through a portal when that is shorter.
+                const float distSq = ::Render::MeshPriority::EffectiveDistSq(
+                    priorityField, playerPosition, chunkPos, sectionY);
 
                 // No initial-compile boost here any more. It used to multiply
                 // initial compiles by 0.25 to jump them ahead of recompiles,
@@ -1469,6 +1510,53 @@ namespace Client {
         // Sort by squared distance (monotonic, same order as sqrt)
         std::sort(m_meshCandidates.begin(), m_meshCandidates.end(),
                   [](const auto& a, const auto& b) { return a.effectiveDistSq < b.effectiveDistSq; });
+
+        // One-shot after a level load: the first pass in which a portal
+        // route pulled a candidate forward shows the order it produced —
+        // each of the first candidates with its plain distance (or "-":
+        // the viewer is in another level) beside the portal-adjusted one.
+        if (priorityField.count > 0 && !m_meshCandidates.empty() &&
+            ::Render::MeshPriority::OrderLogArmed(m_dimension)) {
+            const size_t shown = std::min<size_t>(m_meshCandidates.size(), 16);
+            size_t routedShown = 0;
+            std::string line;
+            for (size_t i = 0; i < shown; ++i) {
+                const auto& c = m_meshCandidates[i];
+                int route = -1;
+                (void)::Render::MeshPriority::EffectiveDistSq(priorityField, playerPosition, c.chunkPos,
+                                                            c.sectionY, &route);
+                char buf[128];
+                if (priorityField.direct) {
+                    const float direct = std::sqrt(::Render::MeshPriority::DirectDistSq(playerPosition, c.chunkPos,
+                                                                                      c.sectionY));
+                    std::snprintf(buf, sizeof(buf), " [(%d,%d,%d) direct %.0f eff %.0f%s]",
+                                  c.chunkPos.x, c.sectionY, c.chunkPos.z, direct,
+                                  std::sqrt(c.effectiveDistSq), route >= 0 ? " via portal" : "");
+                } else {
+                    std::snprintf(buf, sizeof(buf), " [(%d,%d,%d) direct - eff %.0f%s]",
+                                  c.chunkPos.x, c.sectionY, c.chunkPos.z,
+                                  std::sqrt(c.effectiveDistSq), route >= 0 ? " via portal" : "");
+                }
+                line += buf;
+                if (route >= 0) ++routedShown;
+            }
+            if (routedShown > 0) {
+                ::Render::MeshPriority::DisarmOrderLog(m_dimension);
+                std::string routes;
+                for (int i = 0; i < priorityField.count; ++i) {
+                    const auto& r = priorityField.routes[i];
+                    char buf[128];
+                    std::snprintf(buf, sizeof(buf), " [#%u %.1f blocks to it, far (%.0f,%.0f,%.0f) x%.2f]",
+                                  r.portalId, r.entryCost, r.farPoint.x, r.farPoint.y, r.farPoint.z, r.invScale);
+                    routes += buf;
+                }
+                Log::Info("[MeshOrder] %s: %zu candidates, portal routes:%s",
+                          std::string(Game::DimensionName(m_dimension)).c_str(), m_meshCandidates.size(),
+                          routes.c_str());
+                Log::Info("[MeshOrder] %s first %zu (chunkX,sectionY,chunkZ, blocks):%s",
+                          std::string(Game::DimensionName(m_dimension)).c_str(), shown, line.c_str());
+            }
+        }
 
         // Submit snapshots.
         //
@@ -1984,6 +2072,18 @@ namespace Client {
         // our border sections through its own ApplyChunkData ->
         // MarkNeighborSectionsDirty (which now also reaches us while parked).
         ApplyPendingDiffsForChunk(pos, raw);
+
+        // The revived chunk's ticking block entities rejoin the ticking list.
+        // While the chunk was parked TickBlockEntities found no entity at
+        // their positions (the level no longer reaches parked chunks) and
+        // retired them; the full-load path re-registers each one through its
+        // BlockEntityDataS2C, but this 20-byte path sends none. Without this
+        // a geyser, spawner or bell went still for good after a revisit.
+        if (raw->chunkData) {
+            for (const auto& [localPos, be] : raw->chunkData->GetAllBlockEntities()) {
+                if (be && be->NeedsTicking()) RegisterTickingBlockEntity(be->GetWorldPos());
+            }
+        }
         ++m_retainRestored;
         return true;
     }

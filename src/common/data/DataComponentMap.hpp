@@ -17,6 +17,7 @@
 #include "DataComponentType.hpp"
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <vector>
 #include <stdexcept>
 
@@ -35,6 +36,12 @@ namespace Game {
         std::optional<T> get(const DataComponentType<T>& key) const;
 
         bool has(const DataComponentTypeBase& key) const;
+        // MC CopyComponentsFunction's per-type copy: the value `src` holds
+        // for the component registered as `name` ("custom_name",
+        // "banner_patterns" — the id without its namespace) replaces this
+        // map's. False (nothing changed) when `src` has none. Values are
+        // never mutated in place, so the two maps may share it.
+        bool CopyNamed(const DataComponentMap& src, std::string_view name);
         void remove(const DataComponentTypeBase& key);
         bool empty() const { return entries.empty(); }
         size_t size() const { return entries.size(); }

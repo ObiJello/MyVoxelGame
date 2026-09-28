@@ -6,6 +6,7 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world//block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Mth.hpp"
 #include "common/core/Config.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
@@ -233,11 +234,15 @@ namespace Game {
 
         // The caller's context plus MC's EntityCollisionContext for the
         // player: the aerclouds' collision shape reads the fall distance
-        // (AercloudBlock.hpp). The engine has no elytra, so never gliding.
+        // and whether the player glides (AercloudBlock.hpp).
         PhysicsContext context = baseContext;
         context.collisionEntity       = true;
         context.collisionFallDistance = physics.fallDistance;
-        context.collisionFallFlying   = false;
+        context.collisionFallFlying   = physics.isFallFlying;
+
+        // MC LivingEntity.updateFallFlying (server) / the flag coming back:
+        // the glide ends the moment canGlide stops holding.
+        if (physics.isFallFlying && !physics.CanGlide()) physics.isFallFlying = false;
 
         physics.totalTime += deltaTime;
 
@@ -259,7 +264,10 @@ namespace Game {
 
         // Update sneaking state. Not while flying — MC's isCrouching requires
         // !abilities.flying (shift descends instead of crouching mid-flight).
-        physics.isSneaking = sneakPressed && !physics.isFlying;
+        // Nor while gliding or riptiding: Pose.FALL_FLYING and SPIN_ATTACK
+        // outrank CROUCHING (Player.updatePlayerPose).
+        physics.isSneaking = sneakPressed && !physics.isFlying && !physics.isFallFlying &&
+                             !physics.isAutoSpinAttack;
 
         // Per-step jump flag (consumed by ClientPlayer for move-packet stats)
         physics.didJumpThisStep = false;
@@ -283,14 +291,15 @@ namespace Game {
             physics.waterVelocity = glm::vec3(0.0f);
         }
 
-        physics.onClimbable = !physics.noclip && !physics.isFlying && !inFluid &&
+        physics.onClimbable = !physics.noclip && !physics.noPhysics && !physics.isFlying && !inFluid &&
                               (OnClimbable(physics, context) ||
                                // MC Spider.onClimbable: the wall it walked
                                // into last step (the flag is the previous
                                // move's, which is what MC reads too).
                                (physics.morphClimbsWalls && physics.horizontalCollision));
 
-        if (!inFluid && !physics.isFlying) {
+        // A glide carries its own gravity (travelFallFlying) and never jumps.
+        if (!inFluid && !physics.isFlying && !physics.isFallFlying) {
             // Land/air physics
             HandleJump(physics, jumpPressed, deltaTime, context);
 
@@ -344,7 +353,7 @@ namespace Game {
 
         // Landing cancels creative flight — MC LocalPlayer.aiStep:845
         // (onGround && abilities.flying && !isSpectator → flying = false).
-        if (physics.isFlying && physics.isOnGround) {
+        if (physics.isFlying && physics.isOnGround && !physics.noPhysics) {
             physics.isFlying = false;
         }
 
@@ -355,7 +364,7 @@ namespace Game {
         // launch. The fall-distance reset both do is in the fall tracking
         // below — after this step's descent is counted, as MC's
         // checkInsideBlocks follows checkFallDamage.
-        if (!physics.noclip) {
+        if (!physics.noclip && !physics.noPhysics) {
             ProbeAerclouds(physics, context);
             if (physics.inAercloud) {
                 physics.isOnGround = BlueAercloudLaunches(physics) ? false : !physics.isFlying;
@@ -399,6 +408,12 @@ namespace Game {
                 physics.fallDistance = 0.0f;
             }
             physics.landingFallReduction = 0.0f;
+            // MC LivingEntity.checkFallDistanceAccumulation (updateFallFlying):
+            // a glide that is not diving keeps at most one block of fall, so
+            // a gentle landing hurts nothing.
+            if (physics.isFallFlying && physics.velocity.y / 20.0f > -0.5f && physics.fallDistance > 1.0f) {
+                physics.fallDistance = 1.0f;
+            }
             // A bounce is a landing that immediately leaves the ground again
             // (MC: the next tick's move has movement.y > 0). Cleared here,
             // after the flush above has seen the contact, so the rebound is
@@ -586,14 +601,115 @@ namespace Game {
         }
     }
 
+    namespace {
+        // MC LivingEntity.travelFallFlying for the local player: the glide's
+        // per-tick map (updateFallFlyingMovement) on MC's blocks-per-tick
+        // velocity, advanced by the fraction of a tick this step covers
+        // (exact at every tick boundary), then MC's move — a box sweep,
+        // vertical first, no step-up — and the wall-impact damage
+        // (handleFallFlyingCollisions), which the server applies from the
+        // move packet.
+        void TravelFallFlying(PlayerPhysics& physics, float deltaTime, const PhysicsContext& context) {
+            const double f = static_cast<double>(deltaTime) * 20.0;
+            const glm::dvec3 v(glm::dvec3(physics.velocity) / 20.0);
+            const double lastSpeed = std::sqrt(v.x * v.x + v.z * v.z);
+
+            // updateFallFlyingMovement(v).
+            glm::dvec3 look(physics.lookDir);
+            const double lookLen = glm::length(look);
+            look = lookLen > 1.0e-9 ? look / lookLen : glm::dvec3(0.0, 0.0, 1.0);
+            const float  leanAngle = physics.xRotDeg * Mth::kDegToRad;
+            const double lookHorLength = std::sqrt(look.x * look.x + look.z * look.z);
+            const double moveHorLength = lastSpeed;
+            // getEffectiveGravity: SLOW_FALLING caps a falling body's at
+            // 0.01. Gravity scales with the body here (ApplyGravity).
+            const bool   falling = v.y <= 0.0;
+            const double gravity = ((physics.effectSlowFalling && falling) ? 0.01 : 0.08) *
+                                   static_cast<double>(physics.scale);
+            const double cosLean = std::cos(static_cast<double>(leanAngle));
+            const double liftForce = cosLean * cosLean;
+            glm::dvec3 m = v;
+            m.y += gravity * (-1.0 + liftForce * 0.75);
+            if (m.y < 0.0 && lookHorLength > 0.0) {
+                const double convert = m.y * -0.1 * liftForce;
+                m += glm::dvec3(look.x * convert / lookHorLength, convert, look.z * convert / lookHorLength);
+            }
+            if (leanAngle < 0.0f && lookHorLength > 0.0) {
+                const double convert = moveHorLength * -std::sin(static_cast<double>(leanAngle)) * 0.04;
+                m += glm::dvec3(-look.x * convert / lookHorLength, convert * 3.2, -look.z * convert / lookHorLength);
+            }
+            if (lookHorLength > 0.0) {
+                m.x += (look.x / lookHorLength * moveHorLength - m.x) * 0.1;
+                m.z += (look.z / lookHorLength * moveHorLength - m.z) * 0.1;
+            }
+            m *= glm::dvec3(0.9900000095367432, 0.9800000190734863, 0.9900000095367432);
+
+            // The fraction of the tick this step covers.
+            glm::dvec3 vNew = v + (m - v) * std::min(f, 1.0);
+            const glm::dvec3 movement = vNew * f;
+
+            // move(SELF, deltaMovement): Y, then X, then Z.
+            physics.wasOnGround = physics.isOnGround;
+            physics.horizontalCollision = false;
+            glm::dvec3 newPosition = physics.position + glm::dvec3(0.0, movement.y, 0.0);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.y = newPosition.y;
+                if (movement.y != 0.0) physics.isOnGround = false;
+            } else {
+                double lo = newPosition.y;
+                double hi = physics.position.y;
+                glm::dvec3 testPos = physics.position;
+                for (int i = 0; i < 10; ++i) {
+                    const double mid = (lo + hi) * 0.5;
+                    testPos.y = mid;
+                    if (CheckCollision(testPos, physics, context)) lo = mid;
+                    else hi = mid;
+                }
+                physics.position.y = hi;
+                if (movement.y < 0.0) physics.isOnGround = true;
+                vNew.y = 0.0;
+            }
+            newPosition = physics.position + glm::dvec3(movement.x, 0.0, 0.0);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.x = newPosition.x;
+            } else {
+                vNew.x = 0.0;
+                if (movement.x != 0.0) physics.horizontalCollision = true;
+            }
+            newPosition = physics.position + glm::dvec3(0.0, 0.0, movement.z);
+            if (!CheckCollision(newPosition, physics, context)) {
+                physics.position.z = newPosition.z;
+            } else {
+                vNew.z = 0.0;
+                if (movement.z != 0.0) physics.horizontalCollision = true;
+            }
+            if (!physics.wasOnGround && physics.isOnGround) physics.lastLandingTime = physics.totalTime;
+
+            // handleFallFlyingCollisions: the speed a wall took off, past 0.3
+            // a tick, hurts ×10.
+            if (physics.horizontalCollision) {
+                const double newSpeed = std::sqrt(vNew.x * vNew.x + vNew.z * vNew.z);
+                const float damage = static_cast<float>((lastSpeed - newSpeed) * 10.0 - 3.0);
+                if (damage > 0.0f) physics.flyIntoWallDamage = std::max(physics.flyIntoWallDamage, damage);
+            }
+
+            physics.velocity = glm::vec3(vNew * 20.0);
+            physics.waterVelocity = glm::vec3(0.0f);
+        }
+    } // namespace
+
     void HandleMovement(PlayerPhysics& physics, const glm::vec3& movementInput,
                        bool jumpPressed, float deltaTime, const PhysicsContext& context) {
 
         // Store previous onGround state
         physics.wasOnGround = physics.isOnGround;
 
-        // In noclip mode, allow free movement in all directions including vertical
-        if (physics.noclip) {
+        // In noclip mode, allow free movement in all directions including
+        // vertical — whatever the creative flying flag says (the double-tap
+        // still flips that flag underneath; it applies once noclip ends). A
+        // spectator's own movement wins over a noclip flag left on from
+        // before (the noPhysics branch below).
+        if (physics.noclip && !physics.noPhysics) {
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
             glm::vec3 verticalMovement = glm::vec3(0.0f, movementInput.y, 0.0f);
 
@@ -611,6 +727,37 @@ namespace Game {
             physics.waterVelocity = glm::vec3(0.0f);
             physics.isOnGround = false;
             return;
+        }
+
+        // An entity push (PlayerPhysics::pushVelocity): the fluid and glide
+        // models below keep their own MC deltaMovement, so there the push
+        // simply joins it; the land/air model carries it itself.
+        {
+            const bool fluidTravel = (physics.isInWater || physics.isInLava) && !physics.isFlying;
+            const bool glideTravel = physics.isFallFlying && !physics.isFlying && !physics.noPhysics &&
+                                     !physics.isInWater && !physics.isInLava && !physics.onClimbable;
+            if ((fluidTravel || glideTravel) &&
+                (physics.pushVelocity.x != 0.0f || physics.pushVelocity.z != 0.0f)) {
+                // The fluid model's deltaMovement is waterVelocity; the
+                // glide's is velocity (both blocks per second).
+                glm::vec3& deltaMovement = fluidTravel ? physics.waterVelocity : physics.velocity;
+                deltaMovement.x += physics.pushVelocity.x;
+                deltaMovement.z += physics.pushVelocity.z;
+                physics.pushVelocity = glm::vec3(0.0f);
+            }
+        }
+
+        // MC LivingEntity.travel: a fluid wins, then the glide
+        // (travelFallFlying — which on a climbable is travelInAir and the
+        // glide's end), then the air.
+        if (physics.isFallFlying && !physics.isFlying && !physics.noPhysics &&
+            !physics.isInWater && !physics.isInLava) {
+            if (physics.onClimbable) {
+                physics.isFallFlying = false;
+            } else {
+                TravelFallFlying(physics, deltaTime, context);
+                return;
+            }
         }
 
         if ((physics.isInWater || physics.isInLava) && !physics.isFlying) {
@@ -855,7 +1002,11 @@ namespace Game {
                 // (ApplyGravity/HandleJump are skipped upstream).
                 const float sprintMul = physics.isSprinting
                                       ? PlayerPhysics::FLY_SPRINT_MULTIPLIER : 1.0f;
-                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED * sprintMul * physics.scale;
+                // Abilities.flyingSpeed over its 0.05 default: both the
+                // travel's input and the vertical impulse are proportional
+                // to it, and so is the steady speed each settles at.
+                const float flyScale = std::max(physics.flyingSpeed, 0.0f) / 0.05f;
+                speed = PlayerPhysics::FLY_HORIZONTAL_SPEED * sprintMul * physics.scale * flyScale;
                 // Direct vertical control: Space up / Shift down. Use the
                 // input's sign — CalculateMovementInput normalizes the whole
                 // vector, so the raw y magnitude shrinks when combined with
@@ -871,7 +1022,7 @@ namespace Game {
                 // flight uniformly in every direction.
                 const float vert = movementInput.y > 0.01f ? 1.0f
                                  : movementInput.y < -0.01f ? -1.0f : 0.0f;
-                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED * sprintMul * physics.scale;
+                physics.velocity.y = vert * PlayerPhysics::FLY_VERTICAL_SPEED * sprintMul * physics.scale * flyScale;
             }
 
             glm::vec3 horizontalMovement = glm::vec3(movementInput.x, 0.0f, movementInput.z);
@@ -990,10 +1141,21 @@ namespace Game {
                 horizontalMovement.x += physics.velocity.x;
                 horizontalMovement.z += physics.velocity.z;
             }
+            // An entity push moves the body like any deltaMovement.
+            horizontalMovement.x += physics.pushVelocity.x;
+            horizontalMovement.z += physics.pushVelocity.z;
             physics.horizontalCollision = false;
 
             glm::vec3 totalMovement = horizontalMovement + glm::vec3(0.0f, physics.velocity.y, 0.0f);
             glm::vec3 movement = totalMovement * deltaTime;
+
+            // MC Entity.move with noPhysics (a spectator): setPos(pos + delta),
+            // no collision of any kind, never on the ground.
+            if (physics.noPhysics) {
+                physics.position += glm::dvec3(movement);
+                physics.isOnGround = false;
+                return;
+            }
 
             // Vertical collision — snap to collision boundary (mirrors
             // MC's Entity.collide()/Shapes.collide). See the matching
@@ -1163,6 +1325,7 @@ namespace Game {
                 // the blocked axis so the player doesn't keep "pushing"
                 // into the wall after hitting one.
                 physics.velocity.x = 0.0f;
+                physics.pushVelocity.x = 0.0f;
                 if (movement.x != 0.0f) physics.horizontalCollision = true;
             }
 
@@ -1171,6 +1334,7 @@ namespace Game {
                 physics.position.z = newPosition.z;
             } else if (!tryStepUp(0.0f, movement.z)) {
                 physics.velocity.z = 0.0f;
+                physics.pushVelocity.z = 0.0f;
                 if (movement.z != 0.0f) physics.horizontalCollision = true;
             }
 
@@ -1191,6 +1355,25 @@ namespace Game {
                     std::pow(0.83f, deltaTime * 20.0f);
                 physics.velocity.x *= frictionFactor;
                 physics.velocity.z *= frictionFactor;
+            }
+
+            // The push's own decay — MC LivingEntity.travelInAir's
+            // `deltaMovement * (onGround ? blockFriction * 0.91 : 0.91)`
+            // every tick, spread over this step's fraction of one.
+            if (physics.pushVelocity.x != 0.0f || physics.pushVelocity.z != 0.0f) {
+                float retain = 0.91f;
+                if (physics.isOnGround) {
+                    const glm::ivec3 below = BlockPosBelowThatAffectsMovement(physics.position);
+                    const BlockID belowId = context.GetBlockState(below.x, below.y, below.z).Block();
+                    const glm::dvec3 pushPerTick(physics.pushVelocity.x / 20.0, 0.0, physics.pushVelocity.z / 20.0);
+                    retain = GetBlockFriction(belowId, pushPerTick) * 0.91f;
+                }
+                const float decay = std::pow(retain, deltaTime * 20.0f);
+                physics.pushVelocity.x *= decay;
+                physics.pushVelocity.z *= decay;
+                // Gone below MC's own 0.003 cut-off (LivingEntity.aiStep).
+                if (std::abs(physics.pushVelocity.x) < 0.003f * 20.0f) physics.pushVelocity.x = 0.0f;
+                if (std::abs(physics.pushVelocity.z) < 0.003f * 20.0f) physics.pushVelocity.z = 0.0f;
             }
         }
     }
@@ -1378,10 +1561,17 @@ namespace Game {
         // on the ground exactly instead of on a 3 cm float grid.
         const double height = physics.GetCurrentHeight();
         const double half   = physics.GetWidth() * 0.5;
-        return CollidesAt(
-            AABBd::FromMinMax(position - glm::dvec3(half, 0.0, half),
-                              position + glm::dvec3(half, height, half)),
-            context);
+        const AABBd box = AABBd::FromMinMax(position - glm::dvec3(half, 0.0, half),
+                                            position + glm::dvec3(half, height, half));
+        // MC Entity.collide's entity half for the player (getEntityCollisions):
+        // the solid entity boxes the caller gathered — a happy ghast's
+        // harness platform (ClientPlayer::UpdatePhysics).
+        if (context.entityColliders) {
+            for (const AABBd& solid : *context.entityColliders) {
+                if (solid.Intersects(box)) return true;
+            }
+        }
+        return CollidesAt(box, context);
     }
 
     bool HasSupportBelow(const glm::dvec3& position, const PlayerPhysics& physics,
@@ -1690,6 +1880,15 @@ namespace Game {
     void CollectBlockColliders(const AABBd& region, const PhysicsContext& context,
                                std::vector<AABBd>& out, const AABBd* mover) {
         out.clear();
+
+        // MC Entity.collide's entity half (getEntityCollisions): the entity
+        // boxes the mover's owner gathered, before the block walk and its
+        // all-air early-out — a boat on open water still meets another boat.
+        if (context.entityColliders) {
+            for (const AABBd& box : *context.entityColliders) {
+                if (box.Intersects(region)) out.push_back(box);
+            }
+        }
 
         // The mover's box as the provider takes it. Built once, outside the
         // cell loop; only asked about at all when this context has a

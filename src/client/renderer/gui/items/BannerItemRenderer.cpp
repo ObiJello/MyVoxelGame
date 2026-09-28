@@ -23,9 +23,10 @@
 // Display.gui (template_banner.json): rotation [30, 20, 0], translation [0,-3.25,0],
 // scale 0.5325. ItemTransform.apply contributes a trailing translate(-0.5,-0.5,-0.5).
 //
-// For inventory v1: render pole+bar without tint, render flag tinted with the
-// dye color. Pattern layers (creeper face, brick pattern, etc.) NOT supported
-// since BannerPatternLayers data isn't on inventory ItemStacks anyway.
+// BannerRenderer.submitBanner order: pole + bar and the flag on banner_base
+// (untinted), then submitPatterns — the flag again on banner/base tinted with
+// the banner's dye colour, and up to 16 BANNER_PATTERNS layers, each its
+// pattern sheet tinted with the layer's colour (the ominous banner's eight).
 
 #include "BannerItemRenderer.hpp"
 #include "ItemLighting.hpp"
@@ -33,6 +34,7 @@
 #include "../GuiRenderState.hpp"
 #include "../../backend/RenderBackend.hpp"
 #include "common/entity/Item.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/core/Log.hpp"
@@ -76,6 +78,33 @@ namespace Render {
                 g_renderBackend->SetTextureWrap (g_bannerBaseTexture, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
             }
             return g_bannerBaseTexture;
+        }
+
+        // entity/banner/<name>.png — the pattern sheets (base + every
+        // banner_pattern's asset), loaded once each. A missing sheet is
+        // remembered as INVALID so it is not retried every frame.
+        TextureHandle LoadBannerPatternTexture(const std::string& name) {
+            static std::unordered_map<std::string, TextureHandle> s_cache;
+            if (const auto it = s_cache.find(name); it != s_cache.end()) return it->second;
+            TextureHandle handle = INVALID_TEXTURE;
+            if (g_renderBackend) {
+                const std::string full = PlatformMain::GetAssetPath("assets/textures/entity/banner/" + name + ".png");
+                int w = 0, h = 0, ch = 0;
+                stbi_set_flip_vertically_on_load(0);
+                if (unsigned char* pixels = std::filesystem::exists(full)
+                        ? stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha) : nullptr) {
+                    handle = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+                    stbi_image_free(pixels);
+                    if (handle != INVALID_TEXTURE) {
+                        g_renderBackend->SetTextureFilter(handle, TextureFilter::Nearest, TextureFilter::Nearest);
+                        g_renderBackend->SetTextureWrap(handle, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+                    }
+                } else {
+                    Log::Warning("[BannerItemRenderer] pattern sheet missing: %s", full.c_str());
+                }
+            }
+            s_cache.emplace(name, handle);
+            return handle;
         }
 
         // DyeColor.getTextureDiffuseColor() values from MC's DyeColor.java enum.
@@ -275,31 +304,49 @@ namespace Render {
             // preserve cube-declaration order across cubes — exactly what MC does.
             auto renderCube = [&](const glm::mat4& pose, glm::vec3 from, glm::vec3 to,
                                   float xOff, float yOff, float w, float h, float d,
-                                  uint32_t tint) {
+                                  uint32_t tint, TextureHandle sheet) {
+                if (sheet == INVALID_TEXTURE) return;
                 std::vector<CubeFace> faces;
                 faces.reserve(6);
                 BuildCubeFaces(faces, pose, from, to, xOff, yOff, w, h, d, tint);
                 std::stable_sort(faces.begin(), faces.end(),
                                  [](const CubeFace& a, const CubeFace& b) { return a.depth < b.depth; });
-                for (const auto& f : faces) SubmitFace(rs, tex, cx, cy, scale, f);
+                for (const auto& f : faces) SubmitFace(rs, sheet, cx, cy, scale, f);
             };
 
             // Pole (BannerModel, declared first).
             renderCube(prePose,
                        glm::vec3(-1.0f/16, -42.0f/16, -1.0f/16),
                        glm::vec3( 1.0f/16,        0,  1.0f/16),
-                       44, 0, 2, 42, 2, 0xFFFFFFFF);
+                       44, 0, 2, 42, 2, 0xFFFFFFFF, tex);
             // Bar (BannerModel, declared second — drawn after pole).
             renderCube(prePose,
                        glm::vec3(-10.0f/16, -44.0f/16, -1.0f/16),
                        glm::vec3( 10.0f/16, -42.0f/16,  1.0f/16),
-                       0, 42, 20, 2, 2, 0xFFFFFFFF);
+                       0, 42, 20, 2, 2, 0xFFFFFFFF, tex);
             // Flag (BannerFlagModel, submitted SECOND in MC's submitBanner — drawn
             // after bar, so its top edge correctly overdraws the bar's front).
-            renderCube(flagPose,
-                       glm::vec3(-10.0f/16, 0,         -2.0f/16),
-                       glm::vec3( 10.0f/16, 40.0f/16,  -1.0f/16),
-                       0, 0, 20, 40, 1, DyeColorRGB(color));
+            const auto flag = [&](uint32_t tint, TextureHandle sheet) {
+                renderCube(flagPose,
+                           glm::vec3(-10.0f/16, 0,         -2.0f/16),
+                           glm::vec3( 10.0f/16, 40.0f/16,  -1.0f/16),
+                           0, 0, 20, 40, 1, tint, sheet);
+            };
+            flag(0xFFFFFFFF, tex);
+            // submitPatterns: the base colour, then the layers.
+            flag(DyeColorRGB(color), LoadBannerPatternTexture("base"));
+            static constexpr const char* kDyeNames[16] = {
+                "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black" };
+            if (const auto patterns = stack.get(Game::DataComponents::BANNER_PATTERNS)) {
+                const size_t count = std::min<size_t>(patterns->layers.size(), 16);
+                for (size_t i = 0; i < count; ++i) {
+                    const Game::BannerPatternLayer& layer = patterns->layers[i];
+                    std::string path = layer.pattern;
+                    if (const size_t colon = path.find(':'); colon != std::string::npos) path = path.substr(colon + 1);
+                    flag(DyeColorRGB(kDyeNames[layer.color & 15]), LoadBannerPatternTexture(path));
+                }
+            }
         }
     } // namespace
 

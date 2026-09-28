@@ -5,6 +5,7 @@
 // per function) so the C++ side can be diffed against MC's source.
 #include "DataComponents.hpp"
 #include "../network/ItemStackSerialization.hpp"
+#include "../world/tags/DataTags.hpp"
 
 #include <algorithm>
 #include <stdexcept>
@@ -34,6 +35,26 @@ namespace Game {
         const auto& registry = NetworkIdRegistry();
         auto it = registry.find(networkId);
         return it != registry.end() ? it->second : nullptr;
+    }
+
+    bool Equippable::CanBeEquippedBy(std::string_view entityTypeId) const {
+        // Equippable.canBeEquippedBy: allowedEntities.isEmpty() ||
+        // allowedEntities.get().contains(type) — a holder set of direct
+        // types or one entity-type tag.
+        if (allowedEntities.empty()) return true;
+        const std::string_view bare = entityTypeId.substr(
+            entityTypeId.compare(0, 10, "minecraft:") == 0 ? 10 : 0);
+        for (const std::string& entry : allowedEntities) {
+            if (entry.empty()) continue;
+            if (entry[0] == '#') {
+                if (DataTags::HasTag(DataTags::Registry::EntityType, bare, entry)) return true;
+                continue;
+            }
+            const std::string_view e(entry);
+            const std::string_view entryBare = e.substr(e.compare(0, 10, "minecraft:") == 0 ? 10 : 0);
+            if (entryBare == bare) return true;
+        }
+        return false;
     }
 
 } // namespace Game
@@ -89,6 +110,48 @@ namespace Game::DataComponents {
             v.miningSpeed    = r.ReadFloat();
             v.damagePerBlock = static_cast<int>(r.ReadVarInt());
             return v;
+        }
+
+        // MapDecorations.STREAM_CODEC is not networked in MC (the component
+        // is server-side data); ours carries it so a stack round-trips the
+        // container sync intact: VarInt count, then per entry the key, the
+        // registry index, x, z (double) and rotation (float).
+        void SerMapDecorations(Network::PacketBuffer& b, const Maps::MapDecorations& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.decorations.size()));
+            for (const auto& [key, e] : v.decorations) {
+                b.WriteString(key);
+                b.WriteVarInt(static_cast<uint32_t>(e.type));
+                b.WriteDouble(e.x);
+                b.WriteDouble(e.z);
+                b.WriteFloat(e.rotation);
+            }
+        }
+        Maps::MapDecorations DeMapDecorations(Network::PacketReader& r) {
+            Maps::MapDecorations v;
+            const uint32_t count = r.ReadVarInt();
+            if (count > 4096) throw std::runtime_error("map decorations: too many entries");
+            for (uint32_t i = 0; i < count; ++i) {
+                std::string key = r.ReadString();
+                Maps::MapDecorations::Entry e;
+                const uint32_t type = r.ReadVarInt();
+                if (type >= static_cast<uint32_t>(Maps::DecorationType::Count)) {
+                    throw std::runtime_error("map decoration type out of range");
+                }
+                e.type = static_cast<Maps::DecorationType>(type);
+                e.x = r.ReadDouble();
+                e.z = r.ReadDouble();
+                e.rotation = r.ReadFloat();
+                v.decorations.emplace_back(std::move(key), e);
+            }
+            return v;
+        }
+
+        // MapPostProcessing.STREAM_CODEC — ByteBufCodecs.idMapper (VarInt id).
+        void SerMapPostProcessing(Network::PacketBuffer& b, const Maps::MapPostProcessing& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v));
+        }
+        Maps::MapPostProcessing DeMapPostProcessing(Network::PacketReader& r) {
+            return r.ReadVarInt() == 1 ? Maps::MapPostProcessing::Scale : Maps::MapPostProcessing::Lock;
         }
 
         // DAMAGE / MAX_DAMAGE / REPAIR_COST / ENCHANTABLE — MC
@@ -174,6 +237,42 @@ namespace Game::DataComponents {
             v.noAi      = r.ReadByte() != 0;
             return v;
         }
+        // BUCKET_ENTITY_DATA: a flag byte (bit per boolean key, bit 6 =
+        // AgeLocked present, bit 7 = its value), then each optional as a
+        // presence byte + value.
+        void SerBucketEntity(Network::PacketBuffer& b, const BucketEntityData& v) {
+            uint8_t flags = 0;
+            if (v.noAi)                flags |= 0x01;
+            if (v.silent)              flags |= 0x02;
+            if (v.noGravity)           flags |= 0x04;
+            if (v.glowing)             flags |= 0x08;
+            if (v.invulnerable)        flags |= 0x10;
+            if (v.persistenceRequired) flags |= 0x20;
+            if (v.ageLocked)           flags |= 0x40;
+            if (v.ageLocked && *v.ageLocked) flags |= 0x80;
+            b.WriteByte(flags);
+            b.WriteByte(v.health ? 1 : 0);
+            if (v.health) b.WriteFloat(*v.health);
+            b.WriteByte(v.age ? 1 : 0);
+            if (v.age) b.WriteInt(static_cast<uint32_t>(*v.age));
+            b.WriteByte(v.huntingCooldown ? 1 : 0);
+            if (v.huntingCooldown) b.WriteLong(static_cast<uint64_t>(*v.huntingCooldown));
+        }
+        BucketEntityData DeBucketEntity(Network::PacketReader& r) {
+            BucketEntityData v;
+            const uint8_t flags = r.ReadByte();
+            v.noAi                = (flags & 0x01) != 0;
+            v.silent              = (flags & 0x02) != 0;
+            v.noGravity           = (flags & 0x04) != 0;
+            v.glowing             = (flags & 0x08) != 0;
+            v.invulnerable        = (flags & 0x10) != 0;
+            v.persistenceRequired = (flags & 0x20) != 0;
+            if (flags & 0x40) v.ageLocked = (flags & 0x80) != 0;
+            if (r.ReadByte() != 0) v.health = r.ReadFloat();
+            if (r.ReadByte() != 0) v.age = static_cast<int32_t>(r.ReadInt());
+            if (r.ReadByte() != 0) v.huntingCooldown = static_cast<int64_t>(r.ReadLong());
+            return v;
+        }
         void SerFood(Network::PacketBuffer& b, const FoodProperties& v) {
             b.WriteVarInt(static_cast<uint32_t>(v.nutrition));
             b.WriteFloat(v.saturation);
@@ -195,6 +294,119 @@ namespace Game::DataComponents {
         UseRemainder DeUseRemainder(Network::PacketReader& r) {
             UseRemainder v;
             v.convertInto = Network::Serialization::ReadItemStack(r);
+            return v;
+        }
+
+        // PotDecorations.STREAM_CODEC: four optional item templates, back,
+        // left, right, front (0 = empty).
+        void SerPotDecorations(Network::PacketBuffer& b, const PotDecorations& v) {
+            for (ItemID id : v.sides) b.WriteVarInt(static_cast<uint32_t>(id));
+        }
+        PotDecorations DePotDecorations(Network::PacketReader& r) {
+            PotDecorations v;
+            for (ItemID& id : v.sides) id = static_cast<ItemID>(r.ReadVarInt());
+            return v;
+        }
+
+        // ItemContainerContents.STREAM_CODEC: the stack list (optional
+        // stacks: EMPTY holes included).
+        void SerContainer(Network::PacketBuffer& b, const ItemContainerContents& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.items.size()));
+            for (const auto& s : v.items) Network::Serialization::WriteItemStack(b, s);
+        }
+        ItemContainerContents DeContainer(Network::PacketReader& r) {
+            ItemContainerContents v;
+            const uint32_t count = std::min<uint32_t>(r.ReadVarInt(), 256);
+            v.items.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) v.items.push_back(Network::Serialization::ReadItemStack(r));
+            return v;
+        }
+
+        // FireworkExplosion.STREAM_CODEC: shape (idMapper, VarInt), colors
+        // and fade_colors (INT lists), has_trail, has_twinkle (BOOL).
+        void SerFireworkExplosion(Network::PacketBuffer& b, const FireworkExplosion& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.shape));
+            b.WriteVarInt(static_cast<uint32_t>(v.colors.size()));
+            for (int32_t c : v.colors) b.WriteInt(static_cast<uint32_t>(c));
+            b.WriteVarInt(static_cast<uint32_t>(v.fadeColors.size()));
+            for (int32_t c : v.fadeColors) b.WriteInt(static_cast<uint32_t>(c));
+            b.WriteByte(v.hasTrail ? 1 : 0);
+            b.WriteByte(v.hasTwinkle ? 1 : 0);
+        }
+        FireworkExplosion DeFireworkExplosion(Network::PacketReader& r) {
+            FireworkExplosion v;
+            v.shape = FireworkExplosion::ShapeById(static_cast<int>(r.ReadVarInt()));
+            const auto readColors = [&r](std::vector<int32_t>& out) {
+                const uint32_t n = r.ReadVarInt();
+                if (n > 4096) throw std::runtime_error("firework explosion: too many colours");
+                out.reserve(n);
+                for (uint32_t i = 0; i < n; ++i) out.push_back(static_cast<int32_t>(r.ReadInt()));
+            };
+            readColors(v.colors);
+            readColors(v.fadeColors);
+            v.hasTrail = r.ReadByte() != 0;
+            v.hasTwinkle = r.ReadByte() != 0;
+            return v;
+        }
+
+        // Fireworks.STREAM_CODEC: flight_duration (VAR_INT), explosions
+        // (FireworkExplosion list, at most 256).
+        void SerFireworks(Network::PacketBuffer& b, const Fireworks& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.flightDuration));
+            const size_t n = std::min(v.explosions.size(), Fireworks::kMaxExplosions);
+            b.WriteVarInt(static_cast<uint32_t>(n));
+            for (size_t i = 0; i < n; ++i) SerFireworkExplosion(b, v.explosions[i]);
+        }
+        Fireworks DeFireworks(Network::PacketReader& r) {
+            Fireworks v;
+            v.flightDuration = static_cast<int>(r.ReadVarInt());
+            const uint32_t n = r.ReadVarInt();
+            if (n > Fireworks::kMaxExplosions) throw std::runtime_error("fireworks: too many explosions");
+            v.explosions.reserve(n);
+            for (uint32_t i = 0; i < n; ++i) v.explosions.push_back(DeFireworkExplosion(r));
+            return v;
+        }
+
+        // ChargedProjectiles.STREAM_CODEC: an ItemStackTemplate list (at
+        // most 1024).
+        void SerChargedProjectiles(Network::PacketBuffer& b, const ChargedProjectiles& v) {
+            const size_t n = std::min(v.items.size(), ChargedProjectiles::kMaxSize);
+            b.WriteVarInt(static_cast<uint32_t>(n));
+            for (size_t i = 0; i < n; ++i) Network::Serialization::WriteItemStack(b, v.items[i]);
+        }
+        ChargedProjectiles DeChargedProjectiles(Network::PacketReader& r) {
+            ChargedProjectiles v;
+            const uint32_t n = r.ReadVarInt();
+            if (n > ChargedProjectiles::kMaxSize) throw std::runtime_error("charged projectiles: too many items");
+            v.items.reserve(n);
+            for (uint32_t i = 0; i < n; ++i) v.items.push_back(Network::Serialization::ReadItemStack(r));
+            return v;
+        }
+
+        // Mirrors BannerPatternLayers.STREAM_CODEC — a list of Layer
+        // (BannerPattern holder, DyeColor). The pattern travels as its
+        // registry id string (both ends share the data pack), the colour as
+        // DyeColor.STREAM_CODEC's id VarInt.
+        void SerBannerPatterns(Network::PacketBuffer& b, const BannerPatternLayers& v) {
+            b.WriteVarInt(static_cast<uint32_t>(v.layers.size()));
+            for (const BannerPatternLayer& layer : v.layers) {
+                b.WriteString(layer.pattern);
+                b.WriteVarInt(layer.color);
+            }
+        }
+        BannerPatternLayers DeBannerPatterns(Network::PacketReader& r) {
+            BannerPatternLayers v;
+            const uint32_t n = r.ReadVarInt();
+            // No MC cap on the stream; a bound keeps a corrupt peer from
+            // asking for gigabytes.
+            if (n > 1024) throw std::runtime_error("banner patterns: too many layers");
+            v.layers.reserve(n);
+            for (uint32_t i = 0; i < n; ++i) {
+                BannerPatternLayer layer;
+                layer.pattern = r.ReadString();
+                layer.color = static_cast<uint8_t>(std::min<uint32_t>(r.ReadVarInt(), 15));
+                v.layers.push_back(std::move(layer));
+            }
             return v;
         }
 
@@ -225,21 +437,43 @@ namespace Game::DataComponents {
             return static_cast<Rarity>(r.ReadByte());
         }
 
-        // Field order mirrors Equippable.STREAM_CODEC (Equippable.java:106) —
-        // restricted to the fields we model: slot, equipSound, swappable,
-        // damageOnHurt.
+        // Field order mirrors Equippable.STREAM_CODEC (Equippable.java:106):
+        // slot, equipSound, assetId, cameraOverlay, allowedEntities,
+        // dispensable, swappable, damageOnHurt, equipOnInteract,
+        // canBeSheared, shearingSound. The optionals travel as strings ("" =
+        // empty) and the holder set as its entry list (empty = absent).
+        // DataComponentMap::Equals compares these bytes, so every field
+        // must be written.
         void SerEquippable(Network::PacketBuffer& b, const Equippable& v) {
             b.WriteByte(static_cast<uint8_t>(v.slot));
             b.WriteString(v.equipSound);
+            b.WriteString(v.assetId);
+            b.WriteString(v.cameraOverlay);
+            b.WriteVarInt(static_cast<uint32_t>(v.allowedEntities.size()));
+            for (const std::string& e : v.allowedEntities) b.WriteString(e);
+            b.WriteByte(v.dispensable ? 1 : 0);
             b.WriteByte(v.swappable ? 1 : 0);
             b.WriteByte(v.damageOnHurt ? 1 : 0);
+            b.WriteByte(v.equipOnInteract ? 1 : 0);
+            b.WriteByte(v.canBeSheared ? 1 : 0);
+            b.WriteString(v.shearingSound);
         }
         Equippable DeEquippable(Network::PacketReader& r) {
             Equippable v;
-            v.slot         = static_cast<EquipmentSlot>(r.ReadByte());
-            v.equipSound   = r.ReadString();
-            v.swappable    = r.ReadByte() != 0;
-            v.damageOnHurt = r.ReadByte() != 0;
+            v.slot          = static_cast<EquipmentSlot>(r.ReadByte());
+            v.equipSound    = r.ReadString();
+            v.assetId       = r.ReadString();
+            v.cameraOverlay = r.ReadString();
+            // A holder set names a handful of types or one tag; a corrupt
+            // count must not allocate the world.
+            const uint32_t n = r.ReadVarInt();
+            for (uint32_t i = 0; i < n && i < 256u; ++i) v.allowedEntities.push_back(r.ReadString());
+            v.dispensable     = r.ReadByte() != 0;
+            v.swappable       = r.ReadByte() != 0;
+            v.damageOnHurt    = r.ReadByte() != 0;
+            v.equipOnInteract = r.ReadByte() != 0;
+            v.canBeSheared    = r.ReadByte() != 0;
+            v.shearingSound   = r.ReadString();
             return v;
         }
 
@@ -487,6 +721,12 @@ namespace Game::DataComponents {
     const DataComponentType<UseRemainder>     USE_REMAINDER             {"use_remainder",             10, &SerUseRemainder, &DeUseRemainder};
     const DataComponentType<std::string>      CUSTOM_NAME               {"custom_name",                4, &SerString,       &DeString};
     const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET    {"sulfur_cube_bucket",        14, &SerSulfurCubeBucket, &DeSulfurCubeBucket};
+    const DataComponentType<BucketEntityData> BUCKET_ENTITY_DATA        {"bucket_entity_data",        64, &SerBucketEntity, &DeBucketEntity};
+    const DataComponentType<int32_t>          AXOLOTL_VARIANT           {"axolotl/variant",           65, &SerVarInt,       &DeVarInt};
+    const DataComponentType<int32_t>          SALMON_SIZE               {"salmon/size",               66, &SerVarInt,       &DeVarInt};
+    const DataComponentType<int32_t>          TROPICAL_FISH_PATTERN     {"tropical_fish/pattern",     67, &SerVarInt,       &DeVarInt};
+    const DataComponentType<int32_t>          TROPICAL_FISH_BASE_COLOR  {"tropical_fish/base_color",  68, &SerVarInt,       &DeVarInt};
+    const DataComponentType<int32_t>          TROPICAL_FISH_PATTERN_COLOR {"tropical_fish/pattern_color", 69, &SerVarInt,   &DeVarInt};
     const DataComponentType<std::string>      ITEM_NAME                 {"item_name",                  5, &SerString,       &DeString};
     const DataComponentType<ItemLore>         LORE                      {"lore",                       6, &SerLore,         &DeLore};
     const DataComponentType<Rarity>           RARITY                    {"rarity",                     7, &SerRarity,       &DeRarity};
@@ -509,7 +749,19 @@ namespace Game::DataComponents {
     const DataComponentType<Weapon>           WEAPON                    {"weapon",                    28, &SerWeapon,       &DeWeapon};
     const DataComponentType<std::string>      BREAK_SOUND               {"break_sound",               29, &SerString,       &DeString};
     const DataComponentType<std::string>      DAMAGE_RESISTANT          {"damage_resistant",          30, &SerString,       &DeString};
+    const DataComponentType<Fireworks>        FIREWORKS                 {"fireworks",                 76, &SerFireworks,    &DeFireworks};
+    const DataComponentType<FireworkExplosion> FIREWORK_EXPLOSION       {"firework_explosion",        77, &SerFireworkExplosion, &DeFireworkExplosion};
+    const DataComponentType<ChargedProjectiles> CHARGED_PROJECTILES     {"charged_projectiles",       78, &SerChargedProjectiles, &DeChargedProjectiles};
+    const DataComponentType<int32_t>          OMINOUS_BOTTLE_AMPLIFIER  {"ominous_bottle_amplifier",  84, &SerVarInt,       &DeVarInt};
+    const DataComponentType<BannerPatternLayers> BANNER_PATTERNS        {"banner_patterns",           88, &SerBannerPatterns, &DeBannerPatterns};
+    const DataComponentType<std::string>      INSTRUMENT                {"instrument",                89, &SerString,       &DeString};
+    const DataComponentType<PotDecorations>   POT_DECORATIONS           {"pot_decorations",           90, &SerPotDecorations, &DePotDecorations};
+    const DataComponentType<ItemContainerContents> CONTAINER            {"container",                 91, &SerContainer,    &DeContainer};
     const DataComponentType<std::string>      PAINTING_VARIANT          {"painting/variant",          40, &SerString,       &DeString};
+    const DataComponentType<int32_t>          MAP_ID                    {"map_id",                    50, &SerVarInt,       &DeVarInt};
+    const DataComponentType<Maps::MapDecorations> MAP_DECORATIONS       {"map_decorations",           51, &SerMapDecorations, &DeMapDecorations};
+    const DataComponentType<Maps::MapPostProcessing> MAP_POST_PROCESSING {"map_post_processing",      52, &SerMapPostProcessing, &DeMapPostProcessing};
+    const DataComponentType<int32_t>          MAP_COLOR                 {"map_color",                 53, &SerI32,          &DeI32};
 
 #if ENABLE_PORTAL_GUN
     const DataComponentType<uint8_t>  PORTAL_GUN_NEXT_COLOR  {"portal_gun_next_color",  100, &SerU8,  &DeU8};

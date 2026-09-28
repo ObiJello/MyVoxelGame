@@ -297,8 +297,11 @@ namespace Game {
         // altInteract=true → left-click "use" semantics (PortalGun blue).
         // `dimension` stamps the packet with the clicked block's level;
         // absent, it is the level the crosshair's block is in.
+        // `fromUse` marks a placement that came from the held item's own
+        // `use` clip (PlaceOnWaterBlockItem) rather than from the crosshair.
         uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false,
-                               std::optional<Game::DimensionId> dimension = std::nullopt);
+                               std::optional<Game::DimensionId> dimension = std::nullopt,
+                               bool fromUse = false);
 
         // Raycast face numbering -> MC Direction ordinals. Shared by the
         // outgoing packet and the local placement prediction, so the two
@@ -319,9 +322,35 @@ namespace Game {
         // predicts with the correct facing rather than snapping on the ack.
         // It carries the block too, so `outBlock` is redundant with it and kept
         // only because the caller's packet fields are still separate.
+        //
+        // `fromUse` is the PlaceOnWaterBlockItem placement (see
+        // UsePlaceOnWaterItem): a bare BlockItem.useOn with no block use in
+        // the way. Lily pads and frogspawn predict only through it — their
+        // plain click places nothing (useOn is PASS).
         bool ComputePredictedPlacement(const RaycastHit& hit,
                                        glm::ivec3& outPos, BlockID& outBlock,
-                                       BlockState& outState) const;
+                                       BlockState& outState, bool fromUse = false) const;
+
+        // MC BlockItem.canPlace's `level.isUnobstructed(state, pos, …)` on
+        // the client's own view: this player, the other players it draws and
+        // its mob mirror, through the same shared shape test the server uses
+        // (Game::PlacementCollisionShape / PlacementShapeOverlaps). A
+        // placement the server would refuse for an entity in the way is
+        // never predicted, so no ghost block appears.
+        bool PlacementUnobstructedLocally(BlockState state, const glm::ivec3& pos) const;
+
+        // MC PlaceOnWaterBlockItem.use (lily pad, frogspawn): clip the look
+        // ray with ClipContext.Fluid.SOURCE_ONLY — water sources are hit, the
+        // crosshair ray passes straight through them — and place on the cell
+        // ABOVE whatever it hit, as a UseItemOn marked `fromUse`. Returns
+        // false when the held item is not one of the two (the caller carries
+        // on with its own handling); true otherwise, placed or not — a miss
+        // places nothing, as in vanilla.
+        bool UsePlaceOnWaterItem();
+        bool HoldsPlaceOnWaterItem() const;
+        // The SOURCE_ONLY clip itself, already moved to the cell above
+        // (BlockHitResult.withPosition(pos.above())).
+        std::optional<RaycastHit> ClipPlaceOnWater() const;
 
         // What the fill tool places: the held block, or the fluid a held
         // water / lava bucket pours (as its SOURCE block). Air when neither.
@@ -357,6 +386,8 @@ namespace Game {
         // Air-click item use (bucket fill/empty). Mirrors the tail of MC's
         // MultiPlayerGameMode.useItem prediction block.
         void PredictUseItem(uint32_t hand, uint32_t sequence);
+        // The arm swing of a fishing rod's use (cast / reel in).
+        void SwingForRodUse(uint32_t hand);
         // Use item in air — sends UseItemC2S (MC ServerboundUseItemPacket).
         // Returns the interaction sequence it was stamped with (0 if not sent).
         uint32_t SendUseItem(int hand);
@@ -366,7 +397,10 @@ namespace Game {
         // Start/stop the client-side predicted hold-to-use (mirrors MC's
         // client running startUsingItem locally). Start is a no-op when the
         // held stack has no use duration.
-        void StartPredictedUse(uint32_t hand);
+        // `fromUseOn`: the hold an item's useOn started (the brush, whose
+        // BrushItem.useOn is its only way into startUsingItem — an air click
+        // with it uses nothing).
+        void StartPredictedUse(uint32_t hand, bool fromUseOn = false);
         void StopPredictedUse();
         // Per-tick countdown for the predicted use (called from Tick's 20 TPS
         // stepper, alongside UpdateBreakingTick/UpdatePlacingTick).

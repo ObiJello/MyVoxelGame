@@ -1,5 +1,6 @@
 // File: src/common/inventory/CraftingMenu.cpp
 #include "CraftingMenu.hpp"
+#include "common/world/map/MapItem.hpp"
 #include <memory>
 
 namespace Game {
@@ -61,6 +62,9 @@ namespace Game {
 
         bool moved = false;
         if (slotIndex == RESULT_SLOT) {
+            // MC: itemStack.getItem().onCraftedBy(itemStack, player) first —
+            // a crafted map is locked / scaled before it moves.
+            MapItemBridge::OnCraftedPostProcess(stack);
             // A crafted stack fills from the BACK — hotbar first (MC line 106).
             moved = MoveItemStackTo(stack, MAIN_BEGIN, PLAYER_END, true, result);
         } else if (slotIndex >= MAIN_BEGIN && slotIndex < PLAYER_END) {

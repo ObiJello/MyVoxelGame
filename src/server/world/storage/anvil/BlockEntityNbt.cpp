@@ -3,6 +3,7 @@
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 #include "server/world/storage/anvil/SpawnerNbt.hpp"
+#include "server/world/storage/anvil/TrialChamberNbt.hpp"
 #include "server/world/storage/SectionDataUnpacker.hpp"
 
 #include "common/core/Log.hpp"
@@ -13,7 +14,10 @@
 #include "common/world/block/entity/PistonMovingBlockEntity.hpp"
 #include "common/world/block/entity/HopperBlockEntity.hpp"
 #include "common/world/block/entity/LecternBlockEntity.hpp"
+#include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "common/world/block/entity/PotentSulfurBlockEntity.hpp"
+#include "common/world/block/entity/SculkBlockEntities.hpp"
+#include "server/world/storage/anvil/VibrationNbt.hpp"
 #include "common/world/block/entity/AurelithBlockEntities.hpp"
 #include "common/world/block/entity/HushLighthouseLampBlockEntity.hpp"
 #include "common/world/block/entity/EndGatewayBlockEntity.hpp"
@@ -21,6 +25,18 @@
 #include "common/world/block/entity/BrewingStandBlockEntity.hpp"
 #include "common/world/block/entity/SignBlockEntity.hpp"
 #include "common/world/block/entity/SpawnerBlockEntity.hpp"
+#include "common/world/block/entity/TrialSpawnerBlockEntity.hpp"
+#include "common/world/block/entity/VaultBlockEntity.hpp"
+#include "common/world/block/entity/BrushableBlockEntity.hpp"
+#include "common/world/block/entity/DecoratedPotBlockEntity.hpp"
+#include "common/world/block/entity/BannerBlockEntity.hpp"
+#include "common/world/block/entity/ChiseledBookShelfBlockEntity.hpp"
+#include "common/world/block/entity/CopperGolemStatueBlockEntity.hpp"
+#include "common/text/TextComponent.hpp"
+#include "common/text/Language.hpp"
+#include "common/entity/raid/OminousBanner.hpp"
+#include "common/data/DataComponents.hpp"
+#include <iterator>
 
 #include <string>
 #include <unordered_map>
@@ -65,6 +81,99 @@ namespace Game::Anvil {
 
     } // namespace
 
+    // A block entity's saved item components (BlockEntity's "components",
+    // plus `extraKey` → `extraComponent` when the entity keeps one of them
+    // as a field of its own, a banner's "patterns"), read through the item
+    // reader as the components of a stand-in stack.
+    DataComponentMap ReadBlockEntityComponents(const ::World::NBTTagCompound& tag,
+                                               const char* extraKey, const char* extraComponent) {
+        auto item = std::make_shared<::World::NBTTagCompound>();
+        item->value["id"] = std::make_shared<::World::NBTTagString>("minecraft:white_banner");
+        item->value["count"] = std::make_shared<::World::NBTTagInt>(1);
+        auto components = std::make_shared<::World::NBTTagCompound>();
+        if (auto saved = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("components"))) {
+            components->value = saved->value;
+        }
+        if (extraKey && extraComponent) {
+            if (auto extra = tag.GetTag(extraKey)) components->value[extraComponent] = extra;
+        }
+        item->value["components"] = components;
+        return ReadItemStack(*item).components;
+    }
+
+    // SignText's / CustomName's text component as the plain string the
+    // engine keeps: a string tag, or a compound's "text".
+    std::string ReadPlainName(const ::World::NBTTagCompound& tag, const char* key) {
+        auto t = tag.GetTag(key);
+        if (auto str = std::dynamic_pointer_cast<::World::NBTTagString>(t)) return str->value;
+        if (auto c = std::dynamic_pointer_cast<::World::NBTTagCompound>(t)) return c->GetValue<std::string>("text", "");
+        return {};
+    }
+
+    void ReadBanner(const ::World::NBTTagCompound& tag, BannerBlockEntity& banner) {
+        // MC BannerBlockEntity.loadAdditional: CustomName, patterns
+        // (BannerPatternLayers.CODEC); BlockEntity's "components" keep the
+        // rest (the ominous banner's item_name and rarity).
+        DataComponentMap components = ReadBlockEntityComponents(tag, "patterns", "minecraft:banner_patterns");
+        BannerPatternLayers patterns = components.get(DataComponents::BANNER_PATTERNS).value_or(BannerPatternLayers{});
+        std::string name = ReadPlainName(tag, "CustomName");
+        if (name.empty()) name = components.get(DataComponents::CUSTOM_NAME).value_or(std::string());
+        DataComponentMap extra;
+        for (const char* key : { "item_name", "rarity" }) extra.CopyNamed(components, key);
+        banner.LoadFromNbt(std::move(patterns), std::move(name), std::move(extra));
+    }
+
+    void ReadCopperGolemStatue(const ::World::NBTTagCompound& tag, CopperGolemStatueBlockEntity& statue) {
+        // MC keeps the golem's name in the entity's components (custom_name).
+        DataComponentMap components = ReadBlockEntityComponents(tag, nullptr, nullptr);
+        if (auto name = components.get(DataComponents::CUSTOM_NAME)) statue.SetCustomName(*name);
+    }
+
+    void ReadDecoratedPot(const ::World::NBTTagCompound& tag, DecoratedPotBlockEntity& pot) {
+        // MC DecoratedPotBlockEntity.loadAdditional: sherds (26.3's
+        // {back, left, right, front} ItemStackTemplates; the list of four item
+        // ids that older versions wrote reads back in the same order), then
+        // the loot table (read by the container branch) or `item`.
+        if (auto sherds = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("sherds"))) {
+            static constexpr const char* kSideNames[DecoratedPotBlockEntity::kSideCount] = {
+                "back", "left", "right", "front" };
+            for (int side = 0; side < DecoratedPotBlockEntity::kSideCount; ++side) {
+                auto entry = sherds->GetTag(kSideNames[side]);
+                ItemID id = Items::Air;
+                if (auto compound = std::dynamic_pointer_cast<::World::NBTTagCompound>(entry)) {
+                    id = ItemFromName(compound->GetValue<std::string>("id", ""));
+                } else if (auto str = std::dynamic_pointer_cast<::World::NBTTagString>(entry)) {
+                    id = ItemFromName(str->value);
+                }
+                pot.SetSide(side, id);
+            }
+        } else if (auto list = std::dynamic_pointer_cast<::World::NBTTagList>(tag.GetTag("sherds"))) {
+            for (size_t i = 0; i < list->value.size() && i < DecoratedPotBlockEntity::kSideCount; ++i) {
+                if (auto str = std::dynamic_pointer_cast<::World::NBTTagString>(list->value[i])) {
+                    pot.SetSide(static_cast<int>(i), ItemFromName(str->value));
+                }
+            }
+        }
+        if (tag.GetValue<std::string>("LootTable", "").empty()) {
+            if (auto item = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("item"))) {
+                pot.SetItem(0, ReadItemStack(*item));
+            }
+        }
+    }
+
+    void ReadBrushableBlock(const ::World::NBTTagCompound& tag, BrushableBlockEntity& brushable) {
+        // MC BrushableBlockEntity.loadAdditional: tryLoadLootTable, else the
+        // item; hit_direction (a byte, Direction.from3DDataValue).
+        ItemStack item;
+        if (auto itemTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("item"))) {
+            item = ReadItemStack(*itemTag);
+        }
+        const int hitDirection = tag.GetTag("hit_direction")
+            ? static_cast<int>(tag.GetValue<int8_t>("hit_direction", -1)) : -1;
+        brushable.LoadFromNbt(tag.GetValue<std::string>("LootTable", ""),
+                              tag.GetValue<int64_t>("LootTableSeed", 0), std::move(item), hitDirection);
+    }
+
     bool WriteBlockEntity(Nbt::Writer& w, Nbt::Writer::ListScope& list,
                           const BlockEntity& entity, Math::ChunkPos chunkPos) {
         const BlockEntityType* type = entity.GetType();
@@ -94,8 +203,105 @@ namespace Game::Anvil {
             if (container->HasLootTable()) {
                 w.String("LootTable", container->GetLootTable());
                 if (container->GetLootTableSeed() != 0) w.Long("LootTableSeed", container->GetLootTableSeed());
-            } else if (CarriesItems(*type)) {
+            } else if (CarriesItems(*type) && !dynamic_cast<const DecoratedPotBlockEntity*>(&entity)) {
                 WriteContainerItems(w, *container);
+            }
+        }
+
+        if (const auto* pot = dynamic_cast<const DecoratedPotBlockEntity*>(&entity)) {
+            // MC DecoratedPotBlockEntity.saveAdditional: sherds (PotDecorations
+            // .CODEC — {back, left, right, front}, each an ItemStackTemplate)
+            // unless EMPTY, then the loot table (written above) or the one
+            // stack as `item`.
+            if (pot->HasDecorations()) {
+                static constexpr const char* kSideNames[DecoratedPotBlockEntity::kSideCount] = {
+                    "back", "left", "right", "front" };
+                w.BeginCompound("sherds");
+                for (int side = 0; side < DecoratedPotBlockEntity::kSideCount; ++side) {
+                    const std::string name = ItemName(pot->GetSide(side));
+                    if (name.empty()) continue;
+                    w.BeginCompound(kSideNames[side]);
+                    w.String("id", name);
+                    w.EndCompound();
+                }
+                w.EndCompound();
+            }
+            if (!pot->HasLootTable() && !pot->GetItem(0).IsEmpty()) {
+                w.BeginCompound("item");
+                WriteItemStackBody(w, pot->GetItem(0));
+                w.EndCompound();
+            }
+        }
+
+        if (const auto* shelf = dynamic_cast<const ChiseledBookShelfBlockEntity*>(&entity)) {
+            // MC ChiseledBookShelfBlockEntity.saveAdditional: Items (the
+            // container branch above always writes the list) and
+            // last_interacted_slot.
+            w.Int("last_interacted_slot", shelf->GetLastInteractedSlot());
+        }
+
+        if (const auto* banner = dynamic_cast<const BannerBlockEntity*>(&entity)) {
+            // MC BannerBlockEntity.saveAdditional: patterns unless empty,
+            // CustomName; BlockEntity.saveWithComponents: the kept components.
+            static constexpr const char* kDyeNames[16] = {
+                "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black" };
+            if (!banner->GetPatterns().IsEmpty()) {
+                auto list = w.BeginList("patterns", Nbt::TagType::Compound);
+                for (const BannerPatternLayer& layer : banner->GetPatterns().layers) {
+                    w.ListCompoundBegin(list);
+                    w.String("pattern", layer.pattern);
+                    w.String("color", kDyeNames[layer.color & 15]);
+                    w.ListCompoundEnd(list);
+                }
+                w.EndList(list);
+            }
+            if (!banner->GetCustomName().empty()) w.String("CustomName", banner->GetCustomName());
+            const DataComponentMap& extra = banner->GetExtraComponents();
+            const auto itemName = extra.get(DataComponents::ITEM_NAME);
+            const auto rarity = extra.get(DataComponents::RARITY);
+            if (itemName || rarity) {
+                w.BeginCompound("components");
+                if (itemName) {
+                    // The ominous banner's name is Raid's translatable one.
+                    if (*itemName == Language::Get(Raid::kOminousBannerNameKey)) {
+                        WriteTextComponent(w, "minecraft:item_name",
+                                           Text::Component::Translatable(Raid::kOminousBannerNameKey));
+                    } else {
+                        w.String("minecraft:item_name", *itemName);
+                    }
+                }
+                if (rarity) {
+                    static constexpr const char* kRarityNames[] = { "common", "uncommon", "rare", "epic" };
+                    const auto index = static_cast<size_t>(*rarity);
+                    if (index < std::size(kRarityNames)) w.String("minecraft:rarity", kRarityNames[index]);
+                }
+                w.EndCompound();
+            }
+        }
+
+        if (const auto* statue = dynamic_cast<const CopperGolemStatueBlockEntity*>(&entity)) {
+            if (!statue->GetCustomName().empty()) {
+                w.BeginCompound("components");
+                w.String("minecraft:custom_name", statue->GetCustomName());
+                w.EndCompound();
+            }
+        }
+
+        if (const auto* brushable = dynamic_cast<const BrushableBlockEntity*>(&entity)) {
+            // MC BrushableBlockEntity.saveAdditional: the loot table while it
+            // is unrolled (the seed only when non-zero), else the find as
+            // `item`; hit_direction (Direction.LEGACY_ID_CODEC, a byte).
+            if (brushable->HasLootTable()) {
+                w.String("LootTable", brushable->GetLootTable());
+                if (brushable->GetLootTableSeed() != 0) w.Long("LootTableSeed", brushable->GetLootTableSeed());
+            } else if (!brushable->GetItem().IsEmpty()) {
+                w.BeginCompound("item");
+                WriteItemStackBody(w, brushable->GetItem());
+                w.EndCompound();
+            }
+            if (brushable->GetHitDirection() >= 0) {
+                w.Byte("hit_direction", static_cast<int8_t>(brushable->GetHitDirection()));
             }
         }
 
@@ -166,6 +372,20 @@ namespace Game::Anvil {
             }
         }
 
+        if (const auto* jukebox = dynamic_cast<const JukeboxBlockEntity*>(&entity)) {
+            // MC JukeboxBlockEntity.saveAdditional: RecordItem (ItemStack
+            // codec) when there is a disc, ticks_since_song_started while a
+            // song is set.
+            if (!jukebox->GetTheItem().IsEmpty()) {
+                w.BeginCompound("RecordItem");
+                WriteItemStackBody(w, jukebox->GetTheItem());
+                w.EndCompound();
+            }
+            if (jukebox->GetSongPlayer().IsPlaying()) {
+                w.Long("ticks_since_song_started", jukebox->GetSongPlayer().GetTicksSinceSongStarted());
+            }
+        }
+
         if (const auto* comparator = dynamic_cast<const ComparatorBlockEntity*>(&entity)) {
             w.Int("OutputSignal", comparator->GetOutputSignal());
         }
@@ -173,6 +393,22 @@ namespace Game::Anvil {
         if (const auto* sulfur = dynamic_cast<const PotentSulfurBlockEntity*>(&entity)) {
             // MC PotentSulfurBlockEntity.saveAdditional.
             w.Int("countdown", sulfur->waitingCountdown);
+        }
+
+        // The sculk family (SculkBlockEntities.hpp).
+        if (const auto* sensor = dynamic_cast<const SculkSensorBlockEntity*>(&entity)) {
+            // MC SculkSensorBlockEntity.saveAdditional (the calibrated one too).
+            w.Int("last_vibration_frequency", sensor->GetLastVibrationFrequency());
+            WriteVibrationData(w, "listener", sensor->SavedVibrationData());
+        }
+        if (const auto* shrieker = dynamic_cast<const SculkShriekerBlockEntity*>(&entity)) {
+            // MC SculkShriekerBlockEntity.saveAdditional.
+            w.Int("warning_level", shrieker->GetWarningLevel());
+            WriteVibrationData(w, "listener", shrieker->SavedVibrationData());
+        }
+        if (const auto* catalyst = dynamic_cast<const SculkCatalystBlockEntity*>(&entity)) {
+            // MC SculkCatalystBlockEntity.saveAdditional -> SculkSpreader.save.
+            WriteSculkCursors(w, catalyst->GetSculkSpreader());
         }
 
         // Aurelith's quest block entities (AurelithBlockEntities.hpp).
@@ -235,6 +471,16 @@ namespace Game::Anvil {
         if (const auto* spawner = dynamic_cast<const SpawnerBlockEntity*>(&entity)) {
             // MC SpawnerBlockEntity.saveAdditional -> BaseSpawner.save.
             WriteSpawner(w, *spawner);
+        }
+
+        if (const auto* trial = dynamic_cast<const TrialSpawnerBlockEntity*>(&entity)) {
+            // MC TrialSpawnerBlockEntity.saveAdditional -> TrialSpawner.store.
+            WriteTrialSpawner(w, *trial);
+        }
+
+        if (const auto* vault = dynamic_cast<const VaultBlockEntity*>(&entity)) {
+            // MC VaultBlockEntity.saveAdditional: config, shared_data, server_data.
+            WriteVault(w, *vault);
         }
 
         if (const auto* gateway = dynamic_cast<const EndGatewayBlockEntity*>(&entity)) {
@@ -329,6 +575,26 @@ namespace Game::Anvil {
             hopper->SetCooldownTime(tag.GetValue<int32_t>("TransferCooldown", -1));
         }
 
+        if (auto* pot = dynamic_cast<DecoratedPotBlockEntity*>(entity.get())) {
+            ReadDecoratedPot(tag, *pot);
+        }
+
+        if (auto* brushable = dynamic_cast<BrushableBlockEntity*>(entity.get())) {
+            ReadBrushableBlock(tag, *brushable);
+        }
+        if (auto* banner = dynamic_cast<BannerBlockEntity*>(entity.get())) {
+            ReadBanner(tag, *banner);
+        }
+        if (auto* shelf = dynamic_cast<ChiseledBookShelfBlockEntity*>(entity.get())) {
+            // MC loadAdditional: the Items (read by the container branch
+            // above — straight into the slots, no state rewrite) and
+            // last_interacted_slot.
+            shelf->SetLastInteractedSlot(tag.GetValue<int32_t>("last_interacted_slot", -1));
+        }
+        if (auto* statue = dynamic_cast<CopperGolemStatueBlockEntity*>(entity.get())) {
+            ReadCopperGolemStatue(tag, *statue);
+        }
+
         if (auto* lectern = dynamic_cast<LecternBlockEntity*>(entity.get())) {
             // MC LecternBlockEntity.loadAdditional: the Book stack (EMPTY
             // when absent or unreadable), then Page clamped to the book.
@@ -339,6 +605,19 @@ namespace Game::Anvil {
             lectern->LoadFromNbt(std::move(book), tag.GetValue<int32_t>("Page", 0));
         }
 
+        if (auto* jukebox = dynamic_cast<JukeboxBlockEntity*>(entity.get())) {
+            // MC JukeboxBlockEntity.loadAdditional: RecordItem (EMPTY when
+            // absent or unreadable), then ticks_since_song_started — the song
+            // set without playing.
+            ItemStack record;
+            if (auto recordTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("RecordItem"))) {
+                record = ReadItemStack(*recordTag);
+            }
+            const bool hasTicks = tag.GetTag("ticks_since_song_started") != nullptr;
+            jukebox->LoadFromNbt(std::move(record), hasTicks,
+                                 tag.GetValue<int64_t>("ticks_since_song_started", 0));
+        }
+
         if (auto* comparator = dynamic_cast<ComparatorBlockEntity*>(entity.get())) {
             comparator->SetOutputSignal(tag.GetValue<int32_t>("OutputSignal", 0));
         }
@@ -346,6 +625,22 @@ namespace Game::Anvil {
         if (auto* sulfur = dynamic_cast<PotentSulfurBlockEntity*>(entity.get())) {
             // MC PotentSulfurBlockEntity.loadAdditional: keeps its value when absent.
             if (tag.GetTag("countdown")) sulfur->waitingCountdown = tag.GetValue<int32_t>("countdown", -1);
+        }
+
+        // The sculk family (SculkBlockEntities.hpp).
+        if (auto* sensor = dynamic_cast<SculkSensorBlockEntity*>(entity.get())) {
+            // MC SculkSensorBlockEntity.loadAdditional.
+            sensor->SetLastVibrationFrequency(tag.GetValue<int32_t>("last_vibration_frequency", 0));
+            sensor->SetVibrationData(ReadVibrationData(tag, "listener"));
+        }
+        if (auto* shrieker = dynamic_cast<SculkShriekerBlockEntity*>(entity.get())) {
+            // MC SculkShriekerBlockEntity.loadAdditional.
+            shrieker->SetWarningLevel(tag.GetValue<int32_t>("warning_level", 0));
+            shrieker->SetVibrationData(ReadVibrationData(tag, "listener"));
+        }
+        if (auto* catalyst = dynamic_cast<SculkCatalystBlockEntity*>(entity.get())) {
+            // MC SculkCatalystBlockEntity.loadAdditional -> SculkSpreader.load.
+            catalyst->GetSculkSpreader().Load(ReadSculkCursors(tag));
         }
 
         // Aurelith's quest block entities (AurelithBlockEntities.hpp).
@@ -489,6 +784,16 @@ namespace Game::Anvil {
         if (auto* spawner = dynamic_cast<SpawnerBlockEntity*>(entity.get())) {
             // MC SpawnerBlockEntity.loadAdditional -> BaseSpawner.load.
             ReadSpawner(tag, *spawner);
+        }
+
+        if (auto* trial = dynamic_cast<TrialSpawnerBlockEntity*>(entity.get())) {
+            // MC TrialSpawnerBlockEntity.loadAdditional -> TrialSpawner.load.
+            ReadTrialSpawner(tag, *trial);
+        }
+
+        if (auto* vault = dynamic_cast<VaultBlockEntity*>(entity.get())) {
+            // MC VaultBlockEntity.loadAdditional.
+            ReadVault(tag, *vault);
         }
 
         if (auto* gateway = dynamic_cast<EndGatewayBlockEntity*>(entity.get())) {

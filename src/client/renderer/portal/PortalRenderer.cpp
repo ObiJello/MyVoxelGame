@@ -11,8 +11,12 @@
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "../mesh/ChunkRenderer.hpp"     // RenderChunksAll for the see-through scene re-render
+#include "client/world/ClientChunkManager.hpp"   // section info for the occlusion gate
+#include "common/core/Config.hpp"
+#include <algorithm>
 #include "../environment/EnvironmentState.hpp"  // time-of-day sky/fog color
 #include "client/portal/ClientPortalManager.hpp"
+#include "client/ClientTickRateManager.hpp"   // WorldClockSeconds
 #include "common/core/Log.hpp"
 
 #include "../debug/FlickerDiag.hpp"
@@ -1056,10 +1060,78 @@ void main() {
 
     } // namespace
 
+    namespace {
+        // The oval's world box, rim included (the rim's outer border runs
+        // 7.5 % past the 1×2 opening; 15 % keeps it conservative), a
+        // little thick along the normal.
+        void PortalBox(const Client::ClientPortal& p, glm::dvec3& mn, glm::dvec3& mx) {
+            const glm::dvec3 r = glm::dvec3(p.right) * (0.5 * 1.15);
+            const glm::dvec3 u = glm::dvec3(p.upDir) * (1.0 * 1.15);
+            const glm::dvec3 n = glm::dvec3(p.normal) * 0.1;
+            mn = glm::dvec3( 1e300);
+            mx = glm::dvec3(-1e300);
+            for (int i = 0; i < 8; ++i) {
+                const glm::dvec3 c = p.origin + ((i & 1) ? r : -r) + ((i & 2) ? u : -u) + ((i & 4) ? n : -n);
+                mn = glm::min(mn, c);
+                mx = glm::max(mx, c);
+            }
+        }
+
+        // Does any section the box touches appear in the chosen list? Also
+        // true for what a list never holds (no chunk, an all-air section,
+        // outside the build height) and when there is no renderer to ask:
+        // conservative, as Render::EntityCulling's section gate.
+        bool BoxInSectionList(const glm::dvec3& mn, const glm::dvec3& mx, bool mainView) {
+            const ChunkRenderer* renderer = g_chunkRenderer;
+            const Client::ClientChunkManager* chunks = Client::g_clientChunkManager;
+            if (!renderer || !chunks) return true;
+            const int cx0 = static_cast<int>(std::floor(mn.x)) >> 4;
+            const int cx1 = static_cast<int>(std::floor(mx.x)) >> 4;
+            const int cz0 = static_cast<int>(std::floor(mn.z)) >> 4;
+            const int cz1 = static_cast<int>(std::floor(mx.z)) >> 4;
+            int sy0 = (static_cast<int>(std::floor(mn.y)) - Config::MinY) >> 4;
+            int sy1 = (static_cast<int>(std::floor(mx.y)) - Config::MinY) >> 4;
+            if (sy1 < 0 || sy0 >= Game::Math::SECTIONS_PER_CHUNK) return true;
+            sy0 = std::max(sy0, 0);
+            sy1 = std::min(sy1, Game::Math::SECTIONS_PER_CHUNK - 1);
+            for (int cx = cx0; cx <= cx1; ++cx) {
+                for (int cz = cz0; cz <= cz1; ++cz) {
+                    const Game::Math::ChunkPos cp{ cx, cz };
+                    for (int sy = sy0; sy <= sy1; ++sy) {
+                        const Client::SectionInfo* si = chunks->GetSectionInfo(cp, sy);
+                        if (!si || si->isAllAir) return true;
+                        if (mainView ? renderer->IsMainViewSection(cp, sy) : renderer->IsSectionVisible(cp, sy)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+
+        uint64_t PortalKey(uint64_t gunId, int color) {
+            return (gunId << 1) | static_cast<uint64_t>(color & 1);
+        }
+    } // namespace
+
+    void PortalRenderer::SnapshotVisibility() {
+        m_snapshotVisible.clear();
+        Client::GetClientPortalManager().ForEachPair([&](uint64_t gunId, const Client::ClientPortalPair& pair) {
+            const Client::ClientPortal* ends[2] = { &pair.blue, &pair.orange };
+            for (int color = 0; color < 2; ++color) {
+                if (!ends[color]->active) continue;
+                glm::dvec3 mn, mx;
+                PortalBox(*ends[color], mn, mx);
+                if (BoxInSectionList(mn, mx, /*mainView=*/false)) m_snapshotVisible.push_back(PortalKey(gunId, color));
+            }
+        });
+        std::sort(m_snapshotVisible.begin(), m_snapshotVisible.end());
+    }
+
     void PortalRenderer::Render(const glm::mat4& projectionMatrix,
                                 const glm::mat4& viewMatrix,
                                 const Camera& camera,
-                                const Frustum& /*frustum*/,
+                                const Frustum& frustum,
                                 float aspect,
                                 float farPlane,
                                 int8_t dimensionFilter,
@@ -1096,7 +1168,13 @@ void main() {
         // (flTime -= floor(flTime/1000.0)*1000.0). Without this wrap the
         // float time grows unboundedly during long sessions and FP precision
         // erodes the noise-scroll smoothness after a few hours of play.
-        const double rawNow = glfwGetTime();
+        // The world clock (ClientTickRateManager::WorldClockSeconds), the
+        // one ClientPortalManager stamps open/ping/flash times with: the
+        // breathing, the noise scroll and those animations stop while the
+        // world is paused (menu, join transition's hold) and carry on from
+        // the same instant after.
+        const double rawNow = m_captureTime >= 0.0 ? m_captureTime
+                                                   : Client::g_clientTickRate.WorldClockSeconds();
         const float  t      = static_cast<float>(std::fmod(rawNow, 1000.0));
         const float wobble = 0.5f + 0.5f * std::sin(t * kPulseFreqHz * 6.2831853f);
         const float pulse  = 1.0f - kPulseAmplitude * wobble;
@@ -1228,12 +1306,42 @@ void main() {
             // scene callback returns, then the real camera's again.
             virt.ActivateRenderOrigin();
             const glm::mat4 virtView = virt.GetViewMatrix();
-            const glm::mat4 baseProj = glm::perspective(
-                glm::radians(virt.fov), aspect, 0.05f, farPlane);
+            const glm::mat4 baseProj = m_captureProjValid
+                ? m_captureProj
+                : glm::perspective(glm::radians(virt.fov), aspect, 0.05f, farPlane);
             const glm::mat4 virtProj = PortalTransform::ObliqueProjection(
                 baseProj, virtView, dst);
-            // Culling stays in world space.
-            const Frustum   virtFrust = Frustum::FromMatrix(baseProj * virt.GetWorldViewMatrix());
+            // Culling stays in world space. Source's portal frustum: the
+            // side planes run from the virtual eye through the edges of the
+            // part of the SOURCE oval this view can see (clipped to the
+            // current view's frustum, so a portal half off-screen, or seen
+            // through another portal's frustum, narrows further), carried to
+            // the destination. Everything culled against it — the far
+            // side's sections (and so its mesh admission), entities,
+            // particles, weather, block entities — is then only what the
+            // oval can show, not the whole virtual field of view. The oval
+            // is bounded by its rim-inclusive rectangle plus a margin; with
+            // the eye within a third of a block of the surface (it fills
+            // the view, and the planes through a near-coincident eye are
+            // unstable) the plain virtual frustum stands.
+            const Frustum baseFrust = Frustum::FromMatrix(baseProj * virt.GetWorldViewMatrix());
+            const Frustum virtFrust = [&]() -> Frustum {
+                const glm::dvec3 n(src.normal);
+                const double eyeDist = glm::dot(camera.position - src.origin, n);
+                if (eyeDist < 0.35) return baseFrust;
+                const glm::dvec3 r = glm::dvec3(src.right) * (0.5 * 1.1);
+                const glm::dvec3 u = glm::dvec3(src.upDir) * (1.0 * 1.1);
+                glm::dvec3 quad[4] = { src.origin - r - u, src.origin + r - u,
+                                       src.origin + r + u, src.origin - r + u };
+                glm::dvec3 visible[4];
+                if (frustum.VisibleSubRect(quad, 0.25, visible)) {
+                    for (int i = 0; i < 4; ++i) quad[i] = visible[i];
+                }
+                const glm::dmat4 M = PortalTransform::SrcToDst(src, dst);
+                glm::vec3 far[4];
+                for (int i = 0; i < 4; ++i) far[i] = glm::vec3(glm::dvec3(M * glm::dvec4(quad[i], 1.0)));
+                return Frustum::ThroughQuad(glm::vec3(virt.position), far, baseFrust);
+            }();
 
             g_renderBackend->SetStencilOverride(
                 /*enabled=*/   true,
@@ -1540,7 +1648,32 @@ void main() {
             g_renderBackend->UnbindMesh();
         };
 
-        const double now = glfwGetTime();
+        // The same frozen instant as `t` while a panorama face is drawn.
+        const double now = rawNow;
+
+        // Can this end of a pair show in this view at all? (See
+        // SetOcclusion.) A portal that fails costs nothing — not its rim,
+        // not its see-through level pass.
+        const glm::dvec3 eyeD = camera.position;
+        auto mayShow = [&](const Client::ClientPortal& p, uint64_t gunId, int color) -> bool {
+            if (!p.active) return false;
+            // Behind the plane (more than the crossing band): the wall
+            // hides it, and a portal has no back.
+            if (glm::dot(eyeD - p.origin, glm::dvec3(p.normal)) < -0.05) return false;
+            glm::dvec3 mn, mx;
+            PortalBox(p, mn, mx);
+            if (!frustum.IsBoxVisible(glm::vec3(mn), glm::vec3(mx))) return false;
+            switch (m_occlusion) {
+                case Occlusion::None:        return true;
+                case Occlusion::MainView:    return BoxInSectionList(mn, mx, /*mainView=*/true);
+                case Occlusion::CurrentView: return BoxInSectionList(mn, mx, /*mainView=*/false);
+                case Occlusion::Snapshot:
+                    return std::binary_search(m_snapshotVisible.begin(), m_snapshotVisible.end(),
+                                              PortalKey(gunId, color));
+            }
+            return true;
+        };
+
         mgr.ForEachPair([&](uint64_t gunId, const Client::ClientPortalPair& pair) {
             // Per-pair teleport flash intensity, decaying from 1 → 0 over
             // kFlashDurationSec after a teleport (server pushes a packet
@@ -1611,23 +1744,27 @@ void main() {
                 one("blue", pair.blue);
                 one("orange", pair.orange);
             }
+            const bool showBlue   = mayShow(pair.blue,   gunId, 0);
+            const bool showOrange = mayShow(pair.orange, gunId, 1);
             if (both && immersive) {
-                if (inLevel(pair.blue))
+                if (showBlue && inLevel(pair.blue))
                     RimPass(pair.blue,   kBluePalette,   /*isOrange=*/false, flash,
                             OpenAmount(pair.blue),   StaticAmount(pair.blue));
-                if (inLevel(pair.orange))
+                if (showOrange && inLevel(pair.orange))
                     RimPass(pair.orange, kOrangePalette, /*isOrange=*/true,  flash,
                             OpenAmount(pair.orange), StaticAmount(pair.orange));
             } else if (both) {
-                SeeThroughPass(pair.blue,   pair.orange, kBluePalette,   /*isOrange=*/false, flash,
-                               OpenAmount(pair.blue),   StaticAmount(pair.blue));
-                SeeThroughPass(pair.orange, pair.blue,   kOrangePalette, /*isOrange=*/true,  flash,
-                               OpenAmount(pair.orange), StaticAmount(pair.orange));
+                if (showBlue)
+                    SeeThroughPass(pair.blue,   pair.orange, kBluePalette,   /*isOrange=*/false, flash,
+                                   OpenAmount(pair.blue),   StaticAmount(pair.blue));
+                if (showOrange)
+                    SeeThroughPass(pair.orange, pair.blue,   kOrangePalette, /*isOrange=*/true,  flash,
+                                   OpenAmount(pair.orange), StaticAmount(pair.orange));
             } else {
-                if (pair.blue.active && inLevel(pair.blue))
+                if (showBlue && inLevel(pair.blue))
                     InactivePortal(pair.blue,   kBluePalette,   /*isOrange=*/false,
                                                       OpenAmount(pair.blue));
-                if (pair.orange.active && inLevel(pair.orange))
+                if (showOrange && inLevel(pair.orange))
                     InactivePortal(pair.orange, kOrangePalette, /*isOrange=*/true,
                                                       OpenAmount(pair.orange));
             }

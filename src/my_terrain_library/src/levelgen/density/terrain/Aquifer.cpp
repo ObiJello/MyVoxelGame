@@ -171,6 +171,24 @@ private:
     int m_gridSizeZ = 0;
     BoundSampler m_surfaceLevel;
     std::unordered_map<int64_t, int> m_surfaceLevelCache;
+
+    // The 12 aquifer cells around the last anchor computeSubstance saw, in its
+    // loop order, with their locations already unpacked. The cells depend on
+    // the anchor alone and an anchor spans a 16x12x16 block of the fill, so
+    // this replaces 12 index computations, cache reads and 36 out-of-line
+    // BlockPos unpacks per block with one anchor compare.
+    struct AnchorCell {
+        int index;
+        int x, y, z;
+    };
+    static constexpr int kAnchorCells = 12;
+    AnchorCell m_anchorCells[kAnchorCells] = {};
+    bool m_anchorValid = false;
+    int m_anchorX = 0;
+    int m_anchorY = 0;
+    int m_anchorZ = 0;
+
+    void loadAnchorCells(int xAnchor, int yAnchor, int zAnchor);
 };
 
 // SURFACE_SAMPLING_OFFSETS_IN_CHUNKS.
@@ -207,6 +225,42 @@ int NoiseBasedAquifer::maxSurfaceLevel(int minBlockX, int minBlockZ, int maxBloc
     return maxY;
 }
 
+// The cell walk of NoiseBasedAquifer.computeSubstance (x1 0..1, y1 -1..1,
+// z1 0..1), each cell's location drawn on first use as Java does.
+void NoiseBasedAquifer::loadAnchorCells(int xAnchor, int yAnchor, int zAnchor) {
+    int cell = 0;
+    for (int x1 = 0; x1 <= 1; ++x1) {
+        for (int y1 = -1; y1 <= 1; ++y1) {
+            for (int z1 = 0; z1 <= 1; ++z1) {
+                const int spacedGridX = xAnchor + x1;
+                const int spacedGridY = yAnchor + y1;
+                const int spacedGridZ = zAnchor + z1;
+                const int index = getIndex(spacedGridX, spacedGridY, spacedGridZ);
+                const int64_t existingLocation = m_aquiferLocationCache[static_cast<size_t>(index)];
+                int64_t location;
+                if (existingLocation != std::numeric_limits<int64_t>::max()) {
+                    location = existingLocation;
+                } else {
+                    random::AnyRandomSource random = m_positionalRandomFactory.at(spacedGridX, spacedGridY, spacedGridZ);
+                    const int ox = random.nextInt(10);
+                    const int oy = random.nextInt(9);
+                    const int oz = random.nextInt(10);
+                    location = core::BlockPos::asLong(fromGridX(spacedGridX, ox), fromGridY(spacedGridY, oy),
+                                                      fromGridZ(spacedGridZ, oz));
+                    m_aquiferLocationCache[static_cast<size_t>(index)] = location;
+                }
+                m_anchorCells[cell++] = AnchorCell{index, core::BlockPos::getPackedX(location),
+                                                   core::BlockPos::getPackedY(location),
+                                                   core::BlockPos::getPackedZ(location)};
+            }
+        }
+    }
+    m_anchorX = xAnchor;
+    m_anchorY = yAnchor;
+    m_anchorZ = zAnchor;
+    m_anchorValid = true;
+}
+
 BlockState* NoiseBasedAquifer::computeSubstance(int blockX, int blockY, int blockZ, double density) {
     if (density > 0.0) {
         m_shouldScheduleFluidUpdate = false;
@@ -233,56 +287,39 @@ BlockState* NoiseBasedAquifer::computeSubstance(int blockX, int blockY, int bloc
     int closestIndex2 = 0;
     int closestIndex3 = 0;
     int closestIndex4 = 0;
-    for (int x1 = 0; x1 <= 1; ++x1) {
-        for (int y1 = -1; y1 <= 1; ++y1) {
-            for (int z1 = 0; z1 <= 1; ++z1) {
-                const int spacedGridX = xAnchor + x1;
-                const int spacedGridY = yAnchor + y1;
-                const int spacedGridZ = zAnchor + z1;
-                const int index = getIndex(spacedGridX, spacedGridY, spacedGridZ);
-                const int64_t existingLocation = m_aquiferLocationCache[static_cast<size_t>(index)];
-                int64_t location;
-                if (existingLocation != std::numeric_limits<int64_t>::max()) {
-                    location = existingLocation;
-                } else {
-                    random::AnyRandomSource random = m_positionalRandomFactory.at(spacedGridX, spacedGridY, spacedGridZ);
-                    const int ox = random.nextInt(10);
-                    const int oy = random.nextInt(9);
-                    const int oz = random.nextInt(10);
-                    location = core::BlockPos::asLong(fromGridX(spacedGridX, ox), fromGridY(spacedGridY, oy),
-                                                      fromGridZ(spacedGridZ, oz));
-                    m_aquiferLocationCache[static_cast<size_t>(index)] = location;
-                }
-                const int dx = core::BlockPos::getPackedX(location) - blockX;
-                const int dy = core::BlockPos::getPackedY(location) - blockY;
-                const int dz = core::BlockPos::getPackedZ(location) - blockZ;
-                const int newDistance = dx * dx + dy * dy + dz * dz;
-                if (distanceSqr1 >= newDistance) {
-                    closestIndex4 = closestIndex3;
-                    closestIndex3 = closestIndex2;
-                    closestIndex2 = closestIndex1;
-                    closestIndex1 = index;
-                    distanceSqr4 = distanceSqr3;
-                    distanceSqr3 = distanceSqr2;
-                    distanceSqr2 = distanceSqr1;
-                    distanceSqr1 = newDistance;
-                } else if (distanceSqr2 >= newDistance) {
-                    closestIndex4 = closestIndex3;
-                    closestIndex3 = closestIndex2;
-                    closestIndex2 = index;
-                    distanceSqr4 = distanceSqr3;
-                    distanceSqr3 = distanceSqr2;
-                    distanceSqr2 = newDistance;
-                } else if (distanceSqr3 >= newDistance) {
-                    closestIndex4 = closestIndex3;
-                    closestIndex3 = index;
-                    distanceSqr4 = distanceSqr3;
-                    distanceSqr3 = newDistance;
-                } else if (distanceSqr4 >= newDistance) {
-                    closestIndex4 = index;
-                    distanceSqr4 = newDistance;
-                }
-            }
+    if (!m_anchorValid || xAnchor != m_anchorX || yAnchor != m_anchorY || zAnchor != m_anchorZ) {
+        loadAnchorCells(xAnchor, yAnchor, zAnchor);
+    }
+    for (const AnchorCell& cell : m_anchorCells) {
+        const int index = cell.index;
+        const int dx = cell.x - blockX;
+        const int dy = cell.y - blockY;
+        const int dz = cell.z - blockZ;
+        const int newDistance = dx * dx + dy * dy + dz * dz;
+        if (distanceSqr1 >= newDistance) {
+            closestIndex4 = closestIndex3;
+            closestIndex3 = closestIndex2;
+            closestIndex2 = closestIndex1;
+            closestIndex1 = index;
+            distanceSqr4 = distanceSqr3;
+            distanceSqr3 = distanceSqr2;
+            distanceSqr2 = distanceSqr1;
+            distanceSqr1 = newDistance;
+        } else if (distanceSqr2 >= newDistance) {
+            closestIndex4 = closestIndex3;
+            closestIndex3 = closestIndex2;
+            closestIndex2 = index;
+            distanceSqr4 = distanceSqr3;
+            distanceSqr3 = distanceSqr2;
+            distanceSqr2 = newDistance;
+        } else if (distanceSqr3 >= newDistance) {
+            closestIndex4 = closestIndex3;
+            closestIndex3 = index;
+            distanceSqr4 = distanceSqr3;
+            distanceSqr3 = newDistance;
+        } else if (distanceSqr4 >= newDistance) {
+            closestIndex4 = index;
+            distanceSqr4 = newDistance;
         }
     }
 

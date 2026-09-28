@@ -55,6 +55,9 @@ namespace Client {
         virtual Attenuation GetAttenuation() const = 0;
         virtual bool CanStartSilent() const { return false; }
         virtual bool CanPlaySound() const { return true; }
+        // Seconds into a streamed sound to start at (a jukebox song joined
+        // part-way through, Global jukebox range). 0 for everything else.
+        virtual double GetStartOffsetSeconds() const { return 0.0; }
 
         // MC TickableSoundInstance.
         virtual bool IsTickable() const { return false; }

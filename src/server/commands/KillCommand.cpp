@@ -19,7 +19,9 @@
 namespace Server {
 
     void KillCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("kill", KillCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("kill", KillCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Argument("targets", Cmd::Arg::Entities).Executes()));
     }
 
     void KillCommand::Execute(const CommandSourceStack& source,

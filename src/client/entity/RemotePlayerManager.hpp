@@ -12,7 +12,11 @@
 #include "common/entity/PlayerColors.hpp"
 #include "common/entity/LivingEntity.hpp"   // WalkAnimationState (morph)
 #include "common/entity/Morph.hpp"
+#include "common/entity/ElytraAnimationState.hpp"
+#include "common/entity/EquipmentSlot.hpp"
+#include "common/entity/Item.hpp"
 #include <glm/glm.hpp>
+#include <array>
 #include <cmath>
 #include <optional>
 #include <unordered_map>
@@ -68,7 +72,17 @@ namespace Client {
         // block by the mob renderer, an item or orb by theirs (Game::Morph
         // code, kNone = none) — no stick figure, no name tag, no ghost.
         uint32_t morph = Game::Morph::kNone;
+        // The morph's look beyond the code (Game::Morph::DefaultVariantOf —
+        // a tropical fish's packed variant, a salmon's size).
+        int32_t  morphVariant = 0;
         bool IsMorphed() const { return !Game::Morph::IsNone(morph); }
+        // The game mode from PlayerInfoS2C (Server::GameMode raw value). A
+        // spectator is never picked by the crosshair (MC Player.isPickable),
+        // and is drawn — to a spectator, the only viewer the server does not
+        // mark them invisible for — as a translucent floating head
+        // (AvatarRenderer / PlayerModel with isSpectator).
+        uint8_t gameMode = 0;
+        bool IsSpectator() const { return gameMode == 3; }
         // MC LivingEntity.walkAnimation, driven from the tick's travel in
         // Tick(): the morph's limb swing (the stick figure has none).
         Game::WalkAnimationState walk;
@@ -119,12 +133,69 @@ namespace Client {
         // taking the max would leave the revived player lying on the ground
         // forever. Advanced locally between broadcasts so the fall is smooth.
         int deathTime = 0;
+        // MC Entity.isSprinting from PlayerUpdateS2C: drives the sprint dust
+        // under this player (ParticleTicks::TickPlayers).
+        bool sprinting = false;
+        // MC LivingEntity.isFallFlying from PlayerUpdateS2C: gliding on an
+        // elytra (where an attached firework rocket rides).
+        bool fallFlying = false;
+        // The worn elytra (PlayerUpdateS2C elytraFlags: kElytraWorn /
+        // kElytraGlint) and its wings' animation (MC LivingEntity.
+        // elytraAnimationState, ticked in Tick from this copy's travel).
+        uint8_t elytraFlags = 0;
+        Game::ElytraAnimationState elytraAnim;
+        // MC LivingEntity.fallFlyTicks as this client counts it (one per
+        // broadcast): eases the glide pose in.
+        int  fallFlyTicks = 0;
 
         // MC LivingEntity.sleepingPos — the bed's head cell while this player
         // is in it (PlayerSleepS2C). The renderer lays the figure down along
         // the bed (LivingEntityRenderer.setupRotations' SLEEPING branch) and
         // reads the bed's facing off the block under this position.
         std::optional<glm::ivec3> sleepingPos;
+
+        // The entity this player sits on (PlayerMountS2C), 0 when none —
+        // the renderer draws the sitting pose (HumanoidModel.setupAnim's
+        // isPassenger legs and arms). The position already is the seat's.
+        int32_t vehicleId = 0;
+
+        // MC LivingEntity.swinging / swingTime / attackAnim / oAttackAnim —
+        // started by PlayerSwingS2C (swing), advanced in Tick
+        // (updateSwingTime), read as AttackAnim(partialTick). Poses a
+        // morphed player's humanoid arm.
+        bool  swinging    = false;
+        int   swingTime   = 0;
+        uint8_t swingHand = 0;
+        // The swing's SwingAnimation duration (the main hand's attack
+        // animation when it began: a spear's STAB, else the 6-tick WHACK).
+        int   swingDuration = 6;
+        // MC LivingEntity isAutoSpinAttack (the synched flag, PlayerUpdateS2C):
+        // a riptide in flight — the spinning body and the swirl around it.
+        bool  autoSpinAttack = false;
+        // This copy's tick clock, and the tick of the last kinetic hit
+        // (entity event 2) — the held spear's recoil.
+        int   tickCount = 0;
+        int   lastKineticHitFeedbackTick = -1000000;
+        float TicksSinceKineticHitFeedback(float partialTick) const {
+            if (lastKineticHitFeedbackTick <= -1000000) return 0.0f;
+            return static_cast<float>(tickCount - lastKineticHitFeedbackTick) + partialTick;
+        }
+        float attackAnim  = 0.0f;
+        float attackAnimO = 0.0f;
+        // MC LivingEntity.getAttackAnim(partialTick).
+        float AttackAnim(float partialTick) const {
+            float diff = attackAnim - attackAnimO;
+            if (diff < 0.0f) diff += 1.0f;
+            return attackAnimO + diff * partialTick;
+        }
+        // AvatarRenderer.getArmPose and the item-use state, from every
+        // PlayerUpdateS2C (PlayerArmPose.hpp ordinals).
+        uint8_t  rightArmPose = 0;
+        uint8_t  leftArmPose  = 0;
+        bool     usingItem    = false;
+        uint8_t  useItemHand  = 0;
+        uint32_t ticksUsingItem = 0;
+        uint8_t  maxCrossbowCharge = 25;
 
         // Chat bubble
         std::string chatBubbleText;
@@ -166,6 +237,20 @@ namespace Client {
             auto it = m_players.find(id);
             if (it != m_players.end()) it->second.deathTime = deathTime;
         }
+        void SetSprinting(uint32_t id, bool sprinting) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.sprinting = sprinting;
+        }
+        void SetElytraFlags(uint32_t id, uint8_t flags) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.elytraFlags = flags;
+        }
+        void SetFallFlying(uint32_t id, bool fallFlying) {
+            auto it = m_players.find(id);
+            if (it == m_players.end()) return;
+            it->second.fallFlying = fallFlying;
+            it->second.fallFlyTicks = fallFlying ? it->second.fallFlyTicks + 1 : 0;
+        }
 
         // A player lay down (bed head cell) or got up (nullopt). Applied to
         // a known copy only — the sleep packet can precede PlayerInfo ADD
@@ -174,6 +259,72 @@ namespace Client {
         void SetSleepingPos(uint32_t id, const std::optional<glm::ivec3>& bedPos) {
             auto it = m_players.find(id);
             if (it != m_players.end()) it->second.sleepingPos = bedPos;
+        }
+
+        // A player sat on (vehicle id) / got off (0) an entity. Applied to a
+        // known copy only, like the sleep: the join sends PlayerInfo first.
+        void SetVehicle(uint32_t id, int32_t vehicleId) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.vehicleId = vehicleId;
+        }
+
+        // MC LivingEntity.getCurrentSwingDuration for a player with no HASTE /
+        // MINING_FATIGUE (their levels are not synced for other players).
+        static constexpr int kSwingDuration = 6;
+        // ItemStack.getAttackAnimation().duration() (SpearItem.cpp).
+        static int SwingDurationOf(Game::ItemID item);
+
+        // MC LivingEntity.swing(hand, updateSelf): restarts unless a swing is
+        // in its first half.
+        void StartSwing(uint32_t id, uint8_t hand) {
+            auto it = m_players.find(id);
+            if (it == m_players.end()) return;
+            RemotePlayer& rp = it->second;
+            if (!rp.swinging || rp.swingTime >= rp.swingDuration / 2 || rp.swingTime < 0) {
+                rp.swingTime = -1;
+                rp.swinging  = true;
+                rp.swingHand = hand;
+                // The hand's getAttackAnimation: a spear STABs for its own
+                // attack duration.
+                int duration = kSwingDuration;
+                if (const Equipment* eq = GetEquipment(id)) {
+                    const Game::ItemStack& held = (*eq)[static_cast<size_t>(
+                        hand == 1 ? Game::EquipmentSlot::OFFHAND : Game::EquipmentSlot::MAINHAND)];
+                    if (!held.IsEmpty()) duration = SwingDurationOf(held.itemId);
+                }
+                rp.swingDuration = duration > 0 ? duration : kSwingDuration;
+            }
+        }
+
+        // The synched riptide flag (PlayerUpdateS2C).
+        void SetAutoSpinAttack(uint32_t id, bool spinning) {
+            auto it = m_players.find(id);
+            if (it != m_players.end()) it->second.autoSpinAttack = spinning;
+        }
+
+        // Entity event 2 on another player (LivingEntity.onKineticHit): at
+        // most once per HIT_FEEDBACK_TICKS; true when it took (the caller
+        // plays the hit sound).
+        bool OnKineticHit(uint32_t id) {
+            auto it = m_players.find(id);
+            if (it == m_players.end()) return false;
+            RemotePlayer& rp = it->second;
+            if (rp.tickCount - rp.lastKineticHitFeedbackTick <= 10) return false;
+            rp.lastKineticHitFeedbackTick = rp.tickCount;
+            return true;
+        }
+
+        // The arm poses and use state carried by PlayerUpdateS2C.
+        void SetArmPoses(uint32_t id, uint8_t right, uint8_t left, bool usingItem, uint8_t useHand,
+                         uint32_t ticksUsing, uint8_t maxCrossbowCharge = 25) {
+            auto it = m_players.find(id);
+            if (it == m_players.end()) return;
+            it->second.maxCrossbowCharge = maxCrossbowCharge;
+            it->second.rightArmPose   = right;
+            it->second.leftArmPose    = left;
+            it->second.usingItem      = usingItem;
+            it->second.useItemHand    = useHand;
+            it->second.ticksUsingItem = ticksUsing;
         }
 
         void SetDimension(uint32_t id, Game::DimensionId dimension) {
@@ -193,8 +344,15 @@ namespace Client {
         void SetEffectVisuals(uint32_t id, Game::EffectVisuals visuals) {
             m_players[id].effects = std::move(visuals);
         }
-        void SetMorph(uint32_t id, uint32_t morph) {
+        void SetMorph(uint32_t id, uint32_t morph, int32_t variant) {
             m_players[id].morph = morph;
+            m_players[id].morphVariant = variant;
+        }
+        // PlayerInfoS2C ADD / UPDATE_GAME_MODE (lazy-create, as the name).
+        void SetGameMode(uint32_t id, uint8_t gameMode) {
+            auto& rp = m_players[id];
+            rp.playerId = id;
+            rp.gameMode = gameMode;
         }
         void SetMorphAnim(uint32_t id, uint8_t anim) {
             m_players[id].morphAnim = anim;
@@ -341,6 +499,19 @@ namespace Client {
         void Tick() {
             for (auto& [id, rp] : m_players) {
                 if (rp.hurtTime > 0) --rp.hurtTime;
+                // MC LivingEntity.baseTick's oAttackAnim, then aiStep's
+                // updateSwingTime.
+                ++rp.tickCount;
+                rp.attackAnimO = rp.attackAnim;
+                if (rp.swinging) {
+                    if (++rp.swingTime >= rp.swingDuration) {
+                        rp.swingTime = 0;
+                        rp.swinging  = false;
+                    }
+                } else {
+                    rp.swingTime = 0;
+                }
+                rp.attackAnim = static_cast<float>(rp.swingTime) / static_cast<float>(rp.swingDuration);
                 // MC LivingEntity.tickDeath, client-side: the corpse keeps
                 // falling between the 10 Hz broadcasts that correct it.
                 if (rp.deathTime > 0 && rp.deathTime < 20) ++rp.deathTime;
@@ -376,6 +547,10 @@ namespace Client {
                 const glm::dvec3 vel = rp.position - rp.prevPosition;
                 const double speedSq = vel.x * vel.x + vel.z * vel.z;
                 rp.prevPosition = rp.position;
+                // MC LivingEntity.tick → elytraAnimationState.tick(): the
+                // wings follow the glide (its dive from this tick's travel),
+                // the crouch, or fold.
+                rp.elytraAnim.Tick(rp.fallFlying, rp.isCrouching, vel);
 
                 // MC LivingEntity.updateWalkAnimation: horizontal travel × 4,
                 // capped at 1, smoothed by 0.4 a tick. Only a morph reads it.
@@ -487,11 +662,38 @@ namespace Client {
         }
 
         void RemovePlayer(uint32_t id) { m_players.erase(id); }
-        void Clear() { m_players.clear(); }
+        void Clear() { m_players.clear(); m_equipment.clear(); }
+
+        // ── Equipment (MC ClientboundSetEquipmentPacket for a player) ─────
+        // What each other player holds and wears (BodyArmorS2C keyed by the
+        // player's id), by Game::EquipmentSlot ordinal — the stacks a
+        // /morph body draws in its hands and on its armour layer. Kept
+        // apart from the player copies: a copy dropped out of tracking
+        // keeps its equipment (the server sends only changes); forgotten
+        // when the player leaves (PlayerInfo REMOVE).
+        static constexpr int kEquipmentSlots = 6;   // MAINHAND..HEAD
+        using Equipment = std::array<Game::ItemStack, kEquipmentSlots>;
+        void SetEquipment(uint32_t id, Game::EquipmentSlot slot, const Game::ItemStack& stack) {
+            const int i = static_cast<int>(slot);
+            if (i < 0 || i >= kEquipmentSlots) return;
+            m_equipment[id][static_cast<size_t>(i)] = stack;
+        }
+        const Equipment* GetEquipment(uint32_t id) const {
+            auto it = m_equipment.find(id);
+            return it == m_equipment.end() ? nullptr : &it->second;
+        }
+        void ForgetEquipment(uint32_t id) { m_equipment.erase(id); }
         const std::unordered_map<uint32_t, RemotePlayer>& GetPlayers() const { return m_players; }
+        // One player's copy to write (Client::Vehicles puts a riding player
+        // in its seat after the entities tick), null when unknown.
+        RemotePlayer* GetMutable(uint32_t id) {
+            auto it = m_players.find(id);
+            return it == m_players.end() ? nullptr : &it->second;
+        }
 
     private:
         std::unordered_map<uint32_t, RemotePlayer> m_players;
+        std::unordered_map<uint32_t, Equipment> m_equipment;
     };
 
     extern std::unique_ptr<RemotePlayerManager> g_remotePlayerManager;

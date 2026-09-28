@@ -26,6 +26,7 @@ namespace Game {
             { "weaponsmith",   1, 1 },
             { "home",          1, 1 },
             { "meeting",      32, 6 },
+            { "lightning_rod", 0, 1 },
         }};
 
         // MC PoiTypes.BEDS: every state of Blocks.BED.asList() (the sixteen
@@ -57,6 +58,16 @@ namespace Game {
                 case BlockID::SmithingTable:      return PoiType::Toolsmith;
                 case BlockID::Grindstone:         return PoiType::Weaponsmith;
                 case BlockID::Bell:               return PoiType::Meeting;
+                // MC PoiTypes.LIGHTNING_RODS: Blocks.LIGHTNING_ROD.asList() —
+                // the copper family's rods, every oxidation and wax state.
+                case BlockID::LightningRod:
+                case BlockID::ExposedLightningRod:
+                case BlockID::WeatheredLightningRod:
+                case BlockID::OxidizedLightningRod:
+                case BlockID::WaxedLightningRod:
+                case BlockID::WaxedExposedLightningRod:
+                case BlockID::WaxedWeatheredLightningRod:
+                case BlockID::WaxedOxidizedLightningRod: return PoiType::LightningRod;
                 default:                          return std::nullopt;
             }
         }

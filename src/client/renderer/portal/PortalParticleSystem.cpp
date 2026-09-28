@@ -317,8 +317,12 @@ void main() {
     }
 
     PortalParticleSystem::StreamSlot& PortalParticleSystem::AcquireSlot(size_t vertsNeeded, size_t minCapacity) {
-        StreamSlot& slot = m_slots[m_slotCursor];
-        m_slotCursor = (m_slotCursor + 1) % kStreamSlots;
+        // This frame's set (see StreamSlot): a fresh slot per call, the set
+        // growing to the frame's call count.
+        std::vector<StreamSlot>& set = m_frameSlots[m_frameSet];
+        if (m_slotCursor >= kMaxSlotsPerFrame) m_slotCursor = 0;
+        if (m_slotCursor >= set.size()) set.resize(m_slotCursor + 1);
+        StreamSlot& slot = set[m_slotCursor++];
         if (slot.vb == INVALID_BUFFER || slot.capacityVerts < vertsNeeded) {
             size_t newCap = std::max(slot.capacityVerts, minCapacity);
             while (newCap < vertsNeeded) newCap *= 2;
@@ -335,10 +339,13 @@ void main() {
     }
 
     void PortalParticleSystem::DestroySlots() {
-        for (StreamSlot& slot : m_slots) {
-            if (slot.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(slot.mesh);  slot.mesh = INVALID_MESH; }
-            if (slot.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
-            slot.capacityVerts = 0;
+        for (std::vector<StreamSlot>& set : m_frameSlots) {
+            for (StreamSlot& slot : set) {
+                if (slot.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(slot.mesh);  slot.mesh = INVALID_MESH; }
+                if (slot.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
+                slot.capacityVerts = 0;
+            }
+            set.clear();
         }
         m_slotCursor = 0;
     }

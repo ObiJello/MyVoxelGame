@@ -9,6 +9,7 @@
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/RedstoneSignal.hpp"
 #include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldPrimedTnt.hpp"
 
@@ -26,8 +27,8 @@ namespace Game {
         // which spawns at the cell's bottom centre.
         level.PlaySound(nullptr, glm::dvec3(pos.x + 0.5, pos.y, pos.z + 0.5),
                         SoundEvents::TNT_PRIMED, SoundSource::Blocks, 1.0f, 1.0f);
-        // MC: level.gameEvent(source, GameEvent.PRIME_FUSE, pos) — no game-event
-        // system here; the site is named so a sculk sensor finds it later.
+        // MC: level.gameEvent(source, GameEvent.PRIME_FUSE, pos).
+        level.GameEvent(igniter, GameEventId::PrimeFuse, pos);
         return true;
     }
 

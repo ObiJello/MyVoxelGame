@@ -2,6 +2,7 @@
 #include "InventoryMenu.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/EquipmentSlot.hpp"
+#include "common/world/map/MapItem.hpp"
 #include <memory>
 
 namespace Game {
@@ -118,6 +119,8 @@ namespace Game {
         }
 
         if (slotIndex == Inventory::CRAFT_RESULT_BEGIN) {
+            // MC: onCraftedBy before the move (a crafted map is scaled here).
+            MapItemBridge::OnCraftedPostProcess(stack);
             // A crafted stack fills from the BACK (hotbar first) — MC line 104.
             moved = MoveItemStackTo(stack, MAIN_BEGIN, HOTBAR_END, true, result);
         } else if (Inventory::IsCraftGridSlot(slotIndex)

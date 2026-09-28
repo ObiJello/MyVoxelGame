@@ -13,7 +13,9 @@
 namespace Server {
 
     void EntityStatsCommand::Register(CommandDispatcher& dispatcher) {
-        dispatcher.RegisterCommand("entitystats", EntityStatsCommand::Execute);
+        namespace Cmd = Game::Cmd;
+        dispatcher.RegisterCommand("entitystats", EntityStatsCommand::Execute,
+            Cmd::Root().Executes().Then(Cmd::Literals({"tnt", "all"})));
     }
 
     void EntityStatsCommand::Execute(const CommandSourceStack& source,

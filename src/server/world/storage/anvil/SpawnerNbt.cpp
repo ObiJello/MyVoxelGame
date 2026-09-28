@@ -17,6 +17,7 @@
 #include "common/world/spawn/SpawnPlacements.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <string>
@@ -169,6 +170,72 @@ namespace Game::Anvil {
         // False when the codec fails — `entity` missing, custom_spawn_rules
         // not a compound, or a light limit outside 0..15 — and MC's
         // read(...) then yields nothing (the field is treated as absent).
+        // MC EquipmentSlot.CODEC names, by ordinal (EquipmentSlot.hpp).
+        constexpr const char* kEquipmentSlotNames[8] = {
+            "mainhand", "offhand", "feet", "legs", "chest", "head", "body", "saddle"
+        };
+
+        int EquipmentSlotFromName(std::string_view name) {
+            if (name.rfind("minecraft:", 0) == 0) name.remove_prefix(10);
+            for (int i = 0; i < 8; ++i) if (name == kEquipmentSlotNames[i]) return i;
+            return -1;
+        }
+
+        // MC EquipmentTable.CODEC: {loot_table, slot_drop_chances?} — the
+        // chances one FLOAT for every slot or a slot -> FLOAT map; absent is
+        // the empty map (no slot touched).
+        bool ReadEquipmentTable(const NBTTagCompound& tag, SpawnData& out) {
+            const std::string table = tag.GetValue<std::string>("loot_table", "");
+            if (table.empty()) return false;
+            out.hasEquipment = true;
+            out.equipmentLootTable = table.find(':') == std::string::npos ? "minecraft:" + table : table;
+            out.equipmentUniformDrop = false;
+            for (float& c : out.equipmentDropChances) c = std::numeric_limits<float>::quiet_NaN();
+            NBTTagPtr chances = tag.GetTag("slot_drop_chances");
+            if (!chances) return true;
+            if (IsNumeric(chances)) {
+                out.equipmentUniformDrop = true;
+                const float c = tag.GetValue<float>("slot_drop_chances", 0.0f);
+                for (float& slot : out.equipmentDropChances) slot = c;
+                return true;
+            }
+            auto map = std::dynamic_pointer_cast<NBTTagCompound>(chances);
+            if (!map) return false;
+            for (const auto& [key, value] : map->value) {
+                const int slot = EquipmentSlotFromName(key);
+                if (slot < 0 || !IsNumeric(value)) return false;
+                out.equipmentDropChances[slot] = map->GetValue<float>(key, 0.0f);
+            }
+            return true;
+        }
+
+        void WriteEquipmentTable(Nbt::Writer& w, const SpawnData& data) {
+            w.BeginCompound("equipment");
+            w.String("loot_table", data.equipmentLootTable);
+            // DROP_CHANCES_CODEC's encode: every slot present with one value
+            // is the single float, anything else the map; the empty map is
+            // the optional field's default and is omitted.
+            bool allPresent = true, allSame = true, anyPresent = false;
+            for (int i = 0; i < 8; ++i) {
+                const float c = data.equipmentDropChances[i];
+                if (std::isnan(c)) { allPresent = false; continue; }
+                anyPresent = true;
+                if (c != data.equipmentDropChances[0]) allSame = false;
+            }
+            if (allPresent && allSame) {
+                w.Float("slot_drop_chances", data.equipmentDropChances[0]);
+            } else if (anyPresent) {
+                w.BeginCompound("slot_drop_chances");
+                for (int i = 0; i < 8; ++i) {
+                    if (!std::isnan(data.equipmentDropChances[i])) {
+                        w.Float(kEquipmentSlotNames[i], data.equipmentDropChances[i]);
+                    }
+                }
+                w.EndCompound();
+            }
+            w.EndCompound();
+        }
+
         bool ReadSpawnData(const NBTTagCompound& tag, SpawnData& out) {
             auto entity = std::dynamic_pointer_cast<NBTTagCompound>(tag.GetTag("entity"));
             if (!entity) return false;
@@ -182,10 +249,14 @@ namespace Game::Anvil {
                     return false;
                 }
             }
+            if (NBTTagPtr equipmentTag = tag.GetTag("equipment")) {
+                auto equipment = std::dynamic_pointer_cast<NBTTagCompound>(equipmentTag);
+                if (!equipment || !ReadEquipmentTable(*equipment, out)) return false;
+            }
             return true;
         }
 
-        void WriteSpawnDataBody(Nbt::Writer& w, const SpawnData& data) {
+        void WriteSpawnDataFields(Nbt::Writer& w, const SpawnData& data) {
             w.BeginCompound("entity");
             if (!data.entityNbt.empty()) {
                 try {
@@ -207,6 +278,7 @@ namespace Game::Anvil {
                 WriteIntRange(w, "sky_light_limit", data.skyLightMin, data.skyLightMax);
                 w.EndCompound();
             }
+            if (data.hasEquipment) WriteEquipmentTable(w, data);
         }
 
         // ── SpawnerServerHooks ──────────────────────────────────────────────
@@ -255,28 +327,37 @@ namespace Game::Anvil {
 
         bool CheckSpawnerSpawnRules(EntityTypeId type, ::Game::World& world, const glm::ivec3& pos,
                                     JavaRandom& random) {
-            EntityLevel* level = world.Entities();
-            if (!level || !level->Blocks()) return true;
-            const std::function<std::string_view(int, int, int)> biomeAt =
-                [&world](int x, int y, int z) -> std::string_view {
-                    return BiomeRegistry::Get(world.GetBiome(x, y, z)).name;
-                };
-            const std::function<int(int, int)> surfaceHeight = [&world](int x, int z) -> int {
-                auto chunk = world.GetLoadedChunk(x >> 4, z >> 4);
-                if (!chunk) return std::numeric_limits<int>::min();
-                if (!chunk->AreHeightmapsPrimed()) chunk->PrimeHeightmaps();
-                return chunk->GetSurfaceHeight(x & 15, z & 15, HeightmapType::WorldSurface);
-            };
-            int seaLevel = 63;
-            if (::Server::g_integratedServer) {
-                if (::Server::ServerLevel* sl = ::Server::g_integratedServer->GetLevel(world.GetDimension())) {
-                    seaLevel = sl->SeaLevel();
-                }
-            }
-            SpawnRuleContext ctx{ *level, *level->Blocks(), random, SpawnReason::Spawner,
-                                  &biomeAt, &surfaceHeight, seaLevel, world.GetGenerationSeed() };
-            return CheckSpawnRules(type, ctx, pos);
+            return CheckSpawnRulesAt(type, world, pos, random, SpawnReason::Spawner);
         }
+
+    } // namespace
+
+    bool CheckSpawnRulesAt(EntityTypeId type, ::Game::World& world, const glm::ivec3& pos,
+                           JavaRandom& random, SpawnReason reason) {
+        EntityLevel* level = world.Entities();
+        if (!level || !level->Blocks()) return true;
+        const std::function<std::string_view(int, int, int)> biomeAt =
+            [&world](int x, int y, int z) -> std::string_view {
+                return BiomeRegistry::Get(world.GetBiome(x, y, z)).name;
+            };
+        const std::function<int(int, int)> surfaceHeight = [&world](int x, int z) -> int {
+            auto chunk = world.GetLoadedChunk(x >> 4, z >> 4);
+            if (!chunk) return std::numeric_limits<int>::min();
+            if (!chunk->AreHeightmapsPrimed()) chunk->PrimeHeightmaps();
+            return chunk->GetSurfaceHeight(x & 15, z & 15, HeightmapType::WorldSurface);
+        };
+        int seaLevel = 63;
+        if (::Server::g_integratedServer) {
+            if (::Server::ServerLevel* sl = ::Server::g_integratedServer->GetLevel(world.GetDimension())) {
+                seaLevel = sl->SeaLevel();
+            }
+        }
+        SpawnRuleContext ctx{ *level, *level->Blocks(), random, reason,
+                              &biomeAt, &surfaceHeight, seaLevel, world.GetGenerationSeed() };
+        return CheckSpawnRules(type, ctx, pos);
+    }
+
+    namespace {
 
         // MC ServerLevel.tryAddFreshEntityWithPassengers. Straight into the
         // level's MobManager rather than ServerLevelBridge::AddFreshEntity's
@@ -436,19 +517,27 @@ namespace Game::Anvil {
         w.Short("SpawnRange", static_cast<int16_t>(spawner.GetSpawnRange()));
         if (spawner.HasNextSpawnData()) {      // storeNullable
             w.BeginCompound("SpawnData");
-            WriteSpawnDataBody(w, spawner.GetNextSpawnData());
+            WriteSpawnDataFields(w, spawner.GetNextSpawnData());
             w.EndCompound();
         }
         auto list = w.BeginList("SpawnPotentials", Nbt::TagType::Compound);
         for (const WeightedSpawnData& weighted : spawner.GetSpawnPotentials()) {
             w.ListCompoundBegin(list);
             w.BeginCompound("data");
-            WriteSpawnDataBody(w, weighted.data);
+            WriteSpawnDataFields(w, weighted.data);
             w.EndCompound();
             w.Int("weight", weighted.weight);
             w.ListCompoundEnd(list);
         }
         w.EndList(list);
+    }
+
+    bool ReadSpawnDataTag(const NBTTagCompound& tag, SpawnData& out) {
+        return ReadSpawnData(tag, out);
+    }
+
+    void WriteSpawnDataBody(Nbt::Writer& w, const SpawnData& data) {
+        WriteSpawnDataFields(w, data);
     }
 
     void InstallSpawnerServerHooks() {

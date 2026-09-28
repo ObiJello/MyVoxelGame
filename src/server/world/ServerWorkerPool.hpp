@@ -6,7 +6,10 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
 #include <condition_variable>
 #include <deque>
 #include <functional>
@@ -23,9 +26,30 @@ namespace Game {
 
 namespace Threading {
 
-    // Chunk positions chunk work is ordered against, one list per dimension
-    // (index = Game::DimensionSlot).
-    using ChunkLoadAnchors = std::array<std::vector<Game::Math::ChunkPos>, Game::kDimensionCount>;
+    // A position chunk work is ordered against. A player's own view centre
+    // is a plain one; a portal's far side (Game::PortalRoute) carries the
+    // walk to its surface as `bias` (chunks) and its scale as `farScale`, so
+    // its area loads interleaved with the player's own at the distance it is
+    // SEEN at — the same order the chunks are then sent and meshed in.
+    struct ChunkLoadAnchor {
+        Game::Math::ChunkPos pos{0, 0};
+        int   bias     = 0;
+        float farScale = 1.0f;
+
+        // Chebyshev (the worker buckets' metric) and Euclidean (the
+        // generation backlog's) priority distance of `p`, in chunks.
+        int ChebyshevTo(Game::Math::ChunkPos p) const {
+            const int d = std::max(std::abs(p.x - pos.x), std::abs(p.z - pos.z));
+            return bias + static_cast<int>(static_cast<float>(d) * farScale);
+        }
+        double EuclideanTo(Game::Math::ChunkPos p) const {
+            const double dx = p.x - pos.x, dz = p.z - pos.z;
+            return bias + std::sqrt(dx * dx + dz * dz) * farScale;
+        }
+    };
+
+    // One list per dimension (index = Game::DimensionSlot).
+    using ChunkLoadAnchors = std::array<std::vector<ChunkLoadAnchor>, Game::kDimensionCount>;
 
     // Forward declarations
     class IChunkGenerator;

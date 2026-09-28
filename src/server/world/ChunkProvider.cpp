@@ -1543,6 +1543,13 @@ namespace Game {
                                        pos, out, error);
     }
 
+    bool ChunkProvider::ReadTerrainChunkNbt(Math::ChunkPos pos, std::vector<uint8_t>& out,
+                                            std::string& error) {
+        if (!m_anvilIo) { error.clear(); return false; }
+        return m_anvilIo->ReadChunkNbt(m_config.dimensionId, Anvil::RegionKind::Chunks,
+                                       pos, out, error);
+    }
+
     bool ChunkProvider::WriteEntityChunkNbt(Math::ChunkPos pos, const std::vector<uint8_t>& payload,
                                             std::string& error) {
         if (!m_anvilIo) { error.clear(); return false; }
@@ -1552,10 +1559,16 @@ namespace Game {
 
     std::vector<WorldgenEntity> ChunkProvider::TakeWorldgenEntities(Math::ChunkPos pos) {
         std::vector<WorldgenEntity> out;
+        bool tookFromChunk = false;
         if (std::shared_ptr<Chunk> chunk = GetLoadedChunk(pos)) {
             const auto guard = chunk->LockExclusive();
             out.swap(chunk->worldgenEntities);
+            tookFromChunk = !out.empty();
         }
+        // The level's entity storage owns them from here on (ServerLevel.
+        // addWorldGenChunkEntities): the chunk must be written again without
+        // them, or the next load would hand them out a second time.
+        if (tookFromChunk) MarkChunkForSave(pos);
         std::lock_guard<std::mutex> lock(m_worldgenEntityMutex);
         if (auto it = m_evictedWorldgenEntities.find(pos); it != m_evictedWorldgenEntities.end()) {
             // A parked list and a resident one describe the same generation
@@ -1636,9 +1649,12 @@ namespace Game {
         }
 
         // Worldgen entities the level never claimed must not leave with the
-        // chunk: the saved chunk does not carry them (entities/*.mca does, once
-        // they exist), so park them until TakeWorldgenEntities asks.
-        if (chunk) {
+        // chunk. A persisting world keeps them in the chunk's own NBT
+        // (ChunkSerializer's ObeyWorldgenEntities — the chunk is saved before
+        // this callback, and a clean chunk came off disk with them), so they
+        // come back with it; only a world with nowhere to save parks them
+        // here, in memory, until TakeWorldgenEntities asks.
+        if (chunk && !m_chunkSaver) {
             std::vector<WorldgenEntity> unclaimed;
             {
                 const auto guard = chunk->LockExclusive();

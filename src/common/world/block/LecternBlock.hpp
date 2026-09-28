@@ -14,6 +14,7 @@
 namespace Game {
 
     class ILevelWrite;
+    class Entity;
 
     // Wires useItemOn / useWithoutItem / the signal hooks / tick /
     // affectNeighborsAfterRemoval onto BlockID::Lectern. Called from
@@ -23,7 +24,10 @@ namespace Game {
     // MC LecternBlock.resetBookState: POWERED off, HAS_BOOK = `hasBook`, a
     // full update, and the block below told (a lectern powers the block it
     // stands on through getDirectSignal(UP)).
-    void LecternResetBookState(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool hasBook);
+    // `sourceEntity`: the BLOCK_CHANGE game event's source (the placing
+    // player; null when the book is taken — onBookItemRemove).
+    void LecternResetBookState(ILevelWrite& level, const glm::ivec3& pos, BlockState state, bool hasBook,
+                               Entity* sourceEntity = nullptr);
 
     // MC LecternBlock.signalPageChange: POWERED on for two ticks (the
     // scheduled tick turns it off again) and the page-turn sound (level event

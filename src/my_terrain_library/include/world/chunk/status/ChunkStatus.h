@@ -64,6 +64,8 @@ private:
     const ChunkStatus* m_parent;
     ChunkType m_chunkType;
     std::set<levelgen::Heightmap::Types> m_heightmapsAfter;
+    // m_heightmapsAfter in its iteration order, for per-block walks.
+    std::vector<levelgen::Heightmap::Types> m_heightmapsAfterList;
     std::string m_name;
 
     /**
@@ -125,6 +127,9 @@ public:
      * Get the heightmaps to be populated at this status
      * Reference: ChunkStatus.java lines 78-80
      */
+    const std::vector<levelgen::Heightmap::Types>& heightmapsAfterList() const {
+        return m_heightmapsAfterList;
+    }
     const std::set<levelgen::Heightmap::Types>& heightmapsAfter() const {
         return m_heightmapsAfter;
     }

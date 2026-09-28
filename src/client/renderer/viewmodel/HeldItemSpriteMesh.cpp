@@ -333,6 +333,11 @@ namespace Render {
         const Game::ItemStack& stack)
     {
         const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
+        // A sprite chosen by the stack (the loaded crossbow).
+        if (item.stackSprite) {
+            const std::string chosen = item.stackSprite(stack);
+            if (!chosen.empty()) return GetOrBuild(chosen, Game::ResolveItemLayerTint(stack, 0));
+        }
         if (item.spriteLayers.size() <= 1) {
             std::string name = item.spriteName;
             if (name.empty() && !item.spriteFrames.empty()) name = item.spriteFrames[0];

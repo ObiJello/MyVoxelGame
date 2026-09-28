@@ -12,6 +12,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "../ticks/LevelTicks.hpp"
 #include "common/entity/EntityLevel.hpp"   // Game::Difficulty
+#include "common/world/biome/Biomes.hpp"  // BiomeRegistry::Precipitation
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -30,6 +31,7 @@ namespace Game {
 
     class BlockEntity;
     class CollectingNeighborUpdater;
+    class GameEventDispatcher;
     struct EntityLevel;   // struct, as defined — MSVC mangles the tag
 
     class World : public ILevelWrite {
@@ -363,6 +365,12 @@ namespace Game {
         // 22330 -> 0.2667; skyDarken = (int)(15 - 15 * mult)). Shared by the
         // entity bridge's light tests and the grass spread tick.
         static int SkyDarkenForDayTime(int64_t dayTime) {
+            return static_cast<int>(15.0f - SkyLightLevelForDayTime(dayTime));
+        }
+        // MC EnvironmentAttributes.SKY_LIGHT_LEVEL on the DAY timeline: 15 x
+        // the SKY_LIGHT_LEVEL track's multiplier (1.0 by day, 0.26666668 at
+        // night — 4.0 blocks of sky light).
+        static float SkyLightLevelForDayTime(int64_t dayTime) {
             constexpr float kDayMult   = 1.0f;
             constexpr float kNightMult = 0.26666668f;
             const auto t = static_cast<int>(((dayTime % 24000) + 24000) % 24000);
@@ -379,9 +387,34 @@ namespace Game {
                 const float f = static_cast<float>(tt - 22330) / static_cast<float>(24133 - 22330);
                 mult = kNightMult + (kDayMult - kNightMult) * f;
             }
-            return static_cast<int>(15.0f - 15.0f * mult);
+            return 15.0f * mult;
         }
-        int GetSkyDarken() const { return SkyDarkenForDayTime(GetDayTime()); }
+        // MC WeatherAttributes' SKY_LIGHT_LEVEL layers over the timeline
+        // value: RAIN alpha-blends it toward 4 at alpha 0.3125, THUNDER at
+        // 0.52734375, each state-change-lerped by its weight — the rain
+        // weight is rainLevel - thunderLevel, the thunder weight thunderLevel
+        // (Level.getThunderLevel, already x rain). Then Level
+        // .updateSkyBrightness: skyDarken = (int)(15 - SKY_LIGHT_LEVEL). A
+        // full thunderstorm darkens the noon sky to 5 — dark enough to sleep
+        // (BedRule WHEN_DARK = skyDarken >= 4); plain rain only to 3.
+        static int SkyDarkenFor(int64_t dayTime, float rainLevel, float thunderLevel) {
+            float level = SkyLightLevelForDayTime(dayTime);
+            const float rainWeight = rainLevel - thunderLevel;
+            if (rainWeight > 0.0f) {
+                const float rained = level + 0.3125f * (4.0f - level);
+                level = level + rainWeight * (rained - level);
+            }
+            if (thunderLevel > 0.0f) {
+                const float stormed = level + 0.52734375f * (4.0f - level);
+                level = level + thunderLevel * (stormed - level);
+            }
+            return static_cast<int>(15.0f - level);
+        }
+        int GetSkyDarken() const { return SkyDarkenFor(GetDayTime(), GetRainLevel(1.0f), GetThunderLevel(1.0f)); }
+        // MC Level.isBrightOutside / isDarkOutside: never in a fixed-time
+        // dimension; otherwise skyDarken below / at least 4 (BedRule WHEN_DARK).
+        bool IsBrightOutside() const { return !HasFixedDayTime() && GetSkyDarken() < 4; }
+        bool IsDarkOutside() const { return !HasFixedDayTime() && !IsBrightOutside(); }
         // A no-op in a fixed-time dimension (MC ServerLevel.setDayTime writes
         // the clock, but getDayTime never reads it there); callers such as
         // /time set check HasFixedDayTime() to tell the player.
@@ -490,10 +523,68 @@ namespace Game {
         // MC LevelReader.getRawBrightness. See IBlockAccess for what this
         // stands in for; World keeps the base implementation.
         //
-        // MC Level.isRainingAt — no weather system, so always false. Named and
-        // called anyway so the farmland rule reads like FarmBlock.java and a
-        // future weather system has one obvious place to plug in.
-        bool IsRainingAt(int /*worldX*/, int /*worldY*/, int /*worldZ*/) const { return false; }
+        // ── WEATHER (MC Level's rain / thunder levels) ─────────────────────
+        //
+        // The shared weather state (MC WeatherData — clear/rain/thunder
+        // timers and flags) lives on the server (Server::ServerWeather) and
+        // is saved in level.dat; what a LEVEL keeps is its two eased levels,
+        // stepped 0.01 a tick toward that state (ServerLevel
+        // .advanceWeatherCycle's second half). Written on the server thread
+        // between the parallel phases; read by everything (mob AI, block
+        // ticks, the precipitation tick).
+        //
+        // MC Level.canHaveWeather (DimensionCanHaveWeather).
+        bool CanHaveWeather() const { return DimensionCanHaveWeather(m_dimension); }
+        // MC Level.getRainLevel(a): lerp(a, oRainLevel, rainLevel).
+        float GetRainLevel(float partialTick = 1.0f) const {
+            return m_oRainLevel + partialTick * (m_rainLevel - m_oRainLevel);
+        }
+        // MC Level.getThunderLevel(a): lerp(a, oThunderLevel, thunderLevel)
+        // x getRainLevel(a).
+        float GetThunderLevel(float partialTick = 1.0f) const {
+            return (m_oThunderLevel + partialTick * (m_thunderLevel - m_oThunderLevel)) * GetRainLevel(partialTick);
+        }
+        // MC Level.setRainLevel / setThunderLevel: clamped, both ends at once.
+        void SetRainLevel(float level) {
+            const float c = level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level);
+            m_oRainLevel = m_rainLevel = c;
+        }
+        void SetThunderLevel(float level) {
+            const float c = level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level);
+            m_oThunderLevel = m_thunderLevel = c;
+        }
+        // The raw (un-multiplied) thunder level — what ServerLevel broadcasts
+        // in THUNDER_LEVEL_CHANGE during the cycle.
+        float GetRawThunderLevel() const { return m_thunderLevel; }
+        // ServerLevel.advanceWeatherCycle's easing: o = current, then +/-0.01
+        // toward the shared state, clamped. Only for a level that can have
+        // weather (the caller checks).
+        void StepWeatherLevels(bool raining, bool thundering) {
+            m_oThunderLevel = m_thunderLevel;
+            m_thunderLevel += thundering ? 0.01f : -0.01f;
+            m_thunderLevel = m_thunderLevel < 0.0f ? 0.0f : (m_thunderLevel > 1.0f ? 1.0f : m_thunderLevel);
+            m_oRainLevel = m_rainLevel;
+            m_rainLevel += raining ? 0.01f : -0.01f;
+            m_rainLevel = m_rainLevel < 0.0f ? 0.0f : (m_rainLevel > 1.0f ? 1.0f : m_rainLevel);
+        }
+        // MC Level.isRaining: canHaveWeather && getRainLevel(1) > 0.2. The
+        // level-wide flag behind snow accumulation, thunder, the bees' hive
+        // rule and the fishing bite speed-up.
+        bool IsRaining() const { return CanHaveWeather() && static_cast<double>(GetRainLevel(1.0f)) > 0.2; }
+        // MC Level.isThundering: canHaveWeather && getThunderLevel(1) > 0.9.
+        bool IsThundering() const { return CanHaveWeather() && static_cast<double>(GetThunderLevel(1.0f)) > 0.9; }
+        // MC Level.precipitationAt(pos): NONE unless raining; NONE where the
+        // cell cannot see the sky (canSeeSky) or sits below the column's
+        // MOTION_BLOCKING heightmap (getHeightmapPos(...).getY() > y); else
+        // the biome's precipitation at that height — RAIN, or SNOW where it
+        // is cold enough (Biome.getPrecipitationAt with the dimension's sea
+        // level).
+        BiomeRegistry::Precipitation PrecipitationAt(int worldX, int worldY, int worldZ) const;
+        // MC Level.isRainingAt(pos): precipitationAt(pos) == RAIN. Farmland,
+        // fire, cauldrons' drip, Entity.isInRain and the bobber read it.
+        bool IsRainingAt(int worldX, int worldY, int worldZ) const {
+            return PrecipitationAt(worldX, worldY, worldZ) == BiomeRegistry::Precipitation::Rain;
+        }
 
         // ========================================================================
         // SCHEDULED BLOCK TICKS (MC ServerLevel.blockTicks)
@@ -560,6 +651,9 @@ namespace Game {
         void BlockEntityChanged(const glm::ivec3& pos) override;
         void RemoveBlockEntity(const glm::ivec3& pos) override;
         bool IsHandlingTick() const override { return m_handlingTick; }
+        // MC ServerLevel.gameEventDispatcher — the vibration system's
+        // listener registries for this level (gameevent/GameEventDispatcher).
+        GameEventDispatcher* GameEvents() override { return m_gameEvents.get(); }
         // Redstone warm-up (see ServerLevel::redstoneWarmup): scheduled block
         // ticks and the redstone_plus deferred re-checks wait until the server
         // says the world's redstone chunks are all resident.
@@ -578,6 +672,16 @@ namespace Game {
         // that is simulating this tick? Block events in chunks that are not
         // are held over rather than dropped.
         bool ShouldTickBlocksAt(const glm::ivec3& pos) const;
+
+        // MC BlockState.updateShape(level, ticks, pos, direction, neighborPos,
+        // neighborState, random): the state `state` at `pos` becomes once the
+        // neighbour in `direction` is `neighborState`. Writes nothing (it may
+        // book the scheduled ticks vanilla's updateShape books). Answers
+        // `state` unchanged for air and for a block with no reaction.
+        // StructureTemplate.updateShapeAtEdge is its caller outside the
+        // neighbour queue (a grown tree's edge pass).
+        BlockState UpdateShape(BlockState state, Direction direction, const glm::ivec3& pos,
+                               BlockState neighborState);
 
     private:
         friend class CollectingNeighborUpdater;
@@ -604,6 +708,11 @@ namespace Game {
         void BroadcastBlockEntity(const glm::ivec3& pos, const BlockEntity& entity);
 
         std::unique_ptr<CollectingNeighborUpdater> m_neighborUpdater;
+
+        // See GameEvents(). Shared so an entity's listener registration
+        // (DynamicGameEventListener) can hold it weakly; declared before the
+        // chunk provider, so it outlives every block entity it resolves.
+        std::shared_ptr<GameEventDispatcher> m_gameEvents;
 
         // MC ServerLevel.blockEvents / blockEventsToReschedule. A deque
         // because vanilla's is an insertion-ordered set drained from the
@@ -657,6 +766,12 @@ namespace Game {
         int64_t m_dayTime = 6000;
         std::optional<int64_t> m_fixedDayTime;   // DimensionFixedTime — the Hush's midnight
         bool m_doDaylightCycle = false;
+        // MC Level.oRainLevel / rainLevel / oThunderLevel / thunderLevel (see
+        // the WEATHER block above).
+        float m_oRainLevel = 0.0f;
+        float m_rainLevel = 0.0f;
+        float m_oThunderLevel = 0.0f;
+        float m_thunderLevel = 0.0f;
         // Vanilla defaults, unlike doDaylightCycle above.
         bool m_doMobSpawning = true;
         bool m_doMobGriefing = true;

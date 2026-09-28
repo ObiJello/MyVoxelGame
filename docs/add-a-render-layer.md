@@ -574,9 +574,16 @@ out of date. What a new layer has to respect now:
   gap is at most `kDrawMergeGapIndices` (8192) indices and drawable. A new
   layer whose order does not matter should draw through this path. Draw order
   within the pass is *not* front-to-back any more.
-- **Order-dependent layers use `SubmitOrderedRuns`**: exact list order,
-  slab rebound on change, only zero-gap ascending neighbours fused. Never
-  bucket an order-dependent layer by slab — that was the translucent bug.
+- **Order-dependent layers use `SubmitOrderedRuns`**: only zero-gap
+  ascending neighbours fused. From the first *nearby* section on
+  (`m_orderedExactFrom`, `kTranslucentNearRadius`) the order is exact across
+  slabs, slab rebound on change, and that exact tail keeps growing toward
+  the far end while it costs at most 32 extra slab changes; only the
+  remainder is bucketed per slab (exact within a slab), because strict order
+  across heavily interleaved slabs costs thousands of draws. Never
+  bucket the near part — a depth-writing translucent section drawn before a
+  farther one hides it, and the far part's slab order follows the frustum,
+  so the error blinks as the camera turns.
 - Tracy: `Draws/Chunk` (sections) vs `Draws/Merged` (sub-draws issued);
   `Sections/Lookups` (resolve-cache misses). `OBEY_NO_DRAW_MERGE=1` disables
   merging for A/B.

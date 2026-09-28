@@ -25,6 +25,9 @@
 #include "HushAtmosphere.hpp" // the Hush's auroras, cavern fog and stillness
 #include "MobEffectEnvironment.hpp" // the local player's effect fog / night vision / darkness
 #include "client/world/ClientChunkManager.hpp"   // biomes around the camera (Twilight Forest)
+#include "client/world/ClientWeather.hpp"        // the rain / thunder levels (SetWeather)
+#include "client/world/ClientBlockAccess.hpp"    // the camera cell's sky light and biome (rain fog)
+#include "common/world/lighting/ChunkLight.hpp"  // Lighting::LightLayer
 #include <string_view>
 
 #include <algorithm>
@@ -418,6 +421,122 @@ namespace Render {
             return c * keep + glm::vec3(grey) * (1.0f - keep);
         }
 
+        // ── MC WeatherAttributes: the RAIN and THUNDER layers ───────────────
+        //
+        // A dimension that can have weather gets one time-based layer per
+        // weather attribute, after its timeline (EnvironmentAttributeSystem
+        // .addDynamicLayers) and before ClientLevel's lightning-flash layer:
+        //     thunder = getThunderLevel(1), rain = getRainLevel(1) - thunder
+        //     if (rain > 0)    v = lerp(rain,    v, RAIN.modify(v))
+        //     if (thunder > 0) v = lerp(thunder, v, THUNDER.modify(v))
+        // (stateChangeLerp is a plain lerp for every colour and float type).
+        // So a full storm is the THUNDER modifier alone, and rain easing in
+        // under no thunder is the RAIN modifier alone.
+        struct WeatherWeights {
+            float rain    = 0.0f;
+            float thunder = 0.0f;
+        };
+
+        // The two weights, for a dimension whose attribute system has the
+        // weather layers (Level.canHaveWeather) — none for any other.
+        WeatherWeights WeightsFor(float rainLevel, float thunderLevel, Game::DimensionId dimension) {
+            WeatherWeights w;
+            if (!Game::DimensionCanHaveWeather(dimension)) return w;
+            w.thunder = thunderLevel;
+            w.rain    = rainLevel - thunderLevel;
+            return w;
+        }
+
+        template <typename T, typename RainMod, typename ThunderMod>
+        T WeatherLayer(T value, const WeatherWeights& w, RainMod rainMod, ThunderMod thunderMod) {
+            if (w.rain > 0.0f)    value = glm::mix(value, rainMod(value), w.rain);
+            if (w.thunder > 0.0f) value = glm::mix(value, thunderMod(value), w.thunder);
+            return value;
+        }
+
+        // ColorModifier.BLEND_TO_GRAY: ARGB.srgbLerp(factor, c,
+        // scaleRGB(greyscale(c), brightness)) — the greyscale weights are
+        // 0.3 / 0.59 / 0.11 and scaleRGB clamps; alpha is carried through.
+        glm::vec3 BlendToGray(const glm::vec3& c, float brightness, float factor) {
+            const float grey = std::clamp((c.r * 0.3f + c.g * 0.59f + c.b * 0.11f) * brightness, 0.0f, 1.0f);
+            return glm::mix(c, glm::vec3(grey), factor);
+        }
+        glm::vec4 BlendToGray(const glm::vec4& c, float brightness, float factor) {
+            return glm::vec4(BlendToGray(glm::vec3(c), brightness, factor), c.a);
+        }
+
+        // ARGB.colorFromFloat floors each channel to 8 bits (as8BitChannel),
+        // and the modifier arguments are built through it.
+        constexpr float Ch(float f) { return static_cast<float>(static_cast<int>(f * 255.0f)) / 255.0f; }
+
+        // SKY_COLOR: BLEND_TO_GRAY (0.6, 0.75) / (0.24, 0.94).
+        glm::vec3 WeatherSkyColor(const glm::vec3& c, const WeatherWeights& w) {
+            return WeatherLayer(c, w,
+                [](const glm::vec3& v) { return BlendToGray(v, 0.6f, 0.75f); },
+                [](const glm::vec3& v) { return BlendToGray(v, 0.24f, 0.94f); });
+        }
+        // FOG_COLOR: MULTIPLY_RGB by colorFromFloat(1, 0.5, 0.5, 0.6) /
+        // (1, 0.25, 0.25, 0.3).
+        glm::vec3 WeatherFogColor(const glm::vec3& c, const WeatherWeights& w) {
+            return WeatherLayer(c, w,
+                [](const glm::vec3& v) { return v * glm::vec3(Ch(0.5f), Ch(0.5f), Ch(0.6f)); },
+                [](const glm::vec3& v) { return v * glm::vec3(Ch(0.25f), Ch(0.25f), Ch(0.3f)); });
+        }
+        // CLOUD_COLOR: BLEND_TO_GRAY_ARGB (0.24, 0.5) / (0.095, 0.94).
+        glm::vec4 WeatherCloudColor(const glm::vec4& c, const WeatherWeights& w) {
+            return WeatherLayer(c, w,
+                [](const glm::vec4& v) { return BlendToGray(v, 0.24f, 0.5f); },
+                [](const glm::vec4& v) { return BlendToGray(v, 0.095f, 0.94f); });
+        }
+        // SKY_LIGHT_LEVEL: ALPHA_BLEND toward 4 at 0.3125 / 0.52734375 —
+        // here in the frame's level / 15 form (skyBrightness).
+        float WeatherSkyLightLevel01(float level01, const WeatherWeights& w) {
+            constexpr float kNight = 4.0f / 15.0f;
+            return WeatherLayer(level01, w,
+                [](float v) { return v + 0.3125f * (kNight - v); },
+                [](float v) { return v + 0.52734375f * (kNight - v); });
+        }
+        // SKY_LIGHT_COLOR: ALPHA_BLEND_RGB toward Timelines
+        // .NIGHT_SKY_LIGHT_COLOR (colorFromFloat(1, 0.48, 0.48, 1) = #7a7aff)
+        // with the alpha ARGB.color(0.3125 / 0.52734375, ...) floors to 8 bits.
+        glm::vec3 WeatherSkyLightColor(const glm::vec3& c, const WeatherWeights& w) {
+            const glm::vec3 night(Ch(0.48f), Ch(0.48f), 1.0f);
+            return WeatherLayer(c, w,
+                [&](const glm::vec3& v) { return glm::mix(v, night, Ch(0.3125f)); },
+                [&](const glm::vec3& v) { return glm::mix(v, night, Ch(0.52734375f)); });
+        }
+        // SKY_LIGHT_FACTOR: ALPHA_BLEND toward 0.24 at 0.3125 / 0.52734375.
+        float WeatherSkyLightFactor(float f, const WeatherWeights& w) {
+            return WeatherLayer(f, w,
+                [](float v) { return v + 0.3125f * (0.24f - v); },
+                [](float v) { return v + 0.52734375f * (0.24f - v); });
+        }
+        // STAR_BRIGHTNESS: set 0 in both.
+        float WeatherStarBrightness(float s, const WeatherWeights& w) {
+            return WeatherLayer(s, w, [](float) { return 0.0f; }, [](float) { return 0.0f; });
+        }
+        // SUNRISE_SUNSET_COLOR: MULTIPLY_ARGB by colorFromFloat(1, 0.5, 0.5,
+        // 0.6) / (1, 0.25, 0.25, 0.3) — alpha multiplier 1.
+        glm::vec4 WeatherSunriseColor(const glm::vec4& c, const WeatherWeights& w) {
+            return WeatherLayer(c, w,
+                [](const glm::vec4& v) { return v * glm::vec4(Ch(0.5f), Ch(0.5f), Ch(0.6f), 1.0f); },
+                [](const glm::vec4& v) { return v * glm::vec4(Ch(0.25f), Ch(0.25f), Ch(0.3f), 1.0f); });
+        }
+
+        // AtmosphericFogEnvironment.applyWeatherDarken — the sky colour the
+        // atmospheric fog is mixed toward, scaled (and clamped) by weather.
+        glm::vec3 ApplyWeatherDarken(glm::vec3 c, float rainLevel, float thunderLevel) {
+            if (rainLevel > 0.0f) {
+                const float k = 1.0f - rainLevel * 0.5f;
+                const float kb = 1.0f - rainLevel * 0.4f;
+                c = glm::clamp(c * glm::vec3(k, k, kb), 0.0f, 1.0f);
+            }
+            if (thunderLevel > 0.0f) {
+                c = glm::clamp(c * (1.0f - thunderLevel * 0.5f), 0.0f, 1.0f);
+            }
+            return c;
+        }
+
     } // namespace
 
     EnvironmentState& EnvironmentState::Get() {
@@ -438,6 +557,9 @@ namespace Render {
             m_dayTime = m_pendingDayTime.load(std::memory_order_relaxed);
             m_doDaylightCycle = m_pendingRule.load(std::memory_order_relaxed);
         }
+        // The active level's weather (the server's weather game events,
+        // applied in packet order on this thread — ClientWeather.hpp).
+        SetWeather(::Client::ClientWeather::RainLevel(1.0f), ::Client::ClientWeather::ThunderLevel(1.0f));
     }
 
     void EnvironmentState::TickClient() {
@@ -464,6 +586,11 @@ namespace Render {
         m_dayTime = 6000;
         m_doDaylightCycle = false;
         m_skyFlashTime = 0;
+        // A new session's first level starts dry (MC's new ClientLevel); the
+        // server's sendLevelInfo brings its weather.
+        ::Client::ClientWeather::Reset();
+        m_rainLevel = 0.0f;
+        m_thunderLevel = 0.0f;
     }
 
     double EnvironmentState::DayTimeF(float partialTick) const {
@@ -592,24 +719,41 @@ namespace Render {
         m_frame.auroraStrength = 0.0f;    // the Hush's layer below sets it
 
         // ── Attribute colors: base × timeline multiplier ────────────────────
+        // Then, where the dimension can have weather, MC's WeatherAttributes
+        // RAIN / THUNDER layers (they follow the timeline layer), and last
+        // ClientLevel's lightning-flash layer.
+        const WeatherWeights weather = WeightsFor(m_rainLevel, m_thunderLevel, m_lightDimension);
         static const glm::vec3 baseSky = BaseSkyColor();
         const glm::vec4 skyMul = SampleColor(kSkyColorTrack, CountOf(kSkyColorTrack), dayTimeF);
-        glm::vec3 skyColor = baseSky * glm::vec3(skyMul);
+        glm::vec3 skyColor = WeatherSkyColor(baseSky * glm::vec3(skyMul), weather);
         // MC ClientLevel's SKY_COLOR layer while a lightning bolt flashes:
         // ARGB.srgbLerp(0.22, skyColor, (0.8, 0.8, 1.0)) — a plain lerp.
         if (m_skyFlashTime > 0) skyColor = glm::mix(skyColor, glm::vec3(0.8f, 0.8f, 1.0f), 0.22f);
 
         const glm::vec4 fogMul = SampleColor(kFogColorTrack, CountOf(kFogColorTrack), dayTimeF);
-        glm::vec3 fogColor = kBaseFogColor * glm::vec3(fogMul);
+        glm::vec3 fogColor = WeatherFogColor(kBaseFogColor * glm::vec3(fogMul), weather);
 
         const glm::vec4 cloudMul = SampleColor(kCloudColorTrack, CountOf(kCloudColorTrack), dayTimeF);
-        m_frame.cloudColor = kBaseCloudColor * cloudMul;
+        m_frame.cloudColor = WeatherCloudColor(kBaseCloudColor * cloudMul, weather);
 
-        m_frame.skyBrightness = SampleFloat(kSkyLightTrack, CountOf(kSkyLightTrack), dayTimeF);
+        m_frame.skyBrightness = WeatherSkyLightLevel01(
+            SampleFloat(kSkyLightTrack, CountOf(kSkyLightTrack), dayTimeF), weather);
         ComposeLightAttributes(dayTimeF);
-        m_frame.starBrightness = SampleFloat(kStarBrightnessTrack, CountOf(kStarBrightnessTrack), dayTimeF);
-        m_frame.sunriseColor = SampleColor(kSunriseColorTrack, CountOf(kSunriseColorTrack), dayTimeF);
+        m_frame.skyLightFactor = WeatherSkyLightFactor(m_frame.skyLightFactor, weather);
+        m_frame.skyLightColor  = WeatherSkyLightColor(m_frame.skyLightColor, weather);
+        m_frame.starBrightness = WeatherStarBrightness(
+            SampleFloat(kStarBrightnessTrack, CountOf(kStarBrightnessTrack), dayTimeF), weather);
+        m_frame.sunriseColor = WeatherSunriseColor(
+            SampleColor(kSunriseColorTrack, CountOf(kSunriseColorTrack), dayTimeF), weather);
         m_frame.skyColor = skyColor;
+        // MC SkyRenderer.extractRenderState: rainBrightness = 1 -
+        // getRainLevel(partialTicks), the sun's and the moon's alpha (the
+        // Aether's composition below sets its own fades).
+        {
+            const float rainBrightness = 1.0f - (weather.rain + weather.thunder);
+            m_frame.sunAlpha  = rainBrightness;
+            m_frame.moonAlpha = rainBrightness;
+        }
 
         // ── Fog color ───────────────────────────────────────────────────────
         if (m_skyboxActive) {
@@ -631,12 +775,15 @@ namespace Render {
                                         facingSun * sunriseAlpha);
                 }
             }
-            // Blend fog toward the sky color by render distance.
+            // Blend fog toward the sky color by render distance — the sky
+            // colour darkened by the weather first (applyWeatherDarken).
             const float skyFogEndChunks =
                 std::min(512.0f / 16.0f, static_cast<float>(renderDistChunks));
             float mixFactor = ClampedLerp(skyFogEndChunks / 32.0f, 0.25f, 1.0f);
             mixFactor = 1.0f - std::pow(mixFactor, 0.25f);
-            m_frame.fogColor = glm::mix(fogColor, skyColor, mixFactor);
+            const glm::vec3 skyForFog = weather.rain + weather.thunder > 0.0f
+                ? ApplyWeatherDarken(skyColor, m_rainLevel, m_thunderLevel) : skyColor;
+            m_frame.fogColor = glm::mix(fogColor, skyForFog, mixFactor);
         }
 
         // ── Fog distances (FogData; blocks) ─────────────────────────────────
@@ -664,6 +811,21 @@ namespace Render {
             ComposeTwilightForest(renderDistChunks, fogEnabled);
         } else if (m_atmosphere == Atmosphere::Aether) {
             ComposeAether(partialTick, cameraForward, renderDistChunks, fogEnabled);
+        }
+
+        // AtmosphericFogEnvironment.setupFog's rain fog: the environmental
+        // fog pulled in by the eased rainFogMultiplier (start -160, end -256
+        // but never below min(96, end)). The Overworld's and the Twilight
+        // Forest's atmospheric fog (both 26.x); the Aether keeps its 1.21.1
+        // FogRenderer, which had none. Before the fluid fog, which replaces
+        // the atmospheric fog outright.
+        if (m_atmosphere != Atmosphere::Aether && Game::DimensionCanHaveWeather(m_lightDimension)) {
+            const float rainFog = StepRainFog();
+            if (fogEnabled && rainFog > 0.0f) {
+                m_frame.fogEnvStart += -160.0f * rainFog;
+                const float minRainFogEnd = std::min(96.0f, m_frame.fogEnvEnd);
+                m_frame.fogEnvEnd = std::max(minRainFogEnd, m_frame.fogEnvEnd + -256.0f * rainFog);
+            }
         }
 
         // ── Fluid fog (MC FogRenderer: WaterFogEnvironment / LavaFogEnvironment)
@@ -807,6 +969,39 @@ namespace Render {
         }
     }
 
+    float EnvironmentState::StepRainFog() {
+        // AtmosphericFogEnvironment.updateRainFogState, once a frame: the
+        // multiplier eases toward rainLevel x the camera cell's sky light
+        // above 8 (clamp((sky - 8) / 7, 0, 1)) x 0.5 in a biome without
+        // precipitation, at deltaTicks * 0.2 per frame. A recomposition for
+        // another dimension (a portal view) reads the camera's value and
+        // does not step it.
+        if (m_recomposing || m_composingForeign) return m_rainFogMultiplier;
+        const auto now = std::chrono::steady_clock::now();
+        float deltaTicks = 0.0f;
+        if (m_lastRainFogStep.time_since_epoch().count() != 0) {
+            // DeltaTracker.getGameTimeDeltaTicks. Held to 5 ticks so a long
+            // hitch settles on the target instead of overshooting it.
+            deltaTicks = std::clamp(std::chrono::duration<float>(now - m_lastRainFogStep).count() * 20.0f,
+                                    0.0f, 5.0f);
+        }
+        m_lastRainFogStep = now;
+        float target = 0.0f;
+        if (m_rainLevel > 0.0f && m_hasCameraPos && ::Client::g_clientBlockAccess) {
+            const int x = static_cast<int>(std::floor(m_cameraPos.x));
+            const int y = static_cast<int>(std::floor(m_cameraPos.y));
+            const int z = static_cast<int>(std::floor(m_cameraPos.z));
+            const auto& blocks = *::Client::g_clientBlockAccess;
+            const float skyLight = static_cast<float>(blocks.GetBrightness(Game::Lighting::LightLayer::Sky, x, y, z));
+            const float skyLightMul = std::clamp((skyLight - 8.0f) / 7.0f, 0.0f, 1.0f);
+            const bool rainsInBiome = Game::BiomeRegistry::HasPrecipitation(
+                static_cast<Game::BiomeId>(blocks.GetBiome(x, y, z)));
+            target = m_rainLevel * skyLightMul * (rainsInBiome ? 1.0f : 0.5f);
+        }
+        m_rainFogMultiplier += (target - m_rainFogMultiplier) * deltaTicks * 0.2f;
+        return m_rainFogMultiplier;
+    }
+
     void EnvironmentState::ComposeLightAttributes(double dayTimeF) {
         // The DAY timeline (Overworld and every dimension riding its clock),
         // and the dimension's AMBIENT_LIGHT_COLOR / SKY_LIGHT_COLOR
@@ -856,8 +1051,15 @@ namespace Render {
         // layer, so the Twilight Forest has no clouds.
         m_frame.cloudColor     = glm::vec4(0.0f);
 
-        // SKY_COLOR (biome), with ClientLevel's lightning-flash layer.
-        glm::vec3 sky = look.sky;
+        // The dimension can have weather, so MC's WeatherAttributes layers
+        // sit over its attributes as over the Overworld's: the stars go out
+        // in rain, the sky greys, the light factor falls toward 0.24.
+        const WeatherWeights weather = WeightsFor(m_rainLevel, m_thunderLevel, m_lightDimension);
+        m_frame.starBrightness = WeatherStarBrightness(m_frame.starBrightness, weather);
+
+        // SKY_COLOR (biome) and its weather layer, then ClientLevel's
+        // lightning-flash layer.
+        glm::vec3 sky = WeatherSkyColor(look.sky, weather);
         if (m_skyFlashTime > 0) sky = glm::mix(sky, glm::vec3(0.8f, 0.8f, 1.0f), 0.22f);
         m_frame.skyColor = sky;
 
@@ -866,23 +1068,18 @@ namespace Render {
         // the whole terrain, torch-lit or not — so it is held at the
         // Overworld's night floor instead of going to black; the dark
         // forest's black comes from its fog and sky.
-        m_frame.skyBrightness = std::max(look.skyLightFactor, 0.26666668f);
+        m_frame.skyBrightness = WeatherSkyLightLevel01(std::max(look.skyLightFactor, 0.26666668f), weather);
         // With a light engine the lightmap takes the factor as TF gives it:
         // torches, glowing flora and the fireflies light the dark forest.
-        m_frame.skyLightFactor = look.skyLightFactor;
-        m_frame.skyLightColor  = glm::vec3(1.0f);
+        m_frame.skyLightFactor = WeatherSkyLightFactor(look.skyLightFactor, weather);
+        m_frame.skyLightColor  = WeatherSkyLightColor(glm::vec3(1.0f), weather);
 
         // AtmosphericFogEnvironment.getBaseColor: FOG_COLOR (no sunrise
         // blend — the colour is transparent), mixed toward the
         // weather-darkened sky by the sky fog's reach. FogHandler's dimming
         // follows in ApplyTwilightFogHandler.
-        glm::vec3 skyForFog = sky;
-        if (m_rainLevel > 0.0f) {
-            skyForFog *= glm::vec3(1.0f - m_rainLevel * 0.5f, 1.0f - m_rainLevel * 0.5f,
-                                   1.0f - m_rainLevel * 0.4f);
-        }
-        if (m_thunderLevel > 0.0f) skyForFog *= 1.0f - m_thunderLevel * 0.5f;
-        m_frame.fogColor = glm::mix(look.fog, skyForFog,
+        const glm::vec3 skyForFog = ApplyWeatherDarken(sky, m_rainLevel, m_thunderLevel);
+        m_frame.fogColor = glm::mix(WeatherFogColor(look.fog, weather), skyForFog,
                                     SkyFogMixFactor(look.skyFogEnd, renderDistChunks));
 
         // AtmosphericFogEnvironment.setupFog: the environmental fog from

@@ -65,10 +65,9 @@ namespace Game {
     // direction with probability 0.3 every 20 strafing ticks, backs off inside
     // 25% of the radius and closes beyond 75% — the dance every player knows.
     //
-    // MC gates the goal on isHolding(BOW) and drives the draw through the
-    // item-use system; this port has no mob equipment or item use, so the mob
-    // is treated as permanently holding a bow and the draw is a goal-local
-    // counter with identical timing.
+    // MC gates the goal on isHolding(BOW) (the mob's equipment, either hand)
+    // and drives the draw through the item-use system; the draw here is a
+    // goal-local counter with identical timing.
     class RangedBowAttackGoal : public Goal {
     public:
         RangedBowAttackGoal(Mob* mob, RangedAttackMob* shooter, double speedModifier,
@@ -217,6 +216,23 @@ namespace Game {
         // and these headers only forward-declare those types.
         void ClearReferenceTo(const Entity* entity) override;
 
+    protected:
+        // MC AvoidEntityGoal.toAvoid — what CanUse settled on, for the
+        // subclasses whose own canUse inspects it (the wolf's llama test).
+        LivingEntity* ToAvoid() const { return m_toAvoid; }
+
+        // MC AvoidEntityGoal's predicateOnAvoidEntity (the constructor's
+        // lambda): which candidates count at all. A subclass that narrows
+        // them calls SetFiltersThreats(true) and overrides AcceptsThreat;
+        // the nearest ACCEPTED candidate is the threat (MC filters inside
+        // getNearestEntity), so a trusted player close by does not hide an
+        // untrusted one further off.
+        virtual bool AcceptsThreat(const LivingEntity& candidate) const {
+            (void)candidate;
+            return true;
+        }
+        void SetFiltersThreats(bool filters) { m_filtersThreats = filters; }
+
     private:
         LivingEntity* FindThreat(EntityLevel& level) const;
 
@@ -226,6 +242,7 @@ namespace Game {
         const EntityTypeId* m_types = nullptr;
         int    m_typeCount = 0;
         bool   m_avoidsPlayers = true;
+        bool   m_filtersThreats = false;
         float  m_maxDistance;
         double m_walkSpeedModifier;
         double m_sprintSpeedModifier;

@@ -22,6 +22,7 @@
 #include "../block/Direction.hpp"
 #include "DimensionId.hpp"
 #include "common/sound/LevelSound.hpp"
+#include "common/core/Uuid.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -35,6 +36,11 @@ namespace Game {
     class  EntityLevel;
     class  JavaRandom;
     enum class ParticleKind : uint8_t;   // EntityLevel.hpp
+    struct ParticleOptions;              // common/particle/ParticleOptions.hpp
+    class  Entity;
+    class  GameEventDispatcher;          // gameevent/GameEventDispatcher.hpp
+    struct GameEventContext;             // gameevent/GameEvent.hpp
+    enum class GameEventId : uint8_t;    // gameevent/GameEvent.hpp
 
     class ILevelWrite : public IBlockAccess {
     public:
@@ -178,6 +184,38 @@ namespace Game {
             (void)kind; (void)x; (void)y; (void)z; (void)vx; (void)vy; (void)vz;
         }
 
+        // The same with a type's options (dust colour, block state, item …)
+        // — MC ClientLevel.doAddParticle; see EntityLevel::DoAddParticle.
+        // Client-only; ignored everywhere else.
+        virtual void DoAddParticle(const ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                                   double x, double y, double z, double xd, double yd, double zd) {
+            (void)options; (void)overrideLimiter; (void)alwaysShow;
+            (void)x; (void)y; (void)z; (void)xd; (void)yd; (void)zd;
+        }
+        void AddParticle(const ParticleOptions& options, double x, double y, double z,
+                         double xd, double yd, double zd) {
+            DoAddParticle(options, false, false, x, y, z, xd, yd, zd);
+        }
+        void AddAlwaysVisibleParticle(const ParticleOptions& options, double x, double y, double z,
+                                      double xd, double yd, double zd) {
+            DoAddParticle(options, false, true, x, y, z, xd, yd, zd);
+        }
+        // MC ServerLevel.sendParticles (see EntityLevel::SendParticles).
+        // Server-only: a client level answers 0. Out of line
+        // (common/particle/LevelParticles.cpp).
+        int SendParticles(const ParticleOptions& options, bool overrideLimiter, bool alwaysShow,
+                          double x, double y, double z, int count,
+                          double xDist, double yDist, double zDist, double speed);
+        int SendParticles(const ParticleOptions& options, double x, double y, double z, int count,
+                          double xDist, double yDist, double zDist, double speed) {
+            return SendParticles(options, false, false, x, y, z, count, xDist, yDist, zDist, speed);
+        }
+        // MC Level.levelEvent(except, type, pos, data) — see
+        // EntityLevel::PlayLevelEvent. The default sends it from a server
+        // level and does nothing on a client; ClientBlockAccess runs the
+        // predicted half.
+        virtual void PlayLevelEvent(const SoundExcept& except, int type, const glm::ivec3& pos, int data);
+
         // The block entity at `pos` changed in a way clients must see (MC
         // BlockEntity.setChanged + getUpdatePacket). Marks it for saving too.
         virtual void BlockEntityChanged(const glm::ivec3& pos) { (void)pos; }
@@ -191,6 +229,22 @@ namespace Game {
         // block-tick / block-event phase. PistonBaseBlock.checkIfExtend reads
         // it to decide whether a retraction may drop the carried block.
         virtual bool IsHandlingTick() const { return false; }
+
+        // ── Game events (MC LevelAccessor.gameEvent) ────────────────────────
+        //
+        // The vibration system's input (common/world/level/gameevent). Only
+        // the server's level dispatches: GameEvents() is null everywhere else
+        // and the helpers below are then no-ops — MC's ClientLevel.gameEvent
+        // is empty too, so a behaviour that runs on both sides can emit
+        // unconditionally. Defined in gameevent/GameEventLevel.cpp.
+        virtual GameEventDispatcher* GameEvents() { return nullptr; }
+        // gameEvent(event, Vec3, Context).
+        void GameEvent(GameEventId event, const glm::dvec3& pos, const GameEventContext& context);
+        // gameEvent(event, BlockPos, Context) — the block's centre.
+        void GameEvent(GameEventId event, const glm::ivec3& pos, const GameEventContext& context);
+        // gameEvent(sourceEntity, event, Vec3 / BlockPos).
+        void GameEvent(Entity* sourceEntity, GameEventId event, const glm::dvec3& pos);
+        void GameEvent(Entity* sourceEntity, GameEventId event, const glm::ivec3& pos);
 
         // ── The rest of MC's Level surface that blocks reach for ────────────
         //
@@ -217,6 +271,17 @@ namespace Game {
             return false;
         }
         virtual void MoveLocalPlayerByPiston(const glm::dvec3& delta) { (void)delta; }
+
+        // MC Level.getPlayerByUUID, for the client-side block entity code
+        // that follows a player (the vault's connection particles): the
+        // player's feet position and box height. Players are keyed by their
+        // offline UUID (the one the server gives their entity). False for a
+        // player this level does not know; only the client answers — on the
+        // server the players are real entities (EntityLevel::GetPlayers).
+        virtual bool GetPlayerByUuid(const Uuid& uuid, glm::dvec3& outPos, float& outBbHeight) const {
+            (void)uuid; (void)outPos; (void)outBbHeight;
+            return false;
+        }
 
         // The same player's motion, for the block entity tickers that push
         // it the way MC's client pushes its LocalPlayer (the potent sulfur

@@ -10,13 +10,14 @@
 //   validRange  how close a path has to get before the POI counts as reached
 //               (AcquirePoi.findPathToPois hands it to the pathfinder).
 //
-// Only the types a villager touches are registered — the thirteen job sites,
-// HOME (the HEAD half of every dyed bed) and MEETING (the bell). MC's other
-// entries (bee nests, beehives, nether portals, lodestones, lightning rods,
-// test instances) are consumed by systems this engine runs on its own indexes
-// (the nether portal index) or does not run through the POI manager at all
-// (the bee). Registering them here with no reader would only make every chunk
-// scan pay for blocks nothing asks about.
+// Registered: the types a villager touches — the thirteen job sites, HOME (the
+// HEAD half of every dyed bed) and MEETING (the bell) — and LIGHTNING_ROD,
+// which the thunderstorm's strike search reads (ServerLevel.findLightningRod,
+// Server::ServerWeather). MC's other entries (bee nests, beehives, nether
+// portals, lodestones, test instances) are consumed by systems this engine
+// runs on its own indexes (the nether portal index) or does not run through
+// the POI manager at all (the bee). Registering them here with no reader
+// would only make every chunk scan pay for blocks nothing asks about.
 #pragma once
 
 #include "common/world/block/BlockState.hpp"
@@ -44,6 +45,9 @@ namespace Game {
         Weaponsmith,
         Home,
         Meeting,
+        // MC LIGHTNING_ROD — every state of every lightning rod (the four
+        // oxidation stages, waxed and not); 0 tickets, valid range 1.
+        LightningRod,
         Count,
     };
     inline constexpr int kPoiTypeCount = static_cast<int>(PoiType::Count);

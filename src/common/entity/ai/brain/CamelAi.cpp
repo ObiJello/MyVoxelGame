@@ -6,7 +6,6 @@
 #include "common/entity/ai/brain/CommonBehaviors.hpp"
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
-#include "common/world/crafting/RecipeManager.hpp"
 
 namespace Game {
 
@@ -19,6 +18,12 @@ namespace Game {
             explicit CamelPanic(float speed) : AnimalPanic(speed) {}
             const char* DebugString() const override { return "CamelPanic"; }
         protected:
+            // MC CamelPanic.checkExtraStartConditions: not while a mob rides
+            // it (the camel husk under its husk).
+            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
+                const auto* camel = dynamic_cast<const Camel*>(&body);
+                return AnimalPanic::CheckExtraStartConditions(level, body) && !(camel && camel->IsMobControlled());
+            }
             void Start(EntityLevel& level, LivingEntity& body, int64_t t) override {
                 if (auto* camel = dynamic_cast<Camel*>(&body)) camel->StandUpInstantly();
                 AnimalPanic::Start(level, body, t);
@@ -38,17 +43,21 @@ namespace Game {
             bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
                 auto* camel = dynamic_cast<Camel*>(&body);
                 if (!camel) return false;
-                // MC also excludes leashed and ridden camels; neither exists.
+                // MC: never in water, on a lead, mid-air or under a steering
+                // rider, and only with room for the other pose.
                 return !camel->IsInWater()
                     && camel->GetPoseTime() >= m_minimalPoseTicks
-                    && camel->onGround;
+                    && !camel->IsLeashed()
+                    && camel->onGround
+                    && !camel->HasControllingPassenger()
+                    && camel->CanCamelChangePose();
             }
 
             void Start(EntityLevel&, LivingEntity& body, int64_t) override {
                 auto* camel = dynamic_cast<Camel*>(&body);
                 if (!camel) return;
                 if (camel->IsCamelSitting()) camel->StandUp();
-                else if (!camel->IsPanicking()) camel->SitDown();
+                else if (!camel->IsCamelPanicking()) camel->SitDown();
             }
 
         private:
@@ -80,7 +89,6 @@ namespace Game {
     } // namespace
 
     void CamelAi::InitBrain(Camel& camel, Brain& brain) {
-        (void)camel;
 
         // MC Camel.MEMORY_TYPES.
         for (MemoryModule m : { MemoryModule::IsPanicking,
@@ -94,17 +102,20 @@ namespace Game {
                                 MemoryModule::TemptationCooldownTicks,
                                 MemoryModule::GazeCooldownTicks,
                                 MemoryModule::IsTempted,
-                                MemoryModule::BreedTarget }) {
+                                MemoryModule::BreedTarget,
+                                MemoryModule::NearestVisibleAdult }) {
             brain.RegisterMemory(m);
         }
 
         brain.AddSensor(std::make_unique<NearestLivingEntitySensor>());
         brain.AddSensor(std::make_unique<HurtBySensor>());
-        brain.AddSensor(std::make_unique<TemptingSensor>([](uint32_t item) {
-            // MC ItemTags.CAMEL_FOOD — cactus.
-            static const ItemID cactus = RecipeManager::ItemFromSlug("cactus");
-            return cactus != Items::Air && item == static_cast<uint32_t>(cactus);
+        // MC SENSOR_TYPES: NEAREST_LIVING_ENTITIES, HURT_BY,
+        // FOOD_TEMPTATIONS (Camel.isFood — #camel_food cactus, the husk's
+        // #camel_husk_food rabbit foot), NEAREST_ADULT.
+        brain.AddSensor(std::make_unique<TemptingSensor>([&camel](uint32_t item) {
+            return camel.IsFood(item);
         }));
+        brain.AddSensor(std::make_unique<AdultSensor>());
 
         // ── CORE ───────────────────────────────────────────────────────────
         std::vector<BehaviorPtr> core;
@@ -120,11 +131,14 @@ namespace Game {
 
         // ── IDLE ───────────────────────────────────────────────────────────
         //
-        // MC's priority-2 gate also carries BabyFollowAdult, which needs the
-        // NEAREST_VISIBLE_ADULT sensor this port has not got. Its WEIGHT is left
-        // out with it rather than silently redistributed onto the temptation.
+        // MC's priority-2 gate: FollowTemptation(2.5, baby ? 2.5 : 3.5) or,
+        // for a calf willing to move, BabyFollowAdult(5..16, 2.5). (The
+        // behaviour's close-enough distance is fixed at construction, where
+        // every camel is still an adult: the adult's 3.5.)
         std::vector<GateBehavior::Entry> temptGate;
         temptGate.push_back({ std::make_unique<FollowTemptation>(2.5f, 3.5), 1 });
+        temptGate.push_back({ std::make_unique<IfWillingToMove>(
+                                  std::make_unique<BabyFollowAdult>(5, 16, 2.5f)), 1 });
 
         // MC's priority-4 gate: stroll, look-walk, sit, or stand there.
         std::vector<GateBehavior::Entry> idleGate;

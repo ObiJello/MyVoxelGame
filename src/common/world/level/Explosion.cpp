@@ -1,5 +1,8 @@
 // File: src/common/world/level/Explosion.cpp
+#include "common/data/DataComponentMap.hpp"
+#include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/level/Explosion.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -8,6 +11,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/MaceItem.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/ExplosionTrigger.hpp"
 #include "common/world/level/BlockClip.hpp"
@@ -17,6 +21,7 @@
 #include "common/world/level/World.hpp"
 #include "common/world/level/WorldDrops.hpp"
 #include "common/world/loot/LootTables.hpp"
+#include "common/world/tags/DataTags.hpp"
 #include "common/entity/Item.hpp"
 
 #include <algorithm>
@@ -107,6 +112,14 @@ namespace Game {
             return bi != ExplosionBlockInteraction::Keep;
         }
 
+        // MC ExplosionDamageCalculator.getKnockbackMultiplier(entity): the
+        // blast's multiplier — except that SimpleExplosionDamageCalculator
+        // answers 0 for a player whose abilities are flying.
+        float KnockbackMultiplierFor(const ExplosionParams& p, const Entity& e) {
+            if (p.simpleCalculator && e.IsPlayer() && e.IsAbilityFlying()) return 0.0f;
+            return p.knockbackMultiplier;
+        }
+
         // MC ExplosionDamageCalculator.getBlockExplosionResistance: nothing at
         // all for air with no fluid, otherwise max(block, fluid).
         //
@@ -138,11 +151,38 @@ namespace Game {
         // apart, with no write between — which was 16,732 of the 34,019 chunk
         // lookups a radius-4 blast makes. MC reads it once per step and passes
         // it into both calculator methods; this now matches.
+        // #minecraft:blocks_wind_charge_explosions, read once per block id
+        // from the data pack (a hash probe per ray step would be most of a
+        // wind charge's scan).
+        bool IsWindChargeImmune(BlockID id) {
+            static const std::vector<uint8_t> kImmune = [] {
+                std::vector<uint8_t> t(BlockRegistry::Size, 0);
+                for (size_t i = 0; i < BlockRegistry::Size; ++i) {
+                    const std::string& slug = BlockRegistry::Get(static_cast<BlockID>(i)).registrySlug;
+                    if (slug.empty()) continue;
+                    t[i] = DataTags::HasTag(DataTags::Registry::Block, slug,
+                                            "minecraft:blocks_wind_charge_explosions") ? 1 : 0;
+                }
+                return t;
+            }();
+            const size_t index = static_cast<size_t>(id);
+            return index < kImmune.size() && kImmune[index] != 0;
+        }
+
         bool BlockResistance(const ExplosionParams& p, const IBlockAccess& blocks,
                              const glm::ivec3& pos, BlockState state, float& out) {
             (void)blocks;
             const BlockID id = state.Block();
             if (id == BlockID::Air) return false;
+
+            // SimpleExplosionDamageCalculator with immuneBlocks: a listed
+            // block resists 3,600,000; anything else is Optional.empty() —
+            // no resistance at all, the ray keeps its power.
+            if (p.windChargeImmuneBlocks) {
+                if (!IsWindChargeImmune(id)) return false;
+                out = 3600000.0f;
+                return true;
+            }
 
             // MC's portal calculator returns Optional.empty() here, i.e. "no
             // block at all" — so the ray passes through the portal WITHOUT
@@ -848,6 +888,9 @@ namespace Game {
                 // knockback alike.
                 if (e->IgnoreExplosion()) continue;
 
+                // Engine rule (not MC): Wind Burst spares its wielder's pets.
+                if (p.sparePetsOf && MaceItem::IsTamedPetOf(*e, *p.sparePetsOf)) continue;
+
                 const double dist =
                     std::sqrt(e->DistanceToSqr(p.center.x, p.center.y, p.center.z)) /
                     doubleRadius;
@@ -874,10 +917,13 @@ namespace Game {
                     (!p.calculator.shouldDamageEntity ||
                       p.calculator.shouldDamageEntity(p, *e));
 
+                // MC damageCalculator.getKnockbackMultiplier(entity).
+                const float knockbackMultiplier = KnockbackMultiplierFor(p, *e);
+
                 // Skip the (expensive) exposure raycast entirely when neither
                 // damage nor knockback would use it — MC's own short-circuit.
                 const bool wantExposure =
-                    damageThis || p.knockbackMultiplier != 0.0f;
+                    damageThis || knockbackMultiplier != 0.0f;
                 // Reuse phase A's value when it computed one for this victim;
                 // otherwise do it here exactly as before. The fallback is what
                 // keeps this exact if a cheap predicate flipped between the
@@ -937,7 +983,7 @@ namespace Game {
                 // so skipping it mutates nothing observable.
                 const double preResistance = (1.0 - dist) *
                                              static_cast<double>(exposure) *
-                                             static_cast<double>(p.knockbackMultiplier);
+                                             static_cast<double>(knockbackMultiplier);
                 double knockbackResistance = 0.0;
                 if (living && preResistance != 0.0) {
                     knockbackResistance = living->GetAttributeValue(
@@ -959,6 +1005,11 @@ namespace Game {
                         (e->IsSpectator() || (e->IsCreative() && e->IsAbilityFlying()));
                     if (!excludedPlayer) e->AddDeltaMovement(dir * power);
                 }
+
+                // MC entity.onExplosionHit(this.source) — the last step for
+                // every victim in range, pushed or not (a player hit by their
+                // own wind charge arms the fall-damage forgiveness here).
+                if (living) living->OnExplosionHit(p.source);
             }
         }
 
@@ -1057,6 +1108,15 @@ namespace Game {
                     // switch that turns survives_explosion and
                     // apply_explosion_decay from no-ops into 1/radius rolls.
                     ctx.explosionRadius = decay ? p.radius : -1.0f;
+                    // BlockBehaviour.onExplosionHit: BLOCK_ENTITY is the
+                    // entity still there — collected before the cell is
+                    // cleared and its contents spill (a shulker box leaves
+                    // with them aboard; a chest's spill as the air goes in).
+                    DataComponentMap entityComponents;
+                    if (BlockEntity* be = write->GetBlockEntity(pos)) {
+                        be->CollectComponents(entityComponents);
+                        ctx.blockEntityComponents = &entityComponents;
+                    }
 
                     // MC Block.dropResources -> popResource: an explosion's
                     // block loot is behind block_drops like any other.
@@ -1110,7 +1170,10 @@ namespace Game {
 
                 // MC setBlock(pos, AIR, 3) — neighbours AND clients. The
                 // neighbour half is what makes the sand above a crater notice
-                // it has lost its floor.
+                // it has lost its floor. The removal runs the block entity's
+                // preRemoveSideEffects: a container's contents spill in full
+                // (Containers.dropContents — never decayed, never merged into
+                // the blast's stacks), a furnace pays its banked XP.
                 write->SetBlock(pos.x, pos.y, pos.z, BlockID::Air,
                                 World::UpdateFlags::All);
 
@@ -1170,6 +1233,12 @@ namespace Game {
         return CalculateExplodedPositions(level, p, jitter);
     }
 
+    namespace {
+        void EmitExplodeGameEvent(EntityLevel& level, const ExplosionParams& p) {
+            if (ILevelWrite* write = level.MutableBlocks()) write->GameEvent(p.source, GameEventId::Explode, p.center);
+        }
+    }
+
     ExplosionResult Explode(EntityLevel& level, const ExplosionParams& p) {
         PROFILE_ZONE_N("Explode");
         // MC ClientLevel.explode is an empty method: the client is TOLD about
@@ -1196,6 +1265,11 @@ namespace Game {
         ExplosionResult result;
         if (level.IsClientSide()) return result;
         if (p.radius <= 0.0f) return result;
+
+        // MC ServerExplosion.explode opens with gameEvent(source, EXPLODE,
+        // center). (The crater scan before this is read-only, so raising it
+        // after the scan changes nothing a listener could observe.)
+        EmitExplodeGameEvent(level, p);
 
         // One collision snapshot for the whole victim pass — the entity sweep
         // and the loose-entity sweep both read the same neighbourhood, so they
@@ -1275,7 +1349,8 @@ namespace Game {
                 // MC Explosion.isSmall(): under radius 2, or nothing was touched.
                 const bool small = p.radius < kLargeExplosionRadius ||
                                    !InteractsWithBlocks(bi);
-                level.BroadcastExplosion(p.center, p.radius, result.blocksDestroyed, small);
+                level.BroadcastExplosion(p.center, p.radius, result.blocksDestroyed, small,
+                                         static_cast<uint8_t>(p.particles), p.blockParticles);
             }
             return result;
         }
@@ -1302,6 +1377,11 @@ namespace Game {
         if (level.IsClientSide()) return 0;
         const size_t count = params.size();
         if (count == 0) return 0;
+        // MC ServerExplosion.explode: every blast's gameEvent(EXPLODE), in
+        // queue order, before any of them applies.
+        for (const ExplosionParams& p : params) {
+            if (p.radius > 0.0f) EmitExplodeGameEvent(level, p);
+        }
         const auto batchStart = std::chrono::steady_clock::now();
 
         // ── Clusters: 64-block cells, first-seen order ──────────────────────
@@ -1564,7 +1644,8 @@ namespace Game {
                         const bool damageThis = p.damageEntities &&
                             (!p.calculator.shouldDamageEntity ||
                               p.calculator.shouldDamageEntity(p, *e));
-                        const bool wantExposure = damageThis || p.knockbackMultiplier != 0.0f;
+                        const float kbMult = KnockbackMultiplierFor(p, *e);
+                        const bool wantExposure = damageThis || kbMult != 0.0f;
                         const float expo = wantExposure
                             ? ExplosionSeenPercent(level, p.center, *e, grid) : 0.0f;
 
@@ -1576,7 +1657,7 @@ namespace Game {
                         }
                         const double preResistance = (1.0 - dist) *
                                                      static_cast<double>(expo) *
-                                                     static_cast<double>(p.knockbackMultiplier);
+                                                     static_cast<double>(kbMult);
                         double knockbackResistance = 0.0;
                         if (living && preResistance != 0.0) {
                             knockbackResistance = living->GetAttributeValue(
@@ -1588,6 +1669,8 @@ namespace Game {
                                 (e->IsSpectator() || (e->IsCreative() && e->IsAbilityFlying()));
                             if (!excludedPlayer) e->AddDeltaMovement(dir * power);
                         }
+                        // MC entity.onExplosionHit(source), as the serial pass.
+                        if (living) living->OnExplosionHit(p.source);
                     }
                 }
             }

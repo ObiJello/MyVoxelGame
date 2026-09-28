@@ -102,7 +102,7 @@ namespace Render {
         int guiHeight = graphics.GuiHeight();
 
         // MC: chatBottom = floor((screenHeight - 40) / scale), scale defaults to 1.0
-        int baseY = guiHeight - CHAT_BOTTOM_MARGIN;
+        int baseY = guiHeight - CHAT_BOTTOM_MARGIN - (chatOpen ? m_openLift : 0);
 
         // MC: maxWidth = ceil(chatWidth / scale), chatWidth = floor(pct * 280 + 40) = 320 at default
         int maxWidth = CHAT_WIDTH;

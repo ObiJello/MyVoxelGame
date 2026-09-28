@@ -9,12 +9,18 @@
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/enchantment/ItemEnchantments.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/entity/Instruments.hpp"
+#include "common/entity/FireworkItems.hpp"
 #include "common/text/Language.hpp"
 #include "common/text/TextComponent.hpp"
 #include "client/entity/Player.hpp"
 #include "common/entity/Item.hpp"        // IsSameItemSameComponents (Ctrl+Shift+Q)
 #include "common/entity/decoration/PaintingVariants.hpp"
+#include "common/entity/mobs/TropicalFishVariant.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // Items::Painting
+#include "client/input/Input.hpp"        // IsGlfwKeyDown (shift-drag)
+#include "client/input/KeyMapping.hpp"
+#include "client/map/ClientMaps.hpp"
 
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -29,6 +35,12 @@ namespace Render {
         long long NowMillis() {
             using namespace std::chrono;
             return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+        }
+
+        // MC KeyMapping.matches(KeyEvent): the press is this action's key,
+        // whatever the player bound it to.
+        bool IsBoundKey(const Input::KeyMapping* mapping, int glfwKey) {
+            return mapping && mapping->key == Input::BoundKey::Keyboard(glfwKey);
         }
 
         // QuickCraft mask helpers — match MC AbstractContainerMenu lines 749/753/757.
@@ -165,6 +177,7 @@ namespace Render {
         m_isDragging = false;
         m_dragSlots.clear();
         m_dragStartCarriedCount = 0;
+        EndShiftDrag();
         m_hoveredSlot = HIT_NONE;
         m_lastClickTimeMs = 0;
         m_lastClickedSlot = HIT_NONE;
@@ -191,6 +204,7 @@ namespace Render {
         m_isDragging = false;
         m_dragSlots.clear();
         m_dragStartCarriedCount = 0;
+        EndShiftDrag();
         OnClose();
     }
 
@@ -205,6 +219,11 @@ namespace Render {
     void AbstractContainerScreen::QueueClick(Network::ContainerInput action, int16_t slotIndex,
                                              uint8_t button, Game::ItemID creativeItem,
                                              const Game::ItemStack* creativeStack) {
+        // A spectator looks and never takes: the server refuses every click
+        // (MC handleContainerClick's `!player.isSpectator()`), so none is
+        // predicted or sent — the screen is read-only.
+        if (m_player && m_player->IsSpectator()) return;
+
         Game::AbstractContainerMenu* menu = Menu();
 
         Network::InventoryClickC2SPacket p{};
@@ -283,12 +302,62 @@ namespace Render {
             for (int i = 0; i < menu->SlotCount(); ++i) {
                 int sx, sy;
                 if (!GetSlotPos(i, sx, sy)) continue;
-                if (lx >= sx && lx < sx + SLOT_SIZE && ly >= sy && ly < sy + SLOT_SIZE) {
+                // MC AbstractContainerScreen.isHovering(slot): the 16x16
+                // item square grown by 1 px on every side, so neighbouring
+                // slots (18 px apart) meet with no dead gap between them.
+                if (lx >= sx - 1 && lx < sx + SLOT_SIZE + 1 && ly >= sy - 1 && ly < sy + SLOT_SIZE + 1) {
                     return i;
                 }
             }
         }
         return HIT_NONE;
+    }
+
+    int AbstractContainerScreen::SlotAtGuiPoint(glm::vec2 gui, int leftPos, int topPos) const {
+        const int lx = (int)std::floor(gui.x) - leftPos;
+        const int ly = (int)std::floor(gui.y) - topPos;
+        if (lx < 0 || lx >= ImageWidth() || ly < 0 || ly >= ImageHeight()) return HIT_NONE;
+
+        Game::AbstractContainerMenu* menu = Menu();
+        if (!menu) return HIT_NONE;
+        for (int i = 0; i < menu->SlotCount(); ++i) {
+            int sx, sy;
+            if (!GetSlotPos(i, sx, sy)) continue;
+            if (lx >= sx - 1 && lx < sx + SLOT_SIZE + 1 && ly >= sy - 1 && ly < sy + SLOT_SIZE + 1) return i;
+        }
+        return HIT_NONE;
+    }
+
+    // ─── Shift-drag quick move ───────────────────────────────────
+    void AbstractContainerScreen::ShiftDragQuickMove(int slot) {
+        if (!m_isShiftDragging || slot < 0 || static_cast<size_t>(slot) >= m_shiftDragDone.size()) return;
+        if (m_shiftDragDone[static_cast<size_t>(slot)]) return;
+        m_shiftDragDone[static_cast<size_t>(slot)] = true;
+
+        Game::AbstractContainerMenu* menu = Menu();
+        if (!menu || !menu->IsValidSlotIndex(slot)) return;
+        // An empty slot has nothing to move (MC quickMoveStack returns EMPTY
+        // straight away); skipping it just saves the packet. It stays spent
+        // either way — "each slot once per drag" is about slots crossed.
+        if (menu->GetSlot(slot).GetItem().IsEmpty()) return;
+
+        const size_t queuedBefore = m_pendingClicks.size();
+        QueueClick(Network::ContainerInput::QUICK_MOVE, static_cast<int16_t>(slot), 0);
+        // Every slot the predicted move wrote — the source and each stack it
+        // landed on — is spent too, so the drag never carries a stack it just
+        // delivered back out when the cursor crosses where it landed (a sweep
+        // from the hotbar up into the main inventory, say).
+        if (m_pendingClicks.size() > queuedBefore) {
+            for (const auto& written : m_pendingClicks.back().predictedSlots) {
+                const size_t index = written.first;
+                if (index < m_shiftDragDone.size()) m_shiftDragDone[index] = true;
+            }
+        }
+    }
+
+    void AbstractContainerScreen::EndShiftDrag() {
+        m_isShiftDragging = false;
+        m_shiftDragDone.clear();
     }
 
     // ─── Input ───────────────────────────────────────────────────
@@ -310,34 +379,38 @@ namespace Render {
         // letter keys, including the E that would otherwise close the screen.
         if (HandleExtraKey(glfwKey, glfwMods)) return true;
 
-        if (glfwKey == GLFW_KEY_E) {
+        // MC AbstractContainerScreen.keyPressed: options.keyInventory.
+        if (IsBoundKey(Input::Binds::Inventory, glfwKey)) {
             Close();
             return true;
         }
 
-        // Number keys: SWAP with hotbar slot (button = key - GLFW_KEY_1).
-        if (m_hoveredSlot >= 0 && glfwKey >= GLFW_KEY_1 && glfwKey <= GLFW_KEY_9) {
-            uint8_t button = (uint8_t)(glfwKey - GLFW_KEY_1);
-            QueueClick(Network::ContainerInput::SWAP, (int16_t)m_hoveredSlot, button);
-            return true;
+        // Hotbar keys: SWAP with that hotbar slot (button = slot index;
+        // MC checkHotbarKeyPressed: options.keyHotbarSlots[i]).
+        if (m_hoveredSlot >= 0) {
+            for (int i = 0; i < 9; ++i) {
+                if (!IsBoundKey(Input::Binds::Hotbar[i], glfwKey)) continue;
+                QueueClick(Network::ContainerInput::SWAP, (int16_t)m_hoveredSlot, (uint8_t)i);
+                return true;
+            }
         }
 
-        // F: swap the hovered slot with the offhand. MC encodes the offhand as
+        // Swap-offhand key (F): swap the hovered slot with the offhand. MC encodes the offhand as
         // button 40 in the SWAP action's player-inventory index space
         // (AbstractContainerMenu.doClick: `buttonNum < 9 || buttonNum == 40`).
-        if (m_hoveredSlot >= 0 && glfwKey == GLFW_KEY_F) {
+        if (m_hoveredSlot >= 0 && IsBoundKey(Input::Binds::SwapOffhand, glfwKey)) {
             QueueClick(Network::ContainerInput::SWAP, (int16_t)m_hoveredSlot, 40);
             return true;
         }
 
-        // Q: drop. Ctrl+Q drops the whole stack (MC button 1). Ctrl+Shift+Q
+        // Drop key (Q): drop. Ctrl+Q drops the whole stack (MC button 1). Ctrl+Shift+Q
         // (no vanilla counterpart) drops every stack of the hovered item
         // from the player's inventory: one stack-THROW per matching slot,
         // queued together so they predict and send as one batch. Only the
         // player's own slots take part — a chest's contents stay put — and
         // "the same item" means id and components, so an enchanted pickaxe
         // does not take the plain ones with it.
-        if (m_hoveredSlot >= 0 && glfwKey == GLFW_KEY_Q) {
+        if (m_hoveredSlot >= 0 && IsBoundKey(Input::Binds::Drop, glfwKey)) {
             const bool ctrl  = (glfwMods & GLFW_MOD_CONTROL) != 0;
             const bool shift = (glfwMods & GLFW_MOD_SHIFT) != 0;
             if (ctrl && shift) {
@@ -372,6 +445,7 @@ namespace Render {
 
         if (!press) {
             HandleExtraRelease();
+            if (glfwButton == GLFW_MOUSE_BUTTON_LEFT) EndShiftDrag();
             if (m_isDragging) {
                 // The distribution is NOT committed by hand here: QueueClick
                 // runs the same AbstractContainerMenu::DoClick the server will,
@@ -440,9 +514,31 @@ namespace Render {
         }
 
         // Shift+click → QUICK_MOVE.
+        //
+        // A shift + LEFT press on an empty cursor also starts a shift-drag:
+        // while both stay held, every further slot the cursor enters gets the
+        // same QUICK_MOVE, once (OnMouseMove → ShiftDragQuickMove). Vanilla
+        // has no such gesture — its nearest relative is shift + double-click,
+        // which quick-moves every stack of the clicked item on that side
+        // (our Ctrl+Shift+click above) — so this follows Mouse Tweaks' shift
+        // + LMB drag, the de-facto standard. Each step is an ordinary
+        // QUICK_MOVE click, so it obeys the open menu's quickMoveStack rules
+        // (chest ⇄ inventory, hotbar ⇄ main inventory / armour / offhand in
+        // the player's own menu, a furnace's fuel/input routing, …) and the
+        // server validates it like any shift-click. With a stack on the
+        // cursor the drag never starts: that button belongs to MC's
+        // quick-craft drag-splitting.
         if (shift) {
             uint8_t btn = (glfwButton == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : 0;
-            QueueClick(Network::ContainerInput::QUICK_MOVE, (int16_t)hit, btn);
+            const bool startDrag = glfwButton == GLFW_MOUSE_BUTTON_LEFT && Carried().IsEmpty();
+            if (startDrag) {
+                m_isShiftDragging = true;
+                m_shiftDragDone.assign(static_cast<size_t>(menu->SlotCount()), false);
+                m_shiftDragLastGui = m_mouseGui;
+                ShiftDragQuickMove(hit);
+            } else {
+                QueueClick(Network::ContainerInput::QUICK_MOVE, (int16_t)hit, btn);
+            }
             return;
         }
 
@@ -514,6 +610,35 @@ namespace Render {
         m_hoveredSlot = HitTest(leftPos, topPos);
 
         OnExtraMouseMove(leftPos, topPos);
+
+        // Shift-drag quick move. Letting go of shift ends the gesture (the
+        // left button's release ends it too, in OnMouseButton). The cursor is
+        // polled once a frame, so a fast sweep can jump several slots between
+        // two samples: walk the segment from the last position in steps well
+        // under the 2-pixel gutter between slots, so every slot on the path
+        // is entered, in path order.
+        if (m_isShiftDragging) {
+            const bool shiftHeld = Input::IsGlfwKeyDown(GLFW_KEY_LEFT_SHIFT) ||
+                                   Input::IsGlfwKeyDown(GLFW_KEY_RIGHT_SHIFT);
+            Game::AbstractContainerMenu* menu = Menu();
+            if (!shiftHeld || !menu ||
+                static_cast<size_t>(menu->SlotCount()) != m_shiftDragDone.size()) {
+                // A menu swap under the drag (the server closed the chest)
+                // invalidates every index it recorded.
+                EndShiftDrag();
+            } else {
+                const glm::vec2 from  = m_shiftDragLastGui;
+                const glm::vec2 delta = m_mouseGui - from;
+                const float     dist  = std::max(std::fabs(delta.x), std::fabs(delta.y));
+                const int       steps = std::max(1, static_cast<int>(std::ceil(dist)));
+                for (int i = 1; i <= steps && m_isShiftDragging; ++i) {
+                    const glm::vec2 p = from + delta * (static_cast<float>(i) / static_cast<float>(steps));
+                    const int s = (i == steps) ? m_hoveredSlot : SlotAtGuiPoint(p, leftPos, topPos);
+                    if (s >= 0) ShiftDragQuickMove(s);
+                }
+                m_shiftDragLastGui = m_mouseGui;
+            }
+        }
 
         // Drag (QUICK_CRAFT) accumulator.
         if (m_isDragging && m_hoveredSlot >= 0) {
@@ -665,8 +790,11 @@ namespace Render {
         g.RenderItemDecorations(displayed, x, y);
     }
 
-    void AbstractContainerScreen::RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack,
-                                                int mx, int my) {
+    // MC ItemStack.getTooltipLines — the lines only, no drawing. RenderTooltip
+    // draws them; the creative screen also indexes them for its search (MC
+    // SessionSearchTrees.updateCreativeTooltips searches the tooltip text).
+    void AbstractContainerScreen::BuildTooltipLines(const Game::ItemStack& stack, bool advanced,
+                                                    std::vector<TooltipLine>& lines) {
         if (stack.IsEmpty()) return;
 
         // Name line — mirrors ItemStack.getStyledHoverName:
@@ -686,9 +814,115 @@ namespace Render {
         // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips chain —
         // each component's TooltipProvider appends its lines. Order: name →
         // enchantments → lore (matching MC's addDetailsToTooltip).
-        struct Line { std::string text; uint32_t color; };
-        std::vector<Line> lines;
         lines.push_back({name, nameColor});
+
+        // Item.appendHoverText, first in addDetailsToTooltip — the disc
+        // fragment's DiscFragmentItem: "<descriptionId>.desc" in grey
+        // ("Music Disc - 5").
+        if (stack.itemId == Game::Items::DiscFragment5) {
+            lines.push_back({Game::Language::Get("item.minecraft.disc_fragment_5.desc"), 0xFFAAAAAAu});
+        }
+
+        // TROPICAL_FISH_PATTERN — TropicalFish.Pattern.addToTooltip (first of
+        // the component providers in addDetailsToTooltip): the named fish
+        // ("Clownfish"), else the pattern and its colours ("Kob" / "Red,
+        // White"), ITALIC GRAY — grey here (the font has no italics). The
+        // colours default to DEFAULT_VARIANT's white when absent.
+        if (auto pattern = stack.get(Game::DataComponents::TROPICAL_FISH_PATTERN)) {
+            namespace TFV = Game::TropicalFishVariants;
+            TFV::Variant variant = TFV::kDefaultVariant;
+            if (*pattern >= 0 && *pattern < TFV::kPatternCount) {
+                variant.pattern = static_cast<TFV::Pattern>(*pattern);
+            }
+            if (auto c = stack.get(Game::DataComponents::TROPICAL_FISH_BASE_COLOR)) {
+                variant.baseColor = TFV::DyeById(*c);
+            }
+            if (auto c = stack.get(Game::DataComponents::TROPICAL_FISH_PATTERN_COLOR)) {
+                variant.patternColor = TFV::DyeById(*c);
+            }
+            for (std::string& line : TFV::TooltipLines(variant)) {
+                lines.push_back({std::move(line), 0xFFAAAAAAu});
+            }
+        }
+
+        // INSTRUMENT — InstrumentComponent.addToTooltip (after the fish
+        // pattern, before MAP_ID): the instrument's description in GRAY
+        // ("Ponder", "Sing", ...).
+        if (auto instrument = stack.get(Game::DataComponents::INSTRUMENT)) {
+            const std::string description = Game::Instruments::DescriptionOf(*instrument);
+            if (!description.empty()) lines.push_back({description, 0xFFAAAAAAu});   // GRAY
+        }
+
+        // MAP_ID — MapId.addToTooltip (ItemStack.addDetailsToTooltip puts
+        // it after INSTRUMENT, ahead of WRITTEN_BOOK_CONTENT): "Unknown Map"
+        // with no data; else "ID #n" (unless renamed or about to be locked /
+        // scaled), "Locked", and with advanced tooltips the scale and zoom
+        // level the map is (or, SCALE pending, will be).
+        if (auto mapId = stack.get(Game::DataComponents::MAP_ID)) {
+            constexpr uint32_t kGray = 0xFFAAAAAAu;
+            auto translated = [](const char* key, std::initializer_list<std::string> args) {
+                std::vector<Game::Text::Component> components;
+                for (const std::string& a : args) components.push_back(Game::Text::Component::Literal(a));
+                return Game::Text::GetString(Game::Text::Component::Translatable(key, components));
+            };
+            const auto data = Client::Maps::GetMapData(*mapId);
+            if (!data) {
+                lines.push_back({Game::Language::Get("filled_map.unknown"), kGray});
+            } else {
+                const auto post = stack.get(Game::DataComponents::MAP_POST_PROCESSING);
+                if (!stack.get(Game::DataComponents::CUSTOM_NAME) && !post) {
+                    lines.push_back({translated("filled_map.id", {std::to_string(*mapId)}), kGray});
+                }
+                if (data->locked || (post && *post == Game::Maps::MapPostProcessing::Lock)) {
+                    lines.push_back({Game::Language::Get("filled_map.locked"), kGray});
+                }
+                if (advanced) {
+                    const int scaleToAdd = post && *post == Game::Maps::MapPostProcessing::Scale ? 1 : 0;
+                    const int scale = std::min(data->scale + scaleToAdd, Game::Maps::kMaxScale);
+                    lines.push_back({translated("filled_map.scale", {std::to_string(1 << scale)}), kGray});
+                    lines.push_back({translated("filled_map.level", {std::to_string(scale), "4"}), kGray});
+                }
+            }
+        }
+
+        // CONTAINER — ItemContainerContents.addToTooltip: the first five
+        // stacks as "<name> x<count>", then "and N more..." in italics (a
+        // shulker box's contents).
+        if (auto contents = stack.get(Game::DataComponents::CONTAINER)) {
+            int lineCount = 0, itemCount = 0;
+            for (const Game::ItemStack& item : contents->items) {
+                if (item.IsEmpty()) continue;
+                ++itemCount;
+                if (lineCount <= 4) {
+                    ++lineCount;
+                    lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                         // The shipped language file's key for this line
+                                         // ("%s x%s": name, count).
+                                         "container.shulkerBox.itemCount",
+                                         {Game::Text::Component::Literal(Game::GetItemStackHoverName(item)),
+                                          Game::Text::Component::Literal(std::to_string(item.count))})),
+                                     0xFFFFFFFFu});
+                }
+            }
+            if (itemCount - lineCount > 0) {
+                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                     "container.shulkerBox.more",
+                                     {Game::Text::Component::Literal(std::to_string(itemCount - lineCount))})),
+                                 0xFFFFFFFFu});
+            }
+        }
+
+        // POT_DECORATIONS — PotDecorations.addToTooltip: unless EMPTY, a
+        // blank line and each side's item name in grey, front, left, right,
+        // back.
+        if (auto decorations = stack.get(Game::DataComponents::POT_DECORATIONS); decorations && !decorations->IsEmpty()) {
+            lines.push_back({"", 0xFFFFFFFFu});
+            for (int side : { 3, 1, 2, 0 }) {
+                const Game::ItemID id = decorations->sides[static_cast<size_t>(side)];
+                if (id == Game::Items::Air) continue;
+                lines.push_back({Game::GetItemStackHoverName(Game::ItemStack(id, 1)), 0xFFAAAAAAu});
+            }
+        }
 
         // WRITTEN_BOOK_CONTENT — WrittenBookContent.addToTooltip: "by
         // <author>" when the author is not blank, then the generation
@@ -703,6 +937,80 @@ namespace Render {
             }
             lines.push_back({Game::Language::Get("book.generation." + std::to_string(book->generation)),
                              0xFFAAAAAAu});       // GRAY
+        }
+
+        // CHARGED_PROJECTILES, FIREWORKS, FIREWORK_EXPLOSION — in
+        // ItemStack.addDetailsToTooltip's order, between WRITTEN_BOOK_CONTENT
+        // and POTION_CONTENTS.
+        {
+            constexpr uint32_t kGrayLine = 0xFFAAAAAAu;
+            // The component lines an item-stack template adds of its own
+            // (addDetailsToTooltip), for a loaded crossbow's projectiles: a
+            // rocket's flight and stars, a star's explosion, a tipped arrow's
+            // effects.
+            const auto projectileDetails = [](const Game::ItemStack& projectile,
+                                              std::vector<Game::FireworkItems::TooltipLine>& out) {
+                if (auto fw = projectile.get(Game::DataComponents::FIREWORKS)) {
+                    Game::FireworkItems::AddFireworksTooltip(*fw, out);
+                }
+                if (auto fe = projectile.get(Game::DataComponents::FIREWORK_EXPLOSION)) {
+                    Game::FireworkItems::AddExplosionTooltip(*fe, out);
+                }
+                if (auto potion = projectile.get(Game::DataComponents::POTION_CONTENTS)) {
+                    std::vector<Game::PotionTooltipLine> potionLines;
+                    Game::AddPotionTooltip(potion->GetAllEffects(), potionLines,
+                                           projectile.get(Game::DataComponents::POTION_DURATION_SCALE).value_or(1.0f));
+                    for (auto& l : potionLines) out.push_back({std::move(l.text), l.colorARGB});
+                }
+            };
+            // ChargedProjectiles.addToTooltip: runs of matching stacks,
+            // "Projectile: [name]" / "Projectile: N x [name]", each followed
+            // by its details indented in grey.
+            if (auto charged = stack.get(Game::DataComponents::CHARGED_PROJECTILES); charged && !charged->IsEmpty()) {
+                const auto addRun = [&](const Game::ItemStack& projectile, int count) {
+                    const std::string name = "[" + Game::GetItemStackHoverName(projectile) + "]";
+                    std::vector<Game::Text::Component> with;
+                    if (count == 1) {
+                        with.push_back(Game::Text::Component::Literal(name));
+                        lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                             "item.minecraft.crossbow.projectile.single", with)),
+                                         0xFFFFFFFFu});
+                    } else {
+                        with.push_back(Game::Text::Component::Literal(std::to_string(count)));
+                        with.push_back(Game::Text::Component::Literal(Game::GetItemStackHoverName(projectile)));
+                        lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
+                                             "item.minecraft.crossbow.projectile.multiple", with)),
+                                         0xFFFFFFFFu});
+                    }
+                    std::vector<Game::FireworkItems::TooltipLine> details;
+                    projectileDetails(projectile, details);
+                    for (auto& d : details) lines.push_back({"  " + d.text, kGrayLine});
+                };
+                const Game::ItemStack* current = nullptr;
+                int count = 0;
+                for (const Game::ItemStack& projectile : charged->items) {
+                    if (!current) {
+                        current = &projectile;
+                        count = 1;
+                    } else if (Game::ItemStacksMatch(*current, projectile)) {
+                        ++count;
+                    } else {
+                        addRun(*current, count);
+                        current = &projectile;
+                        count = 1;
+                    }
+                }
+                if (current) addRun(*current, count);
+            }
+            // Fireworks.addToTooltip / FireworkExplosion.addToTooltip.
+            std::vector<Game::FireworkItems::TooltipLine> fireworkLines;
+            if (auto fw = stack.get(Game::DataComponents::FIREWORKS)) {
+                Game::FireworkItems::AddFireworksTooltip(*fw, fireworkLines);
+            }
+            if (auto fe = stack.get(Game::DataComponents::FIREWORK_EXPLOSION)) {
+                Game::FireworkItems::AddExplosionTooltip(*fe, fireworkLines);
+            }
+            for (auto& l : fireworkLines) lines.push_back({std::move(l.text), l.argb});
         }
 
         // POTION_CONTENTS — PotionContents.addToTooltip: every effect with
@@ -857,6 +1165,17 @@ namespace Render {
             lines.push_back({Game::Language::Get("item.unbreakable"), 0xFF5555FFu});   // BLUE
         }
 
+        // OMINOUS_BOTTLE_AMPLIFIER — OminousBottleAmplifier.addToTooltip: the
+        // Bad Omen it gives (level and 100:00), as a potion's effect line.
+        if (auto amplifier = stack.get(Game::DataComponents::OMINOUS_BOTTLE_AMPLIFIER)) {
+            std::vector<Game::MobEffectInstance> effects;
+            effects.emplace_back(Game::MobEffectId::BadOmen, Game::DataComponents::kOminousBottleEffectDuration,
+                                 *amplifier, /*ambient=*/false, /*visible=*/false, /*showIcon=*/true);
+            std::vector<Game::PotionTooltipLine> omenLines;
+            Game::AddPotionTooltip(effects, omenLines, 1.0f);
+            for (auto& l : omenLines) lines.push_back({std::move(l.text), l.colorARGB});
+        }
+
         // SUSPICIOUS_STEW_EFFECTS — SuspiciousStewEffects.addToTooltip lists
         // its effects only when flag.isCreative() (the creative player's
         // tooltip); a survival player sees a plain stew.
@@ -872,7 +1191,7 @@ namespace Render {
 
         // F3+H — MC ItemStack.getTooltipLines with TooltipFlag.ADVANCED: the
         // registry name in dark grey and the component count.
-        if (Platform::g_gameSettings.GetAdvancedItemTooltips()) {
+        if (advanced) {
             // "Durability: remaining / max" — only while damaged
             // (`isDamaged() && display.shows(DAMAGE)`), in the default colour.
             if (Game::IsDamaged(stack)) {
@@ -909,6 +1228,17 @@ namespace Render {
                                  stack.components.size();
             lines.push_back({std::to_string(count) + " component(s)", 0xFF555555u});
         }
+    }
+
+    void AbstractContainerScreen::RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack,
+                                                int mx, int my) {
+        if (stack.IsEmpty()) return;
+        std::vector<TooltipLine> lines;
+        BuildTooltipLines(stack, Platform::g_gameSettings.GetAdvancedItemTooltips(), lines);
+        if (lines.empty()) return;
+        // MC AbstractContainerScreen.getTooltipFromContainerItem — a screen's
+        // own additions (the creative screen's tab names).
+        DecorateItemTooltip(stack, lines);
 
         // Layout: 10-px line spacing matches MC's GuiGraphics tooltip spacing.
         const int LINE_H = 10;

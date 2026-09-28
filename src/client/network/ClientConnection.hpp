@@ -13,6 +13,11 @@
 
 namespace Client {
 
+    // Threads decoding chunk packets off the network thread (ClientConnection.cpp);
+    // the chunk batch-rate estimator plans with it.
+    int ChunkDecodeThreadCount();
+
+
     class NetworkClient;
     
     // Client-side connection handler
@@ -52,6 +57,9 @@ namespace Client {
         // serverbound half of MC's per-phase protocol tables
         // (HandshakeProtocols / LoginProtocols / GameProtocols.SERVERBOUND_TEMPLATE).
         bool IsPacketAllowedOutbound(uint8_t packetId) const override;
+        // In the PLAY phase (a LocalPlayer exists in MC's terms): what the
+        // per-tick gameplay senders check before sending.
+        bool IsInPlayPhase() const { return m_phase == ConnectionPhase::PLAY; }
         
         // Get player name
         const std::string& GetPlayerName() const { return m_playerName; }

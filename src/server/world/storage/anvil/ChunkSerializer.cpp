@@ -1,8 +1,11 @@
 // File: src/server/world/storage/anvil/ChunkSerializer.cpp
+#include "common/world/block/CopperGolemStatueBlock.hpp"
 #include "server/world/storage/anvil/ChunkSerializer.hpp"
 #include "server/world/storage/anvil/NbtScan.hpp"
 #include "common/world/lighting/ChunkLight.hpp"
+#include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstddef>
 #include <cstring>
 #include <memory>
@@ -16,6 +19,7 @@
 #include "common/nbt/NbtWrite.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/BlockState.hpp"
 #include "common/world/chunk/ChunkSection.hpp"
 #include "common/world/fluid/FluidState.hpp"
@@ -25,6 +29,26 @@
 namespace Game::Anvil {
 
     namespace {
+
+        // The four sculk blocks whose block entities this engine did not have
+        // before the vibration system (see the repair in DeserialiseChunk).
+        bool NeedsSculkBlockEntity(BlockID id) {
+            return id == BlockID::SculkSensor || id == BlockID::CalibratedSculkSensor ||
+                   id == BlockID::SculkShrieker || id == BlockID::SculkCatalyst ||
+                   // Same repair for the blocks whose entities arrived later:
+                   // a decorated pot without one is invisible (its block
+                   // model is empty), a suspicious block without one cannot
+                   // be brushed. Their worldgen loot tables were never kept,
+                   // so the repaired entities start empty, as a vanilla one
+                   // placed by hand does.
+                   id == BlockID::DecoratedPot ||
+                   id == BlockID::SuspiciousSand || id == BlockID::SuspiciousGravel ||
+                   // ... and the bell (its swing), the banners and the copper
+                   // golem statues, whose models are empty without one.
+                   id == BlockID::Bell || IsCopperGolemStatue(id) ||
+                   (BlockEntityTypes::ForBlock(id) &&
+                    BlockEntityTypes::ForBlock(id)->TypeId() == BlockEntityTypeIds::BANNER);
+        }
 
         // Revision of the light engine that wrote a chunk's light. A chunk
         // stamped with an older one is relit on load rather than trusted.
@@ -152,18 +176,57 @@ namespace Game::Anvil {
             if (!nameTag) nameTag = std::dynamic_pointer_cast<NBTTagString>(entry.GetTag("Name"));
             if (!nameTag) return BlockState{}.RawId();
 
-            std::unordered_map<std::string, std::string> props;
             auto propsTag = entry.GetTag("properties");
             if (!propsTag) propsTag = entry.GetTag("Properties");
+            // The string-valued properties in the compound's iteration order —
+            // the order the registry sees them in below, so a memo key maps
+            // to exactly one resolution.
+            std::vector<std::pair<const std::string*, const std::string*>> ordered;
             if (auto p = AsCompound(propsTag)) {
+                ordered.reserve(p->value.size());
                 for (const auto& [k, v] : p->value) {
-                    if (auto s = std::dynamic_pointer_cast<NBTTagString>(v)) props[k] = s->value;
+                    if (v && v->type == ::World::NBTTagType::TAG_String) {
+                        ordered.emplace_back(&k, &static_cast<const NBTTagString&>(*v).value);
+                    }
                 }
             }
 
+            // The same few dozen states fill every palette of a region, and
+            // resolving one builds and hashes several strings. Memoised per
+            // thread on the name + properties. Only resolutions that
+            // found a block are kept: an unknown name must reach the
+            // registry every time, which counts it for the unimplemented-block
+            // report.
+            static const bool s_noMemo = std::getenv("OBEY_NO_PALETTE_MEMO") != nullptr;   // A/B switch
+            thread_local std::unordered_map<std::string, uint32_t> t_memo;
+            std::string key;
+            if (!s_noMemo) {
+                key.reserve(64);
+                key = nameTag->value;
+                for (const auto& [k, v] : ordered) {
+                    key += '\x1f';
+                    key += *k;
+                    key += '=';
+                    key += *v;
+                }
+                if (auto it = t_memo.find(key); it != t_memo.end()) return it->second;
+            }
+
+            std::unordered_map<std::string, std::string> props;
+            for (const auto& [k, v] : ordered) props[*k] = *v;
             const NbtBlockState resolved =
                 BlockStateRegistry::CreateBlockState(nameTag->value, props);
-            return BlockStates::FromIndex(resolved.resolvedId, resolved.resolvedState).RawId();
+            const uint32_t raw = BlockStates::FromIndex(resolved.resolvedId, resolved.resolvedState).RawId();
+            if (!s_noMemo) {
+                const std::string& n = resolved.name;   // normalised
+                const bool isAirName = n == "minecraft:air" || n == "minecraft:cave_air" ||
+                                       n == "minecraft:void_air";
+                if (resolved.resolvedId != BlockID::Air || isAirName) {
+                    if (t_memo.size() >= 8192) t_memo.clear();   // modded palettes: stay bounded
+                    t_memo.emplace(std::move(key), raw);
+                }
+            }
+            return raw;
         }
 
     } // namespace
@@ -384,6 +447,28 @@ namespace Game::Anvil {
             w.EndList(areas);
         }
 
+        // ObeyCraft extension: the structure entities generation placed here
+        // that the level has not taken yet (Chunk::worldgenEntities). MC keeps
+        // them in the chunk while it is a proto chunk (ProtoChunk.entities,
+        // saved as "entities") and hands them to the entity storage the
+        // moment it becomes FULL (ServerLevel.addWorldGenChunkEntities). Here
+        // a chunk is converted before the level adopts its entities, so a
+        // chunk generated, saved and unloaded before anyone came near it keeps
+        // them in its own NBT until TakeWorldgenEntities claims them — after
+        // which the level's entities/*.mca owns them and the chunk, re-saved,
+        // carries none. Each entry: the entity's binary NBT exactly as the
+        // library wrote it, and whether finalizeSpawn is still owed.
+        if (!chunk.worldgenEntities.empty()) {
+            auto entities = w.BeginList("ObeyWorldgenEntities", Nbt::TagType::Compound);
+            for (const WorldgenEntity& entity : chunk.worldgenEntities) {
+                w.ListCompoundBegin(entities);
+                w.ByteArray("nbt", reinterpret_cast<const int8_t*>(entity.nbt.data()), entity.nbt.size());
+                w.Byte("finalize_spawn", entity.finalizeSpawn ? 1 : 0);
+                w.ListCompoundEnd(entities);
+            }
+            w.EndList(entities);
+        }
+
         w.EndRootCompound();
 
         if (!w.ok()) { error = "NBT writer refused the chunk"; return false; }
@@ -476,6 +561,7 @@ namespace Game::Anvil {
         std::array<bool, Lighting::kLightSectionCount> skyPresent{};
         out.light.Reset();
 
+        std::vector<int> sculkSections;   // see the sculk repair below
         auto sections = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("sections"));
         if (sections) {
             for (const auto& sTag : sections->value) {
@@ -515,6 +601,13 @@ namespace Game::Anvil {
                         for (const auto& e : pal->value) {
                             auto entry = AsCompound(e);
                             values.push_back(entry ? ResolveBlockStateEntry(*entry) : BlockState{}.RawId());
+                        }
+                        // See the sculk repair after the block entities.
+                        for (uint32_t v : values) {
+                            if (NeedsSculkBlockEntity(BlockState::FromRawId(v).Block())) {
+                                sculkSections.push_back(index);
+                                break;
+                            }
                         }
                         std::vector<uint64_t> data;
                         ReadLongArray(*bs, "data", data);
@@ -580,6 +673,7 @@ namespace Game::Anvil {
             out.light.lightCorrect = true;
         }
 
+        // (Filled by the section loop above; consumed after the block entities.)
         // Block entities LAST: each is validated against the block actually
         // sitting under it, which is only known once the sections are decoded.
         if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("block_entities"))) {
@@ -594,6 +688,27 @@ namespace Game::Anvil {
                 glm::ivec3 local{};
                 auto entity = ReadBlockEntity(*entry, expected, blockAt, local);
                 if (entity) out.SetBlockEntity(local.x, local.y, local.z, std::move(entity));
+            }
+        }
+
+        // Engine repair: sculk sensors, shriekers and catalysts saved before
+        // their block entities existed in this engine carry none, and a
+        // listener without one is deaf forever. Give each the fresh entity
+        // MC's worldgen would have (LevelChunk.promotePendingBlockEntity).
+        // Only the sections whose palette names one of the four are walked.
+        for (int sectionIndex : sculkSections) {
+            const int baseY = (sectionIndex + kMinSectionY) * 16;
+            for (int y = baseY; y < baseY + 16; ++y) {
+                for (int z = 0; z < 16; ++z) {
+                    for (int x = 0; x < 16; ++x) {
+                        const BlockID id = out.GetBlock(x, y, z);
+                        if (!NeedsSculkBlockEntity(id) || out.GetBlockEntity(x, y, z)) continue;
+                        if (const BlockEntityType* type = BlockEntityTypes::ForBlock(id)) {
+                            const glm::ivec3 worldPos(expected.x * 16 + x, y, expected.z * 16 + z);
+                            out.SetBlockEntity(x, y, z, type->Create(worldPos, id));
+                        }
+                    }
+                }
             }
         }
 
@@ -639,6 +754,21 @@ namespace Game::Anvil {
                     }
                 }
                 out.structureSpawnAreas.push_back(std::move(area));
+            }
+        }
+
+        // ObeyCraft extension: unclaimed structure entities (see the writer).
+        if (auto list = std::dynamic_pointer_cast<NBTTagList>(rootC->GetTag("ObeyWorldgenEntities"))) {
+            for (const auto& element : list->value) {
+                auto entry = AsCompound(element);
+                if (!entry) continue;
+                auto bytes = std::dynamic_pointer_cast<::World::NBTTagByteArray>(entry->GetTag("nbt"));
+                if (!bytes || bytes->value.empty()) continue;
+                WorldgenEntity entity;
+                entity.nbt.assign(reinterpret_cast<const uint8_t*>(bytes->value.data()),
+                                  reinterpret_cast<const uint8_t*>(bytes->value.data()) + bytes->value.size());
+                entity.finalizeSpawn = entry->GetValue<int8_t>("finalize_spawn", 0) != 0;
+                out.worldgenEntities.push_back(std::move(entity));
             }
         }
 
