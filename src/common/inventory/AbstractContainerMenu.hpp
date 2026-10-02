@@ -31,6 +31,7 @@
 #include "common/network/PacketTypes.hpp"
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace Game {
@@ -77,6 +78,22 @@ namespace Game {
         // access.execute): the session plays UI_LOOM_TAKE_RESULT at the loom,
         // once per game tick.
         bool loomUsed = false;
+        // A smithing result was taken (SmithingMenu.onTake → access.execute):
+        // the session plays levelEvent 1044 at the table.
+        bool smithingUsed = false;
+        // Recipes this click crafted (MC ResultSlot.checkTakeAchievements →
+        // RecipeCraftingHolder.awardUsedRecipes → RECIPE_CRAFTED): the
+        // recipe id and the grid's ingredients. The session fires the
+        // advancement trigger; the client's predictive run must not.
+        struct CraftedRecipe {
+            std::string recipeId;
+            std::vector<ItemStack> ingredients;
+        };
+        std::vector<CraftedRecipe> craftedRecipes;
+        // Potions taken out of a brewing stand's bottle slots (MC
+        // BrewingStandMenu.PotionSlot.onTake → BREWED_POTION): each taken
+        // stack's potion id ("minecraft:swiftness").
+        std::vector<std::string> brewedPotions;
     };
 
     class AbstractContainerMenu {
@@ -217,7 +234,11 @@ namespace Game {
         // insert priority.
         virtual ContainerClickResult HandleCreativePickup(const ItemStack& source, uint8_t button);
         virtual ContainerClickResult HandleCreativeQuickMove(const ItemStack& source);
-        virtual ContainerClickResult HandleCreativeDestroyAll();
+        // button 0: MC's shift-click on the destroy-item slot — every slot and
+        // the cursor cleared. button 1 (engine deviation, not MC): only the
+        // cursor and every slot holding the cursor's item id, components
+        // ignored — shift-clicking the bin with dirt voids all the dirt.
+        virtual ContainerClickResult HandleCreativeDestroyAll(uint8_t button = 0);
         virtual ContainerClickResult HandleCreativeDeleteCarried(uint8_t button);
         // button 0: a full stack of `source` (pick-block, the creative grid's
         // number-key swap); button 1: `source` exactly as given, count

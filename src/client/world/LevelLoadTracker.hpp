@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
 #include <vector>
 #include <glm/glm.hpp>
 
@@ -61,6 +62,8 @@ namespace Client {
 
         // True once the packet has gone out for the current load.
         bool IsLoaded() const { return m_stage == Stage::Ready; }
+        // When the current load became ready (the hand-over); epoch while not.
+        std::chrono::steady_clock::time_point LoadedAt() const { return m_loadedAt; }
 
     private:
         enum class Stage { Idle, WaitingForPlayerChunk, Ready };
@@ -85,11 +88,14 @@ namespace Client {
         // is loaded and meshed — logged once at the hand-over.
         static void LogRouteCoverage();
         static bool IsTargetShown(const PortalViewTarget& target);
+        // Why a target is not shown yet (a timeout's diagnosis).
+        static std::string DescribeTargetWait(const PortalViewTarget& target);
         // True when the portal views are ready or their wait is over.
         bool PortalViewsReady(const ViewInfo* view);
         std::vector<PortalViewTarget> m_portalTargets;
         std::chrono::steady_clock::time_point m_playerSectionReadyAt{};   // portal wait starts here
         bool m_portalDecisionsLogged = false;
+        std::chrono::steady_clock::time_point m_loadedAt{};
 
         Stage m_stage = Stage::Idle;
         int   m_closeDelayMs = 0;

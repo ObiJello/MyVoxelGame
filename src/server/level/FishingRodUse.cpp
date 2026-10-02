@@ -14,6 +14,7 @@
 // FishingRodItem.java and world/entity/projectile/FishingHook.java (retrieve).
 
 #include "ServerLevel.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "server/IntegratedServer.hpp"
 #include "server/entity/ExperienceOrbManager.hpp"
 #include "server/entity/MobManager.hpp"
@@ -72,7 +73,7 @@ namespace Game {
         }
 
         // MC FishingHook.retrieve(rod) — how much the reel-in wears the rod.
-        int Retrieve(FishingHook& hook, const Fisher& fisher) {
+        int Retrieve(FishingHook& hook, const Fisher& fisher, const ItemStack& rod) {
             LivingEntity* owner = hook.GetPlayerOwner();
             if (!owner || hook.ShouldStopFishing(*owner)) return 0;
             EntityLevel& level = *hook.Level();
@@ -82,6 +83,11 @@ namespace Game {
             if (hook.HasHookedTarget()) {
                 // Reel the catch in. The entity event lets the hooked
                 // player's own client pull them (FishingHook.hpp).
+                // CriteriaTriggers.FISHING_ROD_HOOKED with no catch; the
+                // hooked-in context is the hooked entity (or the hook, for an
+                // item entity — not an Entity here).
+                Entity* hookedIn = hook.GetHookedIn();
+                Server::CriteriaTriggers::FishingRodHooked(*fisher.player, rod, hookedIn ? *hookedIn : hook, {});
                 hook.PullHooked();
                 level.BroadcastEntityEvent(hook, FishingHook::kEventPullHooked);
                 dmg = hook.GetHookedItemId() != 0 ? 3 : 5;
@@ -99,8 +105,9 @@ namespace Game {
                 if (!ChestLoot::GetRandomItems(kFishingLootTable, random, luck, items, &context)) {
                     Log::Warning("[Fishing] loot table %s is missing", kFishingLootTable);
                 }
-                // (MC also fires FISHING_ROD_HOOKED and counts FISH_CAUGHT —
-                // no advancements or statistics here.)
+                // CriteriaTriggers.FISHING_ROD_HOOKED with the catch (MC also
+                // counts FISH_CAUGHT — no statistics here).
+                Server::CriteriaTriggers::FishingRodHooked(*fisher.player, rod, hook, items);
                 for (const ItemStack& stack : items) {
                     if (stack.IsEmpty()) continue;
                     // The catch flies at the player: 0.1 of the gap, lifted by
@@ -162,7 +169,7 @@ namespace Game {
         }
 
         if (hook) {
-            const int dmg = Retrieve(*hook, fisher);
+            const int dmg = Retrieve(*hook, fisher, rod);
             HurtAndBreak(rod, dmg, world, &player, hand);
             world->PlaySound(nullptr, at, SoundEvents::FISHING_BOBBER_RETRIEVE, SoundSource::Neutral,
                              1.0f, soundPitch());

@@ -54,6 +54,14 @@ namespace Server {
                             const std::vector<std::string>& args,
                             ServerConnection& connection,
                             PlayerSessionManager& sessionManager);
+
+        // MC Entity.teleportTo(level, x, y, z, relatives = ∅, yRot, xRot,
+        // setCamera) as the commands that move an entity without /tp's
+        // grammar use it (/spreadplayers): performTeleport's path, crossing
+        // levels when the victim is in another. False when the position is
+        // outside the spawnable bounds or the crossing could not be made.
+        static bool TeleportEntity(const CommandSource& source, const SelectedEntity& victim,
+                                   Game::DimensionId level, const glm::dvec3& pos, float yRot, float xRot);
     };
 
 } // namespace Server

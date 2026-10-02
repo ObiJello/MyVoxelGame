@@ -74,16 +74,9 @@ namespace Client {
                   static_cast<unsigned long long>(p.gunId),
                   p.originX, p.originY, p.originZ,
                   p.normalX, p.normalY, p.normalZ);
-        // Flip the bracket on that side from outline to filled.
-        Render::PortalCrosshair::NotifyPortalPlaced(p.color);
     }
 
     void ClientPortalManager::OnPortalRemove(const Network::PortalRemoveS2CPacket& p) {
-        // Revert the bracket on the cleared side(s) back to outline.
-        // Done up-front so the swap happens even when we early-return
-        // on color==2 below.
-        Render::PortalCrosshair::NotifyPortalRemoved(p.color);
-
         auto it = m_pairs.find(p.gunId);
         if (it == m_pairs.end()) return;
 
@@ -123,20 +116,28 @@ namespace Client {
             if (!(pair.blue.active && pair.orange.active)) continue;
             const ClientPortal* sides[2] = { &pair.blue, &pair.orange };
             for (const ClientPortal* p : sides) {
-                const glm::dvec3 wallMid =
-                    p->origin - 0.5 * glm::dvec3(p->normal);
-                const glm::dvec3 halfUp = 0.5 * glm::dvec3(p->upDir);
-                const glm::ivec3 wallA = glm::ivec3(glm::floor(wallMid - halfUp));
-                const glm::ivec3 wallB = glm::ivec3(glm::floor(wallMid + halfUp));
-                // Tunnel extension: 1 block deeper in -normal direction.
+                // The wall cells behind the 1×2 opening: every cell of the
+                // wall layer the rectangle (±0.5 along right, ±1.0 along up)
+                // overlaps — wallA/wallB for a grid portal, up to 2×3 for
+                // one placed off the grid (/gamerule portal_gun_free_
+                // placement; the server's PortalRegistry footprint) — and,
+                // as the tunnel extension, the layer one block deeper.
                 const glm::ivec3 normalI = glm::ivec3(glm::round(p->normal));
-                const glm::ivec3 wallAdeep = wallA - normalI;
-                const glm::ivec3 wallBdeep = wallB - normalI;
-                const bool isWallBlock =
-                    (x == wallA.x     && y == wallA.y     && z == wallA.z) ||
-                    (x == wallB.x     && y == wallB.y     && z == wallB.z) ||
-                    (x == wallAdeep.x && y == wallAdeep.y && z == wallAdeep.z) ||
-                    (x == wallBdeep.x && y == wallBdeep.y && z == wallBdeep.z);
+                const glm::ivec3 rightI  = glm::ivec3(glm::round(p->right));
+                const glm::ivec3 upI     = glm::ivec3(glm::round(p->upDir));
+                auto axisOf = [](const glm::ivec3& v) { return v.x != 0 ? 0 : (v.y != 0 ? 1 : 2); };
+                const int na = axisOf(normalI), ra = axisOf(rightI), ua = axisOf(upI);
+                if (na == ra || na == ua || ra == ua) continue;
+                const glm::ivec3 cell(x, y, z);
+                constexpr double kEps = 1e-4;
+                const int r0 = static_cast<int>(std::floor(p->origin[ra] - 0.5 + kEps));
+                const int r1 = static_cast<int>(std::floor(p->origin[ra] + 0.5 - kEps));
+                const int u0 = static_cast<int>(std::floor(p->origin[ua] - 1.0 + kEps));
+                const int u1 = static_cast<int>(std::floor(p->origin[ua] + 1.0 - kEps));
+                const int layer = static_cast<int>(std::floor(p->origin[na] - 0.5 * normalI[na]));
+                const bool inLayer = cell[na] == layer || cell[na] == layer - normalI[na];
+                const bool isWallBlock = inLayer &&
+                    cell[ra] >= r0 && cell[ra] <= r1 && cell[ua] >= u0 && cell[ua] <= u1;
                 if (!isWallBlock) continue;
 
                 // Lateral-fit test: project the player AABB onto the

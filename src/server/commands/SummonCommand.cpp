@@ -265,7 +265,7 @@ namespace Server {
             return;
         }
 
-        connection.SendChatMessage("Summoned " + std::to_string(spawned) + " " + slug, 1);
+        source.SendSuccess(connection, "Summoned " + std::to_string(spawned) + " " + slug, true);
         Log::Info("[SummonCommand] %s summoned %d %s",
                   sender.getName().c_str(), spawned, slug.c_str());
     }

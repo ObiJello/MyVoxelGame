@@ -29,12 +29,13 @@
 #include "server/session/PlayerSessionManager.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/WorldMobSpawn.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include <memory>
 
 namespace Game {
 
-    bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack) {
+    bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack, IUsePlayer* thrower) {
         auto* server = Server::g_integratedServer.get();
         if (!server) return false;
 
@@ -69,6 +70,10 @@ namespace Game {
         if (level->Mobs()->Add(std::move(eye)) == 0) {
             Log::Warning("[EnderEye] Could not register the thrown eye");
             return false;
+        }
+        // EnderEyeItem.use: CriteriaTriggers.USED_ENDER_EYE with the feature.
+        if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(thrower)) {
+            Server::CriteriaTriggers::UsedEnderEye(*player, *stronghold);
         }
         return true;
     }

@@ -83,7 +83,8 @@ namespace Server {
         // be turned into one. A falling block that cannot land drops here, and
         // routing it through PopResource visibly snapped the item to the
         // centre of whatever cell the entity happened to be overlapping.
-        void SpawnAtLocation(const glm::dvec3& pos, const Game::ItemStack& stack);
+        // Returns the new entity's id (0 for an empty stack).
+        int32_t SpawnAtLocation(const glm::dvec3& pos, const Game::ItemStack& stack);
 
         // MC Block.popResourceFromFace — drop nudged out of one face, used
         // when the item logically comes off a particular side of a block.
@@ -107,6 +108,17 @@ namespace Server {
         // horizontal direction, ignoring where the entity is looking. What
         // death drops and "empty this container" use.
         int32_t DropScattered(const glm::dvec3& pos, const Game::ItemStack& stack);
+
+        // MC ItemEntity.setThrower / getOwner: the entity (a player's view —
+        // its connection id — or a mob) that threw item `id`. Read by the
+        // thrown-item-picked-up advancement triggers; runtime only, like
+        // MC's (not saved here).
+        void SetThrower(int32_t id, int32_t throwerEntityId) { m_throwers[id] = throwerEntityId; }
+        std::optional<int32_t> ThrowerOf(int32_t id) const {
+            auto it = m_throwers.find(id);
+            if (it == m_throwers.end()) return std::nullopt;
+            return it->second;
+        }
 
         // ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -207,6 +219,8 @@ namespace Server {
         // not saved (TF's owner check is a same-session affair). Pruned
         // wherever an entity leaves m_entities.
         std::unordered_set<int32_t> m_playerThrown;
+        // Who threw each item (SetThrower), pruned with m_playerThrown.
+        std::unordered_map<int32_t, int32_t> m_throwers;
 
         // Portal guns among the entities (entity id -> gun instance id),
         // kept from spawn/adoption on because a destroyed entity's stack is

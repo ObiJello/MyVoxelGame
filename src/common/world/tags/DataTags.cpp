@@ -30,6 +30,7 @@ namespace Game::DataTags {
                 case Registry::Item:       return "item";
                 case Registry::DamageType: return "damage_type";
                 case Registry::GameEvent:  return "game_event";
+                case Registry::MobEffect:  return "mob_effect";
             }
             return "block";
         }
@@ -48,7 +49,7 @@ namespace Game::DataTags {
             std::vector<std::string> empty;
         };
 
-        Index g_index[6];
+        Index g_index[7];
         std::mutex g_mutex;
 
         void ScanRegistry(Index& index, Registry registry) {

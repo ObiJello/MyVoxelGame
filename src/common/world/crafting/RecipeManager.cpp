@@ -200,8 +200,51 @@ namespace Game {
                    IsPotIngredient(input.GetItem(2, 1)) && IsPotIngredient(input.GetItem(1, 2));
         }
 
+        // ShieldDecorationRecipe (crafting_special_shielddecoration): a
+        // banner onto an undecorated shield.
+        CraftingRecipe s_shieldDecoration = [] {
+            CraftingRecipe r;
+            r.id = "minecraft:shield_decoration";
+            r.kind = RecipeKind::Shapeless;
+            r.resultItem = Items::Shield;
+            r.resultCount = 1;
+            return r;
+        }();
+
+        // BannerItem.getColor: the banner's dye colour from its id
+        // (<colour>_banner), -1 for anything else.
+        int BannerItemColor(const ItemStack& stack) {
+            if (stack.IsEmpty()) return -1;
+            const std::string_view slug = ItemRegistry::Slug(stack.itemId);
+            constexpr std::string_view kSuffix = "_banner";
+            if (slug.size() <= kSuffix.size() || slug.substr(slug.size() - kSuffix.size()) != kSuffix) return -1;
+            return EntityVariantComponents::DyeFromName(slug.substr(0, slug.size() - kSuffix.size()));
+        }
+
+        // ShieldDecorationRecipe.matches: exactly one banner and one shield
+        // whose BANNER_PATTERNS is empty, nothing else.
+        bool ShieldDecorationMatches(const CraftingInput& input) {
+            if (input.IngredientCount() != 2) return false;
+            bool banner = false, shield = false;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (BannerItemColor(stack) >= 0) {
+                    if (banner) return false;
+                    banner = true;
+                } else if (stack.itemId == Items::Shield) {
+                    if (shield) return false;
+                    const auto patterns = stack.get(DataComponents::BANNER_PATTERNS);
+                    if (patterns && !patterns->layers.empty()) return false;
+                    shield = true;
+                } else {
+                    return false;
+                }
+            }
+            return banner && shield;
+        }
+
         // DataComponents.DYE — the sixteen dyes (#minecraft:dyes).
-        bool IsDye(const ItemStack& stack) { return DyeColorOfItem(stack.itemId) >= 0; }
+        bool IsDye(const ItemStack& stack) { return DyeColorOf(stack) >= 0; }
 
         // FireworkStarRecipe.findShape: fire charge → LARGE_BALL, feather →
         // BURST, gold nugget → STAR, #minecraft:skulls → CREEPER.
@@ -625,9 +668,10 @@ namespace Game {
     }
 
     int RecipeManager::GetFuelBurnTime(const ItemStack& stack) {
-        if (stack.IsEmpty()) return 0;
-        auto it = s_fuelBurnTimes.find(stack.itemId);
-        return (it != s_fuelBurnTimes.end()) ? it->second : 0;
+        // The stack's COOKING_FUEL in a plain furnace (the component is the
+        // source of truth; the table above only seeds the engine's own fuels,
+        // GameplayDataComponents).
+        return GetCookingFuelBurnTime(stack, BlockID::Furnace, nullptr);
     }
 
     size_t RecipeManager::CookingRecipeCount() { return s_cookingRecipes.size(); }
@@ -723,6 +767,7 @@ namespace Game {
             if (matched) return &recipe;
         }
         if (DecoratedPotMatches(input)) return &s_decoratedPot;
+        if (ShieldDecorationMatches(input)) return &s_shieldDecoration;
         if (BookCloningMatches(input)) return &s_bookCloning;
         if (MapCloningMatches(input)) return &s_mapCloning;
         if (MapExtendingMatches(input)) return &s_mapExtending;
@@ -778,6 +823,26 @@ namespace Game {
             return copy;
         }
 
+        // ShieldDecorationRecipe.assemble: the shield (count 1) with the
+        // banner's BANNER_PATTERNS and its colour as BASE_COLOR.
+        if (&recipe == &s_shieldDecoration) {
+            const ItemStack* banner = nullptr;
+            const ItemStack* shield = nullptr;
+            for (const ItemStack& stack : input.Items()) {
+                if (stack.IsEmpty()) continue;
+                if (BannerItemColor(stack) >= 0) banner = &stack;
+                else if (stack.itemId == Items::Shield) shield = &stack;
+            }
+            if (!banner || !shield) return ItemStack{};
+            ItemStack result = *shield;
+            result.count = 1;
+            if (const auto patterns = banner->get(DataComponents::BANNER_PATTERNS)) {
+                result.components.set(DataComponents::BANNER_PATTERNS, *patterns);
+            }
+            result.components.set(DataComponents::BASE_COLOR, static_cast<int32_t>(BannerItemColor(*banner)));
+            return result;
+        }
+
         // DecoratedPotRecipe.assemble: the pot with POT_DECORATIONS from the
         // four edges (back, left, right, front).
         if (&recipe == &s_decoratedPot) {
@@ -819,7 +884,7 @@ namespace Game {
                     explosion.hasTrail = true;
                 } else if (IsDye(stack)) {
                     explosion.colors.push_back(FireworkItems::DyeFireworkColor(
-                        static_cast<uint8_t>(DyeColorOfItem(stack.itemId))));
+                        static_cast<uint8_t>(DyeColorOf(stack))));
                 }
             }
             out.components.set(DataComponents::FIREWORK_EXPLOSION, std::move(explosion));
@@ -835,7 +900,7 @@ namespace Game {
                 if (stack.IsEmpty()) continue;
                 if (IsDye(stack)) {
                     colors.push_back(FireworkItems::DyeFireworkColor(
-                        static_cast<uint8_t>(DyeColorOfItem(stack.itemId))));
+                        static_cast<uint8_t>(DyeColorOf(stack))));
                 } else if (stack.itemId == Items::FireworkStar) {
                     target = &stack;
                 }

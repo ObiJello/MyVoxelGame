@@ -2,7 +2,6 @@
 #include "AbstractContainerScreen.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/world/block/BlockRegistry.hpp"
-#include "common/entity/GeneratedItemAttributes.hpp"
 #include "GuiGraphics.hpp"
 #include "common/world/crafting/RecipeManager.hpp"
 #include "FontRenderer.hpp"
@@ -13,6 +12,7 @@
 #include "common/entity/FireworkItems.hpp"
 #include "common/text/Language.hpp"
 #include "common/text/TextComponent.hpp"
+#include "common/data/components/ComponentTooltips.hpp"
 #include "client/entity/Player.hpp"
 #include "common/entity/Item.hpp"        // IsSameItemSameComponents (Ctrl+Shift+Q)
 #include "common/entity/decoration/PaintingVariants.hpp"
@@ -675,7 +675,7 @@ namespace Render {
             return 1;
         }
         // Middle (creative-clone): full stack per slot.
-        return Game::ItemRegistry::Get(Carried().itemId).maxStackSize;
+        return Game::GetMaxStackSize(Carried());
     }
 
     Game::InventorySlot AbstractContainerScreen::DisplayedSlot(
@@ -691,7 +691,7 @@ namespace Render {
         Game::AbstractContainerMenu* menu = Menu();
         // Cap at the SLOT's limit, matching the authoritative end-phase commit.
         const int maxStack = menu ? menu->GetSlot(slotIndex).GetMaxStackSize(Carried())
-                                  : Game::ItemRegistry::Get(Carried().itemId).maxStackSize;
+                                  : Game::GetMaxStackSize(Carried());
         if (base.IsEmpty()) {
             // Copy the cursor stack so the preview shows the real item —
             // constructing from a bare id drops components, previewing a plain
@@ -790,201 +790,280 @@ namespace Render {
         g.RenderItemDecorations(displayed, x, y);
     }
 
+    namespace {
+
+        constexpr uint32_t kTooltipWhite      = 0xFFFFFFFFu;
+        constexpr uint32_t kTooltipGray       = 0xFFAAAAAAu;
+        constexpr uint32_t kTooltipDarkGray   = 0xFF555555u;
+        constexpr uint32_t kTooltipBlue       = 0xFF5555FFu;
+        constexpr uint32_t kTooltipRed        = 0xFFFF5555u;
+        constexpr uint32_t kTooltipDarkGreen  = 0xFF00AA00u;
+
+        // Component.translatable(key, args…) as a plain string.
+        std::string Translated(const char* key, std::initializer_list<std::string> args) {
+            std::vector<Game::Text::Component> with;
+            for (const std::string& a : args) with.push_back(Game::Text::Component::Literal(a));
+            return Game::Text::GetString(Game::Text::Component::Translatable(key, with));
+        }
+
+        // ItemAttributeModifiers.ATTRIBUTE_MODIFIER_FORMAT: DecimalFormat("#.##").
+        std::string FormatModifierAmount(double v) {
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "%.2f", v);
+            std::string t = buf;
+            while (!t.empty() && t.back() == '0') t.pop_back();
+            if (!t.empty() && t.back() == '.') t.pop_back();
+            if (t == "-0") t = "0";
+            return t;
+        }
+
+        // Attribute.getStyle(valueIncrease) over its Sentiment.
+        uint32_t AttributeStyle(Game::Attribute attribute, bool increase) {
+            switch (Game::GetAttributeDef(attribute).sentiment) {
+                case Game::AttributeSentiment::Positive: return increase ? kTooltipBlue : kTooltipRed;
+                case Game::AttributeSentiment::Negative: return increase ? kTooltipRed : kTooltipBlue;
+                case Game::AttributeSentiment::Neutral:  return kTooltipGray;
+            }
+            return kTooltipBlue;
+        }
+
+        // Attribute.getDescriptionId, translated (a pack without the key
+        // shows the attribute's name in title case).
+        std::string AttributeDisplayName(Game::Attribute attribute) {
+            std::string fallback(Game::AttributeName(attribute));
+            bool capitalize = true;
+            for (char& c : fallback) {
+                if (c == '_') { c = ' '; capitalize = true; continue; }
+                if (capitalize) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                capitalize = false;
+            }
+            return Game::Language::GetOrDefault(Game::AttributeDescriptionId(attribute), fallback);
+        }
+
+        int OperationId(Game::AttributeOperation op) { return static_cast<int>(op); }
+
+    } // namespace
+
     // MC ItemStack.getTooltipLines — the lines only, no drawing. RenderTooltip
     // draws them; the creative screen also indexes them for its search (MC
     // SessionSearchTrees.updateCreativeTooltips searches the tooltip text).
+    //
+    // The order is ItemStack.addDetailsToTooltip's, one step per
+    // ComponentTooltips::Slot; every step asks TOOLTIP_DISPLAY first
+    // (TooltipDisplay.shows), and the components whose lines are produced in
+    // common code are the providers registered against their slot.
     void AbstractContainerScreen::BuildTooltipLines(const Game::ItemStack& stack, bool advanced,
                                                     std::vector<TooltipLine>& lines) {
+        namespace CT = Game::ComponentTooltips;
+        namespace DC = Game::DataComponents;
         if (stack.IsEmpty()) return;
 
-        // Name line — mirrors ItemStack.getStyledHoverName:
-        //   CUSTOM_NAME (anvil rename; MC renders italic — our font can't)
-        //   → ITEM_NAME (data-driven base name)
-        //   → registry display name,
-        // coloured by the RARITY component (Rarity.color(), WHITE default).
-        // (PotionItem / TippedArrowItem.getName answer from POTION_CONTENTS —
-        // "Potion of Swiftness" — inside GetItemStackItemName.)
-        std::string name = Game::GetItemStackHoverName(stack);
-        if (name.empty()) return;
-        // ItemStack.getRarity: an enchanted item shows one tier up.
-        const uint32_t nameColor = Game::RarityColorARGB(
-            static_cast<Game::Rarity>(Game::GetStackRarity(stack)));
+        const bool creative = m_player && m_player->IsCreative();
+        const Game::TooltipDisplay display = Game::GetTooltipDisplay(stack);
+        // `!tooltipFlag.isCreative() && display.hideTooltip()`: no tooltip.
+        if (!creative && display.hideTooltip) return;
+        const auto shows = [&display](const Game::DataComponentTypeBase& type) { return display.Shows(type); };
+        const CT::Context context{advanced, creative};
 
-        // Build the line list: name first, then per-component annotations.
-        // Mirrors MC's ItemStack.appendHoverText / DataComponentTooltips chain —
-        // each component's TooltipProvider appends its lines. Order: name →
-        // enchantments → lore (matching MC's addDetailsToTooltip).
-        lines.push_back({name, nameColor});
+        const auto push = [&lines](std::string text, uint32_t color) {
+            lines.push_back(TooltipLine{std::move(text), color, std::nullopt});
+        };
+        // Every provider registered for a slot (ComponentTooltips).
+        const auto providers = [&](CT::Slot slot) {
+            for (const CT::Registration& reg : CT::ForSlot(slot)) {
+                if (reg.type && (!stack.has(*reg.type) || !display.Shows(*reg.type))) continue;
+                std::vector<CT::Line> out;
+                reg.provider(stack, context, out);
+                for (CT::Line& l : out) lines.push_back(TooltipLine{std::move(l.text), l.argb, std::move(l.rich)});
+            }
+        };
 
-        // Item.appendHoverText, first in addDetailsToTooltip — the disc
-        // fragment's DiscFragmentItem: "<descriptionId>.desc" in grey
-        // ("Music Disc - 5").
-        if (stack.itemId == Game::Items::DiscFragment5) {
-            lines.push_back({Game::Language::Get("item.minecraft.disc_fragment_5.desc"), 0xFFAAAAAAu});
+        // ── getStyledHoverName: the hover name in the rarity's colour,
+        // italic when renamed, with the name's own styles.
+        {
+            Game::Text::Component name = Game::GetStyledHoverName(stack);
+            std::string plain = Game::Text::GetString(name);
+            if (plain.empty()) return;
+            lines.push_back(TooltipLine{std::move(plain),
+                                        Game::RarityColorARGB(static_cast<Game::Rarity>(Game::GetStackRarity(stack))),
+                                        std::move(name)});
         }
 
-        // TROPICAL_FISH_PATTERN — TropicalFish.Pattern.addToTooltip (first of
-        // the component providers in addDetailsToTooltip): the named fish
-        // ("Clownfish"), else the pattern and its colours ("Kob" / "Red,
-        // White"), ITALIC GRAY — grey here (the font has no italics). The
-        // colours default to DEFAULT_VARIANT's white when absent.
-        if (auto pattern = stack.get(Game::DataComponents::TROPICAL_FISH_PATTERN)) {
+        // ── Item.appendHoverText ─────────────────────────────────────────
+        // DiscFragmentItem: "<descriptionId>.desc" in grey ("Music Disc - 5").
+        if (stack.itemId == Game::Items::DiscFragment5) {
+            push(Game::Language::Get("item.minecraft.disc_fragment_5.desc"), kTooltipGray);
+        }
+        // SmithingTemplateItem: "Smithing Template", then "Applies to:" /
+        // "Ingredients:" (grey) over their blue descriptions.
+        {
+            const std::string_view slug = Game::ItemRegistry::Slug(stack.itemId);
+            constexpr std::string_view kSuffix = "_smithing_template";
+            if (slug.size() > kSuffix.size() && slug.substr(slug.size() - kSuffix.size()) == kSuffix) {
+                const bool netherite = slug == "netherite_upgrade_smithing_template";
+                const std::string kind = netherite ? "netherite_upgrade" : "armor_trim";
+                push(Game::Language::Get("item.minecraft.smithing_template"), kTooltipGray);
+                push("", kTooltipWhite);
+                push(Game::Language::Get("item.minecraft.smithing_template.applies_to"), kTooltipGray);
+                push(" " + Game::Language::Get("item.minecraft.smithing_template." + kind + ".applies_to"), kTooltipBlue);
+                push(Game::Language::Get("item.minecraft.smithing_template.ingredients"), kTooltipGray);
+                push(" " + Game::Language::Get("item.minecraft.smithing_template." + kind + ".ingredients"), kTooltipBlue);
+            }
+        }
+        // HangingEntityItem (the painting): the canvas's title and author
+        // (each in its variant JSON's colour), then "painting.dimensions"; a
+        // plain painting says "Random variant", in grey, to a creative player
+        // only (tooltipFlag.isCreative()).
+        if (stack.itemId == Game::Items::Painting && shows(DC::PAINTING_VARIANT)) {
+            const Game::PaintingVariant* variant = nullptr;
+            if (auto id = stack.get(DC::PAINTING_VARIANT)) {
+                variant = Game::PaintingVariants::Get(Game::PaintingVariants::IndexOf(*id));
+            }
+            const auto colorOf = [](const std::string& name) {
+                const auto parsed = Game::Text::TextColor::Parse(name);
+                return parsed ? (0xFF000000u | parsed->rgb) : kTooltipWhite;
+            };
+            if (variant) {
+                for (const auto* line : { &variant->title, &variant->author }) {
+                    if (!*line) continue;
+                    push(Game::Language::GetOrDefault((*line)->translate, (*line)->translate), colorOf((*line)->color));
+                }
+                std::string dims = Game::Language::GetOrDefault("painting.dimensions", "%sx%s");
+                for (int value : { variant->width, variant->height }) {
+                    const size_t at = dims.find("%s");
+                    if (at != std::string::npos) dims.replace(at, 2, std::to_string(value));
+                }
+                push(dims, kTooltipWhite);
+            } else if (creative) {
+                push(Game::Language::GetOrDefault("painting.random", "Random variant"), kTooltipGray);
+            }
+        }
+        providers(CT::Slot::AppendHoverText);
+
+        // ── TROPICAL_FISH_PATTERN — TropicalFish.Pattern.addToTooltip: the
+        // named fish ("Clownfish"), else the pattern and its colours, ITALIC
+        // GRAY (grey here — the font has no italics).
+        if (auto pattern = stack.get(DC::TROPICAL_FISH_PATTERN); pattern && shows(DC::TROPICAL_FISH_PATTERN)) {
             namespace TFV = Game::TropicalFishVariants;
             TFV::Variant variant = TFV::kDefaultVariant;
-            if (*pattern >= 0 && *pattern < TFV::kPatternCount) {
-                variant.pattern = static_cast<TFV::Pattern>(*pattern);
-            }
-            if (auto c = stack.get(Game::DataComponents::TROPICAL_FISH_BASE_COLOR)) {
-                variant.baseColor = TFV::DyeById(*c);
-            }
-            if (auto c = stack.get(Game::DataComponents::TROPICAL_FISH_PATTERN_COLOR)) {
-                variant.patternColor = TFV::DyeById(*c);
-            }
-            for (std::string& line : TFV::TooltipLines(variant)) {
-                lines.push_back({std::move(line), 0xFFAAAAAAu});
-            }
+            if (*pattern >= 0 && *pattern < TFV::kPatternCount) variant.pattern = static_cast<TFV::Pattern>(*pattern);
+            if (auto c = stack.get(DC::TROPICAL_FISH_BASE_COLOR)) variant.baseColor = TFV::DyeById(*c);
+            if (auto c = stack.get(DC::TROPICAL_FISH_PATTERN_COLOR)) variant.patternColor = TFV::DyeById(*c);
+            for (std::string& line : TFV::TooltipLines(variant)) push(std::move(line), kTooltipGray);
         }
+        providers(CT::Slot::TropicalFishPattern);
 
-        // INSTRUMENT — InstrumentComponent.addToTooltip (after the fish
-        // pattern, before MAP_ID): the instrument's description in GRAY
-        // ("Ponder", "Sing", ...).
-        if (auto instrument = stack.get(Game::DataComponents::INSTRUMENT)) {
+        // ── INSTRUMENT — InstrumentComponent.addToTooltip: the description.
+        if (auto instrument = stack.get(DC::INSTRUMENT); instrument && shows(DC::INSTRUMENT)) {
             const std::string description = Game::Instruments::DescriptionOf(*instrument);
-            if (!description.empty()) lines.push_back({description, 0xFFAAAAAAu});   // GRAY
+            if (!description.empty()) push(description, kTooltipGray);
         }
+        providers(CT::Slot::Instrument);
 
-        // MAP_ID — MapId.addToTooltip (ItemStack.addDetailsToTooltip puts
-        // it after INSTRUMENT, ahead of WRITTEN_BOOK_CONTENT): "Unknown Map"
-        // with no data; else "ID #n" (unless renamed or about to be locked /
-        // scaled), "Locked", and with advanced tooltips the scale and zoom
-        // level the map is (or, SCALE pending, will be).
-        if (auto mapId = stack.get(Game::DataComponents::MAP_ID)) {
-            constexpr uint32_t kGray = 0xFFAAAAAAu;
-            auto translated = [](const char* key, std::initializer_list<std::string> args) {
-                std::vector<Game::Text::Component> components;
-                for (const std::string& a : args) components.push_back(Game::Text::Component::Literal(a));
-                return Game::Text::GetString(Game::Text::Component::Translatable(key, components));
-            };
+        // ── MAP_ID — MapId.addToTooltip: "Unknown Map" with no data; else
+        // "ID #n" (unless renamed or about to be locked / scaled), "Locked",
+        // and with advanced tooltips the scale and zoom level.
+        if (auto mapId = stack.get(DC::MAP_ID); mapId && shows(DC::MAP_ID)) {
             const auto data = Client::Maps::GetMapData(*mapId);
             if (!data) {
-                lines.push_back({Game::Language::Get("filled_map.unknown"), kGray});
+                push(Game::Language::Get("filled_map.unknown"), kTooltipGray);
             } else {
-                const auto post = stack.get(Game::DataComponents::MAP_POST_PROCESSING);
-                if (!stack.get(Game::DataComponents::CUSTOM_NAME) && !post) {
-                    lines.push_back({translated("filled_map.id", {std::to_string(*mapId)}), kGray});
+                const auto post = stack.get(DC::MAP_POST_PROCESSING);
+                if (!stack.get(DC::CUSTOM_NAME) && !post) {
+                    push(Translated("filled_map.id", {std::to_string(*mapId)}), kTooltipGray);
                 }
                 if (data->locked || (post && *post == Game::Maps::MapPostProcessing::Lock)) {
-                    lines.push_back({Game::Language::Get("filled_map.locked"), kGray});
+                    push(Game::Language::Get("filled_map.locked"), kTooltipGray);
                 }
                 if (advanced) {
                     const int scaleToAdd = post && *post == Game::Maps::MapPostProcessing::Scale ? 1 : 0;
                     const int scale = std::min(data->scale + scaleToAdd, Game::Maps::kMaxScale);
-                    lines.push_back({translated("filled_map.scale", {std::to_string(1 << scale)}), kGray});
-                    lines.push_back({translated("filled_map.level", {std::to_string(scale), "4"}), kGray});
+                    push(Translated("filled_map.scale", {std::to_string(1 << scale)}), kTooltipGray);
+                    push(Translated("filled_map.level", {std::to_string(scale), "4"}), kTooltipGray);
                 }
             }
         }
+        providers(CT::Slot::MapId);
+        providers(CT::Slot::Bees);
+        providers(CT::Slot::ContainerLoot);
 
-        // CONTAINER — ItemContainerContents.addToTooltip: the first five
-        // stacks as "<name> x<count>", then "and N more..." in italics (a
-        // shulker box's contents).
-        if (auto contents = stack.get(Game::DataComponents::CONTAINER)) {
+        // ── CONTAINER — ItemContainerContents.addToTooltip: the first five
+        // stacks as "<name> x<count>", then "and N more...".
+        if (auto contents = stack.get(DC::CONTAINER); contents && shows(DC::CONTAINER)) {
             int lineCount = 0, itemCount = 0;
             for (const Game::ItemStack& item : contents->items) {
                 if (item.IsEmpty()) continue;
                 ++itemCount;
                 if (lineCount <= 4) {
                     ++lineCount;
-                    lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                         // The shipped language file's key for this line
-                                         // ("%s x%s": name, count).
-                                         "container.shulkerBox.itemCount",
-                                         {Game::Text::Component::Literal(Game::GetItemStackHoverName(item)),
-                                          Game::Text::Component::Literal(std::to_string(item.count))})),
-                                     0xFFFFFFFFu});
+                    push(Translated("container.shulkerBox.itemCount",
+                                    {Game::GetItemStackHoverName(item), std::to_string(item.count)}),
+                         kTooltipWhite);
                 }
             }
             if (itemCount - lineCount > 0) {
-                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                     "container.shulkerBox.more",
-                                     {Game::Text::Component::Literal(std::to_string(itemCount - lineCount))})),
-                                 0xFFFFFFFFu});
+                push(Translated("container.shulkerBox.more", {std::to_string(itemCount - lineCount)}), kTooltipWhite);
             }
         }
+        providers(CT::Slot::Container);
+        providers(CT::Slot::BannerPatterns);
 
-        // POT_DECORATIONS — PotDecorations.addToTooltip: unless EMPTY, a
+        // ── POT_DECORATIONS — PotDecorations.addToTooltip: unless EMPTY, a
         // blank line and each side's item name in grey, front, left, right,
         // back.
-        if (auto decorations = stack.get(Game::DataComponents::POT_DECORATIONS); decorations && !decorations->IsEmpty()) {
-            lines.push_back({"", 0xFFFFFFFFu});
+        if (auto decorations = stack.get(DC::POT_DECORATIONS);
+            decorations && !decorations->IsEmpty() && shows(DC::POT_DECORATIONS)) {
+            push("", kTooltipWhite);
             for (int side : { 3, 1, 2, 0 }) {
                 const Game::ItemID id = decorations->sides[static_cast<size_t>(side)];
                 if (id == Game::Items::Air) continue;
-                lines.push_back({Game::GetItemStackHoverName(Game::ItemStack(id, 1)), 0xFFAAAAAAu});
+                push(Game::GetItemStackHoverName(Game::ItemStack(id, 1)), kTooltipGray);
             }
         }
+        providers(CT::Slot::PotDecorations);
 
-        // WRITTEN_BOOK_CONTENT — WrittenBookContent.addToTooltip: "by
-        // <author>" when the author is not blank, then the generation
-        // ("Original", "Copy of original", …), both grey. MC's order puts it
-        // ahead of POTION_CONTENTS (ItemStack.addDetailsToTooltip).
-        if (auto book = stack.get(Game::DataComponents::WRITTEN_BOOK_CONTENT)) {
+        // ── WRITTEN_BOOK_CONTENT — "by <author>" when the author is not
+        // blank, then the generation, both grey.
+        if (auto book = stack.get(DC::WRITTEN_BOOK_CONTENT); book && shows(DC::WRITTEN_BOOK_CONTENT)) {
             const bool blankAuthor = book->author.find_first_not_of(" \t\r\n") == std::string::npos;
-            if (!blankAuthor) {
-                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                     "book.byAuthor", {Game::Text::Component::Literal(book->author)})),
-                                 0xFFAAAAAAu});   // GRAY
-            }
-            lines.push_back({Game::Language::Get("book.generation." + std::to_string(book->generation)),
-                             0xFFAAAAAAu});       // GRAY
+            if (!blankAuthor) push(Translated("book.byAuthor", {book->author}), kTooltipGray);
+            push(Game::Language::Get("book.generation." + std::to_string(book->generation)), kTooltipGray);
         }
+        providers(CT::Slot::WrittenBookContent);
 
-        // CHARGED_PROJECTILES, FIREWORKS, FIREWORK_EXPLOSION — in
-        // ItemStack.addDetailsToTooltip's order, between WRITTEN_BOOK_CONTENT
-        // and POTION_CONTENTS.
+        // ── CHARGED_PROJECTILES, FIREWORKS, FIREWORK_EXPLOSION ────────────
         {
-            constexpr uint32_t kGrayLine = 0xFFAAAAAAu;
-            // The component lines an item-stack template adds of its own
-            // (addDetailsToTooltip), for a loaded crossbow's projectiles: a
-            // rocket's flight and stars, a star's explosion, a tipped arrow's
-            // effects.
+            // The lines an item-stack template adds of its own (its
+            // addDetailsToTooltip), for a loaded crossbow's projectiles.
             const auto projectileDetails = [](const Game::ItemStack& projectile,
                                               std::vector<Game::FireworkItems::TooltipLine>& out) {
-                if (auto fw = projectile.get(Game::DataComponents::FIREWORKS)) {
-                    Game::FireworkItems::AddFireworksTooltip(*fw, out);
-                }
-                if (auto fe = projectile.get(Game::DataComponents::FIREWORK_EXPLOSION)) {
-                    Game::FireworkItems::AddExplosionTooltip(*fe, out);
-                }
-                if (auto potion = projectile.get(Game::DataComponents::POTION_CONTENTS)) {
+                if (auto fw = projectile.get(DC::FIREWORKS)) Game::FireworkItems::AddFireworksTooltip(*fw, out);
+                if (auto fe = projectile.get(DC::FIREWORK_EXPLOSION)) Game::FireworkItems::AddExplosionTooltip(*fe, out);
+                if (auto potion = projectile.get(DC::POTION_CONTENTS)) {
                     std::vector<Game::PotionTooltipLine> potionLines;
                     Game::AddPotionTooltip(potion->GetAllEffects(), potionLines,
-                                           projectile.get(Game::DataComponents::POTION_DURATION_SCALE).value_or(1.0f));
+                                           projectile.get(DC::POTION_DURATION_SCALE).value_or(1.0f));
                     for (auto& l : potionLines) out.push_back({std::move(l.text), l.colorARGB});
                 }
             };
             // ChargedProjectiles.addToTooltip: runs of matching stacks,
             // "Projectile: [name]" / "Projectile: N x [name]", each followed
             // by its details indented in grey.
-            if (auto charged = stack.get(Game::DataComponents::CHARGED_PROJECTILES); charged && !charged->IsEmpty()) {
+            if (auto charged = stack.get(DC::CHARGED_PROJECTILES);
+                charged && !charged->IsEmpty() && shows(DC::CHARGED_PROJECTILES)) {
                 const auto addRun = [&](const Game::ItemStack& projectile, int count) {
-                    const std::string name = "[" + Game::GetItemStackHoverName(projectile) + "]";
-                    std::vector<Game::Text::Component> with;
                     if (count == 1) {
-                        with.push_back(Game::Text::Component::Literal(name));
-                        lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                             "item.minecraft.crossbow.projectile.single", with)),
-                                         0xFFFFFFFFu});
+                        push(Translated("item.minecraft.crossbow.projectile.single",
+                                        {"[" + Game::GetItemStackHoverName(projectile) + "]"}),
+                             kTooltipWhite);
                     } else {
-                        with.push_back(Game::Text::Component::Literal(std::to_string(count)));
-                        with.push_back(Game::Text::Component::Literal(Game::GetItemStackHoverName(projectile)));
-                        lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                             "item.minecraft.crossbow.projectile.multiple", with)),
-                                         0xFFFFFFFFu});
+                        push(Translated("item.minecraft.crossbow.projectile.multiple",
+                                        {std::to_string(count), Game::GetItemStackHoverName(projectile)}),
+                             kTooltipWhite);
                     }
                     std::vector<Game::FireworkItems::TooltipLine> details;
                     projectileDetails(projectile, details);
-                    for (auto& d : details) lines.push_back({"  " + d.text, kGrayLine});
+                    for (auto& d : details) push("  " + d.text, kTooltipGray);
                 };
                 const Game::ItemStack* current = nullptr;
                 int count = 0;
@@ -1002,233 +1081,261 @@ namespace Render {
                 }
                 if (current) addRun(*current, count);
             }
-            // Fireworks.addToTooltip / FireworkExplosion.addToTooltip.
+            providers(CT::Slot::ChargedProjectiles);
             std::vector<Game::FireworkItems::TooltipLine> fireworkLines;
-            if (auto fw = stack.get(Game::DataComponents::FIREWORKS)) {
+            if (auto fw = stack.get(DC::FIREWORKS); fw && shows(DC::FIREWORKS)) {
                 Game::FireworkItems::AddFireworksTooltip(*fw, fireworkLines);
             }
-            if (auto fe = stack.get(Game::DataComponents::FIREWORK_EXPLOSION)) {
+            for (auto& l : fireworkLines) push(std::move(l.text), l.argb);
+            providers(CT::Slot::Fireworks);
+            fireworkLines.clear();
+            if (auto fe = stack.get(DC::FIREWORK_EXPLOSION); fe && shows(DC::FIREWORK_EXPLOSION)) {
                 Game::FireworkItems::AddExplosionTooltip(*fe, fireworkLines);
             }
-            for (auto& l : fireworkLines) lines.push_back({std::move(l.text), l.argb});
+            for (auto& l : fireworkLines) push(std::move(l.text), l.argb);
+            providers(CT::Slot::FireworkExplosion);
         }
 
-        // POTION_CONTENTS — PotionContents.addToTooltip: every effect with
-        // its potency and (scaled) duration, "No Effects" for none, and the
-        // "When Applied:" attribute lines. Scaled by the stack's
-        // POTION_DURATION_SCALE (a lingering potion shows 1/4, a tipped
-        // arrow 1/8 of the potion's durations).
-        if (auto potion = stack.get(Game::DataComponents::POTION_CONTENTS)) {
+        // ── POTION_CONTENTS — every effect with its potency and (scaled)
+        // duration, "No Effects" for none, and the "When Applied:" lines.
+        if (auto potion = stack.get(DC::POTION_CONTENTS); potion && shows(DC::POTION_CONTENTS)) {
             std::vector<Game::PotionTooltipLine> potionLines;
             Game::AddPotionTooltip(potion->GetAllEffects(), potionLines,
-                                   stack.get(Game::DataComponents::POTION_DURATION_SCALE).value_or(1.0f));
-            for (auto& l : potionLines) lines.push_back({std::move(l.text), l.colorARGB});
+                                   stack.get(DC::POTION_DURATION_SCALE).value_or(1.0f));
+            for (auto& l : potionLines) push(std::move(l.text), l.colorARGB);
         }
+        providers(CT::Slot::PotionContents);
 
-        // PAINTING_VARIANT — HangingEntityItem.appendHoverText: the canvas's
-        // title and author (each in the colour its variant JSON gives), then
-        // "painting.dimensions"; a plain painting says "Random variant", in
-        // grey, to a creative player only (tooltipFlag.isCreative()).
-        if (stack.itemId == Game::Items::Painting) {
-            const Game::PaintingVariant* variant = nullptr;
-            if (auto id = stack.get(Game::DataComponents::PAINTING_VARIANT)) {
-                variant = Game::PaintingVariants::Get(Game::PaintingVariants::IndexOf(*id));
-            }
-            const auto colorOf = [](const std::string& name) {
-                const auto parsed = Game::Text::TextColor::Parse(name);
-                return parsed ? (0xFF000000u | parsed->rgb) : 0xFFFFFFFFu;
-            };
-            if (variant) {
-                for (const auto* line : { &variant->title, &variant->author }) {
-                    if (!*line) continue;
-                    lines.push_back({Game::Language::GetOrDefault((*line)->translate, (*line)->translate),
-                                     colorOf((*line)->color)});
-                }
-                std::string dims = Game::Language::GetOrDefault("painting.dimensions", "%sx%s");
-                for (int value : { variant->width, variant->height }) {
-                    const size_t at = dims.find("%s");
-                    if (at != std::string::npos) dims.replace(at, 2, std::to_string(value));
-                }
-                lines.push_back({dims, 0xFFFFFFFFu});
-            } else if (Player() && Player()->IsCreative()) {
-                lines.push_back({Game::Language::GetOrDefault("painting.random", "Random variant"), 0xFFAAAAAAu});
+        // ── JUKEBOX_PLAYABLE — the song's description in grey. (A stack
+        // whose JUKEBOX_PLAYABLE provider is registered answers there.)
+        if (CT::ForSlot(CT::Slot::JukeboxPlayable).empty()) {
+            if (const std::string& song = Game::ItemRegistry::Get(stack.itemId).jukeboxSongDescription; !song.empty()) {
+                push(song, kTooltipGray);
             }
         }
+        providers(CT::Slot::JukeboxPlayable);
+        providers(CT::Slot::Trim);
 
-        // JUKEBOX_PLAYABLE — JukeboxPlayable.addToTooltip: the song's
-        // description in grey ("C418 - 13"), before the enchantment lines.
-        if (const std::string& song = Game::ItemRegistry::Get(stack.itemId).jukeboxSongDescription; !song.empty()) {
-            lines.push_back({song, 0xFFAAAAAAu});   // GRAY
-        }
-
-        if (auto stored = stack.get(Game::DataComponents::STORED_ENCHANTMENTS)) {
+        // ── STORED_ENCHANTMENTS, ENCHANTMENTS — ItemEnchantments.addToTooltip.
+        if (auto stored = stack.get(DC::STORED_ENCHANTMENTS); stored && shows(DC::STORED_ENCHANTMENTS)) {
             std::vector<Game::Enchantment::FormattedLine> ench;
             stored->AddToTooltip(ench);
-            for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
+            for (auto& l : ench) push(std::move(l.text), l.colorARGB);
         }
-        // ENCHANTMENTS — right after STORED_ENCHANTMENTS in
-        // addDetailsToTooltip, the same ItemEnchantments.addToTooltip.
-        if (auto enchantments = stack.get(Game::DataComponents::ENCHANTMENTS)) {
+        providers(CT::Slot::StoredEnchantments);
+        if (auto enchantments = stack.get(DC::ENCHANTMENTS); enchantments && shows(DC::ENCHANTMENTS)) {
             std::vector<Game::Enchantment::FormattedLine> ench;
             enchantments->AddToTooltip(ench);
-            for (auto& l : ench) lines.push_back({std::move(l.text), l.colorARGB});
+            for (auto& l : ench) push(std::move(l.text), l.colorARGB);
         }
+        providers(CT::Slot::Enchantments);
 
-        // LORE lines — MC ItemLore.LORE_STYLE = DARK_PURPLE + italic (no italics
-        // in our font; colour carries the style).
-        if (auto lore = stack.get(Game::DataComponents::LORE)) {
-            for (const auto& loreLine : lore->lines) {
-                lines.push_back({loreLine, 0xFFAA00AAu});   // DARK_PURPLE
+        // ── DYED_COLOR — DyedItemColor.addToTooltip: "Color: #RRGGBB" with
+        // advanced tooltips, else "Dyed" (grey, italic).
+        if (auto dyed = stack.get(DC::DYED_COLOR); dyed && shows(DC::DYED_COLOR)) {
+            if (advanced) {
+                char hex[16];
+                std::snprintf(hex, sizeof(hex), "#%06X", static_cast<unsigned>(*dyed) & 0xFFFFFFu);
+                push(Translated("item.color", {hex}), kTooltipGray);
+            } else {
+                push(Game::Language::GetOrDefault("item.dyed", "Dyed"), kTooltipGray);
             }
         }
+        providers(CT::Slot::DyedColor);
+        providers(CT::Slot::Profile);
+        // ── LORE (PresentationComponents registers ItemLore's provider).
+        providers(CT::Slot::Lore);
 
-        // Bundle contents — MC renders a slot grid (BundleTooltip); listed as
-        // "Name xN" lines here until a grid tooltip exists. Gray, newest first.
-        // MC SulfurCubeContent.addToTooltip: "Contains: <block>" in grey
-        // italics (entity.minecraft.sulfur_cube.content) under a bucket of
-        // sulfur cube that holds a block.
-        if (auto sulfur = stack.get(Game::DataComponents::SULFUR_CUBE_BUCKET)) {
-            if (!sulfur->bodyItem.empty()) {
-                const Game::ItemID inner = Game::RecipeManager::ItemFromSlug(sulfur->bodyItem);
-                if (inner != Game::Items::Air) {
-                    lines.push_back({"Contains: " + Game::ItemRegistry::Get(inner).name,
-                                     0xFFAAAAAAu});   // GRAY
-                }
+        // ── SULFUR_CUBE_CONTENT — "Contains: <block>" (grey italic).
+        if (auto sulfur = stack.get(DC::SULFUR_CUBE_CONTENT);
+            sulfur && !sulfur->absorbed.IsEmpty() && shows(DC::SULFUR_CUBE_CONTENT)) {
+            push(Translated("entity.minecraft.sulfur_cube.content", {Game::GetItemStackHoverName(sulfur->absorbed)}),
+                 kTooltipGray);
+        }
+        providers(CT::Slot::SulfurCubeContent);
+
+        // ── ItemStack.addAttributeTooltips: per EquipmentSlotGroup (MC's
+        // declaration order), the stack's forEachModifier(group) — its
+        // ATTRIBUTE_MODIFIERS entries, then its enchantments' — under a
+        // blank line and "When in Main Hand:" (item.modifiers.<group>). A
+        // Display.Default line reads as the player's total for the
+        // BASE_ATTACK_DAMAGE / BASE_ATTACK_SPEED entries (" 6 Attack Damage",
+        // dark green), else "+N" / "-N" (percent for the multiplied
+        // operations, knockback resistance times ten) in the attribute's
+        // sentiment colour; an override prints its own text; hidden, nothing.
+        if (shows(DC::ATTRIBUTE_MODIFIERS)) {
+            for (int g = 0; g < Game::kEquipmentSlotGroupCount; ++g) {
+                const auto group = static_cast<Game::EquipmentSlotGroup>(g);
+                bool first = true;
+                Game::ForEachTooltipModifier(stack, group, [&](const Game::TooltipModifier& m) {
+                    using DisplayType = Game::ItemAttributeModifiers::Display::Type;
+                    if (m.display.type == DisplayType::Hidden) return;
+                    if (first) {
+                        push("", kTooltipWhite);
+                        push(Game::Language::Get("item.modifiers." + std::string(Game::EquipmentSlotGroupName(group))),
+                             kTooltipGray);
+                        first = false;
+                    }
+                    if (m.display.type == DisplayType::Override) {
+                        lines.push_back(TooltipLine{Game::Text::GetString(m.display.value), kTooltipWhite, m.display.value});
+                        return;
+                    }
+                    double amount = m.modifier.amount;
+                    bool displayWithBase = false;
+                    if (m_player) {
+                        const std::string id = m.id.find(':') == std::string::npos ? "minecraft:" + m.id : m.id;
+                        if (id == Game::kBaseAttackDamageId) {
+                            amount += Game::PlayerBaseAttributeValue(Game::Attribute::AttackDamage);
+                            displayWithBase = true;
+                        } else if (id == Game::kBaseAttackSpeedId) {
+                            amount += Game::PlayerBaseAttributeValue(Game::Attribute::AttackSpeed);
+                            displayWithBase = true;
+                        }
+                    }
+                    const Game::AttributeOperation op = m.modifier.operation;
+                    double displayAmount = amount;
+                    if (op == Game::AttributeOperation::AddMultipliedBase ||
+                        op == Game::AttributeOperation::AddMultipliedTotal) {
+                        displayAmount = amount * 100.0;
+                    } else if (m.attribute == Game::Attribute::KnockbackResistance) {
+                        displayAmount = amount * 10.0;
+                    }
+                    const std::string name = AttributeDisplayName(m.attribute);
+                    const std::string opId = std::to_string(OperationId(op));
+                    if (displayWithBase) {
+                        push(" " + Translated(("attribute.modifier.equals." + opId).c_str(),
+                                              {FormatModifierAmount(displayAmount), name}),
+                             kTooltipDarkGreen);
+                    } else if (amount > 0.0) {
+                        push(Translated(("attribute.modifier.plus." + opId).c_str(),
+                                        {FormatModifierAmount(displayAmount), name}),
+                             AttributeStyle(m.attribute, true));
+                    } else if (amount < 0.0) {
+                        push(Translated(("attribute.modifier.take." + opId).c_str(),
+                                        {FormatModifierAmount(-displayAmount), name}),
+                             AttributeStyle(m.attribute, false));
+                    }
+                });
             }
         }
+        providers(CT::Slot::AttributeModifiers);
 
-        if (auto bundle = stack.get(Game::DataComponents::BUNDLE_CONTENTS)) {
-            for (const auto& inner : bundle->items) {
-                if (inner.IsEmpty()) continue;
-                lines.push_back({Game::ItemRegistry::Get(inner.itemId).name
-                                     + " x" + std::to_string(inner.count),
-                                 0xFFAAAAAAu});   // GRAY
-            }
+        // ── addUnitComponentToTooltip(INTANGIBLE_PROJECTILE / UNBREAKABLE).
+        providers(CT::Slot::IntangibleProjectile);
+        if (stack.get(DC::UNBREAKABLE) && shows(DC::UNBREAKABLE)) {
+            push(Game::Language::Get("item.unbreakable"), kTooltipBlue);
         }
+        providers(CT::Slot::Unbreakable);
+        providers(CT::Slot::SignTextFront);
+        providers(CT::Slot::SignTextBack);
 
-        // MC ItemStack.addAttributeTooltips — shown on EVERY tooltip, not only
-        // advanced ones: a blank line, "When in Main Hand:" in grey, then the
-        // player's base value plus the weapon's modifier in dark green
-        // (AttributeModifierDisplay.Default: BASE_ATTACK_DAMAGE/SPEED read as
-        // "equals", so an iron sword says " 6 Attack Damage", " 1.6 Attack
-        // Speed"). Only weapons carry modifiers here (GeneratedItemAttributes);
-        // this engine has no armor/toughness values on its armor items, so
-        // those lines cannot be produced yet.
-        {
-            // MC ATTRIBUTE_MODIFIER_FORMAT = DecimalFormat("#.##").
-            auto fmt = [](double v) {
-                char buf[32];
-                std::snprintf(buf, sizeof(buf), "%.2f", v);
-                std::string t = buf;
-                while (!t.empty() && t.back() == '0') t.pop_back();
-                if (!t.empty() && t.back() == '.') t.pop_back();
-                return t;
-            };
-            // Weapons and tools: every item registered with attack modifiers,
-            // INCLUDING the ones whose modifier is zero (a diamond hoe adds
-            // 0 to both and still lists " 1 Attack Damage" / " 4 Attack
-            // Speed" in vanilla).
-            if (Game::HasItemAttackAttributes(stack.itemId)) {
-                float dmg = 0.0f, spd = 0.0f;
-                Game::GetItemAttackAttributes(stack.itemId, dmg, spd);
-                lines.push_back({"", 0xFFFFFFFFu});
-                lines.push_back({"When in Main Hand:", 0xFFAAAAAAu});   // GRAY
-                lines.push_back({" " + fmt(dmg + Game::kPlayerBaseAttackDamage) + " Attack Damage", 0xFF00AA00u});   // DARK_GREEN
-                lines.push_back({" " + fmt(spd + Game::kPlayerBaseAttackSpeed) + " Attack Speed", 0xFF00AA00u});
-            }
-            // Armour (ArmorMaterial.createAttributes): ADD_VALUE modifiers
-            // that are not base values, so they print as "+N …" in BLUE
-            // (attribute.getStyle(true)); a zero modifier prints nothing
-            // (Default.apply: only amount > 0 or < 0 gets a line), and
-            // knockback resistance is shown times ten.
-            if (const Game::ItemArmorRow* armor = Game::GetItemArmorAttributes(stack.itemId)) {
-                const char* header = "When equipped:";
-                switch (armor->slot) {
-                    case Game::ArmorSlotGroup::Head:  header = "When on Head:";  break;
-                    case Game::ArmorSlotGroup::Chest: header = "When on Chest:"; break;
-                    case Game::ArmorSlotGroup::Legs:  header = "When on Legs:";  break;
-                    case Game::ArmorSlotGroup::Feet:  header = "When on Feet:";  break;
-                    case Game::ArmorSlotGroup::Body:  header = "When equipped:"; break;
-                }
-                lines.push_back({"", 0xFFFFFFFFu});
-                lines.push_back({header, 0xFFAAAAAAu});   // GRAY
-                constexpr uint32_t kBlue = 0xFF5555FFu;
-                if (armor->armor > 0.0f)               lines.push_back({"+" + fmt(armor->armor) + " Armor", kBlue});
-                if (armor->armorToughness > 0.0f)      lines.push_back({"+" + fmt(armor->armorToughness) + " Armor Toughness", kBlue});
-                if (armor->knockbackResistance > 0.0f) lines.push_back({"+" + fmt(armor->knockbackResistance * 10.0) + " Knockback Resistance", kBlue});
-            }
-        }
-
-        // UNBREAKABLE — addUnitComponentToTooltip(UNBREAKABLE,
-        // "item.unbreakable" in BLUE), after the attribute lines.
-        if (stack.get(Game::DataComponents::UNBREAKABLE)) {
-            lines.push_back({Game::Language::Get("item.unbreakable"), 0xFF5555FFu});   // BLUE
-        }
-
-        // OMINOUS_BOTTLE_AMPLIFIER — OminousBottleAmplifier.addToTooltip: the
-        // Bad Omen it gives (level and 100:00), as a potion's effect line.
-        if (auto amplifier = stack.get(Game::DataComponents::OMINOUS_BOTTLE_AMPLIFIER)) {
+        // ── OMINOUS_BOTTLE_AMPLIFIER — the Bad Omen it gives, as a potion's
+        // effect line.
+        if (auto amplifier = stack.get(DC::OMINOUS_BOTTLE_AMPLIFIER); amplifier && shows(DC::OMINOUS_BOTTLE_AMPLIFIER)) {
             std::vector<Game::MobEffectInstance> effects;
-            effects.emplace_back(Game::MobEffectId::BadOmen, Game::DataComponents::kOminousBottleEffectDuration,
+            effects.emplace_back(Game::MobEffectId::BadOmen, DC::kOminousBottleEffectDuration,
                                  *amplifier, /*ambient=*/false, /*visible=*/false, /*showIcon=*/true);
             std::vector<Game::PotionTooltipLine> omenLines;
             Game::AddPotionTooltip(effects, omenLines, 1.0f);
-            for (auto& l : omenLines) lines.push_back({std::move(l.text), l.colorARGB});
+            for (auto& l : omenLines) push(std::move(l.text), l.colorARGB);
         }
+        providers(CT::Slot::OminousBottleAmplifier);
 
-        // SUSPICIOUS_STEW_EFFECTS — SuspiciousStewEffects.addToTooltip lists
-        // its effects only when flag.isCreative() (the creative player's
-        // tooltip); a survival player sees a plain stew.
-        if (auto stew = stack.get(Game::DataComponents::SUSPICIOUS_STEW_EFFECTS)) {
-            if (m_player && m_player->IsCreative()) {
-                std::vector<Game::MobEffectInstance> effects;
-                for (const auto& e : stew->effects) effects.push_back(e.CreateEffectInstance());
-                std::vector<Game::PotionTooltipLine> stewLines;
-                Game::AddPotionTooltip(effects, stewLines, 1.0f);
-                for (auto& l : stewLines) lines.push_back({std::move(l.text), l.colorARGB});
+        // ── SUSPICIOUS_STEW_EFFECTS — listed only when flag.isCreative().
+        if (auto stew = stack.get(DC::SUSPICIOUS_STEW_EFFECTS); stew && creative && shows(DC::SUSPICIOUS_STEW_EFFECTS)) {
+            std::vector<Game::MobEffectInstance> effects;
+            for (const auto& e : stew->effects) effects.push_back(e.CreateEffectInstance());
+            std::vector<Game::PotionTooltipLine> stewLines;
+            Game::AddPotionTooltip(effects, stewLines, 1.0f);
+            for (auto& l : stewLines) push(std::move(l.text), l.colorARGB);
+        }
+        providers(CT::Slot::SuspiciousStewEffects);
+        providers(CT::Slot::BlockState);
+        providers(CT::Slot::EntityData);
+        providers(CT::Slot::SpawnerBlockEntityData);
+
+        // Bundle contents — MC draws a slot grid (BundleTooltip, the
+        // tooltip image); listed as "Name xN" lines here, newest first.
+        if (auto bundle = stack.get(DC::BUNDLE_CONTENTS); bundle && shows(DC::BUNDLE_CONTENTS)) {
+            for (const auto& inner : bundle->items) {
+                if (inner.IsEmpty()) continue;
+                push(Game::GetItemStackHoverName(inner) + " x" + std::to_string(inner.count), kTooltipGray);
             }
         }
 
-        // F3+H — MC ItemStack.getTooltipLines with TooltipFlag.ADVANCED: the
-        // registry name in dark grey and the component count.
+        providers(CT::Slot::CanBreak);
+        providers(CT::Slot::CanPlaceOn);
+
+        // ── TooltipFlag.ADVANCED (F3+H) ──────────────────────────────────
         if (advanced) {
-            // "Durability: remaining / max" — only while damaged
-            // (`isDamaged() && display.shows(DAMAGE)`), in the default colour.
-            if (Game::IsDamaged(stack)) {
+            // "Durability: remaining / max" while damaged and DAMAGE shown.
+            if (Game::IsDamaged(stack) && shows(DC::DAMAGE)) {
                 const int maxDamage = Game::GetMaxDamage(stack);
-                lines.push_back({Game::Text::GetString(Game::Text::Component::Translatable(
-                                     "item.durability",
-                                     {Game::Text::Component::Literal(std::to_string(maxDamage - Game::GetDamageValue(stack))),
-                                      Game::Text::Component::Literal(std::to_string(maxDamage))})),
-                                 0xFFFFFFFFu});
+                push(Translated("item.durability", {std::to_string(maxDamage - Game::GetDamageValue(stack)),
+                                                    std::to_string(maxDamage)}),
+                     kTooltipWhite);
             }
-            std::string slug;
-            if (stack.itemId >= Game::PURE_ITEM_BASE) {
-                const size_t idx = static_cast<size_t>(stack.itemId - Game::PURE_ITEM_BASE);
-                if (idx < Game::kPureItemTableSize) slug = Game::kPureItemTable[idx].slug;
-            } else {
-                slug = Game::BlockRegistry::Get(static_cast<Game::BlockID>(stack.itemId)).registrySlug;
+            // The registry id in dark grey (the namespace is dropped here by
+            // request).
+            const std::string_view slug = Game::ItemRegistry::Slug(stack.itemId);
+            if (!slug.empty()) push(std::string(slug), kTooltipDarkGray);
+            // `components.size()` of the patched map: DataComponents.
+            // COMMON_ITEM_COMPONENTS and the item_name / item_model every item
+            // carries, the prototype's own, and the stack's patch — each
+            // counted once, minus what the patch removes.
+            static const char* const kCommon[] = {
+                "max_stack_size", "lore", "enchantments", "repair_cost", "use_effects", "attribute_modifiers",
+                "rarity", "break_sound", "tooltip_display", "attack_animation", "interact_animation",
+                "item_name", "item_model" };
+            std::vector<const Game::DataComponentTypeBase*> present;
+            const auto add = [&present](const Game::DataComponentTypeBase* t) {
+                if (t && std::find(present.begin(), present.end(), t) == present.end()) present.push_back(t);
+            };
+            for (const char* name : kCommon) add(DC::ByName(name));
+            const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
+            for (const Game::DataComponentTypeBase* t : Game::AllComponentTypes()) {
+                if (item.defaultComponents.has(*t) || stack.components.has(*t)) add(t);
             }
-            // The registry path only — vanilla prints "minecraft:stone"; the
-            // namespace is dropped here by request.
-            if (!slug.empty()) lines.push_back({slug, 0xFF555555u});   // DARK_GRAY
-            // MC counts the stack's WHOLE component map — the item's defaults
-            // plus the stack's patch — so a plain stone block says
-            // "13 component(s)": DataComponents.COMMON_ITEM_COMPONENTS (eleven:
-            // max_stack_size, lore, enchantments, repair_cost, use_effects,
-            // attribute_modifiers, rarity, break_sound, tooltip_display,
-            // attack_animation, interact_animation) plus the item_name and
-            // item_model every item gets. This engine keeps only the
-            // components it uses on an item's defaults (equippable, tool,
-            // food…), so the count is vanilla's common set plus those plus
-            // the stack's own entries.
-            constexpr size_t kVanillaCommonComponents = 13;
-            const size_t count = kVanillaCommonComponents +
-                                 Game::ItemRegistry::Get(stack.itemId).defaultComponents.size() +
-                                 stack.components.size();
-            lines.push_back({std::to_string(count) + " component(s)", 0xFF555555u});
+            size_t count = 0;
+            for (const Game::DataComponentTypeBase* t : present) {
+                if (!stack.components.isRemoved(*t)) ++count;
+            }
+            if (count > 0) push(Translated("item.components", {std::to_string(count)}), kTooltipDarkGray);
         }
     }
+
+    namespace {
+        // A rich line as its styled runs: the text of each run, drawn in the
+        // run's colour (the line's base colour where it sets none), with
+        // bold / underline / strikethrough as the font's formatting codes.
+        struct TooltipRun { std::string text; uint32_t color; };
+
+        std::vector<TooltipRun> RichRuns(const Game::Text::Component& component, uint32_t baseColor) {
+            std::vector<TooltipRun> runs;
+            Game::Text::Visit(component, Game::Text::Style{},
+                              [&runs, baseColor](const Game::Text::Style& style, std::string_view text) {
+                                  if (text.empty()) return true;
+                                  std::string prefix;
+                                  if (style.IsBold())          prefix += "\xC2\xA7l";
+                                  if (style.IsUnderlined())    prefix += "\xC2\xA7n";
+                                  if (style.IsStrikethrough()) prefix += "\xC2\xA7m";
+                                  const uint32_t color = style.color ? (0xFF000000u | style.color->rgb) : baseColor;
+                                  runs.push_back({prefix + std::string(text), color});
+                                  return true;
+                              });
+            return runs;
+        }
+
+        int RunsWidth(GuiGraphics& g, const std::vector<TooltipRun>& runs) {
+            int width = 0;
+            for (size_t i = 0; i < runs.size(); ++i) {
+                const int w = g.GetStringWidth(runs[i].text);
+                if (w <= 0) continue;
+                width += w + (width > 0 ? 1 : 0);
+            }
+            return width;
+        }
+    } // namespace
 
     void AbstractContainerScreen::RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack,
                                                 int mx, int my) {
@@ -1240,29 +1347,66 @@ namespace Render {
         // own additions (the creative screen's tab names).
         DecorateItemTooltip(stack, lines);
 
-        // Layout: 10-px line spacing matches MC's GuiGraphics tooltip spacing.
-        const int LINE_H = 10;
+        // Each line's runs (a plain line is one run).
+        std::vector<std::vector<TooltipRun>> runs(lines.size());
         int textW = 0;
-        for (const auto& l : lines) textW = std::max(textW, g.GetStringWidth(l.text));
-        const int totalH = static_cast<int>(lines.size()) * LINE_H - 2; // no trailing gap
+        for (size_t i = 0; i < lines.size(); ++i) {
+            if (lines[i].rich) runs[i] = RichRuns(*lines[i].rich, lines[i].color);
+            else runs[i].push_back({lines[i].text, lines[i].color});
+            textW = std::max(textW, RunsWidth(g, runs[i]));
+        }
+        // GuiGraphicsExtractor.tooltip: 10 px a line, -2 overall.
+        const int LINE_H = 10;
+        const int totalH = static_cast<int>(lines.size()) * LINE_H - 2;
 
+        // DefaultTooltipPositioner: 12 right / 12 up of the mouse, flipped
+        // left when it would leave the screen, pulled up off the bottom.
         int x = mx + 12;
         int y = my - 12;
-        // MC tooltip background colours (Screen.renderTooltip)
-        const uint32_t bg     = 0xF0100010;
-        const uint32_t border = 0x505000FF;
-        g.Fill(x - 3, y - 4,           x + textW + 3, y - 3,           bg);
-        g.Fill(x - 3, y + totalH + 3,  x + textW + 3, y + totalH + 4,  bg);
-        g.Fill(x - 3, y - 3,           x + textW + 3, y + totalH + 3,  bg);
-        g.Fill(x - 4, y - 3,           x - 3,         y + totalH + 3,  bg);
-        g.Fill(x + textW + 3, y - 3,   x + textW + 4, y + totalH + 3,  bg);
-        // Border (left + right)
-        g.Fill(x - 3,         y - 3 + 1, x - 3 + 1,     y + totalH + 3 - 1, border);
-        g.Fill(x + textW + 2, y - 3 + 1, x + textW + 3, y + totalH + 3 - 1, border);
+        if (x + textW > g.GuiWidth()) x = std::max(x - 24 - textW, 4);
+        if (y + totalH + 3 > g.GuiHeight()) y = g.GuiHeight() - totalH - 3;
+
+        // TooltipRenderUtil.extractTooltipBackground: the style's (or the
+        // vanilla) background and frame sprites, nine-sliced around the text
+        // with 3 px of padding and a 9 px margin. TOOLTIP_STYLE "ns:path"
+        // names tooltip/<path>_background / _frame.
+        std::string background = "tooltip/background";
+        std::string frame = "tooltip/frame";
+        if (auto style = stack.get(Game::DataComponents::TOOLTIP_STYLE); style && !style->empty()) {
+            const size_t colon = style->find(':');
+            const std::string path = colon == std::string::npos ? *style : style->substr(colon + 1);
+            if (g.HasSprite("tooltip/" + path + "_background")) background = "tooltip/" + path + "_background";
+            if (g.HasSprite("tooltip/" + path + "_frame"))      frame = "tooltip/" + path + "_frame";
+        }
+        const int x0 = x - 3 - 9;
+        const int y0 = y - 3 - 9;
+        const int paddedW = textW + 3 + 3 + 18;
+        const int paddedH = totalH + 3 + 3 + 18;
+        if (g.HasSprite(background) && g.HasSprite(frame)) {
+            g.BlitSprite(background, x0, y0, paddedW, paddedH);
+            g.BlitSprite(frame, x0, y0, paddedW, paddedH);
+        } else {
+            // No sprites (a pack without them): the pre-1.20.5 fill.
+            const uint32_t bg     = 0xF0100010;
+            const uint32_t border = 0x505000FF;
+            g.Fill(x - 3, y - 4,           x + textW + 3, y - 3,           bg);
+            g.Fill(x - 3, y + totalH + 3,  x + textW + 3, y + totalH + 4,  bg);
+            g.Fill(x - 3, y - 3,           x + textW + 3, y + totalH + 3,  bg);
+            g.Fill(x - 4, y - 3,           x - 3,         y + totalH + 3,  bg);
+            g.Fill(x + textW + 3, y - 3,   x + textW + 4, y + totalH + 3,  bg);
+            g.Fill(x - 3,         y - 3 + 1, x - 3 + 1,     y + totalH + 3 - 1, border);
+            g.Fill(x + textW + 2, y - 3 + 1, x + textW + 3, y + totalH + 3 - 1, border);
+        }
+        g.NextStratum();
 
         for (size_t i = 0; i < lines.size(); ++i) {
-            g.DrawString(lines[i].text, x, y + static_cast<int>(i) * LINE_H,
-                         lines[i].color, true);
+            int runX = x;
+            const int lineY = y + static_cast<int>(i) * LINE_H;
+            for (const TooltipRun& run : runs[i]) {
+                const int w = g.GetStringWidth(run.text);
+                g.DrawString(run.text, runX, lineY, run.color, true);
+                if (w > 0) runX += w + 1;
+            }
         }
     }
 

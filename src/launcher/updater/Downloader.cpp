@@ -11,6 +11,7 @@ namespace Launcher {
     struct DownloadContext {
         std::ofstream file;
         Downloader::ProgressCallback progressCallback;
+        Downloader::DataSink sink;
         std::atomic<bool>* cancelled;
     };
 
@@ -21,7 +22,9 @@ namespace Launcher {
         }
         size_t totalSize = size * nmemb;
         ctx->file.write(static_cast<char*>(contents), static_cast<std::streamsize>(totalSize));
-        return ctx->file.good() ? totalSize : 0;
+        if (!ctx->file.good()) return 0;
+        if (ctx->sink) ctx->sink(static_cast<const uint8_t*>(contents), totalSize);
+        return totalSize;
     }
 
     static int CurlProgressCallback(void* userdata, curl_off_t dltotal, curl_off_t dlnow,
@@ -36,7 +39,8 @@ namespace Launcher {
         return 0;
     }
 
-    bool Downloader::Download(const std::string& url, const std::string& outputPath, ProgressCallback progress) {
+    bool Downloader::Download(const std::string& url, const std::string& outputPath, ProgressCallback progress,
+                              DataSink sink) {
         m_cancelled = false;
 
         // Ensure parent directory exists
@@ -65,6 +69,7 @@ namespace Launcher {
             return false;
         }
         ctx.progressCallback = progress;
+        ctx.sink = std::move(sink);
         ctx.cancelled = &m_cancelled;
 
         struct curl_slist* headers = nullptr;
@@ -77,7 +82,11 @@ namespace Launcher {
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ctx);
         curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
         curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 10L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 600L); // 10 minute timeout for large files
+        // No total timeout: 600 MB on a slow line legitimately takes longer than any
+        // fixed limit. A stalled transfer (under 1 KB/s for 30 s) fails instead.
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
         curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
         curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, CurlProgressCallback);

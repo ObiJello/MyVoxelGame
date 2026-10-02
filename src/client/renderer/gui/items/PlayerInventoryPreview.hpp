@@ -1,6 +1,9 @@
 // File: src/client/renderer/gui/items/PlayerInventoryPreview.hpp
 //
-// Renders our stick-figure player into the inventory's preview box, mirroring
+// Renders the local player into the inventory's preview box — the stick
+// figure (its colour, or the launcher's painted figure), or MC's player model
+// in their skin (PlayerSkins: the same capture MountInventoryScreen draws a
+// mount with) — mirroring
 // MC's `InventoryScreen.renderEntityInInventoryFollowsMouse()` behavior:
 // dampened-atan cursor tracking, body and head yaw bias, head-pitch tilt.
 //
@@ -14,6 +17,8 @@
 #include "../GuiGraphics.hpp"
 #include "common/entity/PlayerColors.hpp"
 
+namespace Game { class ClientPlayer; }
+
 namespace Render {
 
     struct StickFigurePose {
@@ -23,6 +28,11 @@ namespace Render {
         bool  isCrouching;
         // MC isPassenger: the seated pose (a player on a cushion).
         bool  isSitting = false;
+        // The local player, when the caller has one: a Minecraft-skin look
+        // (Client::PlayerSkins) draws MC's player model with what they hold
+        // and wear, their sneak and walk — InventoryScreen draws the entity
+        // as it is.
+        const Game::ClientPlayer* player = nullptr;
     };
 
     // MC: InventoryScreen.renderEntityInInventoryFollowsMouse (lines 83-108).

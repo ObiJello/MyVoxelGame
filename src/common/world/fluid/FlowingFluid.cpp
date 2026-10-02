@@ -6,6 +6,7 @@
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/CandleBlocks.hpp"
+#include "common/world/block/FireBlock.hpp"
 #include "common/world/block/ShapeOcclusion.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/level/DimensionId.hpp"
@@ -608,6 +609,13 @@ namespace Game {
         }
 
         void LavaRandomTick(ILevelWrite& level, const glm::ivec3& pos, JavaRandom& random) {
+            // MC LavaFluid.randomTick: the whole ignition sits behind
+            // ServerLevel.canSpreadFireAround (fire_spread_radius_around_player).
+            if (World* world = dynamic_cast<World*>(&level)) {
+                if (EntityLevel* entities = world->Entities()) {
+                    if (!FireCanSpreadAround(*entities, pos)) return;
+                }
+            }
             const int passes = random.NextInt(3);
             if (passes > 0) {
                 glm::ivec3 testPos = pos;

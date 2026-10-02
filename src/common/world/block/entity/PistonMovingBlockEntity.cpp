@@ -8,6 +8,10 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/RedstoneStateUtil.hpp"
 #include "common/world/block/piston/PistonBaseBlock.hpp"
+#include "common/world/block/piston/PistonBlockEntities.hpp"
+#include "common/world/block/entity/BlockEntityType.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/DoubleChest.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
 
@@ -242,14 +246,25 @@ namespace Game {
             const glm::ivec3 pos = GetWorldPos();
             const bool       isSourcePiston = m_isSourcePiston;
             const BlockState movedState     = m_movedState;
+            // The block entity in transit outlives this one: it is the
+            // landing block's (pistons_move_block_entities).
+            std::unique_ptr<BlockEntity> carried = std::move(m_carried);
             level.RemoveBlockEntity(pos);   // `this` is dead after this line
             if (level.GetBlockState(pos.x, pos.y, pos.z).Is(BlockID::MovingPiston)) {
                 BlockState newState;
                 if (isSourcePiston) newState = BlockState{};
-                else                newState = UpdateFromNeighbourShapes(level, movedState, pos);
+                else                newState = ChestLandingState(level, pos, movedState,
+                                                                 UpdateFromNeighbourShapes(level, movedState, pos));
                 level.SetBlock(pos.x, pos.y, pos.z, newState, World::UpdateFlags::All);
+                // Installed before the notification, so what the neighbours
+                // read is the block with its entity.
+                PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), /*landed=*/true);
                 level.NeighborChanged(pos, newState.Block());
             }
+            // Written over before it could land (preRemoveSideEffects from a
+            // write into the moving cell): nothing to put it in, so a
+            // container's contents spill here.
+            PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), false);
         }
     }
 
@@ -276,6 +291,11 @@ namespace Game {
                 return;
             }
             const BlockState movedState = m_movedState;
+            // The server's carried block entity leaves with the block (the
+            // client's copy stays on this entity: its write over the cell
+            // lands this entity, and the landed entity installs it when it
+            // retires — ClientChunkManager::RetireLandedBlockEntities).
+            std::unique_ptr<BlockEntity> carried;
             if (level.IsClientSide()) {
                 // The client's write over the moving cell lands this entity
                 // (ClientChunkManager::SetBlockLocal) instead of removing it,
@@ -286,22 +306,34 @@ namespace Game {
                     return;
                 }
             } else {
+                carried = std::move(m_carried);
                 level.RemoveBlockEntity(pos);   // `this` is dead after this line
             }
             if (level.GetBlockState(pos.x, pos.y, pos.z).Is(BlockID::MovingPiston)) {
-                BlockState newState = UpdateFromNeighbourShapes(level, movedState, pos);
+                // A carried chest lands paired the way a placed one would
+                // (DoubleChest.hpp ChestLandingState); its new partner
+                // follows through ChestBlock.updateShape on the write below.
+                BlockState newState = ChestLandingState(level, pos, movedState,
+                                                        UpdateFromNeighbourShapes(level, movedState, pos));
                 if (newState.Block() == BlockID::Air) {
                     // setBlock(pos, movedState, 340) then updateOrDestroy → destroy with drops.
                     level.SetBlock(pos.x, pos.y, pos.z, movedState, 256 | 64 | 16 | 4);
+                    // The carried entity goes in first, so the destroy drops
+                    // what it holds (and its loot sees it — a named block,
+                    // a shulker's contents) instead of losing it.
+                    PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), true);
                     level.DestroyBlock(pos, true);
                 } else {
                     if (newState.HasProperty(PropertyId::WATERLOGGED) && BoolOf(newState, PropertyId::WATERLOGGED)) {
                         newState = WithBool(newState, PropertyId::WATERLOGGED, false);
                     }
                     level.SetBlock(pos.x, pos.y, pos.z, newState, 64 | 2 | 1);
+                    PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), true);
                     level.NeighborChanged(pos, newState.Block());
                 }
             }
+            // Not landed (the cell changed under it): spilled, never lost.
+            PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), false);
             return;
         }
         const float newProgress = m_progress + 0.5f;
@@ -318,6 +350,20 @@ namespace Game {
         out.WriteByte(m_isSourcePiston ? 1 : 0);
         out.WriteFloat(m_progress);
         out.WriteFloat(m_progressO);
+        // Trailing (pistons_move_block_entities): the block entity in
+        // transit, as its type id and its own wire form, so a client that
+        // gets this cell in a chunk mid-move draws it too.
+        const BlockEntityType* carriedType = m_carried ? m_carried->GetType() : nullptr;
+        if (carriedType) {
+            Network::PacketBuffer blob;
+            m_carried->Save(blob);
+            out.WriteByte(1);
+            out.WriteVarInt(carriedType->TypeId());
+            out.WriteVarInt(static_cast<uint32_t>(blob.GetData().size()));
+            out.WriteBytes(blob.GetData());
+        } else {
+            out.WriteByte(0);
+        }
     }
 
     void PistonMovingBlockEntity::Load(Network::PacketReader& in) {
@@ -328,6 +374,18 @@ namespace Game {
         m_isSourcePiston = in.ReadByte() != 0;
         m_progress       = in.ReadFloat();
         m_progressO      = in.ReadFloat();
+        m_carried.reset();
+        if (in.Remaining() < 1 || in.ReadByte() == 0) return;
+        const auto* type = BlockEntityTypes::ForId(static_cast<uint16_t>(in.ReadVarInt()));
+        const uint32_t length = in.ReadVarInt();
+        if (length > in.Remaining()) return;
+        const std::vector<uint8_t> bytes = in.ReadBytes(length);
+        Network::PacketReader blob(bytes);   // holds a reference: `bytes` must outlive it
+        if (!type || !type->IsValidFor(m_movedState.Block())) return;
+        std::unique_ptr<BlockEntity> carried = type->Create(GetWorldPos(), m_movedState.Block());
+        if (!carried) return;
+        if (length > 0) carried->Load(blob);
+        Carry(std::move(carried));
     }
 
     void PistonMovingBlockEntity::WriteNbt(Nbt::Writer& w) const {

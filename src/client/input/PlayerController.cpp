@@ -203,6 +203,19 @@ namespace Game {
         pitchDeg = Game::Mth::XRotFromVector(d);
     }
 
+    void ClientPlayerController::HitLookAngles(const RaycastHit& hit, float& yawDeg,
+                                               float& pitchDeg) const {
+        // A ray-produced hit carries its own unit direction; a synthesised
+        // one (the place-on-water clip, the sky stand-in) carries zero.
+        const glm::vec3& d = hit.rayDirection;
+        if (glm::dot(d, d) > 0.25f) {
+            yawDeg   = Game::Mth::YRotFromVector(d);
+            pitchDeg = Game::Mth::XRotFromVector(d);
+            return;
+        }
+        LookAngles(yawDeg, pitchDeg);
+    }
+
     BlockID ClientPlayerController::ReadBlock(const glm::ivec3& pos) const {
         try {
             if (blockAccess) return blockAccess->GetBlock(pos.x, pos.y, pos.z);
@@ -215,6 +228,19 @@ namespace Game {
             if (blockAccess) return blockAccess->GetBlockState(pos.x, pos.y, pos.z);
         } catch (...) {}
         return BlockState{};
+    }
+
+    namespace {
+        // The client's half of the adventure-mode predicates (ItemStack.
+        // canBreakBlockInAdventureMode / canPlaceOnBlockInAdventureMode):
+        // a predicate that asks for block-entity NBT is left to the server,
+        // which holds the saves — the client lets the action through and the
+        // server's answer stands.
+        bool ClientAdventureAllows(const std::optional<Game::AdventureModePredicate>& predicate, BlockState state) {
+            if (!predicate) return false;
+            return Game::AdventurePredicateNeedsNbt(*predicate) ||
+                   Game::AdventurePredicateMatches(*predicate, state, nullptr);
+        }
     }
 
     void ClientPlayerController::PredictBlock(const glm::ivec3& pos,
@@ -261,6 +287,7 @@ namespace Game {
 #if ENABLE_PORTAL_GUN
         // Tick any in-flight portal-gun projectiles; on impact each one
         // turns into a UseItemOnC2S at the hit block face.
+        UpdateShooterVelocity(deltaTime);
         UpdatePendingPortalProjectiles(deltaTime);
 #endif
 
@@ -369,6 +396,17 @@ namespace Game {
         // (MultiPlayerGameMode.destroyBlock's `oldState.isAir()` check).
         const BlockID target = ReadBlock(pos);
         if (target == BlockID::Air) return;
+        // MC Item.canDestroyBlock: a TOOL with can_destroy_blocks_in_creative
+        // false (the swords, the mace, the trident) breaks nothing.
+        if (!Game::CanDestroyBlockWith(player->inventory.GetSelectedStack(), /*instabuild=*/true)) return;
+        // DebugStickItem.canDestroyBlock: false — the left click selects a
+        // property on the server (START_DESTROY) and breaks nothing.
+        if (player->inventory.GetSelectedItem() == Game::Items::DebugStick) {
+            SendDigPacket(Network::BlockActionType::START_DESTROY, pos, target, ReadBlockState(pos));
+            armSwingPending = true;
+            digState.destroyDelay = CREATIVE_BREAK_DELAY_TICKS;
+            return;
+        }
 
         // Set up the minimal dig state FinishDig's packet + local-prediction
         // path expects, then finish immediately.
@@ -431,6 +469,10 @@ namespace Game {
             dimension ? *dimension
                       : (player ? player->lastBlockHitDimension : Game::DimensionId::Overworld)));
         packet.fromUse = fromUse;
+        // The rotation in the clicked block's space (through a portal: the
+        // look mapped through it) — what the server orients a placement by.
+        packet.hasLookRotation = true;
+        HitLookAngles(hit, packet.lookYaw, packet.lookPitch);
         
         // Serialize and send
         auto data = Network::Serialization::Serialize(packet);
@@ -629,7 +671,14 @@ namespace Game {
         // bone meal…) resolves server-side in ways we don't model here.
         const Game::ItemID held = player->inventory.GetSelectedItem();
         if (held == Game::Items::Air) return false;
-        if (Game::ItemRegistry::Get(held).useOn != nullptr) return false;
+        if (Game::StackUseOn(player->inventory.GetSelectedStack()) != nullptr) return false;
+        // ItemStack.useOn's adventure gate: BlockItem.useOn runs only when the
+        // stack's CAN_PLACE_ON matches the clicked block.
+        if (player->gameMode == 2 &&
+            !ClientAdventureAllows(player->inventory.GetSelectedStack().get(Game::DataComponents::CAN_PLACE_ON),
+                                   ReadBlockState(hit.blockPos))) {
+            return false;
+        }
 
         const BlockID toPlace = player->GetSelectedBlock();
         if (toPlace == BlockID::Air) return false;
@@ -781,7 +830,9 @@ namespace Game {
         // appeared facing the wrong way until the server's authoritative state
         // arrived a round trip later, which is exactly the flicker prediction
         // exists to avoid. Same trap SpawnPortalProjectile documents.
-        LookAngles(ctx.playerYaw, ctx.playerPitch);
+        // HitLookAngles: through a portal, the look as seen on the far side
+        // (the same angles SendUseItemOn hands the server).
+        HitLookAngles(hit, ctx.playerYaw, ctx.playerPitch);
 
         outPos   = target;
         outBlock = resolved;
@@ -810,6 +861,9 @@ namespace Game {
             // (PlayerSession::HandleUseItemOn); predicting the powder would
             // flash the wrong block for a tick.
             outBlock = outState.Block();
+            // BlockItem.updateBlockStateFromTag: the stack's BLOCK_STATE, as
+            // the server applies it.
+            outState = Game::ApplyBlockItemStateProperties(player->inventory.GetSelectedStack(), outState);
             // State-aware survival, mirroring the server's second gate: a
             // button's support depends on the face it ends up attached to, so
             // this can only be asked once the state is known. Predicting a
@@ -929,7 +983,7 @@ namespace Game {
         // against every block's OUTLINE and every fluid SOURCE's shape.
         const glm::dvec3 eye = player->GetEyePosition();
         const glm::dvec3 dir = glm::dvec3(glm::normalize(player->lookDir));
-        const double reach = static_cast<double>((player->IsCreative() ? 5.0f : 4.5f) * player->physics.scale);
+        const double reach = player->GetBlockInteractionRange() * static_cast<double>(player->physics.scale);
 
         // Entry distance of the ray into one box, and the axis it entered
         // through; nullopt when it misses or starts inside (AABB.clip only
@@ -1092,8 +1146,11 @@ namespace Game {
 
         Game::BlockHitResult bhr(hit.blockPos, hit.hitFace, hit.hitPoint, hit.insideBlock);
         Game::UseOnContext ctx(Client::g_clientBlockAccess, &usePlayer, hand, bhr);
-        ctx.playerYaw   = yawDeg;
-        ctx.playerPitch = pitchDeg;
+        // The placement orients by the look in the clicked block's space —
+        // mapped through the portal the ray crossed, if any — exactly as
+        // the server will (UseItemOnC2S's look rotation). The use-player
+        // keeps the player's own rotation, as the server's ServerPlayer does.
+        HitLookAngles(hit, ctx.playerYaw, ctx.playerPitch);
 
         // Same dispatch order as PlayerSession::HandleUseItemOn, which in turn
         // mirrors ServerPlayerGameMode.useItemOn:
@@ -1129,9 +1186,18 @@ namespace Game {
             }
         }
 
+        // ItemStack.useOn: a player who may not build (adventure) uses the
+        // item on this block only when its CAN_PLACE_ON matches it.
+        if (!consumed && somethingInHands && player->gameMode == 2 &&
+            !ClientAdventureAllows(heldStack.get(Game::DataComponents::CAN_PLACE_ON), ReadBlockState(hit.blockPos))) {
+            Client::g_clientBlockAccess->EndPrediction();
+            return false;
+        }
+
         if (!consumed && somethingInHands) {
-            const Game::Item& heldItem = Game::ItemRegistry::Get(heldId);
-            if (heldItem.useOn) {
+            // Item.useOn — the item's own, or its BLOCK_TRANSFORMER's.
+            const Game::ItemUseOnFn heldUseOn = Game::StackUseOn(heldStack);
+            if (heldUseOn) {
                 // Creative stack preservation, mirroring the server (and MC's
                 // ServerPlayerGameMode.useItemOn lines 365-371) — only the
                 // COUNT, so a callback's component writes survive. See the
@@ -1139,7 +1205,7 @@ namespace Game {
                 // PlayerSession::HandleUseItemOn for why the whole-stack
                 // restore is kept for the emptied case only.
                 const Game::ItemStack stackBefore = heldStack;
-                Game::UseResult r = heldItem.useOn(ctx, heldStack);
+                Game::UseResult r = heldUseOn(ctx, heldStack);
                 if (player->IsCreative()) {
                     if (heldStack.IsEmpty()) heldStack = stackBefore;
                     else                     heldStack.count = stackBefore.count;
@@ -1336,7 +1402,7 @@ namespace Game {
         // Item.use for a KINETIC_WEAPON: kineticWeapon.makeSound(player) —
         // level.playSound(player, …), which on the client is the player's
         // own copy (the server sends it to everyone else).
-        if (const Game::Spear::KineticWeapon* kinetic = Game::Spear::Kinetic(stack); kinetic && kinetic->sound) {
+        if (const auto kinetic = Game::Spear::Kinetic(stack); kinetic && !kinetic->sound.empty()) {
             Client::Sounds::PlayLocal(player->physics.position, kinetic->sound, Game::SoundSource::Players,
                                       1.0f, 1.0f);
         }
@@ -1429,7 +1495,7 @@ namespace Game {
         }
         // MC Minecraft.continueAttack: `if (!heldItem.has(PIERCING_WEAPON))`
         // — a spear never mines.
-        if (Game::Spear::Piercing(player->inventory.GetSelectedStack())) {
+        if (Game::Spear::IsPiercing(player->inventory.GetSelectedStack())) {
             if (digState.isDestroying) AbortDig();
             return;
         }
@@ -1495,6 +1561,18 @@ namespace Game {
             return;
         }
 
+        // MultiPlayerGameMode.startDestroyBlock / continueDestroyBlock:
+        // Player.blockActionRestricted's adventure half — without a main-hand
+        // CAN_BREAK matching the block, an adventure player does not dig.
+        if (player->gameMode == 2) {
+            const Game::ItemStack& mainHand = player->inventory.GetSelectedStack();
+            if (mainHand.IsEmpty() ||
+                !ClientAdventureAllows(mainHand.get(Game::DataComponents::CAN_BREAK), ReadBlockState(hitPos))) {
+                if (digState.isDestroying) AbortDig();
+                return;
+            }
+        }
+
         // Target changed mid-mine: abort and restart on the new block.
         if (digState.isDestroying && hitPos != digState.destroyBlockPos) {
             AbortDig();
@@ -1522,10 +1600,10 @@ namespace Game {
         const Block& block = BlockRegistry::Get(currentBlock);
 
         // Per-tick progress increment (MC's BlockBehaviour.getDestroyProgress).
-        const Game::ItemID held = player->inventory.GetSelectedItem();
+        const Game::ItemStack& held = player->inventory.GetSelectedStack();
         const bool onGround = player->physics.isOnGround;
         const float inc = GetDestroyProgressPerTick(held, block, onGround,
-                                                    player->GetEffectDigSpeedMultiplier(),
+                                                    player->GetDigSpeedMultiplier(),
                                                     player->physics.isEyeInWater,
                                                     player->GetMiningEfficiency(),
                                                     player->GetSubmergedMiningSpeed());
@@ -1717,7 +1795,8 @@ namespace Game {
 
     int32_t ClientPlayerController::PickEntityAlong(const glm::dvec3& origin, const glm::vec3& dir,
                                                     float range, float blockLimit,
-                                                    int* outDragonPart, glm::dvec3* outHit) const {
+                                                    int* outDragonPart, glm::dvec3* outHit,
+                                                    float minRange, float margin) const {
         if (outDragonPart) *outDragonPart = -1;
         if (!player) return 0;
         if (!Client::g_clientMobManager) return 0;
@@ -1745,11 +1824,11 @@ namespace Game {
         // cancelled in double. Returns the entry distance, or a negative
         // number for a miss.
         const auto slab = [&](const glm::dvec3& mn, const glm::dvec3& mx) -> float {
-            float tMin = 0.0f, tMax = bestT;
+            float tMin = minRange, tMax = bestT;
             for (int a = 0; a < 3; ++a) {
                 const float d  = dir[a];
-                const float lo = static_cast<float>(mn[a] - origin[a]);
-                const float hi = static_cast<float>(mx[a] - origin[a]);
+                const float lo = static_cast<float>(mn[a] - origin[a]) - margin;
+                const float hi = static_cast<float>(mx[a] - origin[a]) + margin;
                 if (std::abs(d) < 1e-8f) {
                     if (0.0f < lo || 0.0f > hi) return -1.0f;
                     continue;
@@ -1871,12 +1950,31 @@ namespace Game {
     int32_t ClientPlayerController::PickEntity(int* outDragonPart, glm::dvec3* outHit) const {
         if (outDragonPart) *outDragonPart = -1;
         if (!player) return 0;
-        // MC's entity pick distance in survival is 3.0 blocks
-        // (Attributes.ENTITY_INTERACTION_RANGE). The server re-checks with a
-        // more generous 6.0 to absorb latency — see HandleInteract.
-        constexpr float kPickRange = 3.0f;
+        // MC's entity pick distance: Player.entityInteractionRange (the
+        // ENTITY_INTERACTION_RANGE attribute, 3.0 — +2.0 in creative). The
+        // server re-checks with 3.0 more to absorb latency — see
+        // HandleInteract.
+        float kPickRange = static_cast<float>(player->GetEntityInteractionRange());
         const glm::dvec3 origin = player->GetEyePosition();
         const glm::vec3 dir = glm::normalize(player->lookDir);
+        // LocalPlayer.raycastHitResult: the active item's ATTACK_RANGE picks
+        // instead (AttackRange.getClosesetHit → ProjectileUtil.
+        // getHitEntitiesAlong): from its minimum reach to its maximum plus
+        // the known movement along the look, boxes inflated by its margin.
+        float minRange = 0.0f, margin = 0.0f;
+        {
+            const Game::ItemStack& active = player->usingItem && player->usingHand == 1
+                ? player->inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN)
+                : player->inventory.GetSelectedStack();
+            if (const auto range = active.IsEmpty() ? std::nullopt : active.get(Game::DataComponents::ATTACK_RANGE)) {
+                const bool creative = player->IsCreative();
+                minRange = creative ? range->minCreativeReach : range->minReach;
+                const float maxRange = creative ? range->maxCreativeReach : range->maxReach;
+                const float along = glm::dot(player->physics.velocity / 20.0f, dir);
+                kPickRange = maxRange + std::max(0.0f, along);
+                margin = range->hitboxMargin;
+            }
+        }
         // The block under the crosshair caps the pick, as a distance along
         // the ray: a hit through a portal is in another level's coordinates,
         // so its point is no use here but its distance is.
@@ -1889,11 +1987,11 @@ namespace Game {
         // while the crosshair reaches through a portal, and this pick is
         // what stops a dig when a mob is in the way.
         if (!Client::ClientLevels::HasSession()) {
-            return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
+            return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit, minRange, margin);
         }
         int32_t nearId = 0;
         Client::ClientLevels::WithLevel(Client::ClientLevels::ActiveDimension(), [&]() {
-            nearId = PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
+            nearId = PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit, minRange, margin);
         });
         if (nearId != 0) return nearId;
 
@@ -1920,11 +2018,12 @@ namespace Game {
         int32_t farId = 0;
         Client::ClientLevels::WithLevel(portal.destDimension, [&]() {
             farId = PickEntityAlong(farOrigin, farDir, kPickRange - travelled,
-                                    blockLimit - travelled, outDragonPart, outHit);
+                                    blockLimit - travelled, outDragonPart, outHit,
+                                    std::max(0.0f, minRange - travelled), margin);
         });
         return farId;
 #else
-        return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit);
+        return PickEntityAlong(origin, dir, kPickRange, blockLimit, outDragonPart, outHit, minRange, margin);
 #endif
     }
 
@@ -1932,8 +2031,28 @@ namespace Game {
         if (!player || !networkClient) return false;
 
         int dragonPart = -1;
-        const int32_t bestId = PickEntity(&dragonPart);
+        glm::dvec3 hitLocation{0.0};
+        const int32_t bestId = PickEntity(&dragonPart, &hitLocation);
         if (bestId == 0) return false;
+
+        // Minecraft.startAttack's ENTITY case: with a held ATTACK_RANGE, the
+        // hit must be within it (AttackRange.isInRange(player, location)) —
+        // otherwise the arm swings at nothing.
+        {
+            const Game::ItemStack& held = player->inventory.GetSelectedStack();
+            if (const auto range = held.IsEmpty() ? std::nullopt : held.get(Game::DataComponents::ATTACK_RANGE)) {
+                const bool creative = player->IsCreative();
+                const double distance = glm::length(hitLocation - player->GetEyePosition());
+                const double minReach = static_cast<double>((creative ? range->minCreativeReach : range->minReach) -
+                                                            range->hitboxMargin);
+                const double maxReach = static_cast<double>((creative ? range->maxCreativeReach : range->maxReach) +
+                                                            range->hitboxMargin);
+                if (distance < minReach || distance > maxReach) {
+                    armSwingPending = true;
+                    return true;
+                }
+            }
+        }
 
         Network::InteractC2SPacket packet;
         packet.entityId = bestId;
@@ -2007,15 +2126,16 @@ namespace Game {
             // player's own copy).
             {
                 const ItemStack& heldStack = player->inventory.GetSelectedStack();
-                if (const Game::Spear::PiercingWeapon* piercing = Game::Spear::Piercing(heldStack)) {
+                if (const auto piercing = Game::Spear::Piercing(heldStack)) {
                     pressHitEntity = true;   // the press never digs
                     if (player->usingItem) return;
-                    if (player->GetAttackStrengthScale(0.0f) < Game::Spear::kMinimumAttackCharge) return;
+                    // cannotAttackWithItem(held, 0): MINIMUM_ATTACK_CHARGE.
+                    if (Game::CannotAttackWithItem(heldStack, player->GetAttackStrengthScale(0.0f))) return;
                     FlushMovement();
                     SendPlayerAction(Network::PlayerAction::STAB);
                     player->attackStrengthTicker = 0;
                     armSwingPending = true;
-                    if (piercing->sound) {
+                    if (!piercing->sound.empty()) {
                         Client::Sounds::PlayLocal(player->physics.position, piercing->sound,
                                                   Game::SoundSource::Players, 1.0f, 1.0f);
                     }
@@ -2056,9 +2176,9 @@ namespace Game {
                 if (hereBlock != BlockID::Air) {
                     const Block& block = BlockRegistry::Get(hereBlock);
                     const float inc = GetDestroyProgressPerTick(
-                        player->inventory.GetSelectedItem(), block,
+                        player->inventory.GetSelectedStack(), block,
                         player->physics.isOnGround,
-                        player->GetEffectDigSpeedMultiplier(),
+                        player->GetDigSpeedMultiplier(),
                         player->physics.isEyeInWater,
                         player->GetMiningEfficiency(),
                         player->GetSubmergedMiningSpeed());
@@ -2553,6 +2673,27 @@ namespace Game {
     static constexpr float kPortalProjSpeed_m_per_s = 57.15f;
     static constexpr float kPortalProjMaxLifetime  = 4.5f;  // ≈ 257 m
 
+    void ClientPlayerController::UpdateShooterVelocity(float deltaTime) {
+        if (!player) { m_shooterMotionValid = false; return; }
+        const glm::dvec3 pos = player->physics.position;
+        if (!m_shooterMotionValid || deltaTime <= 0.0f) {
+            m_shooterMotionPrevPos = pos;
+            m_shooterVelocity      = glm::dvec3(0.0);
+            m_shooterMotionValid   = true;
+            return;
+        }
+        const glm::dvec3 step = pos - m_shooterMotionPrevPos;
+        m_shooterMotionPrevPos = pos;
+        // A jump of more than 8 blocks in one frame is a teleport (a portal
+        // crossing, /tp, a respawn), not motion: keep the last estimate.
+        if (glm::dot(step, step) > 64.0) return;
+        const glm::dvec3 instant = step / static_cast<double>(deltaTime);
+        // Smoothed over ~a tick: physics steps at 20 Hz while frames come
+        // faster, so single-frame deltas alternate between a step and none.
+        const double blend = 1.0 - std::exp(-static_cast<double>(deltaTime) / 0.05);
+        m_shooterVelocity += (instant - m_shooterVelocity) * blend;
+    }
+
     void ClientPlayerController::SpawnPortalProjectile(bool isOrange) {
         if (!player) return;
 
@@ -2560,7 +2701,25 @@ namespace Game {
         // each frame. player->yaw/pitch are stale (mouse-look writes
         // camera.yaw/pitch and only syncs back on teleports), so reading
         // them here makes every shot fly the same direction.
-        const glm::vec3 front = player->lookDir;
+        const glm::vec3 aim = player->lookDir;
+
+        // MC Projectile.shootFromRotation: the shot inherits the shooter's
+        // motion — horizontally always, vertically only while airborne
+        // (`shooter.onGround() ? 0 : movement.y`). A rider's motion is its
+        // vehicle's, so it is taken whole. The impact is decided here, on
+        // the client (the server opens the portal at the face this flight
+        // reports), so the logical sweep and the visible bolt below fly
+        // the same vector and land where the bolt lands. The portal gun
+        // has no hitscan mode; every shot is this projectile.
+        constexpr double kMaxInheritedSpeed = 100.0;   // blocks/s: past elytra-rocket speed
+        glm::dvec3 inherited = m_shooterVelocity;
+        if (player->physics.isOnGround && player->vehicleId == 0) inherited.y = 0.0;
+        const double inheritedLen = glm::length(inherited);
+        if (inheritedLen > kMaxInheritedSpeed) inherited *= kMaxInheritedSpeed / inheritedLen;
+        const glm::dvec3 launch = glm::dvec3(aim) * static_cast<double>(kPortalProjSpeed_m_per_s) + inherited;
+        const double launchSpeed = glm::length(launch);
+        const glm::vec3 front = launchSpeed > 1.0e-6 ? glm::vec3(launch / launchSpeed) : aim;
+        const float shotSpeed = launchSpeed > 1.0e-6 ? static_cast<float>(launchSpeed) : kPortalProjSpeed_m_per_s;
 
         const glm::dvec3 origin = player->physics.GetEyePosition();
 
@@ -2577,6 +2736,7 @@ namespace Game {
         p.isOrange   = isOrange;
         p.hand       = 0;
         p.dimension  = Client::ClientLevels::ActiveDimension();
+        p.speed      = shotSpeed;
         m_pendingPortalProjectiles.push_back(p);
 
         // Visual bolt — spawn at the gun's muzzle, not the eye. The
@@ -2626,7 +2786,7 @@ namespace Game {
         // This makes the bolt appear to converge from the muzzle to
         // where you aimed, hiding the small parallax between the
         // muzzle and the crosshair.
-        const float reachM = kPortalProjSpeed_m_per_s * kPortalProjMaxLifetime;
+        const float reachM = shotSpeed * kPortalProjMaxLifetime;
         auto aimHit = Raycast::CastRay(origin, front, reachM);
         glm::dvec3 aimPoint = aimHit.has_value()
             ? aimHit->hitPoint
@@ -2660,11 +2820,11 @@ namespace Game {
                         farEnd = farHit->hitPoint;
                     }
                 });
-                Render::g_portalParticleSystem.EmitProjectileIn(farDim, farStart, farEnd, isOrange);
+                Render::g_portalParticleSystem.EmitProjectileIn(farDim, farStart, farEnd, isOrange, shotSpeed);
             }
         }
 #endif
-        Render::g_portalParticleSystem.EmitProjectile(muzzle, aimPoint, isOrange);
+        Render::g_portalParticleSystem.EmitProjectile(muzzle, aimPoint, isOrange, shotSpeed);
 
         // Play the real Source @fire1 animation — 15-frame, 0.625s
         // skeletal clip from v_portalgun.mdl (the prongs spin out and
@@ -2691,7 +2851,7 @@ namespace Game {
             // mapped through — the same crossing the player makes. Bounded:
             // two facing portals must not bounce the sweep forever inside
             // one frame.
-            float remaining = kPortalProjSpeed_m_per_s * deltaTime;
+            float remaining = p.speed * deltaTime;
             bool impacted = false;
             for (int hop = 0; hop < 8 && remaining > 1.0e-4f; ++hop) {
                 std::optional<RaycastHit> hit;

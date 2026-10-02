@@ -113,6 +113,8 @@ namespace Game {
     // MC DataComponents.VILLAGER_FOOD (Items.java villagerFood(n)): bread 4,
     // carrot / potato / beetroot 1. 0 = not villager food.
     int VillagerFoodNutrition(ItemID item);
+    // The stack's VILLAGER_FOOD nutrition (GameplayDataComponents.cpp).
+    int VillagerFoodNutrition(const ItemStack& stack);
     // MC ItemTags.VILLAGER_PLANTABLE_SEEDS.
     bool IsVillagerPlantableSeed(ItemID item);
     // MC ItemTags.VILLAGER_PICKS_UP (#villager_plantable_seeds + bread, wheat,

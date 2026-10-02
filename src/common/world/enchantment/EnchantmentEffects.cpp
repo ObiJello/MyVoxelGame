@@ -268,6 +268,10 @@ namespace Game {
             if (type == "thorns")        return MobDamageSource::Thorns;
             if (type == "magic" || type == "indirect_magic") return MobDamageSource::Magic;
             if (type == "on_fire" || type == "in_fire") return MobDamageSource::Fire;
+            if (type == "campfire")      return MobDamageSource::Campfire;
+            if (type == "hot_floor")     return MobDamageSource::HotFloor;
+            if (type == "cactus")        return MobDamageSource::Cactus;
+            if (type == "sweet_berry_bush") return MobDamageSource::SweetBerryBush;
             if (type == "explosion" || type == "player_explosion") return MobDamageSource::Explosion;
             if (type == "player_attack") return MobDamageSource::PlayerAttack;
             if (type == "mace_smash")    return MobDamageSource::MaceSmash;
@@ -814,6 +818,10 @@ namespace Game {
                 auto bolt = std::make_unique<LightningBolt>(&level);
                 bolt->position = at;
                 bolt->oldPosition = at;
+                // SummonEntityEffect: `if (entity instanceof LightningBolt
+                // bolt && item.owner() instanceof ServerPlayer player)
+                // bolt.setCause(player)` — the channeling advancement.
+                if (item.owner && item.owner->IsPlayer()) bolt->SetCauseId(item.owner->GetId());
                 level.AddFreshEntity(std::move(bolt));
                 return;
             }

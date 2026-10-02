@@ -13,6 +13,8 @@
 #include "common/nbt/NbtWrite.hpp"
 #include "server/world/storage/NBTParser.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #if defined(_WIN32)
 #include <share.h>
@@ -91,13 +93,68 @@ namespace Game::Anvil {
 
         const char* kEquipmentKey[4] = {"head", "chest", "legs", "feet"};
 
+        // ── stats/<uuid>.json (MC ServerStatsCounter) ───────────────────────
+        //
+        // The one statistic the engine keeps is minecraft:custom /
+        // minecraft:time_since_rest (the phantoms' insomnia count). The file
+        // is read, that entry replaced, and written back, so every other stat
+        // a vanilla session recorded in the same file survives.
+        constexpr const char* kStatsCustom      = "minecraft:custom";
+        constexpr const char* kStatTimeSinceRest = "minecraft:time_since_rest";
+
+        std::filesystem::path StatsFile(const SaveRoot& root, const Game::Uuid& uuid) {
+            return root.Root() / "stats" / (UuidToString(uuid) + ".json");
+        }
+
+        nlohmann::json ReadStatsJson(const std::filesystem::path& file) {
+            std::error_code ec;
+            if (!std::filesystem::exists(file, ec)) return nlohmann::json::object();
+            std::ifstream in(file, std::ios::binary);
+            if (!in) return nlohmann::json::object();
+            nlohmann::json root = nlohmann::json::parse(in, nullptr, /*allow_exceptions*/ false);
+            return root.is_object() ? root : nlohmann::json::object();
+        }
+
+        bool WritePlayerStats(const SaveRoot& root, const Server::ServerPlayer& player,
+                              int dataVersion, std::string& error) {
+            const auto file = StatsFile(root, OfflinePlayerUuid(player.getName()));
+            nlohmann::json doc = ReadStatsJson(file);
+            nlohmann::json& stats = doc["stats"];
+            if (!stats.is_object()) stats = nlohmann::json::object();
+            nlohmann::json& custom = stats[kStatsCustom];
+            if (!custom.is_object()) custom = nlohmann::json::object();
+            custom[kStatTimeSinceRest] = player.getTimeSinceRest();
+            doc["DataVersion"] = dataVersion;
+
+            std::error_code ec;
+            std::filesystem::create_directories(file.parent_path(), ec);
+            const std::string text = doc.dump();
+            const std::vector<uint8_t> bytes(text.begin(), text.end());
+            auto backup = file;
+            backup += "_old";
+            if (!SafeReplace(file, backup, bytes, error)) return false;
+            std::filesystem::remove(backup, ec);   // MC keeps no previous generation
+            return true;
+        }
+
+        void ReadPlayerStats(const SaveRoot& root, Server::ServerPlayer& player) {
+            const nlohmann::json doc = ReadStatsJson(StatsFile(root, OfflinePlayerUuid(player.getName())));
+            const auto stats = doc.find("stats");
+            if (stats == doc.end() || !stats->is_object()) return;
+            const auto custom = stats->find(kStatsCustom);
+            if (custom == stats->end() || !custom->is_object()) return;
+            const auto value = custom->find(kStatTimeSinceRest);
+            if (value != custom->end() && value->is_number_integer()) {
+                player.setTimeSinceRest(value->get<int>());
+            }
+        }
+
     } // namespace
 
     // ── Write ───────────────────────────────────────────────────────────────
 
-    bool WritePlayerData(const SaveRoot& root, const Server::ServerPlayer& player,
-                         int dataVersion, std::string& error,
-                         const Game::Mob* rootVehicle, const Game::Uuid* attachUuid) {
+    bool BuildPlayerNbt(const Server::ServerPlayer& player, int dataVersion, std::vector<uint8_t>& out,
+                        std::string& error, const Game::Mob* rootVehicle, const Game::Uuid* attachUuid) {
         const auto uuid = OfflinePlayerUuid(player.getName());
         const auto& inventory = player.getInventory();
 
@@ -164,6 +221,11 @@ namespace Game::Anvil {
         // active_effects list (MobEffectInstance.CODEC, omitted when empty).
         w.Float("AbsorptionAmount", player.getAbsorptionAmount());
         WriteActiveEffects(w, player.activeEffects());
+        // MC LivingEntity.addAdditionalSaveData's "attributes"
+        // (AttributeMap.save): every base, and the permanent modifiers
+        // (/attribute … modifier add). The worn items', effects' and the
+        // step-height rule's are rebuilt, never saved.
+        WriteAttributeList(w, player.attributes());
 
         const auto& food = player.getFoodData();
         w.Int  ("foodLevel",           food.getFoodLevel());
@@ -177,6 +239,8 @@ namespace Game::Anvil {
         w.Int  ("XpTotal", xp.Total());
         w.Int  ("XpSeed",  player.getEnchantmentSeed());
         w.Int  ("Score",   0);
+        // MC Entity.saveWithoutId: the scoreboard tags (/tag).
+        WriteEntityTags(w, player.getTags());
 
         // MC ServerPlayer.addAdditionalSaveData: warden_spawn_tracker
         // (WardenSpawnTracker.CODEC).
@@ -189,6 +253,11 @@ namespace Game::Anvil {
             w.EndCompound();
         }
 
+        // The player's name. Vanilla keeps none in this file (it is named by
+        // UUID; names live in usercache.json), so a tool reading only the
+        // world — the portal-gun owner lookup for OFFLINE players — could
+        // not name its owner. Namespaced, so vanilla ignores it.
+        w.String("obeycraft:last_known_name", player.getName());
         w.Int   ("playerGameType", static_cast<int>(player.getGameMode()));
         // MC ServerPlayer.addAdditionalSaveData: previousPlayerGameType only
         // when there is one (GameType.createProfileSerializationCodec).
@@ -318,9 +387,19 @@ namespace Game::Anvil {
 
         w.EndRootCompound();
         if (!w.ok()) { error = "NBT writer refused the player data"; return false; }
+        out = w.TakeBytes();
+        return true;
+    }
+
+    bool WritePlayerData(const SaveRoot& root, const Server::ServerPlayer& player,
+                         int dataVersion, std::string& error,
+                         const Game::Mob* rootVehicle, const Game::Uuid* attachUuid) {
+        std::vector<uint8_t> nbt;
+        if (!BuildPlayerNbt(player, dataVersion, nbt, error, rootVehicle, attachUuid)) return false;
+        const auto uuid = OfflinePlayerUuid(player.getName());
 
         std::vector<uint8_t> gz;
-        if (!Nbt::GzipCompress(w.Bytes(), gz)) { error = "gzip failed"; return false; }
+        if (!Nbt::GzipCompress(nbt, gz)) { error = "gzip failed"; return false; }
 
         std::error_code ec;
         std::filesystem::create_directories(root.PlayerDataDir(), ec);
@@ -329,6 +408,14 @@ namespace Game::Anvil {
         const auto target = root.PlayerDataDir() / (file + ".dat");
         auto backup = root.PlayerDataDir() / (file + ".dat_old");
         if (!SafeReplace(target, backup, gz, error)) return false;
+
+        // The statistics file beside it (non-fatal: the player file is the
+        // one that matters).
+        std::string statsError;
+        if (!WritePlayerStats(root, player, dataVersion, statsError)) {
+            Log::Warning("[Anvil] player '%s' stats not saved: %s",
+                         player.getName().c_str(), statsError.c_str());
+        }
 
         Log::Info("[Anvil] saved player '%s' (%s, %zu bytes)",
                   player.getName().c_str(), file.c_str(), gz.size());
@@ -339,6 +426,9 @@ namespace Game::Anvil {
 
     bool ReadPlayerData(const SaveRoot& root, Server::ServerPlayer& player, std::string& error) {
         error.clear();
+        // stats/<uuid>.json is its own file, read whether or not the player
+        // file exists.
+        ReadPlayerStats(root, player);
         const auto uuid = OfflinePlayerUuid(player.getName());
         auto path = root.PlayerDataDir() / (UuidToString(uuid) + ".dat");
 
@@ -437,6 +527,9 @@ namespace Game::Anvil {
         // built, and sends them to the client (PlayerList
         // .sendActivePlayerEffects).
         player.setAbsorptionAmount(data->GetValue<float>("AbsorptionAmount", 0.0f));
+        // MC readAdditionalSaveData: the attributes first (MAX_HEALTH
+        // among them), onto Player.createAttributes' rows only.
+        ReadAttributeList(*data, player.attributes(), /*onlyRegistered=*/true);
         player.activeEffects() = ReadActiveEffects(*data);
         player.setHealthDirect(data->GetValue<float>("Health", 20.0f));
         player.setOnGround(data->GetValue<int8_t>("OnGround", 1) != 0);
@@ -518,6 +611,7 @@ namespace Game::Anvil {
         xp.SetProgress(data->GetValue<float>("XpP", 0.0f));
         xp.SetTotal   (data->GetValue<int32_t>("XpTotal", 0));
         player.setEnchantmentSeed(data->GetValue<int32_t>("XpSeed", 0));
+        ReadEntityTags(*data, player.getTags());
 
         // MC ServerPlayer.readAdditionalSaveData: warden_spawn_tracker, a
         // fresh tracker when absent.

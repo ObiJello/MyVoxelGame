@@ -124,6 +124,11 @@ namespace Client {
         }
 
         size_t PairCount() const { return m_pairs.size(); }
+        // The pair of one gun, or null when that gun has no open portal.
+        const ClientPortalPair* FindPair(uint64_t gunId) const {
+            auto it = m_pairs.find(gunId);
+            return it == m_pairs.end() ? nullptr : &it->second;
+        }
 
         // True iff (x,y,z) names one of the two wall blocks behind any
         // FULLY-PAIRED portal AND the player AABB fits LATERALLY inside

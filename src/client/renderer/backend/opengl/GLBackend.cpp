@@ -154,6 +154,7 @@ namespace Render {
         m_timers.clear();
 
         DestroyUploadBuffer();
+        DestroySceneTarget();
         for (GLsync& fence : m_frameFences) {
             if (fence) glDeleteSync(fence);
             fence = nullptr;
@@ -172,10 +173,138 @@ namespace Render {
     // ========================================================================
 
     void GLBackend::BeginFrame() {
-        // Nothing special for OpenGL - frame begins implicitly
+        // The frame begins implicitly; only a scaled scene has anything to
+        // set up — the request is this frame's and is consumed here.
+        const int reqW = m_sceneReqWidth;
+        const int reqH = m_sceneReqHeight;
+        m_sceneReqWidth = m_sceneReqHeight = 0;
+        if (m_sceneActive) ResolveScaledScene();   // never left open across frames
+        if (reqW <= 0 || reqH <= 0 || m_sceneBroken) {
+            // Back at 100 %: the scene's memory is not kept for a scale that
+            // may never come back.
+            if (reqW <= 0 && m_sceneFbo != 0) DestroySceneTarget();
+            return;
+        }
+        if (!EnsureSceneTarget(reqW, reqH)) return;
+        m_defaultFbo  = m_sceneFbo;
+        m_sceneActive = true;
+        glBindFramebuffer(GL_FRAMEBUFFER, m_sceneFbo);
+        glViewport(0, 0, m_sceneWidth, m_sceneHeight);
+        m_viewportHeight = m_sceneHeight;
+    }
+
+    void GLBackend::RequestScaledScene(int width, int height) {
+        // Same size as the window = no scene: the zero-cost path.
+        int fbW = 0, fbH = 0;
+        if (m_window) glfwGetFramebufferSize(m_window, &fbW, &fbH);
+        if (width <= 0 || height <= 0 || (width == fbW && height == fbH)) {
+            m_sceneReqWidth = m_sceneReqHeight = 0;
+            return;
+        }
+        if (m_sceneMaxDim == 0) {   // asked once: a glGet is a driver round trip
+            GLint maxRb = 0, maxTex = 0;
+            glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxRb);
+            glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTex);
+            m_sceneMaxDim = std::max(1, static_cast<int>(maxRb > 0 && maxTex > 0 ? std::min(maxRb, maxTex)
+                                                                                  : std::max(maxRb, maxTex)));
+        }
+        width  = std::min(width, m_sceneMaxDim);
+        height = std::min(height, m_sceneMaxDim);
+        m_sceneReqWidth  = width;
+        m_sceneReqHeight = height;
+    }
+
+    bool GLBackend::EnsureSceneTarget(int width, int height) {
+        if (m_sceneFbo != 0 && m_sceneWidth == width && m_sceneHeight == height) return true;
+        DestroySceneTarget();
+        glGenTextures(1, &m_sceneColorTex);
+        glBindTexture(GL_TEXTURE_2D, m_sceneColorTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glGenTextures(1, &m_sceneDepthTex);
+        glBindTexture(GL_TEXTURE_2D, m_sceneDepthTex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH24_STENCIL8, width, height, 0,
+                     GL_DEPTH_STENCIL, GL_UNSIGNED_INT_24_8, nullptr);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glBindTexture(GL_TEXTURE_2D, 0);
+
+        glGenFramebuffers(1, &m_sceneFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_sceneFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_sceneColorTex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, m_sceneDepthTex, 0);
+        const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        if (status != GL_FRAMEBUFFER_COMPLETE) {
+            Log::Error("GLBackend: scaled scene target %dx%d incomplete (0x%x) - Render Resolution off this session",
+                       width, height, status);
+            DestroySceneTarget();
+            m_sceneBroken = true;
+            return false;
+        }
+        m_sceneWidth  = width;
+        m_sceneHeight = height;
+        const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 8u;   // RGBA8 + D24S8
+        m_memStats.textureMemory  += bytes;
+        m_memStats.totalAllocated += bytes;
+        return true;
+    }
+
+    void GLBackend::DestroySceneTarget() {
+        if (m_sceneActive) {
+            m_sceneActive = false;
+            m_defaultFbo  = 0;
+            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        }
+        if (m_sceneFbo != 0 && m_sceneWidth > 0 && m_sceneHeight > 0) {
+            const size_t bytes = static_cast<size_t>(m_sceneWidth) * static_cast<size_t>(m_sceneHeight) * 8u;
+            m_memStats.textureMemory  -= bytes;
+            m_memStats.totalAllocated -= bytes;
+        }
+        if (m_sceneFbo != 0)      glDeleteFramebuffers(1, &m_sceneFbo);
+        if (m_sceneColorTex != 0) glDeleteTextures(1, &m_sceneColorTex);
+        if (m_sceneDepthTex != 0) glDeleteTextures(1, &m_sceneDepthTex);
+        m_sceneFbo = m_sceneColorTex = m_sceneDepthTex = 0;
+        m_sceneWidth = m_sceneHeight = 0;
+    }
+
+    void GLBackend::ResolveScaledScene() {
+        if (!m_sceneActive) return;
+        PROFILE_ZONE_N("GL.ResolveScaledScene");
+        if (m_oitPassOpen) OitEndPass();
+        m_sceneActive = false;
+        m_defaultFbo  = 0;
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(m_window, &fbW, &fbH);
+        // The blit honours the scissor test, and the clear below the depth
+        // and stencil write masks: open them, then let the state cache
+        // re-apply whatever comes next.
+        glDisable(GL_SCISSOR_TEST);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_sceneFbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        // Bilinear both ways: a smooth upscale below 100 %, a 2×2 box at
+        // 200 % (supersampling) and between.
+        glBlitFramebuffer(0, 0, m_sceneWidth, m_sceneHeight, 0, 0, fbW, fbH,
+                          GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        // The window's depth and stencil hold whatever an older frame left;
+        // the GUI starts from cleared ones, as the native frame's world pass
+        // leaves them no worse.
+        glDepthMask(GL_TRUE);
+        glStencilMask(0xFFu);
+        glClearDepth(1.0);
+        glClearStencil(0);
+        glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        glViewport(0, 0, fbW, fbH);
+        m_viewportHeight = fbH;
+        m_stateInitialized = false;
     }
 
     void GLBackend::EndFrame(GLFWwindow* window) {
+        if (m_sceneActive) ResolveScaledScene();
         EndUploadFrame();   // fence this frame's staged uploads
         // This frame's fence (UpdateBufferStreaming), replacing the one from
         // kFrameFences frames ago.
@@ -1002,17 +1131,17 @@ namespace Render {
         if (d == m_renderTargets.end() || d->second.fbo == 0) return false;
         GLint bound = 0;
         glGetIntegerv(GL_FRAMEBUFFER_BINDING, &bound);
-        if (bound != 0) return false;   // only the default framebuffer is "main"
+        if (static_cast<GLuint>(bound) != m_defaultFbo) return false;   // only the frame (window or scaled scene) is "main"
         // glBlitFramebuffer honours the scissor test: a stale scissor rect
         // would copy part of the frame.
         const GLboolean scissor = glIsEnabled(GL_SCISSOR_TEST);
         if (scissor) glDisable(GL_SCISSOR_TEST);
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, m_defaultFbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, d->second.fbo);
         glBlitFramebuffer(0, 0, d->second.width, d->second.height,
                           0, 0, d->second.width, d->second.height,
                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
         if (scissor) glEnable(GL_SCISSOR_TEST);
         return true;
     }
@@ -1127,7 +1256,7 @@ namespace Render {
         // has its own formats and size.
         GLint readFbo = 0;
         glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
-        if (readFbo != 0) return false;
+        if (static_cast<GLuint>(readFbo) != m_defaultFbo) return false;
 
         const bool check = !m_depthCopyChecked;
         if (check) {
@@ -1252,7 +1381,7 @@ namespace Render {
                                   GL_RENDERBUFFER, info.depthRBO);
 
         const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             // Roll back.
             glDeleteFramebuffers(1, &info.fbo);
@@ -1298,7 +1427,7 @@ namespace Render {
         for (int i = 0; i < colorCount; ++i) {
             auto it = m_textures.find(colors[i]);
             if (it == m_textures.end()) {
-                glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
                 glDeleteFramebuffers(1, &info.fbo);
                 return INVALID_RENDER_TARGET;
             }
@@ -1320,7 +1449,7 @@ namespace Render {
             }
         }
         const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             Log::Error("GLBackend: wrapped render target incomplete (status 0x%x, %d colour attachment(s), depth %s)",
                        status, colorCount, depth != INVALID_TEXTURE ? "yes" : "no");
@@ -1335,7 +1464,7 @@ namespace Render {
     void GLBackend::BindRenderTarget(RenderTargetHandle rt) {
         if (rt == INVALID_RENDER_TARGET) {
             // Bind default backbuffer.
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
             return;
         }
         auto it = m_renderTargets.find(rt);
@@ -1377,7 +1506,7 @@ namespace Render {
                                GL_TEXTURE_2D, colorIt->second.glId, 0);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
                                   GL_RENDERBUFFER, it->second.depthRBO);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
 
         it->second.width  = w;
         it->second.height = h;
@@ -2197,7 +2326,7 @@ namespace Render {
         // The frame's depth, snapshotted where the first pass of the frame
         // opens: the OIT passes can't attach FBO 0's own.
         if (pass == OitPass::DepthBounds) {
-            glBindFramebuffer(GL_FRAMEBUFFER, 0);
+            glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
             if (!CopyFramebufferDepthToTexture(m_oit.depthCopy)) return false;
         }
         const RenderTargetHandle fbo = m_oit.fbos[static_cast<size_t>(pass)];

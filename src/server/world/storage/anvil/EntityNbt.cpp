@@ -1,5 +1,6 @@
 // File: src/server/world/storage/anvil/EntityNbt.cpp
 #include "server/world/storage/anvil/EntityNbt.hpp"
+#include "common/entity/mobs/FarmSoundVariants.hpp"
 #include "common/entity/MountInventory.hpp"
 #include "common/entity/FallingBlockEntity.hpp"
 #include "common/entity/PrimedTnt.hpp"
@@ -24,6 +25,7 @@
 #include "common/core/Log.hpp"
 #include "common/entity/Animal.hpp"
 #include "common/entity/Attributes.hpp"
+#include "common/network/packets/game/UpdateAttributesS2CPacket.hpp"   // IsClientSyncableAttribute
 #include "common/entity/EntityType.hpp"
 #include "common/entity/ExperienceOrb.hpp"
 #include "common/entity/ItemEntity.hpp"
@@ -222,6 +224,7 @@ namespace Game::Anvil {
                 WriteTextComponent(w, "CustomName", Text::Component::Literal(*name));
             }
             if (e.IsCustomNameVisible()) w.Bool("CustomNameVisible", true);
+            WriteEntityTags(w, e.Tags());
         }
 
         void ReadEntityBase(const CT& tag, Entity& e) {
@@ -251,6 +254,7 @@ namespace Game::Anvil {
                 }
             }
             e.SetCustomNameVisible(tag.GetValue<int8_t>("CustomNameVisible", 0) != 0);
+            ReadEntityTags(tag, e.Tags());
             // Without this an entity saved mid-portal reloads with a zero
             // cooldown and teleports straight back on its first tick.
             e.portal.SetCooldown(tag.GetValue<int32_t>("PortalCooldown", 0));
@@ -398,77 +402,14 @@ namespace Game::Anvil {
         }
 
         void WriteAttributes(Nbt::Writer& w, const LivingEntity& l) {
-            const auto& all = l.Attributes().All();
-            if (all.empty()) return;
-
-            auto list = w.BeginList("attributes", Nbt::TagType::Compound);
-            for (const auto& inst : all) {
-                const auto& def = kAttributeTable[static_cast<size_t>(inst.GetAttribute())];
-                w.ListCompoundBegin(list);
-                w.String("id",   std::string(kNamespace) + std::string(def.name));
-                w.Double("base", inst.GetBaseValue());
-                bool anyPersistent = false;
-                for (const AttributeModifier& mod : inst.Modifiers()) {
-                    if (PersistentModifierMcId(inst.GetAttribute(), mod.id)) { anyPersistent = true; break; }
-                }
-                if (anyPersistent) {
-                    auto mods = w.BeginList("modifiers", Nbt::TagType::Compound);
-                    for (const AttributeModifier& mod : inst.Modifiers()) {
-                        const char* mcId = PersistentModifierMcId(inst.GetAttribute(), mod.id);
-                        if (!mcId) continue;
-                        w.ListCompoundBegin(mods);
-                        w.String("id", mcId);
-                        w.Double("amount", mod.amount);
-                        w.String("operation", OperationName(mod.operation));
-                        w.ListCompoundEnd(mods);
-                    }
-                    w.EndList(mods);
-                }
-                w.ListCompoundEnd(list);
-            }
-            w.EndList(list);
-        }
-
-        bool AttributeFromName(std::string_view name, Attribute& out) {
-            const std::string_view bare = StripNamespace(name);
-            for (size_t i = 0; i < static_cast<size_t>(Attribute::Count); ++i) {
-                if (bare == kAttributeTable[i].name) {
-                    out = static_cast<Attribute>(i);
-                    return true;
-                }
-            }
-            return false;
+            WriteAttributeList(w, l.Attributes());
         }
 
         void ReadAttributes(const CT& tag, LivingEntity& l) {
-            auto list = As<LT>(tag.GetTag("attributes"));
-            if (!list) return;
-            for (const auto& elem : list->value) {
-                auto c = As<CT>(elem);
-                if (!c) continue;
-                Attribute attr{};
-                if (!AttributeFromName(c->GetValue<std::string>("id", ""), attr)) continue;
-                // Only ever onto an attribute the mob actually registered:
-                // SetBaseValue on an absent one would give a zombie a
-                // jump_strength row it has no business owning, and MC's own
-                // apply() ignores unknown ids the same way.
-                if (!l.Attributes().Has(attr)) continue;
-                l.Attributes().SetBaseValue(attr, c->GetValue<double>("base", 0.0));
-                // The permanent modifiers (see kPersistentModifiers); any
-                // other id MC wrote is one this engine rebuilds itself.
-                if (auto mods = As<LT>(c->GetTag("modifiers"))) {
-                    for (const auto& modElem : mods->value) {
-                        auto m = As<CT>(modElem);
-                        if (!m) continue;
-                        ModifierId id{};
-                        if (!PersistentModifierFromMcId(attr, m->GetValue<std::string>("id", ""), id)) continue;
-                        l.Attributes().RemoveModifier(attr, id);
-                        l.Attributes().AddModifier(attr, AttributeModifier{
-                            static_cast<uint32_t>(id), m->GetValue<double>("amount", 0.0),
-                            OperationFromName(m->GetValue<std::string>("operation", "add_value")) });
-                    }
-                }
-            }
+            bool customized = false;
+            ReadAttributeList(tag, l.Attributes(), /*onlyRegistered=*/true, &customized);
+            if (customized) l.MarkAttributesCustomized();
+            l.RefreshAttributeScale();
         }
 
         // ── Allay (MC Allay.addAdditionalSaveData / its Brain memories) ─────
@@ -1027,7 +968,7 @@ namespace Game::Anvil {
             // "AngryAt" is read only so that worlds this engine wrote before
             // the spelling was corrected still load their grudges.
             if (ReadUuid(tag, "angry_at", uuid) || ReadUuid(tag, "AngryAt", uuid)) {
-                n.SetPersistentAngerTargetUuid(uuid);
+                n.RestoreAngerTargetOnLoad(uuid);
             }
         }
 
@@ -1592,26 +1533,46 @@ namespace Game::Anvil {
                     w.Bool("Sheared", s->IsSheared());
                 }
                 break;
+            // MC IronGolem.addAdditionalSaveData: "PlayerCreated" (the anger
+            // half is WriteNeutral's).
+            case EntityTypeId::IronGolem:
+                if (const auto* g = dynamic_cast<const IronGolem*>(&mob)) {
+                    w.Bool("PlayerCreated", g->IsPlayerCreated());
+                }
+                break;
             // MC SnowGolem.addAdditionalSaveData: "Pumpkin".
             case EntityTypeId::SnowGolem:
                 if (const auto* g = dynamic_cast<const SnowGolem*>(&mob)) {
                     w.Bool("Pumpkin", g->HasPumpkin());
                 }
                 break;
+            // MC CopperGolem.addAdditionalSaveData: "next_weather_age" and
+            // "weather_state" (WeatheringCopper.WeatherState.CODEC — the
+            // lower-case name). The carried stack and the antenna's flower
+            // are its equipment (WriteMobEquipment).
+            case EntityTypeId::CopperGolem:
+                if (const auto* g = dynamic_cast<const CopperGolem*>(&mob)) {
+                    w.Long("next_weather_age", g->GetNextWeatheringTick());
+                    w.String("weather_state", CopperGolem::WeatherStateName(g->GetWeatherState()));
+                }
+                break;
             case EntityTypeId::Chicken:
                 if (const auto* c = dynamic_cast<const Chicken*>(&mob)) {
                     w.Bool("IsChickenJockey", c->IsChickenJockey());
                     w.String("variant", TemperatureVariantId(c->GetVariantByte()));
+                    w.String("sound_variant", std::string("minecraft:") + FarmSoundVariants::Name(FarmSoundVariants::Mob::Chicken, c->GetSoundVariant()));
                 }
                 break;
             case EntityTypeId::Cow:
                 if (const auto* c = dynamic_cast<const Cow*>(&mob)) {
                     w.String("variant", TemperatureVariantId(c->GetVariantByte()));
+                    w.String("sound_variant", std::string("minecraft:") + FarmSoundVariants::Name(FarmSoundVariants::Mob::Cow, c->GetSoundVariant()));
                 }
                 break;
             case EntityTypeId::Pig:
                 if (const auto* p = dynamic_cast<const Pig*>(&mob)) {
                     w.String("variant", TemperatureVariantId(p->GetVariantByte()));
+                    w.String("sound_variant", std::string("minecraft:") + FarmSoundVariants::Name(FarmSoundVariants::Mob::Pig, p->GetSoundVariant()));
                 }
                 break;
             // MC MushroomCow.addAdditionalSaveData: "Type" (Variant.CODEC —
@@ -1699,9 +1660,9 @@ namespace Game::Anvil {
             case EntityTypeId::Rabbit:
                 if (const auto* r = dynamic_cast<const Rabbit*>(&mob)) {
                     w.Int("MoreCarrotTicks", r->GetMoreCarrotTicks());
-                    // "RabbitType" is omitted — the engine models no rabbit
-                    // variant at all, and writing 0 would repaint every
-                    // imported black/gold/killer rabbit brown.
+                    // MC Rabbit.addAdditionalSaveData: "RabbitType" — the
+                    // variant's id (Variant.LEGACY_CODEC).
+                    w.Int("RabbitType", static_cast<int32_t>(r->GetVariant()));
                 }
                 break;
             case EntityTypeId::Ocelot:
@@ -1712,8 +1673,15 @@ namespace Game::Anvil {
             case EntityTypeId::Cat:
                 if (const auto* c = dynamic_cast<const Cat*>(&mob)) {
                     w.String("variant", EnumName(kCatVariantNames, c->GetVariantByte()));
+                    w.String("sound_variant", std::string("minecraft:") + FarmSoundVariants::Name(FarmSoundVariants::Mob::Cat, c->GetSoundVariant()));
                     // MC Cat: DyeColor.LEGACY_ID_CODEC — the ordinal as a byte.
                     w.Byte("CollarColor", static_cast<int8_t>(c->GetCollarColor()));
+                }
+                break;
+            // MC Frog.addAdditionalSaveData: VariantUtils.writeVariant.
+            case EntityTypeId::Frog:
+                if (const auto* frog = dynamic_cast<const Frog*>(&mob)) {
+                    w.String("variant", std::string("minecraft:") + Frog::VariantName(frog->GetVariant()));
                 }
                 break;
             // MC Wolf.addAdditionalSaveData: CollarColor (legacy byte id),
@@ -1818,6 +1786,13 @@ namespace Game::Anvil {
                         const int32_t a[3] = {fp.x, fp.y, fp.z};
                         w.IntArray("flower_pos", a, 3);
                     }
+                    // MC Bee.addAdditionalSaveData: hive_pos (nullable),
+                    // CannotEnterHiveTicks.
+                    if (const auto& hive = b->GetHivePos()) {
+                        const int32_t h[3] = {hive->x, hive->y, hive->z};
+                        w.IntArray("hive_pos", h, 3);
+                    }
+                    w.Int("CannotEnterHiveTicks", b->GetStayOutOfHiveCountdown());
                 }
                 break;
             case EntityTypeId::Dolphin:
@@ -1895,10 +1870,18 @@ namespace Game::Anvil {
                     }
                 }
                 break;
+            // MC ZombieNautilus.addAdditionalSaveData: VariantUtils.writeVariant.
+            case EntityTypeId::ZombieNautilus:
+                if (const auto* zn = dynamic_cast<const ZombieNautilus*>(&mob)) {
+                    w.String("variant", std::string("minecraft:") + ZombieNautilus::VariantName(zn->GetVariantByte()));
+                }
+                break;
             case EntityTypeId::Shulker:
                 if (const auto* sh = dynamic_cast<const Shulker*>(&mob)) {
                     w.Byte("AttachFace", static_cast<int8_t>(sh->GetAttachFace()));
                     w.Byte("Peek",       static_cast<int8_t>(sh->GetRawPeekAmount()));
+                    // MC Shulker.addAdditionalSaveData: "Color" (16 = none).
+                    w.Byte("Color",      static_cast<int8_t>(sh->GetColor()));
                 }
                 break;
             case EntityTypeId::Phantom:
@@ -2371,26 +2354,57 @@ namespace Game::Anvil {
                     s->SetSheared(tag.GetValue<int8_t>("Sheared", 0) != 0);
                 }
                 break;
+            // MC IronGolem.readAdditionalSaveData: getBooleanOr("PlayerCreated", false).
+            case EntityTypeId::IronGolem:
+                if (auto* g = dynamic_cast<IronGolem*>(&mob)) {
+                    g->SetPlayerCreated(tag.GetValue<int8_t>("PlayerCreated", 0) != 0);
+                }
+                break;
             // MC SnowGolem.readAdditionalSaveData: getBooleanOr("Pumpkin", true).
             case EntityTypeId::SnowGolem:
                 if (auto* g = dynamic_cast<SnowGolem*>(&mob)) {
                     g->SetPumpkin(tag.GetValue<int8_t>("Pumpkin", 1) != 0);
                 }
                 break;
+            // MC CopperGolem.readAdditionalSaveData: getLongOr("next_weather_age",
+            // -1) and "weather_state" (absent: UNAFFECTED). A pre-release
+            // save's integer ordinal is read as CopperGolemWeatherStateFix
+            // converts it.
+            case EntityTypeId::CopperGolem:
+                if (auto* g = dynamic_cast<CopperGolem*>(&mob)) {
+                    g->SetNextWeatheringTick(tag.GetValue<int64_t>("next_weather_age",
+                                                                   CopperGolem::kUnsetWeatheringTick));
+                    CopperGolem::WeatherState state = CopperGolem::WeatherState::Unaffected;
+                    if (tag.HasTag("weather_state")) {
+                        const std::string name = tag.GetValue<std::string>("weather_state", "");
+                        if (!name.empty()) {
+                            state = CopperGolem::WeatherStateFromName(StripNamespace(name));
+                        } else {
+                            const int ordinal = tag.GetValue<int32_t>("weather_state", 0);
+                            state = ordinal >= 1 && ordinal <= 3 ? static_cast<CopperGolem::WeatherState>(ordinal)
+                                                                 : CopperGolem::WeatherState::Unaffected;
+                        }
+                    }
+                    g->SetWeatherState(state);
+                }
+                break;
             case EntityTypeId::Chicken:
                 if (auto* c = dynamic_cast<Chicken*>(&mob)) {
                     c->SetChickenJockey(tag.GetValue<int8_t>("IsChickenJockey", 0) != 0);
                     if (tag.HasTag("variant")) c->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
+                    if (uint8_t sv = 0; FarmSoundVariants::FromName(FarmSoundVariants::Mob::Chicken, tag.GetValue<std::string>("sound_variant", ""), sv)) c->SetSoundVariant(sv);
                 }
                 break;
             case EntityTypeId::Cow:
                 if (auto* c = dynamic_cast<Cow*>(&mob)) {
                     if (tag.HasTag("variant")) c->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
+                    if (uint8_t sv = 0; FarmSoundVariants::FromName(FarmSoundVariants::Mob::Cow, tag.GetValue<std::string>("sound_variant", ""), sv)) c->SetSoundVariant(sv);
                 }
                 break;
             case EntityTypeId::Pig:
                 if (auto* p = dynamic_cast<Pig*>(&mob)) {
                     if (tag.HasTag("variant")) p->SetVariantByte(TemperatureVariantFromId(tag.GetValue<std::string>("variant", "")));
+                    if (uint8_t sv = 0; FarmSoundVariants::FromName(FarmSoundVariants::Mob::Pig, tag.GetValue<std::string>("sound_variant", ""), sv)) p->SetSoundVariant(sv);
                 }
                 break;
             // MC MushroomCow.readAdditionalSaveData: absent or unknown →
@@ -2455,6 +2469,11 @@ namespace Game::Anvil {
             case EntityTypeId::Rabbit:
                 if (auto* r = dynamic_cast<Rabbit*>(&mob)) {
                     r->SetMoreCarrotTicks(tag.GetValue<int32_t>("MoreCarrotTicks", 0));
+                    // "RabbitType": an unknown id is Variant.DEFAULT (brown).
+                    if (tag.HasTag("RabbitType")) {
+                        const int32_t id = tag.GetValue<int32_t>("RabbitType", 0);
+                        r->SetVariant(Rabbit::IsValidVariant(id) ? static_cast<Rabbit::Variant>(id) : Rabbit::Variant::Brown);
+                    }
                 }
                 break;
             case EntityTypeId::Ocelot:
@@ -2471,9 +2490,18 @@ namespace Game::Anvil {
                             EnumIndex(kCatVariantNames,
                                       tag.GetValue<std::string>("variant", ""))));
                     }
+                    if (uint8_t sv = 0; FarmSoundVariants::FromName(FarmSoundVariants::Mob::Cat, tag.GetValue<std::string>("sound_variant", ""), sv)) c->SetSoundVariant(sv);
                     // MC: `.orElse(DEFAULT_COLLAR_COLOR)` — red when absent.
                     c->SetCollarColor(static_cast<uint8_t>(
                         tag.GetValue<int8_t>("CollarColor", static_cast<int8_t>(kDyeColorRed))));
+                }
+                break;
+            // MC Frog.readAdditionalSaveData: an unknown key keeps the
+            // default (temperate), as VariantUtils.readVariant's ifPresent.
+            case EntityTypeId::Frog:
+                if (auto* frog = dynamic_cast<Frog*>(&mob)) {
+                    Frog::Variant v;
+                    if (Frog::VariantFromName(tag.GetValue<std::string>("variant", ""), v)) frog->SetVariant(v);
                 }
                 break;
             case EntityTypeId::Wolf:
@@ -2575,6 +2603,13 @@ namespace Game::Anvil {
                         b->SetSavedFlowerPos(
                             glm::ivec3(arr->value[0], arr->value[1], arr->value[2]));
                     }
+                    b->SetStayOutOfHiveCountdown(tag.GetValue<int32_t>("CannotEnterHiveTicks", 0));
+                    if (auto hive = As<::World::NBTTagIntArray>(tag.GetTag("hive_pos"));
+                        hive && hive->value.size() == 3) {
+                        b->SetHivePos(glm::ivec3(hive->value[0], hive->value[1], hive->value[2]));
+                    } else {
+                        b->ClearHivePos();
+                    }
                 }
                 break;
             case EntityTypeId::Dolphin:
@@ -2661,12 +2696,22 @@ namespace Game::Anvil {
                     }
                 }
                 break;
+            case EntityTypeId::ZombieNautilus:
+                if (auto* zn = dynamic_cast<ZombieNautilus*>(&mob)) {
+                    // VariantUtils.readVariant: an unknown id keeps the current.
+                    std::string id = tag.GetValue<std::string>("variant", "");
+                    if (id.rfind("minecraft:", 0) == 0) id = id.substr(10);
+                    if (id == "warm") zn->SetVariantByte(1);
+                    else if (id == "temperate") zn->SetVariantByte(0);
+                }
+                break;
             case EntityTypeId::Shulker:
                 if (auto* sh = dynamic_cast<Shulker*>(&mob)) {
                     sh->SetAttachFace(tag.GetValue<int8_t>("AttachFace", 0));
                     // Through SetRawPeekAmount, which also refreshes the
                     // closed-lid armour modifier a raw assignment would skip.
                     sh->SetRawPeekAmount(tag.GetValue<int8_t>("Peek", 0));
+                    sh->SetColor(static_cast<uint8_t>(tag.GetValue<int8_t>("Color", 16)));
                 }
                 break;
             case EntityTypeId::Endermite:
@@ -3050,6 +3095,7 @@ namespace Game::Anvil {
         w.Bool  ("Invulnerable", false);
         w.Int   ("PortalCooldown", 0);
         WriteUuid(w, "UUID", item.uuid);
+        WriteEntityTags(w, item.tags);
 
         w.Short("Age",         static_cast<int16_t>(item.age));
         w.Short("PickupDelay", static_cast<int16_t>(item.pickupDelay));
@@ -3075,6 +3121,7 @@ namespace Game::Anvil {
         out.age         = tag.GetValue<int16_t>("Age", 0);
         out.pickupDelay = tag.GetValue<int16_t>("PickupDelay", 0);
         ReadUuid(tag, "UUID", out.uuid);
+        ReadEntityTags(tag, out.tags);
         return true;
     }
 
@@ -3098,6 +3145,7 @@ namespace Game::Anvil {
         w.Bool  ("Invulnerable", false);
         w.Int   ("PortalCooldown", 0);
         WriteUuid(w, "UUID", orb.uuid);
+        WriteEntityTags(w, orb.tags);
 
         w.Short("Value",  static_cast<int16_t>(orb.value));
         w.Int  ("Count",  orb.count);
@@ -3120,12 +3168,124 @@ namespace Game::Anvil {
         out.onGround = tag.GetValue<int8_t>("OnGround", 0) != 0;
         out.age      = tag.GetValue<int16_t>("Age", 0);
         ReadUuid(tag, "UUID", out.uuid);
+        ReadEntityTags(tag, out.tags);
         return true;
+    }
+
+    // ── Scoreboard tags (MC Entity "Tags") ─────────────────────────────────
+
+    void WriteEntityTags(Nbt::Writer& w, const EntityTags& tags) {
+        // MC Entity.saveWithoutId: `if (!this.tags.isEmpty()) output.store(
+        // "Tags", TAG_LIST_CODEC, List.copyOf(this.tags))`.
+        if (tags.Empty()) return;
+        auto list = w.BeginList("Tags", Nbt::TagType::String);
+        for (const std::string& t : tags.All()) w.ListString(list, t);
+        w.EndList(list);
+    }
+
+    void ReadEntityTags(const ::World::NBTTagCompound& tag, EntityTags& out) {
+        // MC Entity.load: the tags are cleared, then the saved list (at most
+        // MAX_ENTITY_TAG_COUNT) read back.
+        out.Clear();
+        auto list = std::dynamic_pointer_cast<::World::NBTTagList>(tag.GetTag("Tags"));
+        if (!list) return;
+        for (const auto& element : list->value) {
+            auto str = std::dynamic_pointer_cast<::World::NBTTagString>(element);
+            if (str) out.Add(str->value);
+        }
     }
 
     // ── Player effect list (PlayerDataStore) ───────────────────────────────
     // The same MobEffectInstance.CODEC list LivingEntity writes, for the
     // player file, which ServerPlayer (not a LivingEntity) writes itself.
+    void WriteAttributeList(Nbt::Writer& w, const AttributeMap& map) {
+        const auto& all = map.All();
+        if (all.empty()) return;
+
+        // The modifier's saved Identifier: the fixed table's for the engine's
+        // own permanent ones, else a permanent modifier's recorded name.
+        const auto savedId = [](Attribute attribute, const AttributeModifier& mod) -> std::string {
+            if (const char* mcId = PersistentModifierMcId(attribute, mod.id)) return mcId;
+            if (mod.permanent) return ModifierIdName(mod.id);
+            return {};
+        };
+
+        auto list = w.BeginList("attributes", Nbt::TagType::Compound);
+        for (const auto& inst : all) {
+            const auto& def = kAttributeTable[static_cast<size_t>(inst.GetAttribute())];
+            w.ListCompoundBegin(list);
+            w.String("id",   std::string(kNamespace) + std::string(def.name));
+            w.Double("base", inst.GetBaseValue());
+            bool anyPersistent = false;
+            for (const AttributeModifier& mod : inst.Modifiers()) {
+                if (!savedId(inst.GetAttribute(), mod).empty()) { anyPersistent = true; break; }
+            }
+            if (anyPersistent) {
+                auto mods = w.BeginList("modifiers", Nbt::TagType::Compound);
+                for (const AttributeModifier& mod : inst.Modifiers()) {
+                    const std::string id = savedId(inst.GetAttribute(), mod);
+                    if (id.empty()) continue;
+                    w.ListCompoundBegin(mods);
+                    w.String("id", id);
+                    w.Double("amount", mod.amount);
+                    w.String("operation", OperationName(mod.operation));
+                    w.ListCompoundEnd(mods);
+                }
+                w.EndList(mods);
+            }
+            w.ListCompoundEnd(list);
+        }
+        w.EndList(list);
+    }
+
+    void ReadAttributeList(const ::World::NBTTagCompound& tag, AttributeMap& map, bool onlyRegistered,
+                           bool* customized) {
+        auto list = As<LT>(tag.GetTag("attributes"));
+        if (!list) return;
+        for (const auto& elem : list->value) {
+            auto c = As<CT>(elem);
+            if (!c) continue;
+            Attribute attr{};
+            if (!Game::AttributeFromName(c->GetValue<std::string>("id", ""), attr)) continue;
+            // A mob takes only the attributes it registered: SetBaseValue on
+            // an absent one would give a zombie a jump_strength row it has
+            // no business owning, and MC's own apply() ignores them the same
+            // way.
+            if (onlyRegistered && !map.Has(attr)) continue;
+            const bool syncable = Network::IsClientSyncableAttribute(attr);
+            const double base = c->GetValue<double>("base", map.GetBaseValue(attr));
+            if (customized && syncable && map.Has(attr) && map.GetBaseValue(attr) != base) *customized = true;
+            map.SetBaseValue(attr, base);
+            // The permanent modifiers: the engine's fixed ones (see
+            // kPersistentModifiers) by their table id, every other
+            // Identifier as a permanent named modifier (/attribute's). An
+            // id MC wrote for a modifier this engine rebuilds itself (an
+            // effect's, worn gear's) never reaches a save, so it is not
+            // mistaken for one here.
+            if (auto mods = As<LT>(c->GetTag("modifiers"))) {
+                for (const auto& modElem : mods->value) {
+                    auto m = As<CT>(modElem);
+                    if (!m) continue;
+                    const std::string name = m->GetValue<std::string>("id", "");
+                    if (name.empty() || !IsValidIdentifier(name)) continue;
+                    AttributeModifier mod;
+                    mod.amount = m->GetValue<double>("amount", 0.0);
+                    mod.operation = OperationFromName(m->GetValue<std::string>("operation", "add_value"));
+                    ModifierId fixed{};
+                    if (PersistentModifierFromMcId(attr, name, fixed)) {
+                        mod.id = static_cast<uint32_t>(fixed);
+                    } else {
+                        mod.id = static_cast<uint32_t>(NamedModifierId(name));
+                        mod.permanent = true;
+                        if (customized && syncable) *customized = true;
+                    }
+                    map.RemoveModifier(attr, static_cast<ModifierId>(mod.id));
+                    map.AddModifier(attr, mod);
+                }
+            }
+        }
+    }
+
     void WriteActiveEffects(Nbt::Writer& w, const std::vector<MobEffectInstance>& effects) {
         if (effects.empty()) return;   // MC omits the key when there are none
         auto list = w.BeginList("active_effects", Nbt::TagType::Compound);

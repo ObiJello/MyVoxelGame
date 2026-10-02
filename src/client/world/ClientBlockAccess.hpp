@@ -5,6 +5,8 @@
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/core/JavaRandom.hpp"
 
+#include <cstdint>
+
 namespace Game { class BlockEntity; class ClientPlayer; }
 
 namespace Client {
@@ -39,6 +41,16 @@ namespace Client {
         uint16_t GetBiome(int worldX, int worldY, int worldZ) const override;
         // The chunk's light as the server sent it.
         int GetBrightness(Game::Lighting::LightLayer layer, int worldX, int worldY, int worldZ) const override;
+        // GetBrightness of the 3x3x3 cells around (x, y, z), each as MC
+        // packed light (block | sky << 4) in one byte, at index
+        // (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1) — one chunk lookup per
+        // chunk the cube touches instead of one per read. What a falling
+        // block's per-vertex light blends (BlockCubeEntityRenderer).
+        void GetLightCube(int x, int y, int z, uint8_t (&out)[27]) const;
+        // Changes whenever any light this level answers may have changed (a
+        // chunk's data or light arriving, a chunk loading or unloading), so
+        // a reader can cache what it derived from the light.
+        uint64_t LightVersion() const;
         bool SetBlock(int worldX, int worldY, int worldZ,
                       Game::BlockID blockId, uint32_t updateFlags) override;
         // Prediction write carrying the block-state index, so a predicted
@@ -86,7 +98,31 @@ namespace Client {
         Game::BlockEntity* GetBlockEntity(const glm::ivec3& pos) override;
         void SetBlockEntity(const glm::ivec3& pos, std::unique_ptr<Game::BlockEntity> entity) override;
         void RemoveBlockEntity(const glm::ivec3& pos) override;
+        // The mirrored piston move picks up its copy of a carried block
+        // entity (pistons_move_block_entities) — see PistonBlockEntities.hpp.
+        std::unique_ptr<Game::BlockEntity> TakeBlockEntity(const glm::ivec3& pos) override;
         int64_t GameTime() const override;
+
+        // ── Drawing a block entity a piston is carrying ─────────────────
+        //
+        // While open, a moving-piston cell whose entity carries a block
+        // entity answers as the block in transit: GetBlock / GetBlockState
+        // return the moved state and GetBlockEntity the carried entity. A
+        // block-entity renderer reads its facing, chest pairing and partner
+        // lid off the level at its own position; PistonRenderer opens this
+        // scope around drawing a carried entity so those reads see the
+        // carried blocks (both halves of a double chest in flight pair up)
+        // instead of the invisible moving cells.
+        class CarriedViewScope {
+        public:
+            explicit CarriedViewScope(ClientBlockAccess& a) : m_a(a), m_prev(a.m_carriedView) { a.m_carriedView = true; }
+            ~CarriedViewScope() { m_a.m_carriedView = m_prev; }
+            CarriedViewScope(const CarriedViewScope&) = delete;
+            CarriedViewScope& operator=(const CarriedViewScope&) = delete;
+        private:
+            ClientBlockAccess& m_a;
+            bool m_prev;
+        };
         Game::JavaRandom* Random() override { return &m_random; }
 
         // The local player, for the piston tick (ILevelWrite hooks).
@@ -129,10 +165,15 @@ namespace Client {
         uint64_t RegionWriteStamp(const glm::ivec3& min, const glm::ivec3& max) const override;
 
     private:
+        // CarriedViewScope's answer for a moving-piston cell: the carrying
+        // entity there, or null.
+        const Game::BlockEntity* CarryingPistonAt(int worldX, int worldY, int worldZ) const;
+
         ClientChunkManager* m_chunks = nullptr;
         uint32_t m_sequence   = 0;
         bool     m_predicting = false;
         bool     m_localWrites = false;
+        bool     m_carriedView = false;   // CarriedViewScope
         Game::ClientPlayer* m_player = nullptr;
         Game::JavaRandom    m_random{0};
     };

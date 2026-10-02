@@ -1,5 +1,6 @@
 // File: src/server/world/storage/anvil/BlockEntityNbt.cpp
 #include "server/world/storage/anvil/BlockEntityNbt.hpp"
+#include "common/data/NbtCompoundValue.hpp"
 
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
 #include "server/world/storage/anvil/SpawnerNbt.hpp"
@@ -20,6 +21,7 @@
 #include "server/world/storage/anvil/VibrationNbt.hpp"
 #include "common/world/block/entity/AurelithBlockEntities.hpp"
 #include "common/world/block/entity/HushLighthouseLampBlockEntity.hpp"
+#include "common/world/block/entity/CraftingTableBlockEntity.hpp"
 #include "common/world/block/entity/EndGatewayBlockEntity.hpp"
 #include "common/world/block/entity/FurnaceBlockEntity.hpp"
 #include "common/world/block/entity/BrewingStandBlockEntity.hpp"
@@ -31,6 +33,7 @@
 #include "common/world/block/entity/DecoratedPotBlockEntity.hpp"
 #include "common/world/block/entity/BannerBlockEntity.hpp"
 #include "common/world/block/entity/ChiseledBookShelfBlockEntity.hpp"
+#include "common/world/block/entity/BeehiveBlockEntity.hpp"
 #include "common/world/block/entity/CopperGolemStatueBlockEntity.hpp"
 #include "common/text/TextComponent.hpp"
 #include "common/text/Language.hpp"
@@ -53,7 +56,9 @@ namespace Game::Anvil {
             return type.StringId() != std::string("ender_chest");
         }
 
-        void WriteContainerItems(Nbt::Writer& w, const BaseContainerBlockEntity& container) {
+        // Over any Container: a BaseContainerBlockEntity, or a block entity
+        // that holds one (a crafting table's stored grid).
+        void WriteContainerItems(Nbt::Writer& w, const IContainer& container) {
             auto items = w.BeginList("Items", Nbt::TagType::Compound);
             const int size = container.GetContainerSize();
             for (int slot = 0; slot < size; ++slot) {
@@ -67,7 +72,7 @@ namespace Game::Anvil {
         }
 
         void ReadContainerItems(const ::World::NBTTagCompound& tag,
-                                BaseContainerBlockEntity& container) {
+                                IContainer& container) {
             auto items = std::dynamic_pointer_cast<::World::NBTTagList>(tag.GetTag("Items"));
             if (!items) return;
             for (const auto& element : items->value) {
@@ -188,7 +193,9 @@ namespace Game::Anvil {
         (void)chunkPos;
 
         w.ListCompoundBegin(list);
-        w.String("id", "minecraft:" + std::string(type->StringId()));
+        // Namespaced as registered: an engine type keeps its own namespace
+        // (Minecraft skips an id it does not know rather than misreading it).
+        w.String("id", type->ResourceId());
         w.Int("x", world.x);
         w.Int("y", world.y);
         w.Int("z", world.z);
@@ -206,6 +213,14 @@ namespace Game::Anvil {
             } else if (CarriesItems(*type) && !dynamic_cast<const DecoratedPotBlockEntity*>(&entity)) {
                 WriteContainerItems(w, *container);
             }
+            // LockCode.addToTag: the predicate under "lock".
+            if (container->IsLocked()) WriteNbtTag(w, "lock", container->GetLock().Tag());
+        }
+
+        // obeycraft:crafting_table (shared_crafting_tables): the stored grid
+        // as a container's Items list, slots 0..8 row-major.
+        if (const auto* table = dynamic_cast<const CraftingTableBlockEntity*>(&entity)) {
+            WriteContainerItems(w, table->Grid());
         }
 
         if (const auto* pot = dynamic_cast<const DecoratedPotBlockEntity*>(&entity)) {
@@ -238,6 +253,29 @@ namespace Game::Anvil {
             // container branch above always writes the list) and
             // last_interacted_slot.
             w.Int("last_interacted_slot", shelf->GetLastInteractedSlot());
+        }
+
+        if (const auto* hive = dynamic_cast<const BeehiveBlockEntity*>(&entity)) {
+            // MC BeehiveBlockEntity.saveAdditional: bees (Occupant.LIST_CODEC
+            // — {entity_data: {id, ...}, ticks_in_hive, min_ticks_in_hive})
+            // and flower_pos when the hive remembers one.
+            auto bees = w.BeginList("bees", Nbt::TagType::Compound);
+            for (const BeehiveOccupant& bee : hive->Occupants()) {
+                w.ListCompoundBegin(bees);
+                w.BeginCompound("entity_data");
+                const std::string& type = bee.entityType;
+                w.String("id", type.find(':') == std::string::npos ? "minecraft:" + type : type);
+                for (const auto& [k, v] : bee.entityData.Tag().value) if (v && k != "id") WriteNbtTag(w, k, *v);
+                w.EndCompound();
+                w.Int("ticks_in_hive", bee.ticksInHive);
+                w.Int("min_ticks_in_hive", bee.minTicksInHive);
+                w.ListCompoundEnd(bees);
+            }
+            w.EndList(bees);
+            if (const auto& flower = hive->SavedFlowerPos()) {
+                const int32_t p[3] = {flower->x, flower->y, flower->z};
+                w.IntArray("flower_pos", p, 3);
+            }
         }
 
         if (const auto* banner = dynamic_cast<const BannerBlockEntity*>(&entity)) {
@@ -313,6 +351,7 @@ namespace Game::Anvil {
             w.Short("lit_total_time",      static_cast<int16_t>(furnace->LitDuration()));
             w.Short("cooking_time_spent",  static_cast<int16_t>(furnace->CookingTime()));
             w.Short("cooking_total_time",  static_cast<int16_t>(furnace->CookingTotal()));
+            w.Float("speed_multiplier",    furnace->SpeedMultiplier());
             w.BeginCompound("RecipesUsed"); w.EndCompound();
         }
 
@@ -466,6 +505,15 @@ namespace Game::Anvil {
 
         if (const auto* piston = dynamic_cast<const PistonMovingBlockEntity*>(&entity)) {
             piston->WriteNbt(w);
+            // ObeyCraft extension (pistons_move_block_entities): the block
+            // entity riding in this cell, through this same writer, so a
+            // chunk saved and unloaded mid-move keeps a chest's contents.
+            // A one-element list (Minecraft ignores the unknown key).
+            if (const BlockEntity* carried = piston->Carried()) {
+                auto carriedList = w.BeginList("obeycraft_carried", Nbt::TagType::Compound);
+                WriteBlockEntity(w, carriedList, *carried, chunkPos);
+                w.EndList(carriedList);
+            }
         }
 
         if (const auto* spawner = dynamic_cast<const SpawnerBlockEntity*>(&entity)) {
@@ -569,10 +617,19 @@ namespace Game::Anvil {
             } else if (CarriesItems(*type)) {
                 ReadContainerItems(tag, *container);
             }
+            // LockCode.fromTag: "lock", an ItemPredicate compound.
+            if (auto lock = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("lock"))) {
+                container->SetLock(NbtCompoundValue(lock));
+            }
         }
 
         if (auto* hopper = dynamic_cast<HopperBlockEntity*>(entity.get())) {
             hopper->SetCooldownTime(tag.GetValue<int32_t>("TransferCooldown", -1));
+        }
+
+        // obeycraft:crafting_table — the stored grid, an Items list.
+        if (auto* table = dynamic_cast<CraftingTableBlockEntity*>(entity.get())) {
+            ReadContainerItems(tag, table->Grid());
         }
 
         if (auto* pot = dynamic_cast<DecoratedPotBlockEntity*>(entity.get())) {
@@ -593,6 +650,35 @@ namespace Game::Anvil {
         }
         if (auto* statue = dynamic_cast<CopperGolemStatueBlockEntity*>(entity.get())) {
             ReadCopperGolemStatue(tag, *statue);
+        }
+        if (auto* hive = dynamic_cast<BeehiveBlockEntity*>(entity.get())) {
+            // MC BeehiveBlockEntity.loadAdditional: bees, flower_pos.
+            std::vector<BeehiveOccupant> bees;
+            if (auto list = std::dynamic_pointer_cast<::World::NBTTagList>(tag.GetTag("bees"))) {
+                for (const auto& element : list->value) {
+                    auto c = std::dynamic_pointer_cast<::World::NBTTagCompound>(element);
+                    if (!c) continue;
+                    BeehiveOccupant bee;
+                    if (auto data = std::dynamic_pointer_cast<::World::NBTTagCompound>(c->GetTag("entity_data"))) {
+                        std::string type = data->GetValue<std::string>("id", "minecraft:bee");
+                        if (type.find(':') == std::string::npos) type = "minecraft:" + type;
+                        bee.entityType = type;
+                        auto rest = std::dynamic_pointer_cast<::World::NBTTagCompound>(CloneNbtTag(*data));
+                        if (rest) {
+                            rest->value.erase("id");
+                            bee.entityData = NbtCompoundValue(std::move(rest));
+                        }
+                    }
+                    bee.ticksInHive = c->GetValue<int32_t>("ticks_in_hive", 0);
+                    bee.minTicksInHive = c->GetValue<int32_t>("min_ticks_in_hive", 0);
+                    bees.push_back(std::move(bee));
+                }
+            }
+            hive->SetOccupants(std::move(bees));
+            if (auto flower = std::dynamic_pointer_cast<::World::NBTTagIntArray>(tag.GetTag("flower_pos"));
+                flower && flower->value.size() >= 3) {
+                hive->SetSavedFlowerPos(glm::ivec3(flower->value[0], flower->value[1], flower->value[2]));
+            }
         }
 
         if (auto* lectern = dynamic_cast<LecternBlockEntity*>(entity.get())) {
@@ -709,6 +795,17 @@ namespace Game::Anvil {
                                tag.GetValue<float>("progress", 0.0f),
                                tag.GetValue<int8_t>("extending", 0) != 0,
                                tag.GetValue<int8_t>("source", 0) != 0);
+            // The carried block entity (see the writer): read against the
+            // block in transit, at this cell.
+            if (auto carriedList = std::dynamic_pointer_cast<::World::NBTTagList>(tag.GetTag("obeycraft_carried"));
+                carriedList && !carriedList->value.empty()) {
+                if (auto carriedTag = std::dynamic_pointer_cast<::World::NBTTagCompound>(carriedList->value.front())) {
+                    glm::ivec3 carriedLocal{};
+                    if (auto carried = ReadBlockEntity(*carriedTag, chunkPos, moved.Block(), carriedLocal)) {
+                        piston->Carry(std::move(carried));
+                    }
+                }
+            }
         }
 
         if (auto* furnace = dynamic_cast<FurnaceBlockEntity*>(entity.get())) {
@@ -716,6 +813,9 @@ namespace Game::Anvil {
             furnace->SetLitDuration (tag.GetValue<int16_t>("lit_total_time",     0));
             furnace->SetCookingTime (tag.GetValue<int16_t>("cooking_time_spent", 0));
             furnace->SetCookingTotal(tag.GetValue<int16_t>("cooking_total_time", 0));
+            // MC's default 1.0 is the plain furnace's; a save from before the
+            // key keeps the furnace's own vanilla default (-1).
+            if (tag.GetTag("speed_multiplier")) furnace->SetSpeedMultiplier(tag.GetValue<float>("speed_multiplier", 1.0f));
         }
 
         if (auto* stand = dynamic_cast<BrewingStandBlockEntity*>(entity.get())) {

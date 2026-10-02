@@ -80,12 +80,12 @@ namespace Server {
 
         // LootCommand.callback: one stack names it, several count them.
         if (items.size() == 1) {
-            connection.SendChatMessage(Translate("commands.drop.success.single_with_table",
+            source.SendSuccess(connection, Translate("commands.drop.success.single_with_table",
                                                  {std::to_string(items.front().count),
-                                                  Game::GetItemStackHoverName(items.front()), table}), 1);
+                                                  Game::GetItemStackHoverName(items.front()), table}), false);
         } else {
-            connection.SendChatMessage(Translate("commands.drop.success.multiple_with_table",
-                                                 {std::to_string(items.size()), table}), 1);
+            source.SendSuccess(connection, Translate("commands.drop.success.multiple_with_table",
+                                                 {std::to_string(items.size()), table}), false);
         }
     }
 

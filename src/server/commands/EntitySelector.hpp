@@ -29,6 +29,7 @@
 
 #include "common/physics/Physics.hpp"
 #include "server/level/NamedEntityIndex.hpp"
+#include "server/world/storage/NBTParser.hpp"
 
 #include <glm/glm.hpp>
 #include "common/world/level/DimensionId.hpp"
@@ -37,7 +38,7 @@
 #include <string>
 #include <vector>
 
-namespace Game { class Entity; class Mob; }
+namespace Game { class Entity; class Mob; class EntityTags; }
 
 namespace Server {
 
@@ -47,7 +48,9 @@ namespace Server {
 
     // One entity that a selector matched.
     struct SelectedEntity {
-        enum class Kind : uint8_t { Player, Mob, Item };
+        // Orb: an experience orb (ExperienceOrbManager id), MC's
+        // experience_orb — selectable like any entity (`@e[type=experience_orb]`).
+        enum class Kind : uint8_t { Player, Mob, Item, Orb };
 
         Kind kind = Kind::Player;
 
@@ -129,6 +132,12 @@ namespace Server {
     // box) from its container. False when it is gone.
     bool RefreshSelectedEntity(const CommandSource& source, SelectedEntity& entity);
 
+    // MC Entity.entityTags(): the scoreboard tags of whatever `entity` is —
+    // the player's, the mob's, or the dropped item's / orb's (looked up in
+    // its level's manager by id). Null when the entity is gone. What `tag=`
+    // tests and `/tag` edits.
+    Game::EntityTags* SelectedEntityTags(const SelectedEntity& entity);
+
     // MC EntityArgument's four flavours. They differ in two ways: whether more
     // than one result is allowed, and whether non-players may be returned at
     // all (`EntityArgument.player()` rejects `@e` outright rather than
@@ -157,6 +166,13 @@ namespace Server {
         std::vector<NamedEntities::ChunkRef> chunks;
     };
     NamedEntityDeferral& CurrentNamedEntityDeferral();
+
+    // MC `entity.saveWithoutId` (+ a player's "SelectedItem"): the entity's
+    // full saved compound from the world save's own writers (EntityNbt for
+    // mobs, items and orbs, the player file for players), without "id".
+    // What `nbt=` tests and `/data get entity` shows. Null when the entity
+    // is gone or cannot be written.
+    std::shared_ptr<::World::NBTTagCompound> SavedEntityNbt(const SelectedEntity& entity);
 
     // Parse `token` and resolve it against the live world.
     //

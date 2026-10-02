@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include <memory>
+
 namespace Game {
 
     namespace {
@@ -578,49 +580,23 @@ namespace Game {
             }
         };
 
-        // ── StopAttacking (MC Sensor.wasEntityAttackableLastNTicks(100)) ───
-        //
-        // The breeze drops its target only after 100 straight ticks of it
-        // being un-attackable (dead, out of follow range, or out of sight).
-        // MC builds this from a remembered-timestamp predicate; the timestamp
-        // lives here.
-        class StopAttackingIfNotSeen : public Behavior {
-        public:
-            static constexpr int kTicksToRememberSeenTarget = 100;
-
-            StopAttackingIfNotSeen()
-                : Behavior({ { MemoryModule::AttackTarget, MemoryStatus::ValuePresent } },
-                           1) {}
-            const char* DebugString() const override { return "BreezeStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
-                auto* mob = dynamic_cast<Mob*>(&body);
-                Brain* brain = body.GetBrain();
-                if (!mob || !brain) return false;
-
-                auto* target = dynamic_cast<LivingEntity*>(
-                    brain->GetEntity(MemoryModule::AttackTarget));
-                const int64_t now = level.GetGameTime();
-
-                bool attackableNow = false;
-                if (target && target->IsAlive() && mob->CanAttack(*target)) {
-                    const double range = mob->GetAttributeValue(Attribute::FollowRange);
-                    attackableNow = mob->DistanceToSqr(*target) <= range * range
-                                    && mob->GetSensing().HasLineOfSight(*target);
+        // MC Sensor.wasEntityAttackableLastNTicks(body, 100) — rememberPositives:
+        // a positive isEntityAttackable re-arms the count to 100, each negative
+        // spends one, and the predicate holds while the count has not gone
+        // below zero. Counted per invocation, as MC does (the FIGHT activity's
+        // stop behaviour evaluates it once per brain tick while the earlier
+        // validity clauses hold). One counter per breeze: MC builds the
+        // activity, and so the predicate, per body.
+        StopAttackingIfTargetInvalid::StopAttackCondition NotAttackableLastNTicks(int invocations) {
+            auto positivesLeft = std::make_shared<int>(0);
+            return [positivesLeft, invocations](EntityLevel&, Mob& body, LivingEntity& target) {
+                if (SensorTargeting::IsEntityAttackable(body, target)) {
+                    *positivesLeft = invocations;
+                    return false;
                 }
-                if (attackableNow) m_lastAttackableTime = now;
-
-                if (!target || !target->IsAlive()
-                    || now - m_lastAttackableTime > kTicksToRememberSeenTarget) {
-                    brain->EraseMemory(MemoryModule::AttackTarget);
-                }
-                return true;
-            }
-
-        private:
-            int64_t m_lastAttackableTime = 0;
-        };
+                return --*positivesLeft < 0;
+            };
+        }
 
         // ── BreezeAttackEntitySensor (MC ai/sensing) ───────────────────────
         //
@@ -643,10 +619,11 @@ namespace Game {
                         brain->GetEntityList(MemoryModule::NearestLivingEntities)) {
                     for (Entity* e : *nearest) {
                         auto* living = dynamic_cast<LivingEntity*>(e);
-                        if (!living || !living->IsAlive()) continue;
+                        if (!living) continue;
+                        // EntitySelector.NO_CREATIVE_OR_SPECTATOR, then
+                        // Sensor.isEntityAttackable.
                         if (living->IsCreative() || living->IsSpectator()) continue;
-                        if (!mob->CanAttack(*living)) continue;
-                        if (!mob->GetSensing().HasLineOfSight(*living)) continue;
+                        if (!SensorTargeting::IsEntityAttackable(*mob, *living)) continue;
                         found = living;
                         break;
                     }
@@ -720,7 +697,8 @@ namespace Game {
 
         // ── FIGHT ──────────────────────────────────────────────────────────
         std::vector<BehaviorPtr> fight;
-        fight.push_back(std::make_unique<StopAttackingIfNotSeen>());
+        // MC StopAttackingIfTargetInvalid.create(wasEntityAttackableLastNTicks(100).negate()).
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(NotAttackableLastNTicks(100)));
         fight.push_back(std::make_unique<Shoot>());
         fight.push_back(std::make_unique<LongJump>());
         fight.push_back(std::make_unique<ShootWhenStuck>());

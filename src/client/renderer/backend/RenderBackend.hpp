@@ -385,6 +385,38 @@ namespace Render {
         // cannot be a transfer source).
         virtual bool CopyFramebufferToRenderTarget(RenderTargetHandle /*dst*/) { return false; }
 
+        // ── Scaled scene (Video Settings → Render Resolution) ───────────
+        // MC draws the level into RenderTarget mainTarget and blits that to
+        // the window before the GUI. Here the window IS the main target at
+        // 100 %, at no cost; any other scale moves the frame offscreen for
+        // the level only:
+        //
+        //   RequestScaledScene(w, h)   before BeginFrame — the frame about to
+        //                              begin draws its level at w×h. (0, 0)
+        //                              or the window's own size: no scene.
+        //   BeginFrame                 the frame starts on the scene target.
+        //   ...level...                everything that draws to "the frame"
+        //                              — Clear, SetViewport's flip,
+        //                              BindRenderTarget(INVALID_RENDER_TARGET),
+        //                              CopyFramebuffer*, the read-back,
+        //                              Improved Transparency's frame depth —
+        //                              is the w×h scene, colour and depth.
+        //   ResolveScaledScene()       the scene is stretched (bilinear) over
+        //                              the whole window and the frame is the
+        //                              window again, depth cleared: the GUI.
+        //
+        // The request is consumed by the BeginFrame that follows; a frame
+        // that never resolves is resolved by EndFrame. Vulkan keeps a scene
+        // target per frame slot (frames overlap on the GPU). ScaledSceneActive
+        // says whether THIS frame took it (false when unsupported — the frame
+        // is then simply drawn at the window's size).
+        virtual void RequestScaledScene(int /*width*/, int /*height*/) {}
+        virtual bool ScaledSceneActive() const { return false; }
+        // This frame's scene size (the request, clamped to what the device
+        // can attach). Unchanged arguments when no scene is active.
+        virtual void GetScaledSceneSize(int& /*width*/, int& /*height*/) const {}
+        virtual void ResolveScaledScene() {}
+
         // ── Shader overrides (shader packs) ─────────────────────────────
         // While override mode is on, BindShader of an ENGINE shader that has
         // an override binds the pack's program instead (and that program's

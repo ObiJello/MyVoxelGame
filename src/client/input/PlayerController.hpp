@@ -271,6 +271,13 @@ namespace Game {
         // Live look angles in degrees, derived from lookDir (player->yaw/pitch
         // are stale — see the implementation comment).
         void LookAngles(float& yawDeg, float& pitchDeg) const;
+        // The look angles a click on `hit` was made with, in the hit block's
+        // OWN space: the direction of the ray that found it — mapped through
+        // the portal it crossed, if any (RaycastHit::rayDirection) — else the
+        // live LookAngles. Block placement orients from these, so a door
+        // placed through a portal faces the way the player sees themselves
+        // looking on the far side.
+        void HitLookAngles(const RaycastHit& hit, float& yawDeg, float& pitchDeg) const;
         // Apply a predicted block change to the client's own chunk data so it
         // shows up this frame instead of a round trip later, and register it
         // with ClientChunkManager's prediction handler under `sequence` so the
@@ -291,9 +298,13 @@ namespace Game {
         // nothing was sent) so a matching block prediction can be filed.
         // The entity pick along one ray in the BOUND level; PickEntity runs it
         // in the player's level and, past a portal, in the far level.
+        // `minRange` / `margin`: an ATTACK_RANGE item's pick (AttackRange.
+        // getClosesetHit — hits from its minimum reach on, every box
+        // inflated by its hitbox margin).
         int32_t PickEntityAlong(const glm::dvec3& origin, const glm::vec3& dir, float range,
                                 float blockLimit, int* outDragonPart,
-                                glm::dvec3* outHit = nullptr) const;
+                                glm::dvec3* outHit = nullptr, float minRange = 0.0f,
+                                float margin = 0.0f) const;
         // altInteract=true → left-click "use" semantics (PortalGun blue).
         // `dimension` stamps the packet with the clicked block's level;
         // absent, it is the level the crosshair's block is in.
@@ -428,8 +439,21 @@ namespace Game {
             // stamped with THAT level, so a portal can be fired through a
             // nether portal onto the Nether's walls.
             Game::DimensionId dimension = Game::DimensionId::Overworld;
+            // Blocks per second along `direction`: the gun's launch speed
+            // plus the shooter's own motion (see SpawnPortalProjectile).
+            float     speed = 57.15f;
         };
         std::vector<PendingPortalProjectile> m_pendingPortalProjectiles;
+        // The local player's actual motion, blocks per second, measured from
+        // its position frame to frame (walking, falling, gliding, portal
+        // momentum, a vehicle carrying it — whatever moved it), smoothed
+        // over a tick and capped; teleports are ignored. What a shot
+        // inherits (MC Projectile.shootFromRotation adds the shooter's
+        // deltaMovement).
+        glm::dvec3 m_shooterMotionPrevPos{0.0};
+        glm::dvec3 m_shooterVelocity{0.0};
+        bool       m_shooterMotionValid = false;
+        void UpdateShooterVelocity(float deltaTime);
         void SpawnPortalProjectile(bool isOrange);
         void UpdatePendingPortalProjectiles(float deltaTime);
 #endif

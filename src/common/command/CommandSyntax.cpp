@@ -17,6 +17,8 @@ namespace Game::Cmd {
             case Arg::BlockList:
             case Arg::ItemList:
             case Arg::Greedy:
+            case Arg::Message:
+            case Arg::TextComponent:
             case Arg::Command:   return 0;
             default:             return 1;
         }

@@ -120,9 +120,10 @@ namespace Game {
 
         // MC GuardianAttackSelector: (Player || Squid || Axolotl) &&
         // distSqr > 9. GlowSquid extends Squid in MC and counts.
+        // MC 26.3 getTargetSearchArea: the follow range on ALL axes.
         AABB box = m_guardian->GetAABB();
-        box.min -= glm::vec3(follow, 4.0, follow);
-        box.max += glm::vec3(follow, 4.0, follow);
+        box.min -= glm::vec3(follow, follow, follow);
+        box.max += glm::vec3(follow, follow, follow);
 
         std::vector<Entity*> nearby;
         level->GetEntitiesInBox(box, m_guardian, nearby);
@@ -168,8 +169,9 @@ namespace Game {
     }
 
     void GuardianAttackTargetGoal::Start() {
+        // MC NearestAttackableTargetGoal.start: setTarget + super only — no
+        // targetMob cache, so a target cleared elsewhere stays cleared.
         m_guardian->SetTarget(m_target);
-        m_targetMob = m_target;
         TargetGoal::Start();
     }
 

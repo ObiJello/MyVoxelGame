@@ -277,6 +277,15 @@ namespace Game {
             using Slot::Slot;
             bool MayPlace(const ItemStack& stack) const override { return IsBrewingPotionInput(stack); }
             int  GetMaxStackSize() const override { return 1; }
+            // MC PotionSlot.onTake: a taken stack with a potion is
+            // CriteriaTriggers.BREWED_POTION — reported for the session.
+            void OnTake(const ItemStack& taken, ContainerClickResult& result) override {
+                Slot::OnTake(taken, result);
+                const auto contents = taken.get(DataComponents::POTION_CONTENTS);
+                if (contents && contents->potion) {
+                    result.brewedPotions.push_back(std::string("minecraft:") + GetPotionKey(*contents->potion));
+                }
+            }
         };
         // MC BrewingStandMenu.IngredientsSlot: BREWING_REAGENTS.
         class BrewingIngredientSlot : public Slot {
@@ -288,7 +297,7 @@ namespace Game {
         class BrewingFuelSlot : public Slot {
         public:
             using Slot::Slot;
-            bool MayPlace(const ItemStack& stack) const override { return GetBrewingFuelUses(stack) > 0; }
+            bool MayPlace(const ItemStack& stack) const override { return IsBrewingFuel(stack); }
         };
     }
 
@@ -361,7 +370,7 @@ namespace Game {
                                slotIndex == SLOT_INGREDIENT || slotIndex == SLOT_FUEL;
         if (!fromStand) {
             Slot& ingredientSlot = GetSlot(SLOT_INGREDIENT);
-            if (GetBrewingFuelUses(original) > 0) {
+            if (IsBrewingFuel(original)) {
                 // Fuel first. Blaze powder is also a reagent (strength), so
                 // when the fuel slot is full it goes on to the ingredient.
                 if (!MoveItemStackTo(stack, SLOT_FUEL, SLOT_FUEL + 1, false, result) &&

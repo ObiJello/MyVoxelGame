@@ -23,6 +23,9 @@ namespace Render {
                     GuiRenderState* renderState, FontRenderer* fontRenderer);
 
         // --- Sprite rendering (MC: blitSprite) ---
+        // Whether the GUI atlas holds `spriteId` (a tooltip style's sprites
+        // fall back to the vanilla ones when a pack lacks them).
+        bool HasSprite(const std::string& spriteId) const;
         void BlitSprite(const std::string& spriteId, int x, int y, int width, int height);
         void BlitSprite(const std::string& spriteId, int x, int y, int width, int height, uint32_t color);
         // Partial sprite sub-region (for progress bars)

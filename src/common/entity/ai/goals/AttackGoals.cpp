@@ -182,7 +182,7 @@ namespace Game {
                                                  double walkSpeedModifier,
                                                  double sprintSpeedModifier)
         : AvoidEntityGoal(rabbit, maxDistance, walkSpeedModifier,
-                          sprintSpeedModifier) {}
+                          sprintSpeedModifier), m_rabbit(rabbit) {}
 
     RabbitAvoidEntityGoal::RabbitAvoidEntityGoal(Rabbit* rabbit,
                                                  const EntityTypeId* types,
@@ -190,7 +190,11 @@ namespace Game {
                                                  double walkSpeedModifier,
                                                  double sprintSpeedModifier)
         : AvoidEntityGoal(rabbit, types, typeCount, maxDistance,
-                          walkSpeedModifier, sprintSpeedModifier) {}
+                          walkSpeedModifier, sprintSpeedModifier), m_rabbit(rabbit) {}
+
+    bool RabbitAvoidEntityGoal::CanUse() {
+        return (!m_rabbit || m_rabbit->GetVariant() != Rabbit::Variant::Evil) && AvoidEntityGoal::CanUse();
+    }
 
     // ── ZombieAttackGoal ───────────────────────────────────────────────────
 

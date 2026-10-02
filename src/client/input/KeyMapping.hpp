@@ -122,6 +122,9 @@ namespace Input {
         extern KeyMapping* VeinMine;
 
         extern KeyMapping* Inventory;
+        // MC keyAdvancements (key.categories.misc, L): opens the
+        // Advancements screen; pressed again inside it, closes it.
+        extern KeyMapping* Advancements;
         extern KeyMapping* Chat;
         extern KeyMapping* Command;
         // MC keyPlayerList (held: the tab list), keySpectatorOutlines (held:

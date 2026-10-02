@@ -635,13 +635,6 @@ namespace Game {
         void UpdateNeighbourShapes(BlockState state, const glm::ivec3& pos,
                                    uint32_t updateFlags, int updateLimit);
 
-        // The old name for "tell the six neighbours something changed here".
-        // Its one remaining caller is the wither ritual, which mirrors
-        // CarvedPumpkinBlock.updatePatternBlocks' `blockUpdated(pos, AIR)`.
-        void NotifyNeighborBlocks(int worldX, int worldY, int worldZ) {
-            UpdateNeighborsAt(glm::ivec3(worldX, worldY, worldZ), BlockID::Air);
-        }
-
         // ── Block events (MC ServerLevel.blockEvents) ───────────────────────
         void BlockEvent(const glm::ivec3& pos, BlockID block, int b0, int b1) override;
 
@@ -650,6 +643,9 @@ namespace Game {
         void SetBlockEntity(const glm::ivec3& pos, std::unique_ptr<BlockEntity> entity) override;
         void BlockEntityChanged(const glm::ivec3& pos) override;
         void RemoveBlockEntity(const glm::ivec3& pos) override;
+        // Silent detach (a piston carrying it): no spill, no packet — see
+        // ILevelWrite::TakeBlockEntity.
+        std::unique_ptr<BlockEntity> TakeBlockEntity(const glm::ivec3& pos) override;
         bool IsHandlingTick() const override { return m_handlingTick; }
         // MC ServerLevel.gameEventDispatcher — the vibration system's
         // listener registries for this level (gameevent/GameEventDispatcher).

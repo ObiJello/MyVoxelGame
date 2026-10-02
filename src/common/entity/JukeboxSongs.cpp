@@ -1,4 +1,5 @@
 // File: src/common/entity/JukeboxSongs.cpp
+#include "common/data/DataComponents.hpp"
 #include "common/entity/JukeboxSongs.hpp"
 
 #include "common/entity/GeneratedItemList.hpp"
@@ -66,11 +67,13 @@ namespace Game {
         }
 
         int IdFromStack(const ItemStack& stack) {
+            // MC JukeboxSong.fromStack: the stack's JUKEBOX_PLAYABLE song.
             if (stack.IsEmpty()) return -1;
-            for (size_t i = 0; i < kSongs.size(); ++i) {
-                if (kSongs[i].discItem == stack.itemId) return static_cast<int>(i);
-            }
-            return -1;
+            const auto song = stack.get(DataComponents::JUKEBOX_PLAYABLE);
+            if (!song) return -1;
+            std::string_view key = *song;
+            if (key.rfind("minecraft:", 0) == 0) key.remove_prefix(10);
+            return IdFromKey(key);
         }
 
         int IdFromKey(std::string_view key) {

@@ -1,6 +1,8 @@
 // File: src/client/renderer/mesh/ChunkRenderer.cpp
 #include "ChunkRenderer.hpp"
 #include "../core/DevRenderSkip.hpp"
+#include "../core/WorldFramebuffer.hpp"
+#include "../blockentity/SkyBlockRenderer.hpp"
 #include <cstdlib>
 #include "SectionFade.hpp"
 #include "ChunkMegaBuffer.hpp"
@@ -498,6 +500,17 @@ namespace Render {
         // Bind opaque shader, compute MVP, and bind atlas texture
         BindSharedRenderState(camera);
 
+        // Sky blocks: their faces go into the depth buffer now — after this
+        // view's sky, before any of its terrain — so the sky stays showing
+        // where they are (SkyBlockRenderer.hpp). Every view passes through
+        // here (main, portal far sides, gun portals, panorama faces), with
+        // its own sections, MVP and clip plane. A draw leaves its own
+        // shader bound, so the terrain state is bound again.
+        if (!m_visibleSections.empty() &&
+            g_skyBlockRenderer.RenderWindows(*this, m_cachedMVP, PortalClipPlane())) {
+            BindSharedRenderState(camera);
+        }
+
         // Bind shared block VAO once per frame — all mega-buffers share this
         // VAO's vertex format.  Switching between mega-buffers only calls
         // BindBuffers() (glBindVertexBuffer + IBO rebind), avoiding the GPU
@@ -927,6 +940,30 @@ namespace Render {
         m_stats.sectionsRendered = static_cast<int>(m_visibleSections.size());
     }
 
+    bool ChunkRenderer::IsStalestRecentPortalSlot(const ReachableCacheSlot& s, int renderDistance) const {
+        // "Recent": drawn within the last few dozen prepares (every view of
+        // a frame is one), i.e. a portal view still on screen.
+        constexpr uint32_t kRecentPrepares = 64;
+        for (const auto& o : m_reachableSlots) {
+            if (&o == &s || !o.valid || !o.portalView) continue;
+            if (m_prepareCounter - o.lastUsed > kRecentPrepares) continue;
+            if (IsSlotFresh(o, o.renderDistance)) continue;
+            if (o.builtAt < s.builtAt) return false;
+        }
+        (void)renderDistance;
+        return true;
+    }
+
+    void ChunkRenderer::CountLastViewMeshed(int& visible, int& meshed) const {
+        visible = static_cast<int>(m_visibleSections.size());
+        meshed = 0;
+        if (!m_chunks) return;
+        for (const auto& rd : m_visibleSections) {
+            const auto* info = m_chunks->GetSectionInfo(rd.chunkPos, rd.sectionY);
+            if (info && (info->builtOnce || info->meshResolvedEmpty)) ++meshed;
+        }
+    }
+
     ChunkRenderer::ReachableCacheSlot* ChunkRenderer::PickEvictionSlot(bool forPortalView) {
         // A free slot first. Then the least recently used — but a portal
         // view's result takes a portal slot before it takes a main one:
@@ -1037,6 +1074,7 @@ namespace Render {
                 dst->portalView = job->portalView;
                 dst->renderDistance = job->renderDistance;
                 dst->valid = true;
+                dst->builtAt = std::chrono::steady_clock::now();
                 dst->lastUsed = m_prepareCounter;
                 m_bfsVisitedCount = job->visitedCount;
                 m_bfsOccludedCount = job->occludedCount;
@@ -1172,6 +1210,45 @@ namespace Render {
             return;
         }
 
+        // A portal view whose own set has gone stale and stayed so (its far
+        // side kept meshing while the one BFS worker served the main view):
+        // draw — and record for the mesh scheduler — by frustum, as a view
+        // with no set yet does, until a refresh lands. Its stale BFS list
+        // stops at the far side's first unmeshed ring (an unmeshed section
+        // blocks the BFS) and is never extended, so drawing from it held
+        // back everything the far side compiled since, and kept the rest
+        // from being admitted for meshing at all. The refresh is asked for
+        // below (portal fairness: m_portalRebuildStarved).
+        constexpr auto kPortalSlotMaxStale = std::chrono::milliseconds(500);
+        if (portalView && exact && !IsSlotFresh(*exact, renderDistanceChunks) &&
+            std::chrono::steady_clock::now() - exact->builtAt > kPortalSlotMaxStale) {
+            exact->lastUsed = m_prepareCounter;
+            const bool mayRefresh = m_meshes && !m_occlusionGraph.Busy() && !m_mainViewAwaitingBfs &&
+                                    IsStalestRecentPortalSlot(*exact, renderDistanceChunks);
+            if (mayRefresh) {
+                m_lastRebuildSubmit = std::chrono::steady_clock::now();
+                m_portalRebuildStarved = false;
+                m_lastRebuildWasMain = false;
+                auto job = m_occlusionGraph.AcquireJob();
+                job->keyCx = currentChunkX;
+                job->keyCz = currentChunkZ;
+                job->keySy = currentSectionY;
+                job->worldVersion = m_worldVersion;
+                job->eraseToken = m_eraseToken;
+                job->propagationEpoch = m_propagationEpoch;
+                job->portalView = true;
+                m_occlusionGraph.BuildInput(*job, bfsOrigin, m_enableSmartCull && !m_smartCullSuppressed, renderDistanceChunks);
+                m_occlusionGraph.SubmitAsync(std::move(job));
+            } else {
+                m_portalRebuildStarved = true;
+            }
+            m_lastPrepareSource = PrepareSource::FrustumOnly;
+            PrepareVisibleSectionsThroughPortal(camera, frustum, renderDistanceChunks);
+            auto overallEnd = std::chrono::high_resolution_clock::now();
+            m_stats.chunkIterationTimeMs = std::chrono::duration<float, std::milli>(overallEnd - overallStartTime).count();
+            return;
+        }
+
         if (!usable) {
             // Cold start (world entry / post-erase): synchronous rebuild so
             // this frame renders correct data.
@@ -1212,6 +1289,7 @@ namespace Render {
             dst->worldVersion = syncDegenerate ? job->worldVersion - 1 : job->worldVersion;
             dst->propagationEpoch = job->propagationEpoch;
             dst->valid = true;
+            dst->builtAt = std::chrono::steady_clock::now();
             m_bfsVisitedCount = job->visitedCount;
             m_bfsOccludedCount = job->occludedCount;
             if (!portalView) m_occlusionGraph.AdoptGraph(*job);   // cold-start graph, same as the async path
@@ -1315,10 +1393,19 @@ namespace Render {
         // A portal view waits while the main view has no slot of its own:
         // the one job in flight must be the player's world, not a far side.
         const bool yieldToMain = portalView && m_mainViewAwaitingBfs;
-        if (!haveExactFresh && m_meshes && !m_occlusionGraph.Busy() && !yieldToMain &&
+        // ...and the main view's routine refresh yields every other time to
+        // a portal view that is waiting for one (see m_portalRebuildStarved);
+        // among portal views, the stalest goes first.
+        const bool yieldToPortal = !portalView && !urgentRebuild && m_portalRebuildStarved && m_lastRebuildWasMain;
+        const bool portalsTurn   = !portalView || !exact || IsStalestRecentPortalSlot(*exact, renderDistanceChunks);
+        if (!haveExactFresh && portalView && (m_occlusionGraph.Busy() || !portalsTurn)) m_portalRebuildStarved = true;
+        if (!haveExactFresh && m_meshes && !m_occlusionGraph.Busy() && !yieldToMain && !yieldToPortal &&
+            portalsTurn &&
             (urgentRebuild ||
              rebuildNow - m_lastRebuildSubmit >= std::chrono::milliseconds(250))) {
             m_lastRebuildSubmit = rebuildNow;
+            m_lastRebuildWasMain = !portalView;
+            if (portalView) m_portalRebuildStarved = false;
             auto job = m_occlusionGraph.AcquireJob();
             job->keyCx = currentChunkX;
             job->keyCz = currentChunkZ;
@@ -1932,7 +2019,8 @@ namespace Render {
 
         // Compute MVP once and cache it (needed when switching to cutout shader)
         int width, height;
-        glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
+        // The level's size (the scaled scene's under Render Resolution).
+        if (!WorldFramebuffer::Get(width, height)) glfwGetFramebufferSize(g_renderBackend->GetWindow(), &width, &height);
         float aspect = (height == 0) ? 1.0f : static_cast<float>(width) / static_cast<float>(height);
         // Render space: the camera's own origin must be the one every other
         // renderer of this view reads (Render::RenderOrigin()), or terrain

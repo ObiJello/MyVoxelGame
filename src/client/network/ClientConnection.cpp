@@ -5,10 +5,14 @@
 #include "common/world/portal/PortalState.hpp"
 #include "common/world/level/GameRules.hpp"
 #include "common/world/block/RedstonePlus.hpp"
+#include "common/world/block/piston/PistonBlockEntities.hpp"
+#include "common/world/block/entity/PistonMovingBlockEntity.hpp"
 #include "client/ClientTickRateManager.hpp"
 #include "client/world/HushStillnessState.hpp"
 #include "client/world/HushSignalState.hpp"
 #include "client/entity/LocalItemCooldowns.hpp"
+#include "client/entity/PlayerSkins.hpp"
+#include "common/network/packets/game/PlayerAppearancePackets.hpp"
 #include "common/network/packets/game/CooldownS2CPacket.hpp"
 #include "client/world/AurelithState.hpp"
 #include "common/network/packets/game/HushStillnessS2CPacket.hpp"
@@ -258,6 +262,9 @@ namespace Client {
                     Game::Rules::SetBool(Game::Rules::Id::ImmediateRespawn, p[3] != 0);
                 }
                 if (p.size() >= 5) Game::RedstonePlus::SetEnabled(p[4] != 0);
+                // pistons_move_block_entities: the client's mirrored piston
+                // move must resolve and carry exactly as the server's.
+                if (p.size() >= 6) Game::PistonBlockEntities::SetEnabled(p[5] != 0);
             });
         m_packetRegistry.RegisterHandler(PacketId::PongResponseS2C,
             [this](const std::vector<uint8_t>& p) {
@@ -556,6 +563,21 @@ namespace Client {
             Platform::g_gameSettings.GetVSync(),
             Platform::g_gameSettings.GetMouseSensitivity()
         );
+
+        // How this player looks (the launcher's stick figure / skin / cape,
+        // docs/player-appearance.md); the server relays it to everyone else.
+        // The plain stick figure needs no packet — it is what a player who
+        // never sent one is drawn as — so only a chosen look is sent.
+        // (Local() is set once at startup, before any connection.)
+        {
+            const Game::PlayerAppearance& look = Client::PlayerSkins::Get().Local();
+            if (look != Game::PlayerAppearance{}) {
+                Network::PlayerAppearanceC2SPacket packet;
+                packet.appearance = look;
+                SendPacket(static_cast<uint8_t>(Network::PacketId::PlayerAppearanceC2S),
+                           Network::Serialization::Serialize(packet));
+            }
+        }
     }
 
     void ClientConnection::HandleDisconnect(const std::vector<uint8_t>& payload) {
@@ -595,10 +617,36 @@ namespace Client {
         // with packet ordering), the BE still gets stored — the renderer
         // re-reads the variant from the chunk each frame.
         Game::BlockID blockId = clientChunk->chunkData->GetBlock(lx, packet.worldY, lz);
+        // A moving-piston cell (pistons_move_block_entities) — in flight, or
+        // landed and bridging until its section mesh uploads: the server's
+        // data is for the block it is landing, so the entity is that
+        // block's, not the moving piston's. Built for the cell's block id it
+        // would say MovingPiston for good, and a later move of the same
+        // chest could not carry it (the client dropped it instead and the
+        // chest vanished for the length of every move after the first).
+        Game::PistonMovingBlockEntity* movingCell = nullptr;
+        if (packet.typeId != Game::BlockEntityTypeIds::PISTON) {
+            movingCell = dynamic_cast<Game::PistonMovingBlockEntity*>(
+                clientChunk->chunkData->GetBlockEntity(lx, packet.worldY, lz));
+            if (movingCell && type->IsValidFor(movingCell->GetMovedState().Block())) {
+                blockId = movingCell->GetMovedState().Block();
+            }
+        }
         auto be = type->Create(glm::ivec3(packet.worldX, packet.worldY, packet.worldZ), blockId);
         if (!packet.dataBlob.empty()) {
             Network::PacketReader r(packet.dataBlob);
             be->Load(r);
+        }
+        // The moving cell takes the data INTO itself and installs it when it
+        // retires (ClientChunkManager::RetireLandedBlockEntities) — replacing
+        // the cell's entity here would drop the landing block's bridge frame
+        // and the carried copy with it.
+        if (movingCell) {
+            if (const Game::BlockEntity* previous = movingCell->Carried(); previous && previous->GetType() == type) {
+                be->CarryClientState(*previous);
+            }
+            movingCell->Carry(std::move(be));
+            return;
         }
         // MC loads an update into the existing entity; this builds a new one,
         // so the old one's client-only state is handed over (a spawner's
@@ -796,6 +844,8 @@ namespace Client {
         } else if (packet.action == Network::PlayerInfoS2CPacket::Action::REMOVE) {
             Client::g_remotePlayerManager->RemovePlayer(packet.playerId);
             Client::g_remotePlayerManager->ForgetEquipment(packet.playerId);
+            // Their look and its textures (ids are reused).
+            Client::PlayerSkins::Get().Forget(packet.playerId);
             Log::Info("[ClientConnection] PlayerInfo REMOVE: ID %u", packet.playerId);
         }
         if (packet.action == Network::PlayerInfoS2CPacket::Action::ADD ||
@@ -1017,6 +1067,10 @@ namespace Client {
                 auto data = Serialization::DeserializeUpdateAttributesS2C(payload);
                 return std::make_unique<UpdateAttributesS2CPacketImpl>(std::move(data));
             }
+            case PacketId::TitlesS2C: {
+                auto data = Serialization::DeserializeTitlesS2C(payload);
+                return std::make_unique<TitlesS2CPacketImpl>(std::move(data));
+            }
             case PacketId::VehicleDataS2C: {
                 auto data = Serialization::DeserializeVehicleDataS2C(payload);
                 return std::make_unique<VehicleDataS2CPacketImpl>(data);
@@ -1025,6 +1079,10 @@ namespace Client {
                 auto data = Serialization::DeserializePlayerSwingS2C(payload);
                 return std::make_unique<PlayerSwingS2CPacketImpl>(data);
             }
+            case PacketId::PlayerAppearanceS2C: {
+                auto data = Serialization::DeserializePlayerAppearanceS2C(payload);
+                return std::make_unique<PlayerAppearanceS2CPacketImpl>(std::move(data));
+            }
             case PacketId::ShoulderParrotsS2C: {
                 auto data = Serialization::DeserializeShoulderParrotsS2C(payload);
                 return std::make_unique<ShoulderParrotsS2CPacketImpl>(data);
@@ -1032,6 +1090,14 @@ namespace Client {
             case PacketId::OpenSignEditorS2C: {
                 auto data = Serialization::DeserializeOpenSignEditorS2C(payload);
                 return std::make_unique<OpenSignEditorS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::UpdateAdvancementsS2C: {
+                auto data = Serialization::DeserializeUpdateAdvancementsS2C(payload);
+                return std::make_unique<UpdateAdvancementsS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::SelectAdvancementsTabS2C: {
+                auto data = Serialization::DeserializeSelectAdvancementsTabS2C(payload);
+                return std::make_unique<SelectAdvancementsTabS2CPacketImpl>(std::move(data));
             }
             case PacketId::OpenBookS2C: {
                 auto data = Serialization::DeserializeOpenBookS2C(payload);
@@ -1136,6 +1202,10 @@ namespace Client {
             case PacketId::EndCrystalBeamS2C: {
                 auto data = Serialization::DeserializeEndCrystalBeamS2C(payload);
                 return std::make_unique<EndCrystalBeamS2CPacketImpl>(std::move(data));
+            }
+            case PacketId::WitherHeadTargetsS2C: {
+                auto data = Serialization::DeserializeWitherHeadTargetsS2C(payload);
+                return std::make_unique<WitherHeadTargetsS2CPacketImpl>(std::move(data));
             }
             case PacketId::ArmorStandDataS2C: {
                 auto data = Serialization::DeserializeArmorStandDataS2C(payload);

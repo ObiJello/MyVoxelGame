@@ -19,10 +19,12 @@
 namespace Game {
 
     // One-box, state-dependent shapes: the wall torches, tripwire and its
-    // hook, rails, pressure plates. Returns false for any other block.
+    // hook, rails, pressure plates, the piston base. Returns false for any
+    // other block.
     bool RedstoneShapeFor(BlockState state, BlockRegistry::BlockShape& out);
 
-    // Shapes that are a union of boxes: redstone wire, hopper, lectern.
+    // Shapes that are a union of boxes: redstone wire, hopper, lectern,
+    // piston head. (The piston base is a one-box state shape: RedstoneShapeFor.)
     bool IsRedstoneMultiBoxBlock(BlockID id);
 
     // `collision` picks getCollisionShape over getShape; they differ only for

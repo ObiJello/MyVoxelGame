@@ -13,9 +13,8 @@
 // (FoodProperties.java:60-62, FoodConstants.java:30-32) — the Food() helper
 // below does the same conversion so the table reads like Foods.java.
 //
-// Status-effect payloads ("name Nt ampM [chanceP]; …") are parsed and applied
-// on consume by ConsumableBehavior (ApplyStatusEffects / RemoveStatusEffects /
-// ClearAllStatusEffects ConsumeEffect). The suspicious stew's per-stack
+// The on-consume effects are MC's structured ConsumeEffects (Consumables.java
+// rows), applied on consume by ConsumableBehavior::ApplyConsumeEffect. The suspicious stew's per-stack
 // SUSPICIOUS_STEW_EFFECTS component (default set in alchemy/PotionItems.cpp)
 // is applied by ConsumableBehavior::OnConsume as its ConsumableListener.
 #include "Item.hpp"
@@ -61,10 +60,13 @@ namespace Game {
             c.hasConsumeParticles = false;
             return c;
         };
-        auto WithEffect = [](Consumable c, ConsumeEffect::Type type,
-                             const char* payload) {
-            c.onConsumeEffects.push_back(ConsumeEffect{type, payload});
+        auto WithEffect = [](Consumable c, ConsumeEffect effect) {
+            c.onConsumeEffects.push_back(std::move(effect));
             return c;
+        };
+        // MobEffectInstance(effect, duration, amplifier).
+        auto Effect = [](MobEffectId id, int duration, int amplifier = 0) {
+            return MobEffectInstance(id, duration, amplifier);
         };
 
         // Attach components to one item. maxStack ≤ 0 → leave unchanged.
@@ -84,8 +86,6 @@ namespace Game {
         auto SetF = [&](ItemID id, FoodProperties food) {
             Set(id, &food, DefaultFood());
         };
-
-        using ET = ConsumeEffect::Type;
 
         // ── Plain foods (Foods.java row order) ──────────────────────────────
         SetF(Items::Apple,          Food(4, 0.3f));   // Foods.java:4
@@ -151,7 +151,7 @@ namespace Game {
         }
         {   // SKYROOT_MILK_BUCKET: drinks like milk (SkyrootMilkBucketItem clears
             // every effect) and hands back the skyroot bucket.
-            auto c = WithEffect(DefaultDrink(), ET::ClearAllStatusEffects, "");
+            auto c = WithEffect(DefaultDrink(), ConsumeEffect::ClearAllEffects());
             Set(Items::SkyrootMilkBucket, nullptr, c, Items::SkyrootBucket, 1);
         }
         // Twilight Forest (TFFoods).
@@ -163,8 +163,8 @@ namespace Game {
         {   // CHICKEN — 30% hunger 0:30 (:41)
             auto f = Food(2, 0.3f);                    // Foods.java:11
             Set(Items::Chicken, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "hunger 600t amp0 chance0.3"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Hunger, 600)}, 0.3f)));
         }
         {   // The Hush's WHISPERFRUIT (engine-only, docs/the-hush.md): 4
             // hunger at saturation modifier 0.3 (MC's Food(nutrition, mod)
@@ -172,49 +172,55 @@ namespace Game {
             // the fruit that lets you see in the dark it grows in.
             auto f = Food(4, 0.3f);
             Set(Items::Whisperfruit, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects, "night_vision 1200t amp0"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::NightVision, 1200)})));
         }
         {   // GOLDEN_APPLE — regen II 0:05 + absorption 2:00 (:43)
             auto f = Food(4, 1.2f, /*alwaysEdible=*/true);  // Foods.java:24
             Set(Items::GoldenApple, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "regeneration 100t amp1; absorption 2400t amp0"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Regeneration, 100, 1),
+                                Effect(MobEffectId::Absorption, 2400, 0)})));
         }
         {   // ENCHANTED_GOLDEN_APPLE — regen/resist/fire-resist/absorption (:42)
             auto f = Food(4, 1.2f, /*alwaysEdible=*/true);  // Foods.java:23
             Set(Items::EnchantedGoldenApple, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "regeneration 400t amp1; resistance 6000t amp0; "
-                           "fire_resistance 6000t amp0; absorption 2400t amp3"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Regeneration, 400, 1),
+                                Effect(MobEffectId::Resistance, 6000, 0),
+                                Effect(MobEffectId::FireResistance, 6000, 0),
+                                Effect(MobEffectId::Absorption, 2400, 3)})));
         }
         {   // POISONOUS_POTATO — 60% poison 0:05 (:44)
             auto f = Food(2, 0.3f);                    // Foods.java:30
             Set(Items::PoisonousPotato, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "poison 100t amp0 chance0.6"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Poison, 100)}, 0.6f)));
         }
         {   // PUFFERFISH — poison II 1:00 + hunger III 0:15 + nausea 0:15 (:45)
             auto f = Food(1, 0.1f);                    // Foods.java:33
             Set(Items::Pufferfish, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "poison 1200t amp1; hunger 300t amp2; nausea 300t amp0"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Poison, 1200, 1),
+                                Effect(MobEffectId::Hunger, 300, 2),
+                                Effect(MobEffectId::Nausea, 300, 0)})));
         }
         {   // ROTTEN_FLESH — 80% hunger 0:30 (:46)
             auto f = Food(4, 0.1f);                    // Foods.java:37
             Set(Items::RottenFlesh, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "hunger 600t amp0 chance0.8"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Hunger, 600)}, 0.8f)));
         }
         {   // SPIDER_EYE — poison 0:05 (:47)
             auto f = Food(2, 0.8f);                    // Foods.java:39
             Set(Items::SpiderEye, &f,
-                WithEffect(DefaultFood(), ET::ApplyStatusEffects,
-                           "poison 100t amp0"));
+                WithEffect(DefaultFood(), ConsumeEffect::ApplyEffects(
+                               {Effect(MobEffectId::Poison, 100)})));
         }
         {   // CHORUS_FRUIT — random teleport (:49)
             auto f = Food(4, 0.3f, /*alwaysEdible=*/true);  // Foods.java:12
             Set(Items::ChorusFruit, &f,
-                WithEffect(DefaultFood(), ET::TeleportRandomly, "diameter16"));
+                WithEffect(DefaultFood(), ConsumeEffect::TeleportRandomlyBy(16.0f)));
         }
 
         // ── Stews / soups — usingConvertsTo(BOWL) + stacksTo(1) (Items.java) ─
@@ -242,13 +248,13 @@ namespace Game {
             auto c = DefaultDrink();
             c.consumeSeconds = 2.0f;
             c.sound          = "item.honey_bottle.drink";
-            c = WithEffect(std::move(c), ET::RemoveStatusEffects, "poison");
+            c = WithEffect(std::move(c), ConsumeEffect::RemoveEffects({"minecraft:poison"}));
             auto f = Food(6, 0.1f, /*alwaysEdible=*/true);  // Foods.java:26
             Set(Items::HoneyBottle, &f, c, Items::GlassBottle, 16);
         }
         {   // MILK_BUCKET — drink, clears all effects, → bucket, stacksTo(1)
             // (Consumables.java:48 + Items.java milk_bucket row). No FOOD.
-            auto c = WithEffect(DefaultDrink(), ET::ClearAllStatusEffects, "");
+            auto c = WithEffect(DefaultDrink(), ConsumeEffect::ClearAllEffects());
             Set(Items::MilkBucket, nullptr, c, Items::Bucket, 1);
         }
 

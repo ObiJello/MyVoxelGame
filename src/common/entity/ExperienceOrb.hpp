@@ -13,6 +13,7 @@
 #pragma once
 
 #include "common/core/Uuid.hpp"
+#include "common/entity/EntityTags.hpp"
 
 #include "common/physics/Physics.hpp"
 #include "common/core/JavaRandom.hpp"
@@ -90,6 +91,8 @@ namespace Game {
         int  age       = 0;
         int  tickCount = 0;
         bool onGround  = false;
+        // MC Entity.tags — `/tag`'s scoreboard tags ("Tags" in the save).
+        EntityTags tags;
 
         // Which player currently pulls this orb (server: connection id,
         // client: RemotePlayerManager key or kLocalPlayerFollowId). MC keeps

@@ -783,16 +783,49 @@ namespace Game::EnchantmentHelper {
         });
     }
 
-    double PlayerAttributeValue(Attribute attribute, double base, Inventory& inventory,
+    namespace {
+        // The worn items', location effects' and status effects' modifiers
+        // onto `instance` — the shared tail of both player folds.
+        void AddPlayerWornAndEffectModifiers(AttributeInstance& instance, const Inventory& inventory,
+                                             const std::vector<MobEffectInstance>& effects,
+                                             const AttributeMap* locationModifiers);
+    } // namespace
+
+    AttributeInstance PlayerAttributeInstance(Attribute attribute, const AttributeMap* own,
+                                              const Inventory& inventory,
+                                              const std::vector<MobEffectInstance>& effects,
+                                              const AttributeMap* locationModifiers) {
+        const AttributeInstance* row = own ? own->Find(attribute) : nullptr;
+        AttributeInstance instance = row ? *row : AttributeInstance(attribute, PlayerBaseAttributeValue(attribute));
+        AddPlayerWornAndEffectModifiers(instance, inventory, effects, locationModifiers);
+        return instance;
+    }
+
+    double PlayerAttributeValue(Attribute attribute, double base, const Inventory& inventory,
                                 const std::vector<MobEffectInstance>& effects,
                                 const AttributeMap* locationModifiers) {
         AttributeInstance instance(attribute, base);
-        // collectEquipmentChanges: every worn, unbroken item's modifiers.
-        const EnchantmentEquipment equipment = EnchantmentEquipment::OfInventory(inventory);
+        AddPlayerWornAndEffectModifiers(instance, inventory, effects, locationModifiers);
+        return instance.GetValue();
+    }
+
+    namespace {
+    void AddPlayerWornAndEffectModifiers(AttributeInstance& instance, const Inventory& inventory,
+                                         const std::vector<MobEffectInstance>& effects,
+                                         const AttributeMap* locationModifiers) {
+        const Attribute attribute = instance.GetAttribute();
+        // collectEquipmentChanges: every worn, unbroken item's modifiers —
+        // its ATTRIBUTE_MODIFIERS entries for the slot, then its
+        // enchantments' (ItemStack.forEachModifier). A player has the
+        // humanoid six (no BODY / SADDLE).
         for (const EquipmentSlot slot : kEquipmentSlots) {
-            const ItemStack* item = equipment.itemBySlot(slot);
-            if (!item || item->IsEmpty() || IsBrokenItem(*item)) continue;
-            ForEachModifier(*item, slot, [&](Attribute a, const AttributeModifier& m) {
+            int index = -1;
+            if (slot == EquipmentSlot::MAINHAND) index = Inventory::HotbarToIndex(inventory.GetSelectedSlot());
+            else index = InventoryIndexFor(slot);
+            if (index < 0) continue;
+            const ItemStack& item = inventory.GetSlot(index);
+            if (item.IsEmpty() || IsBrokenItem(item)) continue;
+            ForEachItemModifier(item, slot, [&](Attribute a, const AttributeModifier& m) {
                 if (a == attribute) instance.AddModifier(m);
             });
         }
@@ -802,8 +835,8 @@ namespace Game::EnchantmentHelper {
             }
         }
         AddEffectAttributeModifiers(instance, effects);
-        return instance.GetValue();
     }
+    } // namespace
 
 } // namespace Game::EnchantmentHelper
 

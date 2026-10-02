@@ -37,6 +37,13 @@ namespace Game {
 
         uint16_t           TypeId()   const { return m_typeId; }
         const std::string& StringId() const { return m_stringId; }
+        // The namespaced id a save writes ("minecraft:chest"). Vanilla types
+        // register a bare path and get the minecraft namespace; an engine
+        // type registers its own namespace ("obeycraft:crafting_table") so
+        // Minecraft skips it on load instead of mistaking it for its own.
+        std::string ResourceId() const {
+            return m_stringId.find(':') == std::string::npos ? "minecraft:" + m_stringId : m_stringId;
+        }
 
         bool IsValidFor(BlockID id) const { return m_validBlocks.count(id) > 0; }
 

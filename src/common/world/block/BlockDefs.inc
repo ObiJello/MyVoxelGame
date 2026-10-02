@@ -1682,3 +1682,28 @@ BLOCK_DEF(BrownConcreteSlab, "brown_concrete_slab", "Brown Concrete Slab", Opaqu
 BLOCK_DEF(GreenConcreteSlab, "green_concrete_slab", "Green Concrete Slab", Opaque)
 BLOCK_DEF(RedConcreteSlab, "red_concrete_slab", "Red Concrete Slab", Opaque)
 BLOCK_DEF(BlackConcreteSlab, "black_concrete_slab", "Black Concrete Slab", Opaque)
+// ── Flower pots for the engine dimensions' plants (2026-10-02), APPENDED,
+// never re-sorted. FlowerPotBlock (world/block/FlowerPotBlock) derives MC's
+// POTTED_BY_CONTENT from the slugs: each pot holds the plant its slug names
+// after "potted_". The Hush's resonance bloom and whisperwood sapling, the
+// Twilight Forest saplings and the Aether's saplings and flowers — each the
+// mod's own potted block (TFBlocks / AetherBlocks POTTED_*), the TF mangrove
+// sapling's under this port's tf_ name. Cutout like every vanilla pot.
+BLOCK_DEF(PottedResonanceBloom, "potted_resonance_bloom", "Potted Resonance Bloom", Cutout)
+BLOCK_DEF(PottedWhisperwoodSapling, "potted_whisperwood_sapling", "Potted Whisperwood Sapling", Cutout)
+BLOCK_DEF(PottedTwilightOakSapling, "potted_twilight_oak_sapling", "Potted Sickly Twilight Oak Sapling", Cutout)
+BLOCK_DEF(PottedCanopySapling, "potted_canopy_sapling", "Potted Canopy Tree Sapling", Cutout)
+BLOCK_DEF(PottedTfMangroveSapling, "potted_tf_mangrove_sapling", "Potted Twilight Mangrove Sapling", Cutout)
+BLOCK_DEF(PottedDarkwoodSapling, "potted_darkwood_sapling", "Potted Darkwood Sapling", Cutout)
+BLOCK_DEF(PottedSkyrootSapling, "potted_skyroot_sapling", "Potted Skyroot Sapling", Cutout)
+BLOCK_DEF(PottedGoldenOakSapling, "potted_golden_oak_sapling", "Potted Golden Oak Sapling", Cutout)
+BLOCK_DEF(PottedWhiteFlower, "potted_white_flower", "Potted White Flower", Cutout)
+BLOCK_DEF(PottedPurpleFlower, "potted_purple_flower", "Potted Purple Flower", Cutout)
+// ── Sky Block (2026-10-02), APPENDED, never re-sorted. An engine block: a
+// full opaque cube for culling and occlusion whose faces show the active sky
+// (vanilla sky, skybox, OptiFine layers, the End's or the Nether's) as a
+// window, MC end-portal style — the chunk mesh skips it (Mesher::
+// ProcessBlock) and Render::SkyBlockRenderer draws its faces depth-only right
+// after the view's sky. Breaks, sounds and blocks light like tinted glass
+// (gen_block_hardness SLUG_ALIASES).
+BLOCK_DEF(SkyBlock, "sky_block", "Sky Block", Opaque)

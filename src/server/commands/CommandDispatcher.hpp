@@ -39,6 +39,11 @@ namespace Server {
         // Without a tree: the name completes, but the client knows nothing
         // of its arguments. Don't — every command should declare its tree.
         void RegisterCommand(const std::string& name, CommandHandler handler);
+        // Replace an already registered command's tree, keeping its handler —
+        // for a tree whose suggestions follow live state (/tag's tag names,
+        // /bossbar's ids). Safe from inside that command's own handler. The
+        // caller resends CommandsS2C (NamedEntities::ResendCommands).
+        void UpdateSyntax(const std::string& name, Game::Cmd::Node syntax);
 
         // Execute a command line (without leading '/') as the player typed it:
         // the stack is built from the sender (CommandSourceStack::ForPlayer).
@@ -70,6 +75,13 @@ namespace Server {
         // generated from its tree; empty when the name is unknown.
         std::vector<std::string> GetUsageLines(const std::string& name) const;
 
+        // MC ExecutionContext.incrementCost — an `/execute` modifier stage
+        // (as, at, positioned, if ...) spends one of the top-level command's
+        // max_command_sequence_length budget; every command run spends one
+        // more (ExecuteCommand below), and once it is spent nothing else in
+        // that top-level command runs.
+        void IncrementCommandCost() { --m_commandQuota; }
+
         // Server thread, once a tick: re-run the commands a `name=` selector
         // deferred (named entities in unloaded chunks — EntitySelector.hpp)
         // once their chunks' entities are in, or after the timeout.
@@ -85,6 +97,11 @@ namespace Server {
         static constexpr int kDeferredTimeoutTicks = 200;   // 10 s
         std::vector<Deferred> m_deferred;
         int  m_depth = 0;          // nested ExecuteCommand (/execute run)
+        // MC ExecutionContext.commandQuota for the top-level command in
+        // flight (max_command_sequence_length), and whether its "stopped due
+        // to limit" line has been logged.
+        int  m_commandQuota = 0;
+        bool m_quotaLogged  = false;
         bool m_rerunning = false;  // inside ProcessDeferred's re-run
 
         std::unordered_map<std::string, CommandHandler> m_commands;

@@ -76,7 +76,7 @@ namespace Game::WeaponItems {
         Server::ServerPlayer* player = AsServerPlayer(user);
         if (!player) return UseResult::Pass;
         const ItemStack& stack = player->getItemInHand(hand);
-        const Spear::KineticWeapon* kinetic = Spear::Kinetic(stack);
+        const auto kinetic = Spear::Kinetic(stack);
         if (!kinetic) return UseResult::Pass;
         // Item.use: player.startUsingItem(hand); kineticWeapon.makeSound(player).
         player->startUsingItem(hand);
@@ -87,7 +87,7 @@ namespace Game::WeaponItems {
 
     void SpearUseTick(IUsePlayer& user, ItemStack& spear, int remainingTicks) {
         Server::ServerPlayer* player = AsServerPlayer(user);
-        const Spear::KineticWeapon* kinetic = Spear::Kinetic(spear);
+        const auto kinetic = Spear::Kinetic(spear);
         if (!player || !kinetic) return;
         Holder holder;
         if (!Resolve(*player, holder)) return;
@@ -103,11 +103,8 @@ namespace Game::WeaponItems {
         const ItemStack& held = player->getItemInHand(0);
         // cannotAttackWithItem(itemInHand, 5): the charge (with five ticks of
         // slack for the round trip) must reach MINIMUM_ATTACK_CHARGE.
-        if (Spear::IsSpear(held.itemId) &&
-            player->getAttackStrengthScale(5.0f) < Spear::kMinimumAttackCharge) {
-            return;
-        }
-        const Spear::PiercingWeapon* piercing = Spear::Piercing(held);
+        if (Game::CannotAttackWithItem(held, player->getAttackStrengthScale(5.0f))) return;
+        const auto piercing = Spear::Piercing(held);
         if (!piercing) return;
         Holder holder;
         if (!Resolve(*player, holder)) return;
@@ -203,13 +200,11 @@ namespace Server {
     // ── PlayerEntityView: the player's side of spear and riptide combat ──
 
     float PlayerEntityView::GetJabAttackDamage() const {
-        // ATTACK_DAMAGE as the player has it: base 1, the main hand's
-        // modifier, Strength / Weakness.
-        if (!m_player) return Game::kPlayerBaseAttackDamage;
-        const Game::ItemStack& held = m_player->getItemInHand(0);
-        float itemDamage = 0.0f, itemSpeed = 0.0f;
-        Game::GetItemAttackAttributes(held.itemId, itemDamage, itemSpeed);
-        return m_player->getAttackDamage(itemDamage);
+        // ATTACK_DAMAGE as the player has it: base 1 through the worn items'
+        // ATTRIBUTE_MODIFIERS (the spear's BASE_ATTACK_DAMAGE in the main
+        // hand), Strength / Weakness.
+        if (!m_player) return static_cast<float>(Game::PlayerBaseAttributeValue(Game::Attribute::AttackDamage));
+        return m_player->getAttackDamage();
     }
 
     void PlayerEntityView::OnAttack() {
@@ -231,9 +226,11 @@ namespace Server {
         if (target.SkipAttackInteraction(*this)) return false;
 
         Game::ItemStack* weapon = EquipmentInSlot(slot);
-        const bool spear = weapon && !weapon->IsEmpty() && Game::Spear::IsSpear(weapon->itemId);
-        const Game::MobDamageSource sourceType =
-            spear ? Game::MobDamageSource::Spear : Game::MobDamageSource::PlayerAttack;
+        // ItemStack.getDamageSource: the weapon's DAMAGE_TYPE (the spears'
+        // minecraft:spear), else a player attack.
+        const Game::MobDamageSource sourceType = weapon && !weapon->IsEmpty()
+            ? Game::ItemMeleeDamageSource(*weapon, Game::MobDamageSource::PlayerAttack)
+            : Game::MobDamageSource::PlayerAttack;
         const Game::DamageSourceInfo source = Game::DamageSourceInfo::Of(sourceType, this, nullptr);
 
         // magicBoost = getEnchantedDamage(target, base, source) - base; both

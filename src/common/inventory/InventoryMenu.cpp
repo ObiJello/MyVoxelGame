@@ -150,7 +150,7 @@ namespace Game {
         if (source.itemId == Items::Air) return result;
 
         ItemStack stack = source;
-        stack.count = ItemRegistry::Get(source.itemId).maxStackSize;
+        stack.count = Game::GetMaxStackSize(source);
 
         // Hotbar first, then main — a creative shift-click is "give me this in
         // hand", so the hotbar is the useful destination.

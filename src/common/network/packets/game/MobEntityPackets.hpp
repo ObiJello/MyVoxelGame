@@ -232,9 +232,17 @@ namespace Network {
     // yaw, i.e. the attacker's bearing relative to the way you are facing. That
     // is what makes the camera tip away from the blow rather than always
     // rolling the same way (GameRenderer.bobHurt conjugates the roll by it).
+    //
+    // `damageEvent` (trailing) turns the packet into MC's
+    // ClientboundDamageEventPacket as the victim's own client sees it
+    // (LivingEntity.handleDamageEvent): hurtTime / damageCooldownTime start
+    // but hurtDir is left alone — every hit that lands sends one, and only
+    // the hits that knock back follow it with a real hurt animation
+    // (ServerPlayer.indicateDamage). `yaw` is ignored then.
     struct HurtAnimationS2CPacket {
         int32_t entityId = 0;
         float   yaw = 0.0f;
+        bool    damageEvent = false;
     };
 
     // MC ServerboundInteractPacket, attack branch only. `useOffhand` and the
@@ -608,6 +616,7 @@ namespace Network {
             Network::PacketBuffer b;
             b.WriteVarInt(static_cast<uint32_t>(p.entityId));
             b.WriteFloat(p.yaw);
+            b.WriteByte(p.damageEvent ? 1 : 0);
             return b.GetData();
         }
 
@@ -617,6 +626,7 @@ namespace Network {
             HurtAnimationS2CPacket p;
             p.entityId = static_cast<int32_t>(r.ReadVarInt());
             p.yaw      = r.ReadFloat();
+            if (r.Remaining() >= 1) p.damageEvent = r.ReadByte() != 0;
             return p;
         }
 

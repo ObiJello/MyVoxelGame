@@ -43,7 +43,8 @@ namespace Server {
                                    const std::vector<std::string>& args,
                                    ServerConnection& connection,
                                    PlayerSessionManager& sessionManager) {
-        ServerPlayer& sender = *source.sender;
+        // The executor travels (`/execute as Steve run dimension nether`).
+        ServerPlayer* traveller = source.ExecutorPlayer();
         if (args.empty()) {
             connection.SendChatMessage("Usage: /dimension <overworld|nether|end|hush|twilight|aether>", 1);
             return;
@@ -64,6 +65,11 @@ namespace Server {
             connection.SendChatMessage("Dimensions are unavailable (no server)", 1);
             return;
         }
+        if (!traveller) {
+            connection.SendChatMessage(CommandSourceStack::kPlayerRequired, 1);
+            return;
+        }
+        ServerPlayer& sender = *traveller;
         auto session = sessionManager.GetSession(sender.getPlayerId());
         if (!session) {
             connection.SendChatMessage("You have no session to travel with", 1);
@@ -81,7 +87,7 @@ namespace Server {
             return;
         }
         PortalTravel::TravelToDimension(*g_integratedServer, *fromLevel, *view, *target);
-        connection.SendChatMessage("Travelled to " + std::string(Game::DimensionName(*target)), 1);
+        source.SendSuccess(connection, "Travelled to " + std::string(Game::DimensionName(*target)), true);
     }
 
 } // namespace Server

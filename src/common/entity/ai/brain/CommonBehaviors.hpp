@@ -19,8 +19,13 @@
 #include "common/entity/ai/brain/Behavior.hpp"
 #include "common/entity/ai/brain/Sensor.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
+#include "common/world/block/BlockState.hpp"
 
 #include <functional>
+#include <optional>
+#include <vector>
+
+#include <glm/glm.hpp>
 
 namespace Game {
 
@@ -69,6 +74,10 @@ namespace Game {
         void Stop(EntityLevel&, LivingEntity&, int64_t) override;
 
     private:
+        // MC AnimalPanic.lookForWater (Vec3.atBottomCenterOf of the cell is
+        // the WalkTarget's own block).
+        static std::optional<glm::ivec3> LookForWater(PathfinderMob& mob);
+
         float m_speedMultiplier;
     };
 
@@ -162,15 +171,44 @@ namespace Game {
         TargetFinder m_finder;
     };
 
-    // MC StopAttackingIfTargetInvalid — drop a target that died, became
-    // unattackable, or that the mob has been failing to reach for 200 ticks.
+    // MC Sensor's static targeting tests — the shared TargetingConditions at
+    // the body's FOLLOW_RANGE (MC Sensor.tick re-ranges its static conditions
+    // to the ticking body's follow range). For the body's current
+    // ATTACK_TARGET, invisibility is not tested: an engaged target does not
+    // vanish by drinking invisibility.
+    namespace SensorTargeting {
+        // MC isEntityTargetable: forNonCombat (line of sight required).
+        bool IsEntityTargetable(LivingEntity& body, const LivingEntity& target);
+        // MC isEntityAttackable: forCombat (line of sight required).
+        bool IsEntityAttackable(LivingEntity& body, const LivingEntity& target);
+        // MC isEntityAttackableIgnoringLineOfSight: forCombat, no sight test.
+        bool IsEntityAttackableIgnoringLineOfSight(LivingEntity& body, const LivingEntity& target);
+    } // namespace SensorTargeting
+
+    // MC StopAttackingIfTargetInvalid — drop ATTACK_TARGET once the body can
+    // no longer attack it, it died or left the body's level, the mob has been
+    // failing to reach it for 200 ticks (unless canGrowTired is off), or the
+    // mob's own stop condition fires. onTargetErased runs just before the
+    // erase, with the target being dropped (MC's TargetErasedCallback).
     class StopAttackingIfTargetInvalid : public Behavior {
     public:
-        StopAttackingIfTargetInvalid();
+        using StopAttackCondition =
+            std::function<bool(EntityLevel&, Mob& body, LivingEntity& target)>;
+        using TargetErasedCallback =
+            std::function<void(EntityLevel&, Mob& body, LivingEntity& target)>;
+
+        StopAttackingIfTargetInvalid(StopAttackCondition stopAttackingWhen = {},
+                                     TargetErasedCallback onTargetErased = {},
+                                     bool canGrowTiredOfTryingToReachTarget = true);
         const char* DebugString() const override { return "StopAttackingIfTargetInvalid"; }
 
     protected:
         bool CheckExtraStartConditions(EntityLevel&, LivingEntity&) override;
+
+    private:
+        StopAttackCondition  m_stopAttackingWhen;
+        TargetErasedCallback m_onTargetErased;
+        bool                 m_canGrowTired;
     };
 
     // MC FollowTemptation — walk toward a player holding this mob's food.
@@ -546,6 +584,50 @@ namespace Game {
 
     private:
         IsAttackable m_pred;
+    };
+
+    // ── Doors — MC InteractWithDoor and DoorBlock.setOpen for brain mobs ────
+    //
+    // MC keeps a mob's opened doors in its DOORS_TO_CLOSE memory (a set of
+    // GlobalPos); here the owner keeps the list (Villager::DoorsToClose,
+    // CopperGolem::DoorsToClose) and the behaviour reaches it through
+    // `DoorsToCloseFn`, the Brain having no position-set memory variant.
+    namespace Doors {
+        using DoorsToCloseFn = std::vector<glm::ivec3>& (*)(LivingEntity& body);
+
+        // #mob_interactable_doors (the wooden doors) and DoorBlock.isOpen.
+        bool IsMobInteractableDoor(BlockState state);
+        bool IsDoorOpen(BlockState state);
+        // MC DoorBlock.setOpen(entity, level, state, pos, open): flags 10,
+        // the other half following, the door's sound, BLOCK_OPEN / _CLOSE.
+        void SetDoorOpen(EntityLevel& level, const glm::ivec3& pos, bool open, Entity* source);
+        // MC InteractWithDoor.closeDoorsThatIHaveOpenedOrPassedThrough: every
+        // remembered door the body is not moving through right now is shut
+        // (unless another mob of its type is coming through it) and
+        // forgotten; a door too far away (3+ blocks from its centre) or no
+        // longer an open door is just forgotten.
+        void CloseDoorsThatIHaveOpenedOrPassedThrough(EntityLevel& level, LivingEntity& body,
+                                                      std::vector<glm::ivec3>& doorsToClose,
+                                                      const glm::ivec3* movingFrom,
+                                                      const glm::ivec3* movingTo);
+    } // namespace Doors
+
+    // MC InteractWithDoor.create(): while the mob walks a path, the doors at
+    // the path's previous and next node are opened (and remembered), and the
+    // remembered ones it has left behind are closed — re-checked every 20
+    // ticks or whenever the next node changes.
+    class InteractWithDoor : public Behavior {
+    public:
+        explicit InteractWithDoor(Doors::DoorsToCloseFn doorsToClose);
+        const char* DebugString() const override { return "InteractWithDoor"; }
+
+    protected:
+        bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override;
+
+    private:
+        Doors::DoorsToCloseFn m_doorsToClose;
+        std::optional<glm::ivec3> m_lastCheckedNode;
+        int m_remainingCooldown = 0;
     };
 
 } // namespace Game

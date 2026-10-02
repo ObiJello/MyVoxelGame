@@ -187,14 +187,29 @@ namespace Game {
     }
 
     int GetBrewingFuelUses(const ItemStack& stack) {
-        // ContextIntProviders.BREWING_DEFAULT_USES — 20.
-        return (!stack.IsEmpty() && stack.itemId == Items::BlazePowder) ? 20 : 0;
+        // BrewingStandBlockEntity: ResolvableInt.getFromItem(fuel,
+        // BREWING_FUEL, uses, context, 0) — blaze powder's
+        // brewing/uses_default is 20.
+        if (stack.IsEmpty()) return 0;
+        const auto fuel = stack.get(DataComponents::BREWING_FUEL);
+        if (!fuel) return 0;
+        ProviderContext ctx;
+        ctx.block = BlockID::BrewingStand;
+        return ResolveInt(fuel->uses, ctx, 0);
+    }
+
+    bool IsBrewingFuel(const ItemStack& stack) {
+        return !stack.IsEmpty() && stack.has(DataComponents::BREWING_FUEL);
     }
 
     float GetBrewingFuelSpeedMultiplier(const ItemStack& stack) {
-        // ContextFloatProviders.BREWING_DEFAULT_SPEED_MULTIPLIER — 1.0.
-        (void)stack;
-        return 1.0f;
+        // brewing/speed_default — 1.0.
+        if (stack.IsEmpty()) return 1.0f;
+        const auto fuel = stack.get(DataComponents::BREWING_FUEL);
+        if (!fuel) return 1.0f;
+        ProviderContext ctx;
+        ctx.block = BlockID::BrewingStand;
+        return ResolveFloat(fuel->speedMultiplier, ctx, 1.0f);
     }
 
 } // namespace Game

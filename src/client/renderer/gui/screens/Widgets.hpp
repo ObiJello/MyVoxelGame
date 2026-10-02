@@ -117,6 +117,13 @@ namespace Render {
         // hovered-or-focused → _highlighted, else base.
         void RenderButtonChrome(GuiGraphics& g, const std::string& label) const;
 
+        // MC AbstractWidget.extractScrollingStringOverContents: the label
+        // centred between the widget's sides less `margin`; a label wider
+        // than that is clipped and ping-pongs across the gap over time
+        // (ActiveTextCollector.defaultScrollingHelper).
+        void RenderScrollingString(GuiGraphics& g, const std::string& label,
+                                   int margin, uint32_t color) const;
+
         int m_x, m_y, m_width, m_height;
         std::string m_message;
         bool  m_hovered = false;

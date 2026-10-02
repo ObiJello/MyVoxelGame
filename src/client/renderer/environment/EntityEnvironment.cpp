@@ -57,13 +57,17 @@ namespace Render::EntityEnvironment {
     }
 
     int LevelLightCoordsAt(const glm::ivec3& pos) {
+        return LevelLightCoordsAt(pos, pos);
+    }
+
+    int LevelLightCoordsAt(const glm::ivec3& statePos, const glm::ivec3& lightPos) {
         namespace L = Game::Lighting;
         const Client::ClientBlockAccess* blocks = Client::g_clientBlockAccess;
         if (!blocks) return L::LightCoords::kFullSky;
-        const Game::BlockState state = blocks->GetBlockState(pos.x, pos.y, pos.z);
+        const Game::BlockState state = blocks->GetBlockState(statePos.x, statePos.y, statePos.z);
         if (L::BlockLightProperties::EmissiveRendering(state)) return L::LightCoords::kFullBright;
-        const int sky = blocks->GetBrightness(L::LightLayer::Sky, pos.x, pos.y, pos.z);
-        const int block = std::max(blocks->GetBrightness(L::LightLayer::Block, pos.x, pos.y, pos.z),
+        const int sky = blocks->GetBrightness(L::LightLayer::Sky, lightPos.x, lightPos.y, lightPos.z);
+        const int block = std::max(blocks->GetBrightness(L::LightLayer::Block, lightPos.x, lightPos.y, lightPos.z),
                                    L::BlockLightProperties::Emission(state));
         return L::LightCoords::Pack(block, sky);
     }
@@ -83,6 +87,25 @@ namespace Render::EntityEnvironment {
             return glm::vec3(block >= 15 ? FullBlockLight() : Lit());
         }
         return Lightmap::Get().SampleFor(EnvironmentState::Get().Frame(), block, sky);
+    }
+
+    glm::vec3 LightColorCoords(int lightCoords) {
+        namespace L = Game::Lighting;
+        // Levels with fractions: coords are level * 16 (0..240).
+        const float block = std::clamp(static_cast<float>(L::LightCoords::SmoothBlock(lightCoords)) / 16.0f, 0.0f, 15.0f);
+        const float sky   = std::clamp(static_cast<float>(L::LightCoords::SmoothSky(lightCoords)) / 16.0f, 0.0f, 15.0f);
+        if (!Lightmap::Enabled() || !Lightmap::WorldLightingOn()) {
+            return glm::vec3(block >= 15.0f ? FullBlockLight() : Lit());
+        }
+        const EnvironmentFrame& frame = EnvironmentState::Get().Frame();
+        Lightmap& lightmap = Lightmap::Get();
+        const int b0 = static_cast<int>(block), s0 = static_cast<int>(sky);
+        const int b1 = std::min(b0 + 1, 15), s1 = std::min(s0 + 1, 15);
+        const float tb = block - static_cast<float>(b0), ts = sky - static_cast<float>(s0);
+        if (tb == 0.0f && ts == 0.0f) return lightmap.SampleFor(frame, b0, s0);
+        const glm::vec3 c00 = lightmap.SampleFor(frame, b0, s0), c10 = lightmap.SampleFor(frame, b1, s0);
+        const glm::vec3 c01 = lightmap.SampleFor(frame, b0, s1), c11 = lightmap.SampleFor(frame, b1, s1);
+        return glm::mix(glm::mix(c00, c10, tb), glm::mix(c01, c11, tb), ts);
     }
 
     glm::vec3 LitAt(const glm::dvec3& probe) {

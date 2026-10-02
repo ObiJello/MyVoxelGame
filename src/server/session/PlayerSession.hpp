@@ -27,6 +27,7 @@
 
 namespace Game {
     class World;
+    class AbstractContainerMenu;
 }
 
 namespace Server {
@@ -486,6 +487,12 @@ namespace Server {
         // (either half of a double). Spectators never count. What a chest's
         // opener recheck counts — see ChestBlockEntity::RecheckOpen.
         bool HasChestOpenAt(const Game::World* world, const glm::ivec3& pos) const;
+        // shared_crafting_tables: whether this player has a SHARED crafting
+        // menu over the table at `pos` in `world` — what the table's idle
+        // check (CraftingTableBlockEntity::Tick) and the rule-off hand-over
+        // count as its viewers. Spectators count: their menu is over the
+        // table's grid too.
+        bool HasSharedCraftingTableOpenAt(const Game::World* world, const glm::ivec3& pos) const;
         // Drop what a CreateFilledResult could not fit in the inventory
         // (MC player.drop inside ItemUtils.createFilledResult).
         void FlushPendingDrops();
@@ -892,6 +899,12 @@ namespace Server {
 
         // Returns true when the menu was closed because its block vanished.
         bool CloseMenuIfBlockGone();
+        // The crafting table's menu at `pos` (FlushPendingMenuOpen): the
+        // table's shared grid under the shared_crafting_tables rule, the
+        // vanilla private grid otherwise — seeded with whatever the table
+        // still stores from when the rule was on, which then goes back to
+        // this player on close (the lossless rule-off hand-over).
+        std::unique_ptr<Game::AbstractContainerMenu> CreateCraftingTableMenu(const glm::ivec3& pos);
         // The costs a click that took a menu's result left on its
         // ContainerClickResult: the levels an anvil charges, and the anvil's
         // wear roll + use sound. Run straight after every DoClick.
@@ -905,6 +918,7 @@ namespace Server {
         // sound at the table, at most once per game tick (MC lastSoundTime).
         void ApplyCartographyTake(const Game::ContainerClickResult& result);
         void ApplyLoomTake(const Game::ContainerClickResult& result);
+        void ApplySmithingTake(const Game::ContainerClickResult& result);
         int64_t m_lastCartographySoundTime = -1;
         int64_t m_lastLoomSoundTime = -1;
 

@@ -536,7 +536,6 @@ namespace Game::VillagerTrades {
         struct OfferContext {
             JavaRandom& random;
             std::optional<VillagerType> merchantType;
-            int additionalCost = 0;   // MC's ADDITIONAL_TRADE_COST component, carried aside
             const TradeOrigin* origin = nullptr;   // LootContextParams.ORIGIN + the merchant's level
         };
 
@@ -576,7 +575,8 @@ namespace Game::VillagerTrades {
                     EnchantmentHelper::Enchant(stack, id, level);
                     if (fn.includeAdditionalCost) {
                         // 2 + nextInt(5 + level * 10) + 3 * level.
-                        ctx.additionalCost = 2 + ctx.random.NextInt(5 + level * 10) + 3 * level;
+                        stack.components.set(DataComponents::ADDITIONAL_TRADE_COST,
+                                             2 + ctx.random.NextInt(5 + level * 10) + 3 * level);
                     }
                     break;
                 }
@@ -585,7 +585,9 @@ namespace Game::VillagerTrades {
                     const int cost = fn.levels.GetInt(ctx.random);
                     stack = EnchantmentHelper::EnchantItem(
                         ctx.random, stack, cost, fn.hasOptions ? fn.options : EnchantmentDefinitions::All());
-                    if (fn.includeAdditionalCost && !stack.IsEmpty() && cost > 0) ctx.additionalCost = cost;
+                    if (fn.includeAdditionalCost && !stack.IsEmpty() && cost > 0) {
+                        stack.components.set(DataComponents::ADDITIONAL_TRADE_COST, cost);
+                    }
                     break;
                 }
                 case Function::Kind::Filtered: {
@@ -714,7 +716,7 @@ namespace Game::VillagerTrades {
         ItemCost ToItemCost(const Cost& cost, JavaRandom& random, int additionalCost) {
             ItemCost c;
             c.item = cost.item;
-            const int maxStack = ItemRegistry::Get(cost.item).maxStackSize;
+            const int maxStack = GetItemDefaultMaxStackSize(cost.item);
             c.count = std::clamp(cost.count.GetInt(random) + additionalCost, 0, maxStack);
             c.components = cost.components;
             return c;
@@ -731,12 +733,13 @@ namespace Game::VillagerTrades {
             }
             ItemStack result(t.gives, t.givesCount);
             result.components = t.givesComponents;
-            ctx.additionalCost = 0;
             if (!t.modifiers.empty()) {
                 ApplyAll(t.modifiers, result, ctx);
                 if (result.IsEmpty()) return std::nullopt;
             }
-            int additionalCost = ctx.additionalCost;
+            // VillagerTrade.getOffer: result.remove(ADDITIONAL_TRADE_COST).
+            int additionalCost = result.get(DataComponents::ADDITIONAL_TRADE_COST).value_or(0);
+            result.components.remove(DataComponents::ADDITIONAL_TRADE_COST);
             if (t.hasDoublePrice) {
                 if (auto stored = result.get(DataComponents::STORED_ENCHANTMENTS)) {
                     for (const auto& e : stored->entries) {
@@ -778,7 +781,7 @@ namespace Game::VillagerTrades {
             numberOfOffers = set->amount.GetInt(random);
             allowDuplicates = set->allowDuplicates;
         }
-        OfferContext ctx{ random, merchantType, 0, origin };
+        OfferContext ctx{ random, merchantType, origin };
         int found = 0;
         if (allowDuplicates) {
             // MC addOffersFromItemListings: draw with replacement; a trade

@@ -1186,7 +1186,7 @@ namespace Game::ChestLoot {
             std::vector<ItemStack> out;
             for (ItemStack& stack : stacks) {
                 if (stack.IsEmpty()) continue;
-                const int max = std::max(1, ItemRegistry::Get(stack.itemId).maxStackSize);
+                const int max = std::max(1, Game::GetMaxStackSize(stack));
                 if (stack.count < max) { out.push_back(std::move(stack)); continue; }
                 int count = stack.count;
                 while (count > 0) {
@@ -1305,6 +1305,28 @@ namespace Game::ChestLoot {
         GetRandomItemsRaw(*table, ctx, stacks);
         SplitStacks(stacks);
         for (ItemStack& stack : stacks) out.push_back(std::move(stack));
+        return true;
+    }
+
+    bool ApplyItemModifier(const nlohmann::json& modifier, ItemStack& stack, JavaRandom& random,
+                           std::string& error, const LootLevelContext* level) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        Table table;
+        table.key = "item_modifier";
+        table.functions = ParseFunctions(modifier);
+        if (table.functions.empty()) {
+            error = "Not a valid item modifier";
+            return false;
+        }
+        for (const Function& fn : table.functions) {
+            if (fn.kind == Function::Kind::Unsupported) {
+                error = "Unknown item modifier function 'minecraft:" + fn.name + "'";
+                return false;
+            }
+        }
+        Context ctx{random};
+        ctx.level = level;
+        ApplyAll(table.functions, stack, ctx, table);
         return true;
     }
 

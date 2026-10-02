@@ -18,6 +18,7 @@
 #include "common/core/Uuid.hpp"
 
 #include "common/entity/Item.hpp"
+#include "common/entity/EntityTags.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/core/JavaRandom.hpp"
 #include <glm/glm.hpp>
@@ -119,17 +120,22 @@ namespace Game {
 
         int   age         = 0;
         int   pickupDelay = 0;
+        // MC ItemEntity.target (setTarget): only this player may pick it up —
+        // /give's overflow is its receiver's. 0 = anyone. Runtime only.
+        uint32_t targetPlayerId = 0;
         bool  onGround    = false;
         // The item's size, 1 = vanilla: a scaled portal multiplies it, and
         // /scale sets it. Rendering only; the pickup box stays 0.25.
         float scale       = 1.0f;
 
         // MC ItemEntity.health — 5, reduced by damage (fire, lava, a blast)
-        // and the item is destroyed at zero. Only the explosion path writes it
-        // today; fire and lava damage to dropped items is not modelled, and
-        // neither is ItemStack.canBeHurtBy (netherite's damage_resistant), so
-        // every stack is equally destructible.
+        // and the item is destroyed at zero (ItemEntityManager's tick, the
+        // explosion sweep), except for the sources the stack's
+        // DAMAGE_RESISTANT covers (ItemStack.canBeHurtBy).
         int   health      = 5;
+
+        // MC Entity.tags — `/tag`'s scoreboard tags ("Tags" in the save).
+        EntityTags tags;
 
         // MC Entity.noPhysics, driven per-tick by ItemEntity.tick: true while
         // the entity's (slightly deflated) box overlaps a collision shape —

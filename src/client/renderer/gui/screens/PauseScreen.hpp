@@ -6,7 +6,8 @@
 // design, keeps TICKING — same as vanilla with "Open to LAN" active).
 //
 //   Back to Game            → pops the screen, recaptures the mouse
-//   Advancements/Statistics → placeholders (disabled, vanilla layout)
+//   Advancements / Friends  → AdvancementsScreen; FriendsScreen in vanilla's
+//                             Statistics slot (no statistics screen here)
 //   Options...              → the full options tree (same screens as title)
 //   Open to LAN             → disabled; the server is already listening
 //   Save and Quit to Title  → tears the world session down (server save runs

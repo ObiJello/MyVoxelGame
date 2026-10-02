@@ -34,18 +34,23 @@ namespace Server {
     }
 
     // FoodData.tick — FoodData.java:32-73.
-    void FoodData::tick(ServerPlayer& player, bool peaceful) {
-        // MC ServerPlayer.tick (:  if difficulty == PEACEFUL && naturalRegen):
-        // a hurt player heals one point a second, and an empty stomach
-        // refills one point every half second.
-        if (peaceful) {
-            ++m_peacefulTicks;
-            if (player.getHealth() < 20.0f && (m_peacefulTicks % 20) == 0) player.heal(1.0f);
-            if (m_foodLevel < 20 && (m_peacefulTicks % 10) == 0) m_foodLevel = std::min(m_foodLevel + 1, 20);
+    void FoodData::tick(ServerPlayer& player, int difficulty) {
+        const bool peaceful = difficulty == 0;
+        // :44 — the natural_health_regeneration game rule.
+        const bool naturalRegen = Game::Rules::GetBool(Game::Rules::Id::NaturalHealthRegeneration);
+
+        // MC ServerPlayer.tickRegeneration (from Player.aiStep): on PEACEFUL
+        // with natural regeneration, every 20 ticks +1 health (below max)
+        // and +1 saturation (below 20 — setSaturation, not clamped to the
+        // food level); every 10 ticks +1 food while it is below 20.
+        ++m_regenClock;
+        if (peaceful && naturalRegen) {
+            if (m_regenClock % 20 == 0) {
+                if (player.getHealth() < player.getMaxHealth()) player.heal(1.0f);
+                if (m_saturationLevel < 20.0f) m_saturationLevel += 1.0f;
+            }
+            if (m_regenClock % 10 == 0 && needsFood()) m_foodLevel = m_foodLevel + 1;
         }
-        // Difficulty pinned to NORMAL (no difficulty setting): the PEACEFUL
-        // no-hunger-drain branch and the HARD starvation exception both
-        // resolve to NORMAL behaviour below.
 
         // :35-42 — exhaustion drains saturation first, then food.
         if (m_exhaustionLevel > 4.0f) {
@@ -57,9 +62,8 @@ namespace Server {
             }
         }
 
-        // :44 — the natural_health_regeneration game rule.
-        const bool naturalRegen = Game::Rules::GetBool(Game::Rules::Id::NaturalHealthRegeneration);
-        const bool isHurt = player.getHealth() < 20.0f;  // Player.isHurt()
+        // Player.isHurt: 0 < health < getMaxHealth (HEALTH_BOOST raises it).
+        const bool isHurt = player.getHealth() > 0.0f && player.getHealth() < player.getMaxHealth();
 
         if (naturalRegen && m_saturationLevel > 0.0f && isHurt && m_foodLevel >= 20) {
             // :45-52 — fast saturation-powered regen: every 10 ticks heal
@@ -80,11 +84,12 @@ namespace Server {
                 m_tickTimer = 0;
             }
         } else if (m_foodLevel <= 0) {
-            // :60-68 — starvation: 1 damage every 80 ticks while health > 1
-            // (NORMAL difficulty rule; HARD would starve to death).
+            // :60-68 — starvation, 1 damage every 80 ticks: down to 10
+            // health on easy (and peaceful), to 1 on normal, to death on hard.
             ++m_tickTimer;
             if (m_tickTimer >= 80) {
-                if (player.getHealth() > 1.0f) {
+                const float health = player.getHealth();
+                if (health > 10.0f || difficulty == 3 || (health > 1.0f && difficulty == 2)) {
                     player.damage(1.0f, DamageSource::STARVATION);
                 }
                 m_tickTimer = 0;

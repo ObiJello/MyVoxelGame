@@ -2,10 +2,9 @@
 //
 // Mirrors net/minecraft/world/food/FoodData.java — the hunger / saturation /
 // exhaustion triple on a player, plus the per-tick regen/starvation logic.
-// Ported verbatim (FoodData.java:11-116) with two pinned simplifications,
-// each commented at the site:
-//   • difficulty pinned to NORMAL (no difficulty setting exists)
-//   • naturalRegeneration gamerule pinned to true (no gamerules exist)
+// Ported verbatim (FoodData.java:11-116), with the world difficulty and the
+// natural_health_regeneration game rule read live; ServerPlayer's
+// tickRegeneration (the PEACEFUL heal / refill) rides the same tick.
 #pragma once
 
 namespace Server {
@@ -23,10 +22,13 @@ namespace Server {
         // saturation value (our Game::FoodProperties stores it pre-converted).
         void eatFinal(int nutrition, float saturation);
 
-        // Per-tick hunger logic — FoodData.java:32-73.
-        // `peaceful`: MC Difficulty.PEACEFUL — hunger never drains below
-        // its level and refills, and health regenerates on its own.
-        void tick(ServerPlayer& player, bool peaceful = false);
+        // Per-tick hunger logic — FoodData.java:32-73, preceded by MC
+        // ServerPlayer.tickRegeneration (PEACEFUL: +1 health and +1
+        // saturation every 20 ticks, +1 food every 10). `difficulty` is MC's
+        // Difficulty id (0 peaceful .. 3 hard): peaceful never drains food,
+        // and starvation stops at 10 health on easy/peaceful, at 1 on
+        // normal, and kills on hard.
+        void tick(ServerPlayer& player, int difficulty);
 
         // FoodData.java:101-103 (clamped at 40).
         void addExhaustion(float amount);
@@ -49,7 +51,7 @@ namespace Server {
         float m_saturationLevel = 5.0f;
         float m_exhaustionLevel = 0.0f;
         int   m_tickTimer       = 0;
-        int m_peacefulTicks = 0;   // peaceful regen/refill clock
+        int m_regenClock = 0;   // stands in for Player.tickCount (tickRegeneration's % 20 / % 10)
 
         // FoodData.add — :19-22.
         void add(int food, float saturation);

@@ -5,6 +5,7 @@
 #include "../session/PlayerSession.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/level/GameRules.hpp"
 #include <sstream>
 #include <algorithm>
 #include <cctype>
@@ -27,6 +28,16 @@ namespace Server {
         syntax.redirectRoot = false;
         m_syntax[lower] = std::move(syntax);
         RegisterCommand(lower, std::move(handler));
+    }
+
+    void CommandDispatcher::UpdateSyntax(const std::string& name, Game::Cmd::Node syntax) {
+        std::string lower = name;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        if (m_commands.find(lower) == m_commands.end()) return;
+        syntax.type = Game::Cmd::Arg::Literal;
+        syntax.name = lower;
+        syntax.redirectRoot = false;
+        m_syntax[lower] = std::move(syntax);
     }
 
     std::vector<const Game::Cmd::Node*> CommandDispatcher::GetCommandSyntax() const {
@@ -133,6 +144,24 @@ namespace Server {
         // Build args (everything after command name)
         std::vector<std::string> args(tokens.begin() + 1, tokens.end());
 
+        // MC Commands.executeCommandInContext: a top-level command gets an
+        // ExecutionContext whose quota is max(1, max_command_sequence_length);
+        // runCommandQueue stops (and logs once) when it is spent, and each
+        // command executed costs one (ExecuteCommand.execute's incrementCost).
+        if (m_depth == 0) {
+            m_commandQuota = std::max(1, Game::Rules::GetInt(Game::Rules::Id::MaxCommandSequenceLength));
+            m_quotaLogged  = false;
+        }
+        if (m_commandQuota <= 0) {
+            if (!m_quotaLogged) {
+                Log::Info("[CommandDispatcher] Command execution stopped due to limit (executed %d commands)",
+                          std::max(1, Game::Rules::GetInt(Game::Rules::Id::MaxCommandSequenceLength)));
+                m_quotaLogged = true;
+            }
+            return true;
+        }
+        --m_commandQuota;
+
         // Execute
         struct DepthGuard {
             int& depth;
@@ -162,9 +191,13 @@ namespace Server {
     }
 
     std::vector<std::string> CommandDispatcher::Tokenize(const std::string& input) {
-        // Whitespace splits tokens, except inside a selector's [...] (MC's
-        // EntitySelectorParser reads options across spaces — `@e[type=cow,
-        // name="Two Words"]`), and inside a quoted string within one.
+        // Whitespace splits tokens, except inside a selector's or an item's
+        // [...] (MC's EntitySelectorParser reads options across spaces —
+        // `@e[type=cow, name="Two Words"]`), inside SNBT {...} (`/data merge
+        // entity @s {Health: 20f, CustomName: "Rex"}`), and inside a quoted
+        // string — one within those, or one a token starts with (MC
+        // StringReader.readString: `/data modify … value "two words"`). A
+        // quote inside a plain word ("don't") is just a character.
         std::vector<std::string> tokens;
         std::string token;
         int  depth = 0;
@@ -177,13 +210,13 @@ namespace Server {
                 else if (c == quote) quote = 0;
                 continue;
             }
-            if (depth > 0 && (c == '"' || c == '\'')) {
+            if ((depth > 0 || token.empty()) && (c == '"' || c == '\'')) {
                 quote = c;
                 token += c;
                 continue;
             }
-            if (c == '[') ++depth;
-            else if (c == ']' && depth > 0) --depth;
+            if (c == '[' || c == '{') ++depth;
+            else if ((c == ']' || c == '}') && depth > 0) --depth;
             if (depth == 0 && std::isspace(static_cast<unsigned char>(c))) {
                 if (!token.empty()) tokens.push_back(std::move(token));
                 token.clear();

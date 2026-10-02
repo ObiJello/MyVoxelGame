@@ -1,5 +1,7 @@
 // File: src/server/entity/ItemEntityManager.cpp
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include <cmath>
 #include "ItemEntityManager.hpp"
 
@@ -8,6 +10,10 @@
 #include "server/player/ServerPlayer.hpp"
 #include "server/session/PlayerSession.hpp"
 #include "server/session/PlayerSessionManager.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
+#include "server/IntegratedServer.hpp"
+#include "server/level/ServerLevel.hpp"
+#include "server/entity/ServerLevelBridge.hpp"
 #include "common/core/Features.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
 #include "server/portal/EntityPortalTravel.hpp"
@@ -91,6 +97,7 @@ namespace Server {
         Game::ItemEntity e = std::move(it->second);
         m_entities.erase(it);
         m_playerThrown.erase(id);
+        m_throwers.erase(id);
         // Travelling to another level, which adopts it (and its gun) again.
         m_gunEntities.erase(id);
         m_transferred.erase(id);
@@ -166,9 +173,9 @@ namespace Server {
         Spawn(pos, vel, stack, Game::ItemEntity::kDefaultPickupDelay);
     }
 
-    void ItemEntityManager::SpawnAtLocation(const glm::dvec3& pos,
-                                           const Game::ItemStack& stack) {
-        if (stack.IsEmpty()) return;
+    int32_t ItemEntityManager::SpawnAtLocation(const glm::dvec3& pos,
+                                              const Game::ItemStack& stack) {
+        if (stack.IsEmpty()) return 0;
 
         // MC Entity.spawnAtLocation(level, stack) -> new ItemEntity(level,
         // getX(), getY(), getZ(), stack): the exact position, then the same
@@ -179,7 +186,7 @@ namespace Server {
             m_random.NextDouble() * 0.2 - 0.1
         };
 
-        Spawn(pos, vel, stack, Game::ItemEntity::kDefaultPickupDelay);
+        return Spawn(pos, vel, stack, Game::ItemEntity::kDefaultPickupDelay);
     }
 
     void ItemEntityManager::PopResourceFromFace(const glm::ivec3& blockPos,
@@ -317,6 +324,8 @@ namespace Server {
             if (ob.max.y <= minY || ob.min.y >= maxY) continue;
             if (ob.max.z <= minZ || ob.min.z >= maxZ) continue;
 
+            // MC tryToMerge: only items meant for the same player (target).
+            if (entity.targetPlayerId != other.targetPlayerId) continue;
             if (!Game::CanMergeItemEntities(entity.stack, other.stack)) continue;
 
             // MC pours the SMALLER stack into the larger so the surviving
@@ -391,6 +400,63 @@ namespace Server {
                 }
             }
 
+            // MC Entity.baseTick's lavaHurt and the in-block hurts for an
+            // item: lava hurts it by 4 (with the burn hiss), a fire block
+            // (FireBlock.entityInside) by 1, a cactus
+            // (CactusBlock.entityInside) by 1, and at health 0 it is gone —
+            // unless the stack's DAMAGE_RESISTANT covers the source
+            // (ItemStack.canBeHurtBy: netherite floats on lava and sits in
+            // fire untouched; nothing resists a cactus). ItemEntity.hurtServer
+            // has no invulnerability window, so a cactus eats a default
+            // 5-health item in five ticks.
+            //
+            // The cells are those of the item's box deflated by MC's 1e-5
+            // (Entity.checkInsideBlocks): an item resting flush against a
+            // block's face is not inside it, while one leaning on a cactus's
+            // 1/16-inset side, or lying on its 15/16 top, is in its cell.
+            {
+                constexpr double kDeflate = 9.999999747378752E-6;
+                const double half = Game::ItemEntity::kWidth * 0.5;
+                const int x0 = static_cast<int>(std::floor(e.pos.x - half + kDeflate));
+                const int x1 = static_cast<int>(std::floor(e.pos.x + half - kDeflate));
+                const int y0 = static_cast<int>(std::floor(e.pos.y + kDeflate));
+                const int y1 = static_cast<int>(std::floor(e.pos.y + Game::ItemEntity::kHeight - kDeflate));
+                const int z0 = static_cast<int>(std::floor(e.pos.z - half + kDeflate));
+                const int z1 = static_cast<int>(std::floor(e.pos.z + half - kDeflate));
+                bool inLava = false, inFire = false, inCactus = false;
+                for (int x = x0; x <= x1; ++x) {
+                    for (int y = y0; y <= y1; ++y) {
+                        for (int z = z0; z <= z1; ++z) {
+                            const Game::BlockID b = world->GetBlock(x, y, z);
+                            if (b == Game::BlockID::Lava) inLava = true;
+                            else if (b == Game::BlockID::Fire || b == Game::BlockID::SoulFire) inFire = true;
+                            else if (b == Game::BlockID::Cactus) inCactus = true;
+                        }
+                    }
+                }
+                // Each source is its own hurt in MC (lavaHurt in baseTick,
+                // then every block's entityInside), so they add up.
+                int damage = 0;
+                if (inLava && Game::ItemStackCanBeHurtBy(e.stack, "minecraft:lava")) {
+                    damage += 4;
+                    world->PlaySound(nullptr, e.pos, Game::SoundEvents::GENERIC_BURN, Game::SoundSource::Neutral,
+                                     0.4f, 2.0f + m_random.NextFloat() * 0.4f);
+                }
+                if (inFire && Game::ItemStackCanBeHurtBy(e.stack, "minecraft:in_fire")) {
+                    damage += 1;
+                }
+                if (inCactus && Game::ItemStackCanBeHurtBy(e.stack, "minecraft:cactus")) {
+                    damage += 1;
+                }
+                if (damage > 0) {
+                    e.health -= damage;
+                    if (e.health <= 0) {
+                        e.stack.Clear();
+                        continue;
+                    }
+                }
+            }
+
             // Twilight Forest: a diamond a player threw into a valid pool
             // lights it (ProgressionEvents.checkForPortalCreation →
             // TFPortalBlock.tryToCreatePortal). Gated on the item id first —
@@ -454,6 +520,8 @@ namespace Server {
 
                 for (auto& [id, e] : m_entities) {
                     if (e.stack.IsEmpty() || e.pickupDelay > 0) continue;
+                    // MC playerTouch: `target == null || target.equals(player.getUUID())`.
+                    if (e.targetPlayerId != 0 && e.targetPlayerId != player->getPlayerId()) continue;
                     if (!e.GetAABB().Intersects(pickupBox)) continue;
 
                     // AddStack returns what did NOT fit. A partial pickup
@@ -468,6 +536,19 @@ namespace Server {
                     const int taken = e.stack.count - leftover;
                     outPickups.push_back(ItemPickupEvent{
                         e.id, player->getPlayerId(), taken });
+                    // MC ServerPlayer.onItemPickup: an item someone threw is
+                    // THROWN_ITEM_PICKED_UP_BY_PLAYER, with the thrower.
+                    if (const auto thrower = ThrowerOf(id)) {
+                        ServerLevel* level = g_integratedServer ? g_integratedServer->GetLevel(world->GetDimension())
+                                                                : nullptr;
+                        Game::Entity* throwerEntity =
+                            level && level->MobLevel() ? level->MobLevel()->ResolveEntityById(*thrower) : nullptr;
+                        if (throwerEntity) {
+                            Game::ItemStack picked = e.stack;
+                            picked.count = taken;
+                            CriteriaTriggers::ThrownItemPickedUpByPlayer(*player, picked, throwerEntity);
+                        }
+                    }
 
                     if (leftover > 0) {
                         e.stack.count = leftover;
@@ -501,6 +582,7 @@ namespace Server {
                     outRemoved.push_back(it->first);
                 }
                 m_playerThrown.erase(it->first);
+                m_throwers.erase(it->first);
                 RetireGunEntity(it->first, it->second, /*stored=*/false);
                 it = m_entities.erase(it);
             } else {
@@ -515,6 +597,7 @@ namespace Server {
             if (ChunkOf(it->second.pos) == chunk) {
                 outRemoved.push_back(it->first);
                 m_playerThrown.erase(it->first);
+                m_throwers.erase(it->first);
                 // Saved with its chunk just before this (IntegratedServer's
                 // unload pass), so a gun here is stored, not lost.
                 RetireGunEntity(it->first, it->second, /*stored=*/true);
@@ -528,6 +611,7 @@ namespace Server {
     void ItemEntityManager::Clear() {
         m_entities.clear();
         m_playerThrown.clear();
+        m_throwers.clear();
         m_gunEntities.clear();
         m_transferred.clear();
         m_mobPickups.clear();

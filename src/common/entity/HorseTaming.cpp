@@ -1,5 +1,6 @@
 // File: src/common/entity/HorseTaming.cpp
 #include "common/entity/HorseTaming.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -35,7 +36,12 @@ namespace Game {
     bool HorseTaming::TameWithName(const LivingEntity& player) {
         SetOwner(&player);
         SetTamed(true);
-        // (CriteriaTriggers.TAME_ANIMAL: no advancement system here.)
+        // AbstractHorse.tameWithName: CriteriaTriggers.TAME_ANIMAL.
+        if (m_horseSelf && m_horseSelf->Level() && !m_horseSelf->Level()->IsClientSide()) {
+            if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(&player)) {
+                Server::CriteriaTriggers::TameAnimal(*sp, *m_horseSelf);
+            }
+        }
         if (EntityLevel* level = m_horseSelf ? m_horseSelf->Level() : nullptr) {
             level->BroadcastEntityEvent(*m_horseSelf, 7);
         }

@@ -1,5 +1,7 @@
 // File: src/server/level/EndDragonFight.cpp
 #include "server/level/EndDragonFight.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
+#include "server/entity/ServerLevelBridge.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -384,6 +386,10 @@ namespace Server {
         p.color = Network::BossEventS2CPacket::Color::Pink;
         p.notches = 0;
         p.name = "Ender Dragon";
+        // MC EndDragonFight's dragonEvent: setPlayBossMusic(true)
+        // .setCreateWorldFog(true).
+        p.properties = Network::BossEventS2CPacket::kPlayBossMusic |
+                       Network::BossEventS2CPacket::kCreateWorldFog;
         session->GetConnection()->SendPacket(
             static_cast<uint8_t>(Network::PacketId::BossEventS2C),
             Network::Serialization::Serialize(p));
@@ -941,7 +947,17 @@ namespace Server {
             // through Tick's `SetBarVisible(!m_dragonKilled)` next tick,
             // exactly as MC's tick-top setVisible brings it back.
             m_lastSentProgress = -1.0f;
-            CreateNewDragon();
+            Game::EnderDragon* dragon = CreateNewDragon();
+            // MC setRespawnStage(END): every player on the fight's boss bar
+            // gets CriteriaTriggers.SUMMONED_ENTITY with the new dragon.
+            if (dragon && m_level.MobLevel()) {
+                for (uint32_t connectionId : m_barPlayers) {
+                    Game::Entity* view = m_level.MobLevel()->ResolveEntityById(static_cast<int32_t>(connectionId));
+                    if (ServerPlayer* player = CriteriaTriggers::PlayerOf(view)) {
+                        CriteriaTriggers::SummonedEntity(*player, *dragon);
+                    }
+                }
+            }
             Save();
         } else {
             m_respawnStage = stage;

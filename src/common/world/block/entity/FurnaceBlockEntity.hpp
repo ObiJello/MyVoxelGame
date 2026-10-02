@@ -84,6 +84,10 @@ namespace Game {
         void SetLitDuration(int v)  { m_litDuration = v; }
         void SetCookingTime(int v)  { m_cookingTime = v; }
         void SetCookingTotal(int v) { m_cookingTotal = v; }
+        // MC speedMultiplier: the burning fuel's COOKING_FUEL speed (-1 =
+        // never set: the furnace's vanilla default).
+        float SpeedMultiplier() const;
+        void  SetSpeedMultiplier(float v) { m_speedMultiplier = v; }
 
         bool IsLit() const { return m_litTime > 0; }
 
@@ -115,6 +119,7 @@ namespace Game {
         int   m_cookingTime  = 0;   // ticks the current item has cooked
         int   m_cookingTotal = 0;   // ticks it needs (for the arrow's width)
         float m_storedXp     = 0.0f;
+        float m_speedMultiplier = -1.0f;
     };
 
 } // namespace Game

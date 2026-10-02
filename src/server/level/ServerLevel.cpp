@@ -12,6 +12,7 @@
 #include "server/level/ChunkKeeper.hpp"
 #include "server/level/EndDragonFight.hpp"
 #include "server/level/SilentWardenBossBars.hpp"
+#include "server/level/WitherBossEvents.hpp"
 #include "server/level/HushStillness.hpp"
 #include "server/world/storage/anvil/SaveRoot.hpp"
 #include "server/session/PlayerSessionManager.hpp"
@@ -40,28 +41,35 @@ namespace Server {
 
         m_world = std::make_unique<Game::World>();
 
-        // Order matters and is not obvious: every one of these must be set
-        // BEFORE World::Initialize, which is where the chunk provider — and
-        // with it the terrain generator — is constructed from them.
+        // Order matters and is not obvious: these four must be set BEFORE
+        // World::Initialize, which is where the chunk provider — and with it
+        // the terrain generator — is constructed from them.
         m_world->SetDimension(m_config.dimension);
         m_world->SetReadOnly(m_config.readOnly);
         m_world->SetSavePath(m_config.savePath);
         if (!m_config.worldPath.empty()) {
             m_world->SetMinecraftWorldPath(m_config.worldPath);
         }
-        m_world->SetGenerationSeed(m_config.seed);
-        m_world->SetGenerateStructures(m_config.generateStructures);
-
-        // World-type customization is an OVERWORLD concept. "amplified" or a
-        // flat preset handed to the nether generator would select the wrong
-        // noise router; vanilla has no presets for the other two dimensions.
-        if (m_config.dimension == Game::DimensionId::Overworld) {
-            m_world->SetWorldGenOptions(m_config.worldType, m_config.flatPreset,
-                                        m_config.flatLayers, m_config.singleBiome);
-            m_world->SetWorldGenTweaks(m_config.worldgenTweaks);
-        }
 
         m_world->Initialize();
+
+        // The generation settings, by contrast, go AFTER Initialize: the World
+        // setters forward to the chunk provider and silently drop the value
+        // while it does not exist yet. Set before, the Nether and End fell back
+        // to the GenerationConfig default seed (12345) in every world.
+        //
+        // The overworld's seed and world-type customization are pushed by
+        // PlatformMain (ApplyWorldGenSettings) — an imported Minecraft save
+        // deliberately gets none — so this level only sets them for the
+        // dimensions IntegratedServer creates on its own, where cfg.seed is
+        // the overworld's seed (MC: one WorldOptions seed for every level).
+        // World-type customization is an OVERWORLD concept anyway: "amplified"
+        // or a flat preset handed to the nether generator would select the
+        // wrong noise router; vanilla has no presets for the other two.
+        if (m_config.dimension != Game::DimensionId::Overworld) {
+            m_world->SetGenerationSeed(m_config.seed);
+            m_world->SetGenerateStructures(m_config.generateStructures);
+        }
 
         // AFTER Initialize — that is where the provider is constructed, and
         // the cap lives on the provider rather than on the world config.
@@ -135,6 +143,8 @@ namespace Server {
         }
         // The Silent Warden's boss bar, every dimension (see the header).
         m_wardenBossBars = std::make_unique<SilentWardenBossBars>(*this, m_sessions);
+        // Every wither's boss bar, every dimension (see the header).
+        m_witherBossEvents = std::make_unique<WitherBossEvents>(*this, m_sessions);
         // The Hush's stillness (see the header). After the bridge, whose
         // flag it drives.
         if (m_config.dimension == Game::DimensionId::Hush) {
@@ -166,6 +176,8 @@ namespace Server {
         m_dragonFight.reset();
         if (m_wardenBossBars) m_wardenBossBars->RemoveAll();
         m_wardenBossBars.reset();
+        if (m_witherBossEvents) m_witherBossEvents->RemoveAll();
+        m_witherBossEvents.reset();
         // Before the bridge it writes to.
         if (m_stillness) m_stillness->RemoveAll();
         m_stillness.reset();

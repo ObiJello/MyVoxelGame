@@ -186,6 +186,9 @@ namespace Render {
         float     fishYawDeg = 0.0f;
         bool      fishLandRoll = false;
         glm::vec3 fishLandOffset{0.0f};
+        // MC IronGolemRenderer.setupRotations' tail after super: the walking
+        // golem's sway, rotateDegrees(ZP, 6.5 * triangleWave) — degrees.
+        float     setupRollDeg = 0.0f;
 
         bool isCrouching  = false;
         bool isSprinting  = false;
@@ -322,6 +325,13 @@ namespace Render {
         // MC EnderDragonRenderState.flapTime — lerp(partialTick, oFlapTime,
         // flapTime), in MC's revolutions (the model multiplies by 2π).
         float  dragonFlapTime = 0.0f;
+        // MC WitherRenderState.yHeadRots / xHeadRots (the side heads' look,
+        // degrees — WitherBoss.getHeadYRots / getHeadXRots, unlerped) and
+        // LivingEntityRenderState.bodyRot, which WitherBossModel's
+        // setupHeadRotation subtracts.
+        float  witherHeadYRots[2] = { 0.0f, 0.0f };
+        float  witherHeadXRots[2] = { 0.0f, 0.0f };
+        float  bodyRot = 0.0f;
         // MC getHeadPartYOffset's three inputs.
         bool   dragonIsSitting = false;
         bool   dragonIsLandingOrTakingOff = false;
@@ -612,6 +622,14 @@ namespace Render {
         bool LeftHandMatrix(glm::mat4& out) const override;
         bool CullBackFaces() const override { return m_cull; }
 
+    protected:
+        // Runs after the walk clips and before every other clip — the slot
+        // where a model class clamps the walked pose (CopperGolemModel's
+        // poseHeldItemArmsIfStill). The clips themselves only ADD to the
+        // pose, so splitting the walk clips out first changes nothing for a
+        // model without the hook.
+        virtual void AfterWalkClips(const EntityRenderState& state) { (void)state; }
+
     private:
         bool m_cull = false;   // GenModel::cull
         // Resolved once at construction so SetupAnim is a walk over pointers
@@ -689,6 +707,37 @@ namespace Render {
 
     private:
         ModelPart* m_tail = nullptr;
+    };
+
+    // MC CopperGolemModel: the generated mesh, its compiled setupAnim and
+    // clips, plus poseHeldItemArmsIfStill — when it holds something, after
+    // the walk_item clip and before the idle / interaction clips, both arms
+    // are clamped up into the carrying pose (the compiled program cannot
+    // read the hand item states).
+    class CopperGolemModel : public GeneratedModel {
+    public:
+        CopperGolemModel();
+
+    protected:
+        void AfterWalkClips(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_rightArm = nullptr;
+        ModelPart* m_leftArm  = nullptr;
+    };
+
+    // MC WitherBossModel: the generated mesh and its compiled setupAnim
+    // (ribcage, tail, centre head), plus setupHeadRotation for the two side
+    // heads, which the compiled program cannot carry — each turned to its
+    // own look: yRot = (yHeadRots[i] - bodyRot), xRot = xHeadRots[i].
+    class WitherBossModel : public GeneratedModel {
+    public:
+        explicit WitherBossModel(std::string_view slug = "wither");
+        void SetupAnim(const EntityRenderState& state) override;
+
+    private:
+        ModelPart* m_rightHead = nullptr;
+        ModelPart* m_leftHead  = nullptr;
     };
 
     // MC WolfModel / AdultWolfModel / BabyWolfModel — the generated mesh and

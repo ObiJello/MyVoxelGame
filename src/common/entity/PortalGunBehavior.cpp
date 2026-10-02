@@ -98,7 +98,10 @@ namespace Game::Portal {
         // types behind these interfaces are always the server's here.
         const PlaceResult result = ServerRegistry().PlacePortal(
             id, static_cast<Game::World*>(ctx.world), ctx.hitResult, color,
-            static_cast<Server::ServerPlayer*>(ctx.player));
+            static_cast<Server::ServerPlayer*>(ctx.player),
+            // The heading in the hit block's space: a shot fired through a
+            // portal lays a floor portal along the way it arrived there.
+            ctx.playerYaw);
 
         if (result == PlaceResult::Fizzled) {
             // TODO(sound): play fizzle sound when the audio system lands.

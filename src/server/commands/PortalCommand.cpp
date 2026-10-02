@@ -16,6 +16,7 @@
 #include "../portal/ImmersivePortalRegistry.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/level/GameRules.hpp"
 
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/constants.hpp>
@@ -91,9 +92,11 @@ namespace Server {
             origin[ih] = std::round(origin[ih] - height * 0.5) + height * 0.5;
         }
 
-        void FrameFacingPlayer(const ServerPlayer& player, double width, double height,
+        // In front of the command source, facing it (its position and yaw —
+        // the sender's, or what `/execute at|positioned|rotated` made them).
+        void FrameFacingPlayer(const CommandSourceStack& source, double width, double height,
                                Portal& portal, bool gridAligned = false) {
-            double yaw = glm::radians(static_cast<double>(player.getYaw()));
+            double yaw = glm::radians(static_cast<double>(source.rotation.yRot));
             // A grid-aligned frame faces the nearest world axis.
             if (gridAligned) yaw = std::round(yaw / glm::half_pi<double>()) * glm::half_pi<double>();
             const glm::dvec3 forward(-std::sin(yaw), 0.0, std::cos(yaw));
@@ -104,21 +107,21 @@ namespace Server {
             portal.axisH  = up;
             portal.width  = width;
             portal.height = height;
-            portal.origin = player.getPosition() + forward * kPlacementDistance +
+            portal.origin = source.position + forward * kPlacementDistance +
                             glm::dvec3(0.0, height * 0.5, 0.0);
             if (gridAligned) SnapFrameToGrid(portal.origin, portal.axisW, portal.axisH, normal, width, height);
         }
 
-        void SendList(ServerConnection& connection, const ImmersivePortalRegistry& registry,
+        void SendList(const CommandSourceStack& source, ServerConnection& connection,
+                      const ImmersivePortalRegistry& registry,
                       Game::DimensionId dimension) {
             size_t n = 0;
             registry.ForEachInDimension(dimension, [&](const Portal& p) {
-                connection.SendChatMessage(p.Describe(), 1);
+                source.SendSuccess(connection, p.Describe(), false);
                 ++n;
             });
-            connection.SendChatMessage(
-                std::to_string(n) + " portal(s) in " + std::string(Game::DimensionName(dimension)) +
-                " (" + std::to_string(registry.Count()) + " total)", 1);
+            source.SendSuccess(connection, std::to_string(n) + " portal(s) in " + std::string(Game::DimensionName(dimension)) +
+                " (" + std::to_string(registry.Count()) + " total)", false);
         }
 
         bool ParseDouble(const std::string& s, double& out) {
@@ -130,14 +133,14 @@ namespace Server {
         }
 
         // The portal nearest the sender within /portal info's reach.
-        const Portal* NearestPortal(const ImmersivePortalRegistry& registry, const ServerPlayer& sender,
+        const Portal* NearestPortal(const ImmersivePortalRegistry& registry, const CommandSourceStack& source,
                                     Game::DimensionId here) {
             const Portal* best = nullptr;
             double bestDist = 0.0;
-            for (const Portal* p : registry.CollectNear(here, sender.getPosition(), kInfoRadius)) {
+            for (const Portal* p : registry.CollectNear(here, source.position, kInfoRadius)) {
                 // World-option surfaces are not edited by hand.
                 if (p->Has(Game::Immersive::PortalFlag::Global)) continue;
-                const double d = glm::length(p->origin - sender.getPosition());
+                const double d = glm::length(p->origin - source.position);
                 if (!best || d < bestDist) { best = p; bestDist = d; }
             }
             return best;
@@ -235,7 +238,8 @@ namespace Server {
         if (hasPlayer) {
             std::shared_ptr<PlayerSession> target;
             if (args[1] == "@s") {
-                target = sessionManager.GetSession(sender.getPlayerId());
+                // The executor (`/execute as Steve run scale 2 @s`).
+                if (ServerPlayer* self = source.ExecutorPlayer()) target = sessionManager.GetSession(self->getPlayerId());
             } else {
                 std::string want = args[1];
                 std::transform(want.begin(), want.end(), want.begin(),
@@ -258,23 +262,27 @@ namespace Server {
             if (&other == &sender) {
                 connection.SendPlayerAbilities(sender);
                 std::snprintf(buf, sizeof(buf), "Your size is now %.2f", sender.getScale());
-                connection.SendChatMessage(buf, 1);
+                source.SendSuccess(connection, buf, true);
                 return;
             }
             if (auto* conn = target->GetConnection()) {
                 conn->SendPlayerAbilities(other);
-                std::snprintf(buf, sizeof(buf), "%s set your size to %.2f", sender.getName().c_str(), other.getScale());
-                conn->SendChatMessage(buf, 1);
+                // The target's own notice, as gamemode's: only under
+                // send_command_feedback.
+                if (Game::Rules::GetBool(Game::Rules::Id::SendCommandFeedback)) {
+                    std::snprintf(buf, sizeof(buf), "%s set your size to %.2f", sender.getName().c_str(), other.getScale());
+                    conn->SendChatMessage(buf, 1);
+                }
             }
             std::snprintf(buf, sizeof(buf), "%s's size is now %.2f", other.getName().c_str(), other.getScale());
-            connection.SendChatMessage(buf, 1);
+            source.SendSuccess(connection, buf, true);
             return;
         }
         if (hasRadius) {
-            ServerLevel* level = g_integratedServer ? g_integratedServer->GetLevel(
-                Game::DimensionFromRaw(sender.getDimensionId())) : nullptr;
+            // Around the source (`/execute at|positioned|in ...`).
+            ServerLevel* level = g_integratedServer ? g_integratedServer->GetLevel(source.dimension) : nullptr;
             if (!level) { connection.SendChatMessage("No level", 1); return; }
-            const glm::dvec3 here = sender.getPosition();
+            const glm::dvec3 here = source.position;
             size_t mobsDone = 0, itemsDone = 0;
             if (level->Mobs()) {
                 for (Game::Mob* mob : level->Mobs()->List()) {
@@ -296,15 +304,21 @@ namespace Server {
             char buf[96];
             std::snprintf(buf, sizeof(buf), "Scaled %zu mob(s) and %zu item(s) to %.2f",
                           mobsDone, itemsDone, scale);
-            connection.SendChatMessage(buf, 1);
+            source.SendSuccess(connection, buf, true);
             return;
         }
-        sender.setScale(static_cast<float>(scale));
+        // No target: the executor.
+        ServerPlayer* self = source.ExecutorPlayer();
+        if (!self) { connection.SendChatMessage(CommandSourceStack::kPlayerRequired, 1); return; }
+        self->setScale(static_cast<float>(scale));
         // The abilities packet carries the size to the client.
-        connection.SendPlayerAbilities(sender);
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "Your size is now %.2f", sender.getScale());
-        connection.SendChatMessage(buf, 1);
+        auto selfSession = sessionManager.GetSession(self->getPlayerId());
+        ServerConnection* selfConn = selfSession ? selfSession->GetConnection() : nullptr;
+        if (selfConn) selfConn->SendPlayerAbilities(*self);
+        char buf[96];
+        if (self == &sender) std::snprintf(buf, sizeof(buf), "Your size is now %.2f", self->getScale());
+        else std::snprintf(buf, sizeof(buf), "%s's size is now %.2f", self->getName().c_str(), self->getScale());
+        source.SendSuccess(connection, buf, true);
     }
 
     void PortalCommand::Execute(const CommandSourceStack& source,
@@ -317,7 +331,7 @@ namespace Server {
             return;
         }
         auto& registry = *g_integratedServer->ImmersivePortals();
-        const Game::DimensionId here = Game::DimensionFromRaw(sender.getDimensionId());
+        const Game::DimensionId here = source.dimension;
 
         if (args.empty()) {
             connection.SendChatMessage(kUsage, 1);
@@ -326,12 +340,12 @@ namespace Server {
         const std::string& sub = args[0];
 
         if (sub == "list") {
-            SendList(connection, registry, here);
+            SendList(source, connection, registry, here);
             return;
         }
 
         if (sub == "info") {
-            const auto nearby = registry.CollectNear(here, sender.getPosition(), kInfoRadius);
+            const auto nearby = registry.CollectNear(here, source.position, kInfoRadius);
             if (nearby.empty()) {
                 connection.SendChatMessage("No portal within " +
                                            std::to_string(static_cast<int>(kInfoRadius)) + " blocks", 1);
@@ -340,19 +354,19 @@ namespace Server {
             const Portal* best = nullptr;
             double bestDist = 0.0;
             for (const Portal* p : nearby) {
-                const double d = glm::length(p->origin - sender.getPosition());
+                const double d = glm::length(p->origin - source.position);
                 if (!best || d < bestDist) { best = p; bestDist = d; }
             }
-            connection.SendChatMessage(best->Describe(), 1);
+            source.SendSuccess(connection, best->Describe(), false);
             const glm::dvec3 n = best->Normal();
             char buf[160];
             std::snprintf(buf, sizeof(buf),
                           "  normal (%.2f, %.2f, %.2f), %.1f blocks away, you are %s it; "
                           "links: reverse #%u flipped #%u parallel #%u",
                           n.x, n.y, n.z, bestDist,
-                          best->IsInFront(sender.getPosition()) ? "in front of" : "behind",
+                          best->IsInFront(source.position) ? "in front of" : "behind",
                           best->reversePortalId, best->flippedPortalId, best->parallelPortalId);
-            connection.SendChatMessage(buf, 1);
+            source.SendSuccess(connection, buf, false);
             return;
         }
 
@@ -371,12 +385,12 @@ namespace Server {
                 }
                 id = static_cast<PortalId>(parsed);
             } else {
-                const Portal* target = NearestPortal(registry, sender, here);
+                const Portal* target = NearestPortal(registry, source, here);
                 if (!target) { connection.SendChatMessage("No portal nearby", 1); return; }
                 id = target->id;
             }
             const size_t removed = registry.RemoveCluster(id);
-            connection.SendChatMessage("Removed " + std::to_string(removed) + " portal(s)", 1);
+            source.SendSuccess(connection, "Removed " + std::to_string(removed) + " portal(s)", true);
             return;
         }
 
@@ -414,7 +428,7 @@ namespace Server {
             // the far one and stuck there. With the near frame on the grid
             // and the far frame snapped on its own, the transform carries
             // block boundaries onto block boundaries.
-            FrameFacingPlayer(sender, width, height, portal, /*gridAligned=*/true);
+            FrameFacingPlayer(source, width, height, portal, /*gridAligned=*/true);
             portal.destination = portal.origin + offset;
             portal.rotation    = glm::angleAxis(glm::radians(turn), glm::dvec3(0.0, 1.0, 0.0));
             {
@@ -429,7 +443,7 @@ namespace Server {
                 return;
             }
             const Portal* created = registry.Get(id);
-            connection.SendChatMessage("Created loop " + (created ? created->Describe() : std::string("portal")), 1);
+            source.SendSuccess(connection, "Created loop " + (created ? created->Describe() : std::string("portal")), true);
             return;
         }
 
@@ -448,7 +462,7 @@ namespace Server {
             portal.dimension     = here;
             portal.destDimension = here;
             portal.tag           = "mirror";
-            FrameFacingPlayer(sender, width, height, portal);
+            FrameFacingPlayer(source, width, height, portal);
             portal.destination   = portal.origin;
             const PortalId id = registry.Add(portal);
             if (id == kInvalidPortalId) {
@@ -456,7 +470,7 @@ namespace Server {
                 return;
             }
             const Portal* created = registry.Get(id);
-            connection.SendChatMessage("Created " + (created ? created->Describe() : std::string("mirror")), 1);
+            source.SendSuccess(connection, "Created " + (created ? created->Describe() : std::string("mirror")), true);
             return;
         }
 
@@ -472,7 +486,7 @@ namespace Server {
                 connection.SendChatMessage("Axis must be a non-zero vector, degrees a number", 1);
                 return;
             }
-            const Portal* target = NearestPortal(registry, sender, here);
+            const Portal* target = NearestPortal(registry, source, here);
             if (!target) { connection.SendChatMessage("No portal nearby", 1); return; }
             if (target->IsMirror()) { connection.SendChatMessage("A mirror has no rotation", 1); return; }
             if (Game::FamilyOfKind(target->kind)) {
@@ -482,8 +496,8 @@ namespace Server {
             Portal edited = *target;
             edited.rotation = glm::angleAxis(glm::radians(degrees), glm::normalize(axis));
             const size_t n = UpdateCluster(registry, edited);
-            connection.SendChatMessage("Rotation set on " + std::to_string(n) + " portal(s) of #" +
-                                       std::to_string(edited.id), 1);
+            source.SendSuccess(connection, "Rotation set on " + std::to_string(n) + " portal(s) of #" +
+                                       std::to_string(edited.id), true);
             return;
         }
 
@@ -497,7 +511,7 @@ namespace Server {
                 connection.SendChatMessage("Scale must be between 0.1 and 32", 1);
                 return;
             }
-            const Portal* target = NearestPortal(registry, sender, here);
+            const Portal* target = NearestPortal(registry, source, here);
             if (!target) { connection.SendChatMessage("No portal nearby", 1); return; }
             if (target->IsMirror()) { connection.SendChatMessage("A mirror has no scale", 1); return; }
             // A frame portal's (nether, hush) surfaces ARE its two frames; a
@@ -512,8 +526,8 @@ namespace Server {
             Portal edited = *target;
             edited.scale = scale;
             const size_t n = UpdateCluster(registry, edited);
-            connection.SendChatMessage("Scale set on " + std::to_string(n) + " portal(s) of #" +
-                                       std::to_string(edited.id), 1);
+            source.SendSuccess(connection, "Scale set on " + std::to_string(n) + " portal(s) of #" +
+                                       std::to_string(edited.id), true);
             return;
         }
 
@@ -522,7 +536,7 @@ namespace Server {
             registry.ForEach([&](const Portal& p) { ids.push_back(p.id); });
             size_t removed = 0;
             for (PortalId id : ids) if (registry.Remove(id)) ++removed;
-            connection.SendChatMessage("Removed " + std::to_string(removed) + " portal(s)", 1);
+            source.SendSuccess(connection, "Removed " + std::to_string(removed) + " portal(s)", true);
             return;
         }
 
@@ -560,7 +574,7 @@ namespace Server {
         portal.destDimension = destDim;
         portal.destination   = dest;
         portal.tag           = "command";
-        FrameFacingPlayer(sender, width, height, portal);
+        FrameFacingPlayer(source, width, height, portal);
 
         PortalId id = kInvalidPortalId;
         if (make)           id = registry.Add(portal);
@@ -572,7 +586,7 @@ namespace Server {
             return;
         }
         const Portal* created = registry.Get(id);
-        connection.SendChatMessage("Created " + (created ? created->Describe() : std::string("portal")), 1);
+        source.SendSuccess(connection, "Created " + (created ? created->Describe() : std::string("portal")), true);
         Log::Info("[PortalCommand] %s created portal #%u", sender.getName().c_str(), id);
     }
 

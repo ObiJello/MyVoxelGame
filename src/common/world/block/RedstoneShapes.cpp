@@ -136,6 +136,41 @@ namespace Game {
             return set;
         }
 
+        // ── Pistons (PistonBaseBlock / PistonHeadBlock) ────────────────────
+        //
+        // Shapes.rotateAll of a NORTH shape: the shape's front (z = 0) turns
+        // to face `facing`. The cross-sections here are square and centred,
+        // so only where the front lands matters; up puts it at y = 16, down
+        // at y = 0.
+        BlockShape TurnAll(const BlockShape& north, std::string_view facing) {
+            const glm::vec3 a = north.min, b = north.max;
+            if (facing == "up") {
+                // (x, y, z) -> (x, 1 - z, y)
+                return BlockShape{ glm::vec3(a.x, 1.0f - b.z, a.y), glm::vec3(b.x, 1.0f - a.z, b.y) };
+            }
+            if (facing == "down") {
+                // (x, y, z) -> (x, z, 1 - y)
+                return BlockShape{ glm::vec3(a.x, a.z, 1.0f - b.y), glm::vec3(b.x, b.z, 1.0f - a.y) };
+            }
+            return TurnY(north, TurnsFor(facing));
+        }
+
+        // PistonHeadBlock: SHAPE_PLATFORM = boxZ(16, 0, 4); SHAPES_SHORT add
+        // the arm boxZ(4, 4, 16), SHAPES the arm boxZ(4, 4, 20) — which
+        // reaches 4 px into the base's cell. Clamped to the cell the two are
+        // the same box; the slice MC takes for the face toward the base
+        // (calculateFace at 1 - epsilon) is the arm's 4x4 either way, so the
+        // occlusion and light answers are MC's for both. NOT the model's
+        // bounds: those fill the whole cell, which made the head hide every
+        // neighbouring face and stop light like a stone block.
+        BlockShapeSet PistonHeadShape(BlockState state) {
+            const std::string_view facing = state.GetValueByName("facing");
+            BlockShapeSet set;
+            Add(set, TurnAll(Px(0.0f, 0.0f, 0.0f, 16.0f, 16.0f, 4.0f), facing));
+            Add(set, TurnAll(Px(6.0f, 6.0f, 4.0f, 10.0f, 10.0f, 16.0f), facing));
+            return set;
+        }
+
     } // namespace
 
     bool RedstoneShapeFor(BlockState state, BlockShape& out) {
@@ -155,6 +190,15 @@ namespace Game {
             case BlockID::TripwireHook:
                 out = TurnY(Px(5.0f, 0.0f, 10.0f, 11.0f, 10.0f, 16.0f),
                             TurnsFor(state.GetValueByName("facing")));
+                return true;
+
+            // PistonBaseBlock.getShape: extended = rotateAll(boxZ(16, 4, 16))
+            // (the 12-pixel base behind the head), else Shapes.block().
+            case BlockID::Piston:
+            case BlockID::StickyPiston:
+                out = state.GetValueByName("extended") == "true"
+                    ? TurnAll(Px(0.0f, 0.0f, 4.0f, 16.0f, 16.0f, 16.0f), state.GetValueByName("facing"))
+                    : BlockShape{};
                 return true;
 
             // TripWireBlock: attached = column(16, 1, 2.5), else column(16, 0, 8).
@@ -191,7 +235,8 @@ namespace Game {
     }
 
     bool IsRedstoneMultiBoxBlock(BlockID id) {
-        return id == BlockID::RedstoneWire || id == BlockID::Hopper || id == BlockID::Lectern;
+        return id == BlockID::RedstoneWire || id == BlockID::Hopper || id == BlockID::Lectern ||
+               id == BlockID::PistonHead;
     }
 
     BlockShapeSet RedstoneMultiBoxShape(BlockState state, bool collision) {
@@ -199,6 +244,7 @@ namespace Game {
             case BlockID::RedstoneWire: return WireShape(state);
             case BlockID::Hopper:       return HopperShape(state);
             case BlockID::Lectern:      return LecternShape(state, collision);
+            case BlockID::PistonHead:   return PistonHeadShape(state);
             default: {
                 BlockShapeSet set;
                 Add(set, BlockShape{});

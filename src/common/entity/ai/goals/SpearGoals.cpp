@@ -15,11 +15,11 @@ namespace Game {
     namespace SpearAi {
 
         bool HoldsKineticWeapon(const Mob& mob) {
-            return Spear::Kinetic(mob.GetMainHandEquipment()) != nullptr;
+            return Spear::Kinetic(mob.GetMainHandEquipment()).has_value();
         }
 
         int KineticUseDuration(const Mob& mob) {
-            const Spear::KineticWeapon* kinetic = Spear::Kinetic(mob.GetMainHandEquipment());
+            const auto kinetic = Spear::Kinetic(mob.GetMainHandEquipment());
             return kinetic ? kinetic->ComputeDamageUseDuration() : 0;
         }
 

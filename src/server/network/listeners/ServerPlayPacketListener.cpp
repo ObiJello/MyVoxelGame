@@ -7,8 +7,10 @@
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "common/network/PacketTypes.hpp"
 #include "server/IntegratedServer.hpp"
+#include "server/advancements/ServerAdvancements.hpp"
 #include "server/player/SpectatorMode.hpp"
 #include "server/entity/PlayerRiding.hpp"
+#include "server/player/PlayerAppearances.hpp"
 
 namespace Server {
     
@@ -169,6 +171,12 @@ namespace Server {
         m_session.HandleEditBook(packet);
     }
 
+    void ServerPlayPacketListener::onSeenAdvancementsC2S(const Network::SeenAdvancementsC2SPacket& packet) {
+        // MC handleSeenAdvancements: OPENED_TAB remembers the tab (and echoes
+        // it back); CLOSED_SCREEN needs nothing.
+        Advancements::HandleSeenAdvancements(m_session, packet);
+    }
+
     void ServerPlayPacketListener::onContainerButtonClickC2S(const Network::ContainerButtonClickC2SPacket& packet) {
         // MC handleContainerButtonClick: behind the load gate like the rest
         // of the container family.
@@ -188,6 +196,13 @@ namespace Server {
         // container family.
         if (!m_session.HasClientLoaded()) return;
         m_session.HandleRenameItem(packet);
+    }
+
+    void ServerPlayPacketListener::onPlayerAppearanceC2S(const Network::PlayerAppearanceC2SPacket& packet) {
+        // No load gate: the look is sent straight after login, before the
+        // client has loaded its level, and touches nothing in the world.
+        ASSERT_SERVER_THREAD();
+        PlayerAppearances::HandleC2S(m_session, packet);
     }
 
     void ServerPlayPacketListener::onSpectatorActionC2S(const Network::SpectatorActionC2SPacket& packet) {

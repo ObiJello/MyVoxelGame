@@ -34,8 +34,11 @@ namespace Game::Raid {
                     { "minecraft:border",          kBlack },
                 };
                 stack.components.set(DataComponents::BANNER_PATTERNS, std::move(layers));
-                stack.components.set(DataComponents::ITEM_NAME,
-                                     Language::GetOrDefault(kOminousBannerNameKey, "Ominous Banner"));
+                // Raid.getBannerComponentPatch: ITEM_NAME is
+                // Component.translatable("block.minecraft.ominous_banner") —
+                // kept as that component (a saved banner reads back equal,
+                // which Raider.isCaptain's ItemStack.matches relies on).
+                SetItemName(stack.components, Text::Component::Translatable(kOminousBannerNameKey));
                 stack.components.set(DataComponents::RARITY, Rarity::UNCOMMON);
                 return stack;
             }();

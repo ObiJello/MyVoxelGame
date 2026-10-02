@@ -13,6 +13,14 @@
 
 namespace Network {
 
+    // DELIBERATE DEVIATION from MC's 256-character chat limit (requested):
+    // a chat line or command may be up to MC's network string maximum,
+    // 32767 characters (the client's chat box stops there too —
+    // Render::ChatScreen::MAX_MESSAGE_LENGTH). The server refuses anything
+    // longer (ServerConnection::HandleChatMessage); the connection's frame
+    // cap (NetworkConnection::MAX_PACKET_SIZE, 2 MiB) bounds a hostile one.
+    inline constexpr size_t kMaxChatMessageLength = 32767;
+
     struct ChatMessageC2SPacket {
         std::string message;
         uint32_t    timestamp;

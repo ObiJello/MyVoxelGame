@@ -12,6 +12,12 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
 #include "common/sound/SoundEvents.hpp"
+#include "common/entity/ai/village/PoiManager.hpp"
+#include "common/world/block/entity/BeehiveBlockEntity.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+
+#include <algorithm>
 
 #include <cmath>
 #include <cstdlib>
@@ -192,10 +198,17 @@ namespace Game {
     }
 
     std::optional<glm::dvec3> BeeWanderGoal::FindPos() const {
-        // MC findPos. The isHiveValid() steer-home branch is skipped with the
-        // hive goals — a hive-less vanilla bee takes this branch too:
-        // wanderDirection = getViewVector(0).
-        const glm::vec3 view = Mth::ViewVector(m_bee->xRot, m_bee->yRot);
+        // MC findPos: beyond the wander threshold (48 - 16 for a bee with no
+        // hive and no flower, 48 - 24 otherwise) of a valid hive, steer
+        // home; else along the view.
+        glm::vec3 view = Mth::ViewVector(m_bee->xRot, m_bee->yRot);
+        const int threshold = 48 - (!m_bee->HasHive() && !m_state->hasSavedFlowerPos ? 16 : 24);
+        if (m_bee->IsHiveValid() && !m_bee->CloserThan(*m_bee->GetHivePos(), threshold)) {
+            const glm::dvec3 hive = glm::dvec3(*m_bee->GetHivePos()) + glm::dvec3(0.5);
+            const glm::dvec3 d = hive - m_bee->position;
+            const double len = glm::length(d);
+            view = len < 1.0e-5 ? glm::vec3(0.0f) : glm::vec3(d / len);
+        }
         std::optional<glm::dvec3> groundBased = RandomPos::GetHoverPos(
             *m_bee, 8, 7, view.x, view.z, Mth::kPi / 2.0f, 3, 1);
         if (groundBased) return groundBased;
@@ -246,7 +259,7 @@ namespace Game {
         m_pollinatingTicks = 0;
         m_lastSoundPlayedTick = 0;
         m_pollinating = true;
-        m_hasHoverPos = false;
+        // (MC keeps hoverPos across uses.)
         // MC: resetTicksWithoutNectarSinceExitingHive.
         m_state->ticksWithoutNectarSinceExitingHive = 0;
     }
@@ -255,7 +268,9 @@ namespace Game {
         if (HasPollinatedLongEnough()) {
             // MC setHasNectar(true) — the Bee mirrors this onto its anim
             // byte (bit 2) for the renderer's nectar texture swap.
+            // MC setHasNectar(true) also restarts the no-nectar clock.
             m_state->hasNectar = true;
+            m_state->ticksWithoutNectarSinceExitingHive = 0;
         }
         m_pollinating = false;
         m_bee->GetNavigation().Stop();
@@ -335,11 +350,10 @@ namespace Game {
     }
 
     std::optional<glm::ivec3> BeePollinateGoal::FindNearbyFlower() {
-        // MC findNearbyFlower: BlockPos.withinManhattan(pos, 5, 5, 5),
-        // nearest-first, with the unreachable-flower blacklist (600 ticks per
-        // failed path). MC's exact within-shell visiting order is
-        // approximated by a per-shell coordinate sweep; nearest-shell-first
-        // is preserved, which is the property the behaviour rests on.
+        // MC findNearbyFlower: findBlocksInBoxByManhattanDistance(pos, 5)
+        // (BlockPos.manhattanOrdered — depth 0..15, x ascending, y
+        // ascending, +z then its mirror), filtered to bee-attractive states,
+        // then the unreachable-flower blacklist (600 ticks per failed path).
         EntityLevel* level = m_bee->Level();
         const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
         if (!blocks) return std::nullopt;
@@ -357,14 +371,14 @@ namespace Game {
                         const int dz = (s == 0) ? adz : -adz;
                         const glm::ivec3 pos = origin + glm::ivec3(dx, dy, dz);
                         const uint64_t key = PackPos(pos);
+                        if (!AttractsBees(
+                                blocks->GetBlockState(pos.x, pos.y, pos.z))) {
+                            continue;
+                        }
                         const auto it = m_unreachableFlowerCache.find(key);
                         if (it != m_unreachableFlowerCache.end() &&
                             level->GetGameTime() < it->second) {
                             freshCache[key] = it->second;
-                            continue;
-                        }
-                        if (!AttractsBees(
-                                blocks->GetBlockState(pos.x, pos.y, pos.z))) {
                             continue;
                         }
                         std::optional<Path> path =
@@ -420,12 +434,11 @@ namespace Game {
 
     bool BeeGrowCropGoal::CanBeeUse() {
         // MC canBeeUse: under the 10-crop cap, a 70% start roll, carrying
-        // nectar — and isHiveValid(), treated as satisfied (DEVIATION, see
-        // the header).
+        // nectar to a valid hive.
         if (m_state->numCropsGrownSincePollination >= 10) return false;
         if (!m_bee->Level()) return false;
         if (m_bee->Level()->Random().NextFloat() < 0.3f) return false;
-        return m_state->hasNectar;
+        return m_state->hasNectar && m_bee->IsHiveValid();
     }
 
     void BeeGrowCropGoal::Tick() {
@@ -443,12 +456,27 @@ namespace Game {
                 blocks->GetBlockState(belowPos.x, belowPos.y, belowPos.z);
 
             // MC's per-family growth (#bee_growables = #crops +
-            // sweet_berry_bush + cave_vines). PITCHER_CROP is skipped (its
-            // growth is the two-block PitcherCropBlock.grow, not an age
-            // bump); CAVE_VINES are skipped (their growth is the bonemeal
-            // path, which needs an ILevelWrite this seam does not carry).
+            // sweet_berry_bush + cave_vines). PITCHER_CROP is in #crops but
+            // is neither a CropBlock nor a StemBlock, so MC grows nothing
+            // there either; the cave vines take the MOB bonemeal path.
             BlockState growState = belowState;   // sentinel: unchanged
             switch (belowState.Block()) {
+                case BlockID::CaveVines:
+                case BlockID::CaveVinesPlant: {
+                    const Block& block = BlockRegistry::Get(belowState.Block());
+                    ILevelWrite* write = level->MutableBlocks();
+                    if (write && block.isValidBonemealTarget && block.performBonemeal &&
+                        block.isValidBonemealTarget(*write, belowPos, belowState)) {
+                        block.performBonemeal(*write, belowPos, belowState, level->Random());
+                        growState = write->GetBlockState(belowPos.x, belowPos.y, belowPos.z);
+                        // MC: growState = the cell after the bonemeal — set
+                        // back below even when unchanged-looking.
+                        level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_BEE_GROWTH, belowPos, 15);
+                        level->SetBlockState(belowPos, growState);
+                        ++m_state->numCropsGrownSincePollination;
+                    }
+                    continue;
+                }
                 case BlockID::Wheat:
                 case BlockID::Carrots:
                 case BlockID::Potatoes:
@@ -469,10 +497,12 @@ namespace Game {
                     break;
                 }
                 case BlockID::TorchflowerCrop: {
+                    // TorchflowerCropBlock: max age 2 over an AGE_1
+                    // property, so it is never "max age" — age 1 grows into
+                    // the torchflower itself (getStateForAge(2)).
                     const int age = belowState.GetIndex(PropertyId::AGE_1);
-                    if (age < 1) {
-                        growState = belowState.SetIndex(PropertyId::AGE_1, age + 1);
-                    }
+                    growState = age < 1 ? belowState.SetIndex(PropertyId::AGE_1, age + 1)
+                                        : BlockStates::Default(BlockID::Torchflower);
                     break;
                 }
                 default:
@@ -487,6 +517,225 @@ namespace Game {
                 ++m_state->numCropsGrownSincePollination;
             }
         }
+    }
+
+    // ── BeeGoToKnownFlowerGoal ─────────────────────────────────────────────
+
+    BeeGoToKnownFlowerGoal::BeeGoToKnownFlowerGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state)
+        : BaseBeeGoal(bee, std::move(state)) {
+        SetFlags(static_cast<uint8_t>(GoalFlag::Move));
+    }
+
+    bool BeeGoToKnownFlowerGoal::CanBeeUse() {
+        // MC: a remembered flower, no home restriction, wantsToGoToKnownFlower
+        // (ticksWithoutNectarSinceExitingHive > 600), not already within 2.
+        return m_state->hasSavedFlowerPos && !m_bee->HasHome() &&
+               m_state->ticksWithoutNectarSinceExitingHive > 600 &&
+               !m_bee->CloserThan(m_state->savedFlowerPos, 2);
+    }
+
+    void BeeGoToKnownFlowerGoal::Start() {
+        m_travellingTicks = 0;
+        BaseBeeGoal::Start();
+    }
+
+    void BeeGoToKnownFlowerGoal::Stop() {
+        m_travellingTicks = 0;
+        m_bee->GetNavigation().Stop();
+    }
+
+    void BeeGoToKnownFlowerGoal::Tick() {
+        if (!m_state->hasSavedFlowerPos || !m_bee->Level()) return;
+        ++m_travellingTicks;
+        if (m_travellingTicks > AdjustedTickDelay(kMaxTravellingTicks)) {
+            m_state->DropFlower(m_bee->Level()->Random());
+        } else if (!m_bee->GetNavigation().IsInProgress()) {
+            if (m_bee->IsTooFarAway(m_state->savedFlowerPos)) {
+                m_state->DropFlower(m_bee->Level()->Random());
+            } else {
+                m_bee->PathfindRandomlyTowards(m_state->savedFlowerPos);
+            }
+        }
+    }
+
+    // ── BeeEnterHiveGoal ───────────────────────────────────────────────────
+
+    BeeEnterHiveGoal::BeeEnterHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state)
+        : BaseBeeGoal(bee, std::move(state)) {}
+
+    bool BeeEnterHiveGoal::CanBeeUse() {
+        // MC: a hive, the wish to go in, and the bee within 2 of its centre;
+        // a full hive is forgotten.
+        if (!m_bee->HasHive() || !m_bee->WantsToEnterHive()) return false;
+        const glm::dvec3 center = glm::dvec3(*m_bee->GetHivePos()) + glm::dvec3(0.5);
+        const glm::dvec3 d = center - m_bee->position;
+        if (glm::dot(d, d) >= 4.0) return false;
+        if (BeehiveBlockEntity* hive = m_bee->GetBeehive()) {
+            if (!hive->IsFull()) return true;
+            m_bee->ClearHivePos();
+        }
+        return false;
+    }
+
+    void BeeEnterHiveGoal::Start() {
+        EntityLevel* level = m_bee->Level();
+        ILevelWrite* write = level ? level->MutableBlocks() : nullptr;
+        if (BeehiveBlockEntity* hive = m_bee->GetBeehive(); hive && write) {
+            hive->AddOccupant(*m_bee, *write);
+        }
+    }
+
+    // ── ValidateHiveGoal ───────────────────────────────────────────────────
+
+    ValidateHiveGoal::ValidateHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state)
+        : BaseBeeGoal(bee, std::move(state)),
+          m_validateHiveCooldown(bee->Level() ? bee->Level()->Random().NextInt(20, 40) : 30) {}
+
+    bool ValidateHiveGoal::CanBeeUse() {
+        return m_bee->Level() && m_bee->Level()->GetGameTime() > m_lastValidateTick + m_validateHiveCooldown;
+    }
+
+    void ValidateHiveGoal::Start() {
+        EntityLevel* level = m_bee->Level();
+        const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
+        if (m_bee->HasHive() && blocks) {
+            const glm::ivec3& p = *m_bee->GetHivePos();
+            if (blocks->IsPositionLoaded(p.x, p.y, p.z) && !m_bee->IsHiveValid()) m_bee->DropHive();
+        }
+        if (level) m_lastValidateTick = level->GetGameTime();
+    }
+
+    // ── BeeLocateHiveGoal ──────────────────────────────────────────────────
+
+    BeeLocateHiveGoal::BeeLocateHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state)
+        : BaseBeeGoal(bee, std::move(state)) {}
+
+    bool BeeLocateHiveGoal::CanBeeUse() {
+        return m_bee->GetRemainingCooldownBeforeLocatingNewHive() == 0 && !m_bee->HasHive() &&
+               m_bee->WantsToEnterHive();
+    }
+
+    void BeeLocateHiveGoal::Start() {
+        // MC start: 200 ticks to the next search; the nearest hive with room
+        // that is not blacklisted — or, all blacklisted, the nearest with
+        // the blacklist cleared.
+        m_bee->SetRemainingCooldownBeforeLocatingNewHive(200);
+        const std::vector<glm::ivec3> hives = FindNearbyHivesWithSpace();
+        if (hives.empty()) return;
+        BeeGoToHiveGoal* goTo = m_bee->GoToHiveGoal();
+        for (const glm::ivec3& pos : hives) {
+            if (!goTo || !goTo->IsTargetBlacklisted(pos)) {
+                m_bee->SetHivePos(pos);
+                return;
+            }
+        }
+        if (goTo) goTo->ClearBlacklist();
+        m_bee->SetHivePos(hives.front());
+    }
+
+    std::vector<glm::ivec3> BeeLocateHiveGoal::FindNearbyHivesWithSpace() const {
+        std::vector<glm::ivec3> out;
+        EntityLevel* level = m_bee->Level();
+        PoiManager* poi = level ? level->GetPoiManager() : nullptr;
+        if (!poi) return out;
+        const glm::ivec3 beePos = m_bee->BlockPosition();
+        for (const PoiManager::Record* r : poi->GetInRange(IsBeeHome, beePos, 20, PoiManager::Occupancy::Any)) {
+            if (r && m_bee->DoesHiveHaveSpace(r->pos)) out.push_back(r->pos);
+        }
+        // MC sorted(comparingDouble(pos.distSqr(beePos))) — a stable sort.
+        std::stable_sort(out.begin(), out.end(), [&](const glm::ivec3& a, const glm::ivec3& b) {
+            const glm::dvec3 da = glm::dvec3(a - beePos), db = glm::dvec3(b - beePos);
+            return glm::dot(da, da) < glm::dot(db, db);
+        });
+        return out;
+    }
+
+    // ── BeeGoToHiveGoal ────────────────────────────────────────────────────
+
+    BeeGoToHiveGoal::BeeGoToHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state)
+        : BaseBeeGoal(bee, std::move(state)) {
+        SetFlags(static_cast<uint8_t>(GoalFlag::Move));
+    }
+
+    bool BeeGoToHiveGoal::CanBeeUse() {
+        if (!m_bee->HasHive()) return false;
+        const glm::ivec3 hive = *m_bee->GetHivePos();
+        if (m_bee->IsTooFarAway(hive) || m_bee->HasHome() || !m_bee->WantsToEnterHive()) return false;
+        if (HasReachedTarget(hive)) return false;
+        // BlockTags.BEEHIVES: bee_nest, beehive.
+        EntityLevel* level = m_bee->Level();
+        const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
+        if (!blocks) return false;
+        const BlockID id = blocks->GetBlock(hive.x, hive.y, hive.z);
+        return id == BlockID::BeeNest || id == BlockID::Beehive;
+    }
+
+    void BeeGoToHiveGoal::Start() {
+        m_travellingTicks = 0;
+        m_ticksStuck = 0;
+        BaseBeeGoal::Start();
+    }
+
+    void BeeGoToHiveGoal::Stop() {
+        m_travellingTicks = 0;
+        m_ticksStuck = 0;
+        m_bee->GetNavigation().Stop();
+    }
+
+    void BeeGoToHiveGoal::Tick() {
+        if (!m_bee->HasHive()) return;
+        const glm::ivec3 hive = *m_bee->GetHivePos();
+        ++m_travellingTicks;
+        if (m_travellingTicks > AdjustedTickDelay(kMaxTravellingTicks)) {
+            DropAndBlacklistHive();
+            return;
+        }
+        if (m_bee->GetNavigation().IsInProgress()) return;
+        if (!m_bee->CloserThan(hive, 16)) {
+            if (m_bee->IsTooFarAway(hive)) m_bee->DropHive();
+            else m_bee->PathfindRandomlyTowards(hive);
+            return;
+        }
+        if (!PathfindDirectlyTowards(hive)) {
+            DropAndBlacklistHive();
+        } else if (const Path* path = m_bee->GetNavigation().GetPath(); m_lastPath && path && path->SameAs(*m_lastPath)) {
+            if (++m_ticksStuck > 60) {
+                m_bee->DropHive();
+                m_ticksStuck = 0;
+            }
+        } else {
+            if (path) m_lastPath = *path;
+            else m_lastPath.reset();
+        }
+    }
+
+    bool BeeGoToHiveGoal::PathfindDirectlyTowards(const glm::ivec3& target) {
+        // MC: closeEnough 1 within 3 blocks, else 2; moveTo(x, y, z, it, 1.0).
+        const int closeEnough = m_bee->CloserThan(target, 3) ? 1 : 2;
+        PathNavigation& nav = m_bee->GetNavigation();
+        nav.MoveTo(nav.CreatePath(target, closeEnough), 1.0);
+        const Path* path = nav.GetPath();
+        return path && path->CanReach();
+    }
+
+    bool BeeGoToHiveGoal::IsTargetBlacklisted(const glm::ivec3& pos) const {
+        return std::find(m_blacklistedTargets.begin(), m_blacklistedTargets.end(), pos) != m_blacklistedTargets.end();
+    }
+
+    void BeeGoToHiveGoal::BlacklistTarget(const glm::ivec3& pos) {
+        m_blacklistedTargets.push_back(pos);
+        while (m_blacklistedTargets.size() > 3) m_blacklistedTargets.erase(m_blacklistedTargets.begin());
+    }
+
+    void BeeGoToHiveGoal::DropAndBlacklistHive() {
+        if (m_bee->HasHive()) BlacklistTarget(*m_bee->GetHivePos());
+        m_bee->DropHive();
+    }
+
+    bool BeeGoToHiveGoal::HasReachedTarget(const glm::ivec3& target) const {
+        if (m_bee->CloserThan(target, 2)) return true;
+        const Path* path = m_bee->GetNavigation().GetPath();
+        return path && path->GetTarget() == target && path->CanReach() && path->IsDone();
     }
 
 } // namespace Game

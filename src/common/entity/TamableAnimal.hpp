@@ -82,8 +82,8 @@ namespace Game {
         LivingEntity* GetOwner() const;
         bool IsOwnedBy(const LivingEntity& entity) const;
 
-        // MC tame(player): flag + side effects + owner. (The TAME_ANIMAL
-        // advancement trigger has no advancement system to land in.)
+        // MC tame(player): flag + side effects + owner, then the
+        // TAME_ANIMAL advancement trigger for a server player.
         void Tame(const LivingEntity& player);
 
         // MC TamableAnimal.canAttack's owner exemption — implementers call

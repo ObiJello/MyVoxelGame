@@ -7,13 +7,23 @@
 // (sendDirtyEntityData). Here the mobs whose client copy needs them opt in
 // (Mob::SyncsAttributesToClient — the mounts a client steers: an equine's
 // rolled speed and jump move it on the steering client, its rolled health
-// fills the rider's vehicle hearts), and a change resends the whole set.
+// fills the rider's vehicle hearts), plus any mob whose attributes were
+// customized (/attribute — Mob::ShouldSyncAttributes), and a change resends
+// the whole set. A player's own attributes go to its own client under the
+// player's id (ServerPlayer::syncAttributesToClient) — the base values and
+// own modifiers its prediction folds the worn items and effects onto.
+//
+// Trailing (wire-safe) block: the Identifier of every modifier id in the
+// packet that has one (Game::ModifierIdName), so the client can name them —
+// /attribute's Tab completion of `modifier remove <id>`.
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
 #include "common/entity/Attributes.hpp"
 
 #include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace Network {
@@ -27,7 +37,12 @@ namespace Network {
             case Game::Attribute::ArmorToughness:
             case Game::Attribute::AttackSpeed:
             case Game::Attribute::Bounciness:
+            case Game::Attribute::BelowNameDistance:
+            case Game::Attribute::BlockBreakSpeed:
+            case Game::Attribute::BlockInteractionRange:
             case Game::Attribute::BurningTime:
+            case Game::Attribute::CameraDistance:
+            case Game::Attribute::EntityInteractionRange:
             case Game::Attribute::ExplosionKnockbackResistance:
             case Game::Attribute::FallDamageMultiplier:
             case Game::Attribute::FlyingSpeed:
@@ -40,6 +55,7 @@ namespace Network {
             case Game::Attribute::MiningEfficiency:
             case Game::Attribute::MovementEfficiency:
             case Game::Attribute::MovementSpeed:
+            case Game::Attribute::NameTagDistance:
             case Game::Attribute::OxygenBonus:
             case Game::Attribute::SafeFallDistance:
             case Game::Attribute::Scale:
@@ -62,6 +78,8 @@ namespace Network {
         };
         int32_t            entityId = 0;
         std::vector<Entry> attributes;
+        // (modifier id, Identifier) for the modifiers above that have one.
+        std::vector<std::pair<uint32_t, std::string>> modifierNames;
     };
 
     // The syncable attributes of `map`, in its own order.
@@ -117,6 +135,22 @@ namespace Network {
                     b.WriteByte(static_cast<uint8_t>(mod.operation));
                 }
             }
+            // The trailing names block, from the packet's own list or, when
+            // the sender left it empty, from the process-wide name table.
+            std::vector<std::pair<uint32_t, std::string>> names = p.modifierNames;
+            if (names.empty()) {
+                for (const auto& entry : p.attributes) {
+                    for (const Game::AttributeModifier& mod : entry.modifiers) {
+                        std::string name = Game::ModifierIdName(mod.id);
+                        if (!name.empty()) names.emplace_back(mod.id, std::move(name));
+                    }
+                }
+            }
+            b.WriteVarInt(static_cast<uint32_t>(names.size()));
+            for (const auto& [id, name] : names) {
+                b.WriteVarInt(id);
+                b.WriteString(name);
+            }
             return b.GetData();
         }
 
@@ -143,6 +177,13 @@ namespace Network {
                 if (attribute >= static_cast<uint8_t>(Game::Attribute::Count)) continue;
                 entry.attribute = static_cast<Game::Attribute>(attribute);
                 p.attributes.push_back(std::move(entry));
+            }
+            if (r.Remaining() > 0) {
+                const uint32_t nameCount = r.ReadVarInt();
+                for (uint32_t i = 0; i < nameCount && r.Remaining() > 0; ++i) {
+                    const uint32_t id = r.ReadVarInt();
+                    p.modifierNames.emplace_back(id, r.ReadString());
+                }
             }
             return p;
         }

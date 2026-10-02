@@ -1760,6 +1760,13 @@ namespace Game {
         // .getCollisionShape = SHAPES[layers - 1]). A single layer's shape is
         // empty, which only the set can say, so it returns null here too.
         if (id == BlockID::SnowLayer) return SnowLayer::CollisionBox(state);
+        // The cactus collides a pixel lower than its outline (see
+        // GetBlockCollisionShapeSet).
+        if (id == BlockID::Cactus) {
+            static const BlockShape kCactusCollision{ glm::vec3(1.0f / 16.0f, 0.0f, 1.0f / 16.0f),
+                                                      glm::vec3(15.0f / 16.0f, 15.0f / 16.0f, 15.0f / 16.0f) };
+            return &kCactusCollision;
+        }
         // The Aether's aerclouds: the entity-less collision shape, not the
         // model's cube (see GetBlockCollisionShapeSet).
         if (Aercloud::IsAercloud(id)) {
@@ -1806,6 +1813,18 @@ namespace Game {
                 set.boxes[0] = *box;
                 set.count    = 1;
             }
+            return set;
+        }
+        // MC CactusBlock.getCollisionShape: SHAPE_COLLISION = column(14, 0,
+        // 15) — the outline's 1/16 inset, one pixel LOWER than the outline's
+        // 16. Whatever stands on a cactus sinks that pixel into its cell, which
+        // is what makes standing on one hurt (CactusBlock.entityInside, the
+        // whole-cell test) and what eats an item dropped on top.
+        if (id == BlockID::Cactus) {
+            BlockShapeSet set;
+            set.boxes[0].min = glm::vec3(1.0f / 16.0f, 0.0f, 1.0f / 16.0f);
+            set.boxes[0].max = glm::vec3(15.0f / 16.0f, 15.0f / 16.0f, 15.0f / 16.0f);
+            set.count = 1;
             return set;
         }
         // The Aether's aerclouds (AercloudBlock.getCollisionShape) draw and

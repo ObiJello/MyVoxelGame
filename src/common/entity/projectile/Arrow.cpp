@@ -1,5 +1,6 @@
 // File: src/common/entity/projectile/Arrow.cpp
 #include "common/entity/projectile/Arrow.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/core/JavaRandom.hpp"
@@ -128,6 +129,19 @@ namespace Game {
     void Arrow::OnHitBlockArrow(const glm::dvec3& hitPos, const glm::ivec3& blockPos) {
         m_lastBlock = m_level->Blocks()->GetBlock(blockPos.x, blockPos.y, blockPos.z);
 
+        // MC AbstractArrow.onHitBlock → super (Projectile.onHitBlock): the
+        // block's onProjectileHit, after lastState is taken and while the
+        // flight velocity is intact — a target block scores the arrow, a
+        // flaming one lights TNT, an impact projectile breaks a pot or a
+        // chorus flower, a fast trident snaps a speleothem.
+        {
+            HitResult blockHit;
+            blockHit.type     = HitResult::Type::Block;
+            blockHit.location = hitPos;
+            blockHit.blockPos = blockPos;
+            NotifyBlockOfProjectileHit(blockHit);
+        }
+
         // MC: back the position off the surface by 0.05 against the movement
         // sign, so the arrow visibly sticks OUT of the block.
         const glm::dvec3 offset(std::copysign(0.05, velocity.x),
@@ -148,6 +162,7 @@ namespace Game {
         m_pierceLevel = 0;
         m_soundEvent.clear();
         m_piercingIgnore.clear();
+        m_piercedAndKilled.clear();
         // MC AbstractArrow.onHitBlock: the launcher's hit_block effects
         // (Channeling on a lightning rod), a worn-out launcher dropping the
         // copy (onItemBreak).
@@ -243,6 +258,24 @@ namespace Game {
             m_potion.ForEachEffect([&](MobEffectInstance effect) {
                 target.AddEffect(std::move(effect), effectSource);
             }, m_potionDurationScale);
+            // MC AbstractArrow.onHitEntity: a player's arrow reports its kills
+            // — a piercing one everything it has killed this flight, a plain
+            // one the target it just killed (CriteriaTriggers.KILLED_BY_ARROW).
+            if (m_level && !m_level->IsClientSide()) {
+                if (Server::ServerPlayer* shooter = Server::CriteriaTriggers::PlayerOf(GetOwner())) {
+                    const ItemStack* fired = m_firedFromWeapon.IsEmpty() ? nullptr : &m_firedFromWeapon;
+                    if (m_pierceLevel > 0) {
+                        if (!target.IsAlive()) m_piercedAndKilled.push_back(target.GetId());
+                        std::vector<Entity*> victims;
+                        for (int32_t id : m_piercedAndKilled) {
+                            if (Entity* victim = m_level->ResolveEntityById(id)) victims.push_back(victim);
+                        }
+                        Server::CriteriaTriggers::KilledByArrow(*shooter, victims, fired);
+                    } else if (!target.IsAlive()) {
+                        Server::CriteriaTriggers::KilledByArrow(*shooter, {&target}, fired);
+                    }
+                }
+            }
             // MC: this.soundEvent (ARROW_HIT). The shooter's ARROW_HIT_PLAYER
             // ding is a game-event packet to that one player — no such packet.
             PlaySound(HitSoundEvent(), 1.0f, 1.2f / (m_level->Random().NextFloat() * 0.2f + 0.9f));

@@ -46,7 +46,9 @@ namespace Game {
         double bestDistSq = 0.0;
         auto consider = [&](LivingEntity* living) {
             if (!living) return;
-            if (IsUndeadEntityType(living->GetType())) return;
+            // #wither_friends (#undead) — a player's view carries a
+            // placeholder type and is never one.
+            if (!living->IsPlayer() && IsUndeadEntityType(living->GetType())) return;
             // Projectiles ride the Mob pipeline here (MC's are not
             // LivingEntities and never reach this selector) — skip them.
             if (dynamic_cast<const Projectile*>(living)) return;
@@ -55,8 +57,15 @@ namespace Game {
             if (dynamic_cast<const BlockAttachedEntity*>(living)) return;
             // And boats and minecarts (VehicleEntity, a plain Entity in MC).
             if (IsVehicleEntityType(living->GetType())) return;
+            // MC attackable(): false for an armor stand (the engine's
+            // IsAttackable answers whether a player may hit it instead).
+            if (living->GetType() == EntityTypeId::ArmorStand) return;
+            if (!living->IsAttackable()) return;
             if (!m_conditions.Test(m_wither, *living)) return;
-            const double d = m_wither->DistanceToSqr(*living);
+            // findTarget's getNearestEntity measures from the WITHER'S EYES
+            // (mob.getX(), mob.getEyeY(), mob.getZ()) to each candidate.
+            const double d = living->DistanceToSqr(m_wither->position.x, m_wither->GetEyeY(),
+                                                   m_wither->position.z);
             if (!best || d < bestDistSq) { best = living; bestDistSq = d; }
         };
 
@@ -64,9 +73,10 @@ namespace Game {
         level->GetPlayers(players);
         for (LivingEntity* player : players) consider(player);
 
+        // MC 26.3 getTargetSearchArea: the follow range on ALL axes.
         AABB box = m_wither->GetAABB();
-        box.min -= glm::vec3(follow, 4.0, follow);
-        box.max += glm::vec3(follow, 4.0, follow);
+        box.min -= glm::vec3(follow, follow, follow);
+        box.max += glm::vec3(follow, follow, follow);
         std::vector<Entity*> nearby;
         level->GetEntitiesInBox(box, m_wither, nearby);
         for (Entity* e : nearby) consider(dynamic_cast<LivingEntity*>(e));
@@ -82,8 +92,9 @@ namespace Game {
     }
 
     void WitherTargetGoal::Start() {
+        // MC NearestAttackableTargetGoal.start: setTarget + super only — no
+        // targetMob cache, so a target cleared elsewhere stays cleared.
         m_wither->SetTarget(m_target);
-        m_targetMob = m_target;
         TargetGoal::Start();
     }
 

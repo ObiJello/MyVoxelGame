@@ -547,6 +547,8 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/entity_vk.frag
             ${VK_SHADER_DIR}/end_portal_vk.vert
             ${VK_SHADER_DIR}/end_portal_vk.frag
+            ${VK_SHADER_DIR}/sky_block_vk.vert
+            ${VK_SHADER_DIR}/sky_block_vk.frag
             ${VK_SHADER_DIR}/blockentity_vk.vert
             ${VK_SHADER_DIR}/blockentity_vk.frag
             ${VK_SHADER_DIR}/stick_figure_vk.vert
@@ -683,6 +685,7 @@ set(GAME_SOURCES
             src/common/sound/EntitySounds.hpp
             src/common/sound/LevelEventSounds.hpp
             src/common/network/packets/game/SoundPackets.hpp
+            src/common/network/packets/game/PlayerAppearancePackets.hpp
             src/common/network/packets/game/LevelEventS2CPacket.hpp
             src/common/network/packets/game/JukeboxSongS2CPacket.hpp
             src/common/network/packets/game/BookPackets.hpp
@@ -721,6 +724,8 @@ set(GAME_SOURCES
             src/client/entity/Player.hpp
             src/client/entity/RemotePlayerManager.cpp
             src/client/entity/RemotePlayerManager.hpp
+            src/client/entity/PlayerSkins.cpp        # players' looks: skin / cape textures, cape physics
+            src/client/entity/PlayerSkins.hpp
             src/client/entity/ItemEntityManager.cpp
             src/client/entity/ItemEntityManager.hpp
             src/client/entity/LocalItemCooldowns.cpp   # MC LocalPlayer.getCooldowns() mirror
@@ -743,8 +748,6 @@ set(GAME_SOURCES
             src/client/renderer/particle/ParticleTicks.cpp
             src/client/renderer/particle/ParticleSprites.cpp
             src/client/renderer/particle/ParticleSprites.hpp
-            src/client/renderer/particle/BlockParticleTint.cpp
-            src/client/renderer/particle/BlockParticleTint.hpp
 
             # Client rendering - Entity
             src/client/renderer/entity/PlayerRenderer.cpp
@@ -763,8 +766,12 @@ set(GAME_SOURCES
             src/client/renderer/entity/StickFigureGeometry.cpp
             src/client/renderer/entity/StickFigureGeometry.hpp
             src/client/renderer/entity/MobRenderer.cpp
+            src/client/renderer/entity/ShieldTextures.cpp
             src/client/renderer/entity/ElytraLayer.cpp
             src/client/renderer/entity/RiptideLayer.cpp   # MC SpinAttackEffectLayer
+            src/client/renderer/entity/PlayerSkinRenderer.cpp   # MC AvatarRenderer: skinned players + CapeLayer
+            src/client/renderer/entity/SkinnedPlayerPoses.cpp   # local / remote bodies as SkinnedPlayerPose
+            src/client/renderer/entity/SkinnedPlayerPoses.hpp
             src/client/renderer/entity/VehicleRenderer.cpp
             src/client/renderer/entity/ItemDisplayTransforms.cpp
             src/client/renderer/entity/MobEquipmentLayers.cpp
@@ -784,6 +791,8 @@ set(GAME_SOURCES
             src/client/renderer/entity/model/ModelPart.hpp
             src/client/renderer/entity/model/EntityModels.cpp
             src/client/renderer/entity/model/HumanoidArmorModel.cpp
+            src/client/renderer/entity/model/PlayerModel.cpp     # MC PlayerModel / PlayerCapeModel
+            src/client/renderer/entity/model/PlayerModel.hpp
             src/client/renderer/entity/model/GeneratedEntityModels.cpp
             src/client/renderer/entity/GeneratedBabyTextures.cpp
             src/client/renderer/entity/GeneratedBabyTextures.hpp
@@ -887,6 +896,8 @@ set(GAME_SOURCES
             src/client/renderer/blockentity/AurelithQuestRenderers.hpp
             src/client/renderer/blockentity/VoiceBeaconRenderer.hpp
             src/client/renderer/blockentity/EndPortalRenderer.cpp
+            src/client/renderer/blockentity/SkyBlockRenderer.cpp
+            src/client/renderer/blockentity/SkyBlockRenderer.hpp
             src/client/renderer/blockentity/EndPortalRenderer.hpp
             src/client/renderer/blockentity/BedRenderer.cpp
             src/client/renderer/blockentity/BedRenderer.hpp
@@ -915,6 +926,8 @@ set(GAME_SOURCES
             src/client/renderer/gui/FontRenderer.cpp
             src/client/renderer/gui/HudRenderer.hpp
             src/client/renderer/gui/HudRenderer.cpp
+            src/client/renderer/gui/TitleOverlay.hpp
+            src/client/renderer/gui/TitleOverlay.cpp   # MC Hud title / subtitle (/title)
             src/client/renderer/gui/SpectatorGui.cpp
             src/client/renderer/gui/PlayerTabOverlay.cpp
             src/client/renderer/post/PostChain.cpp
@@ -1054,6 +1067,7 @@ set(GAME_SOURCES
 
             # Client rendering - Texture
             src/client/renderer/texture/AtlasBuilder.cpp
+            src/client/renderer/texture/PalettedPermutations.cpp
             src/client/renderer/texture/MipmapGenerator.cpp
             src/client/renderer/texture/AtlasBuilder.hpp
             src/client/renderer/texture/TextureAnimator.cpp
@@ -1156,6 +1170,8 @@ set(GAME_SOURCES
             src/common/world/block/BedBlock.cpp
             src/common/world/block/BlockBounce.hpp
             src/common/world/biome/Biomes.cpp
+            src/common/world/biome/BiomeAttributes.cpp
+            src/common/world/biome/BiomeAttributes.hpp
             src/common/world/biome/BiomeZoom.cpp
             src/common/world/block/BlockModel.hpp
             src/common/world/block/Block.cpp
@@ -1216,16 +1232,27 @@ set(GAME_SOURCES
             src/common/world/block/TntBlock.cpp
             src/common/world/block/TntBlock.hpp
             src/common/world/block/CandleBlocks.cpp
+            src/common/world/block/ComposterBlock.cpp
+            src/common/world/block/BeehiveBlock.cpp
+            src/common/world/crafting/SmithingRecipes.cpp
             src/common/world/block/CandleBlocks.hpp
             src/common/world/block/PlantBlocks.cpp
             src/common/world/block/PlantBlocks.hpp
             src/common/world/block/TurtleEggBlock.cpp
             src/common/world/block/TurtleEggBlock.hpp
+            src/common/world/block/ContactDamageBlocks.cpp
+            src/common/world/block/ContactDamageBlocks.hpp
             src/common/world/block/CopperChestBlock.cpp
             src/common/world/block/FireBlock.cpp
             src/common/world/block/FireBlock.hpp
             src/common/world/block/GeneratedFireFlammability.inc
             src/common/world/block/CopperChestBlock.hpp
+            src/common/world/block/CarvedPumpkinBlock.cpp
+            src/common/world/block/CarvedPumpkinBlock.hpp
+            src/common/world/block/WitherSkullBlock.cpp
+            src/common/world/block/WitherSkullBlock.hpp
+            src/common/world/block/pattern/BlockPattern.cpp
+            src/common/world/block/pattern/BlockPattern.hpp
             src/common/world/fluid/FluidState.cpp
             src/common/world/fluid/FluidState.hpp
             src/common/world/fluid/FlowingFluid.cpp
@@ -1240,8 +1267,6 @@ set(GAME_SOURCES
             src/common/world/portal/PortalShape.hpp
             src/common/world/portal/BlockUtil.cpp
             src/common/world/portal/BlockUtil.hpp
-            src/common/world/portal/BlockPattern.cpp
-            src/common/world/portal/BlockPattern.hpp
             src/common/world/portal/EndPortalFrame.cpp
             src/common/world/portal/EndPortalFrame.hpp
             src/common/world/portal/PortalState.cpp
@@ -1265,6 +1290,8 @@ set(GAME_SOURCES
             src/common/world/block/entity/CampfireBlockEntity.cpp
             src/common/world/block/entity/LecternBlockEntity.hpp
             src/common/world/block/entity/LecternBlockEntity.cpp
+            src/common/world/block/entity/CraftingTableBlockEntity.hpp
+            src/common/world/block/entity/CraftingTableBlockEntity.cpp
             src/common/world/block/entity/JukeboxBlockEntity.hpp
             src/common/world/block/entity/JukeboxBlockEntity.cpp
             src/common/world/block/entity/BrushableBlockEntity.cpp
@@ -1273,6 +1300,7 @@ set(GAME_SOURCES
             src/common/world/block/entity/BellBlockEntity.cpp
             src/common/world/block/entity/CopperGolemStatueBlockEntity.cpp
             src/common/world/block/entity/ChiseledBookShelfBlockEntity.cpp
+            src/common/world/block/entity/BeehiveBlockEntity.cpp
             src/common/world/block/entity/AurelithBlockEntities.cpp
             src/common/world/block/entity/AurelithBlockEntities.hpp
             src/common/world/block/entity/SpawnerBlockEntity.hpp
@@ -1385,6 +1413,8 @@ set(GAME_SOURCES
             src/common/world/block/piston/PistonBaseBlock.hpp
             src/common/world/block/piston/PistonStructureResolver.cpp
             src/common/world/block/piston/PistonStructureResolver.hpp
+            src/common/world/block/piston/PistonBlockEntities.cpp
+            src/common/world/block/piston/PistonBlockEntities.hpp
             src/common/world/block/entity/ComparatorBlockEntity.hpp
             src/common/world/block/entity/DaylightDetectorBlockEntity.hpp
             src/common/world/block/entity/PistonMovingBlockEntity.cpp
@@ -1403,6 +1433,10 @@ set(GAME_SOURCES
             src/common/world/block/DecoratedPotBlock.cpp
             src/common/world/block/CopperGolemStatueBlock.cpp
             src/common/world/block/ChiseledBookShelfBlock.cpp
+            src/common/world/block/FlowerPotBlock.hpp
+            src/common/world/block/FlowerPotBlock.cpp
+            src/common/world/block/BlockCloneItem.hpp
+            src/common/world/block/BlockCloneItem.cpp
             src/common/world/block/TrialChamberBlocks.cpp
             src/common/world/block/PotentSulfurBlock.hpp
             src/common/world/block/PotentSulfurBlock.cpp
@@ -1459,10 +1493,16 @@ set(GAME_SOURCES
             src/common/entity/ItemEntity.hpp
             src/common/entity/ExperienceOrb.cpp
             src/common/entity/ExperienceOrb.hpp
+            src/common/entity/EntityTags.hpp
             src/common/entity/GeneratedItemList.cpp
             src/common/entity/GeneratedItemList.hpp
             src/common/entity/PlayerColors.cpp
             src/common/entity/PlayerColors.hpp
+            # Player appearance: stick figure / skin / cape (docs/player-appearance.md)
+            src/common/entity/PlayerAppearance.cpp
+            src/common/entity/PlayerAppearance.hpp
+            src/common/entity/PlayerCapes.hpp
+            src/common/entity/PlayerModelLayout.hpp
             src/common/entity/PlayerArmPose.hpp
 
             # Common entity - mob system (MC net.minecraft.world.entity port)
@@ -1685,6 +1725,8 @@ set(GAME_SOURCES
             src/common/entity/ai/goals/DoorGoals.hpp
             src/common/entity/ai/goals/WitherGoals.cpp
             src/common/entity/ai/goals/WitherGoals.hpp
+            src/common/entity/ai/goals/GolemGoals.cpp
+            src/common/entity/ai/goals/GolemGoals.hpp
             src/common/entity/ai/goals/StriderGoals.cpp
             src/common/entity/ai/goals/StriderGoals.hpp
 
@@ -1761,11 +1803,51 @@ set(GAME_SOURCES
             src/server/commands/WardenSpawnTrackerCommand.hpp
             src/server/commands/LootCommand.hpp
             src/server/commands/LootCommand.cpp
+            # Advancements (docs/advancements.md): data model + loader (common),
+            # triggers / predicates / progress (server), packets, the command,
+            # and the client's mirror, toasts and screen.
+            src/common/advancements/Advancement.hpp
+            src/common/advancements/Advancement.cpp
+            src/common/advancements/AdvancementLoader.hpp
+            src/common/advancements/AdvancementLoader.cpp
+            src/common/network/packets/game/AdvancementPackets.hpp
+            src/server/advancements/AdvancementPredicates.hpp
+            src/server/advancements/AdvancementPredicates.cpp
+            src/server/advancements/AdvancementText.hpp
+            src/server/advancements/AdvancementText.cpp
+            src/server/advancements/CriteriaTriggers.hpp
+            src/server/advancements/CriteriaTriggers.cpp
+            src/server/advancements/PlayerAdvancements.hpp
+            src/server/advancements/PlayerAdvancements.cpp
+            src/server/advancements/ServerAdvancements.hpp
+            src/server/advancements/ServerAdvancements.cpp
+            src/server/commands/AdvancementCommand.hpp
+            src/server/commands/AdvancementCommand.cpp
+            src/client/advancements/ClientAdvancements.hpp
+            src/client/advancements/ClientAdvancements.cpp
+            src/client/renderer/gui/toasts/ToastManager.hpp
+            src/client/renderer/gui/toasts/ToastManager.cpp
+            src/client/renderer/gui/screens/AdvancementsScreen.hpp
+            src/client/renderer/gui/screens/AdvancementsScreen.cpp
             src/server/commands/HealCommand.hpp
+            src/server/commands/AttributeCommand.cpp   # MC /attribute (step_height, scale, …)
+            src/server/commands/AttributeCommand.hpp
             src/server/commands/EffectCommand.cpp
             src/server/commands/EffectCommand.hpp
             src/server/commands/ParticleCommand.cpp
             src/server/commands/ParticleCommand.hpp
+            src/server/commands/DataCommand.cpp      # MC /data (DataCommands + accessors)
+            src/server/commands/DataCommand.hpp
+            src/server/commands/NbtPath.cpp          # MC NbtPathArgument + NbtUtils helpers
+            src/server/commands/NbtPath.hpp
+            src/server/commands/ContextNumberProviders.cpp   # MC context float/int providers (/data modify … compute)
+            src/server/commands/ContextNumberProviders.hpp
+            src/server/commands/CommandStorage.cpp   # MC CommandStorage (data/command_storage_*.dat)
+            src/server/commands/CommandStorage.hpp
+            src/server/commands/GiveCommand.cpp
+            src/server/commands/GiveCommand.hpp
+            src/server/commands/ItemArgument.cpp     # MC ItemArgument/ItemParser: id[component=value]
+            src/server/commands/ItemArgument.hpp
             src/server/commands/PlaySoundCommand.cpp
             src/server/commands/PlaySoundCommand.hpp
             src/server/commands/StopSoundCommand.cpp
@@ -1789,6 +1871,7 @@ set(GAME_SOURCES
             src/server/level/maps/MapFill.cpp
             src/server/level/LiveFeatureLevel.cpp
             src/server/level/LiveFeatureLevel.hpp
+            src/common/world/level/ConfiguredFeatureIds.inc   # /place feature ids (server table + client completion)
             src/server/commands/GameRuleCommand.hpp
             src/server/commands/GameRuleCommand.cpp
             src/server/commands/SeedCommand.cpp
@@ -1804,6 +1887,28 @@ set(GAME_SOURCES
             src/server/commands/StillnessCommand.cpp
             src/server/commands/AurelithCommand.cpp
             src/server/commands/AurelithCommand.hpp
+            src/server/commands/EntityCommandUtil.cpp   # shared helpers of the entity/player commands
+            src/server/commands/EntityCommandUtil.hpp
+            src/server/commands/TagCommand.cpp
+            src/server/commands/TagCommand.hpp
+            src/server/commands/ExperienceCommand.cpp
+            src/server/commands/ExperienceCommand.hpp
+            src/server/commands/ClearCommand.cpp
+            src/server/commands/ClearCommand.hpp
+            src/server/commands/EnchantCommand.cpp
+            src/server/commands/EnchantCommand.hpp
+            src/server/commands/DamageCommand.cpp
+            src/server/commands/DamageCommand.hpp
+            src/server/commands/RideCommand.cpp
+            src/server/commands/RideCommand.hpp
+            src/server/commands/RotateCommand.cpp
+            src/server/commands/RotateCommand.hpp
+            src/server/commands/SpectateCommand.cpp
+            src/server/commands/SpectateCommand.hpp
+            src/server/commands/SwingCommand.cpp
+            src/server/commands/SwingCommand.hpp
+            src/server/commands/ItemCommand.cpp
+            src/server/commands/ItemCommand.hpp
             src/server/world/ChunkProvider.cpp
             src/server/world/ChunkProvider.hpp
             src/server/world/MyTerrainGenerator.cpp
@@ -1819,6 +1924,8 @@ set(GAME_SOURCES
 
             src/server/player/ServerPlayer.cpp
             src/server/player/SpectatorMode.cpp
+            src/server/player/PlayerAppearances.cpp   # stick figure / skin / cape relay
+            src/server/player/PlayerAppearances.hpp
             src/server/player/ServerPlayer.hpp
             src/server/commands/SummonCommand.cpp
             src/server/commands/SummonCommand.hpp
@@ -1831,10 +1938,36 @@ set(GAME_SOURCES
             src/server/commands/SetBlockCommand.hpp
             src/server/commands/FillBiomeCommand.cpp
             src/server/commands/FillBiomeCommand.hpp
+            src/server/commands/BlockCommandUtil.cpp    # BlockInput.place, getLoadedBlockPos, updateNeighboursOnBlockSet
+            src/server/commands/BlockCommandUtil.hpp
+            src/server/commands/FillCommand.cpp
+            src/server/commands/FillCommand.hpp
+            src/server/commands/CloneCommand.cpp
+            src/server/commands/CloneCommand.hpp
+            src/server/commands/SetWorldSpawnCommand.cpp
+            src/server/commands/SetWorldSpawnCommand.hpp
+            src/server/commands/SpawnPointCommand.cpp
+            src/server/commands/SpawnPointCommand.hpp
+            src/server/commands/SpreadPlayersCommand.cpp
+            src/server/commands/SpreadPlayersCommand.hpp
+            src/server/commands/PlaceCommand.cpp
+            src/server/commands/PlaceCommand.hpp
             src/server/commands/ReplaceAllCommand.cpp
             src/server/commands/ReplaceAllCommand.hpp
             src/server/commands/SpawnAllCommand.cpp
             src/server/commands/SpawnAllCommand.hpp
+            src/server/commands/CommandText.cpp         # MC ComponentArgument / MessageArgument / ComponentUtils.resolve
+            src/server/commands/CommandText.hpp
+            src/server/commands/CommandSavedData.cpp    # MC Stopwatches + RandomSequences SavedData
+            src/server/commands/CommandSavedData.hpp
+            src/server/commands/ChatCommands.cpp        # /say /msg /tell /w /me /tellraw /title
+            src/server/commands/ChatCommands.hpp
+            src/server/commands/InfoCommands.cpp        # /list /help /version /random
+            src/server/commands/InfoCommands.hpp
+            src/server/commands/StopwatchCommand.cpp
+            src/server/commands/StopwatchCommand.hpp
+            src/server/commands/ServerAdminCommands.cpp # /save-all /save-off /save-on /stop (dedicated)
+            src/server/commands/ServerAdminCommands.hpp
             src/server/entity/MobManager.cpp
             src/server/entity/MobManager.hpp
             src/server/entity/FallingBlockStore.cpp
@@ -1868,11 +2001,15 @@ set(GAME_SOURCES
             src/server/level/ChunkKeeper.cpp
             src/server/level/WanderingTraderSpawner.cpp
             src/server/level/PatrolSpawner.cpp
+            src/server/level/PhantomSpawner.cpp
             src/server/level/PatrolSpawner.hpp
+            src/server/level/PhantomSpawner.hpp
             src/server/level/EndDragonFight.cpp
             src/server/level/EndDragonFight.hpp
             src/server/level/SilentWardenBossBars.cpp
             src/server/level/SilentWardenBossBars.hpp
+            src/server/level/WitherBossEvents.cpp
+            src/server/level/WitherBossEvents.hpp
             src/server/level/HushStillness.cpp
             src/server/level/AurelithCities.cpp
             src/server/level/AurelithCities.hpp
@@ -1906,6 +2043,7 @@ set(GAME_SOURCES
 
             # Container menus (shared by client prediction and server authority)
             src/common/inventory/Container.hpp
+            src/common/inventory/SlotRanges.hpp
             src/common/inventory/Slot.cpp
             src/common/inventory/Slot.hpp
             src/common/inventory/AbstractContainerMenu.cpp
@@ -2081,6 +2219,9 @@ set(GAME_SOURCES
             src/common/entity/Morph.cpp
             src/common/entity/EntityNbtHints.cpp   # /summon {…} key + value completion
             src/common/entity/EntityNbtHints.hpp
+            src/common/entity/SelectableEntityTypes.hpp   # selector `type=` ids beyond EntityTypeId
+            src/common/entity/ItemComponentHints.hpp     # item argument components (server + completion)
+            src/common/world/loot/ContextNumberProviderNames.hpp   # provider ids/types (server + completion)
             src/common/entity/Morph.hpp
             src/common/entity/Item.hpp
             src/common/entity/ItemBehaviors.cpp
@@ -2134,6 +2275,44 @@ set(GAME_SOURCES
             src/common/data/DataComponentMap.hpp
             src/common/data/DataComponents.cpp
             src/common/data/DataComponents.hpp
+            src/common/data/components/AttributeComponents.cpp
+            src/common/data/components/AttributeComponents.hpp
+            src/server/world/storage/anvil/components/AttributeNbt.cpp
+            src/common/data/components/StackComponents.cpp
+            src/common/data/components/StackComponents.hpp
+            src/server/world/storage/anvil/components/StackNbt.cpp
+            src/common/data/components/ConsumableComponents.cpp
+            src/common/data/components/ConsumableComponents.hpp
+            src/server/world/storage/anvil/components/ConsumableNbt.cpp
+            src/common/data/components/ToolComponents.cpp
+            src/common/data/components/ToolComponents.hpp
+            src/server/world/storage/anvil/components/ToolNbt.cpp
+            src/common/data/components/WeaponComponents.cpp
+            src/common/data/components/WeaponComponents.hpp
+            src/server/world/storage/anvil/components/WeaponNbt.cpp
+            src/common/data/components/EntityDataComponents.cpp
+            src/common/data/components/EntityDataComponents.hpp
+            src/server/world/storage/anvil/components/EntityDataNbt.cpp
+            src/common/data/components/BlockDataComponents.cpp
+            src/common/data/components/BlockDataComponents.hpp
+            src/server/world/storage/anvil/components/BlockDataNbt.cpp
+            src/common/data/components/ItemFeatureComponents.cpp
+            src/common/data/components/ItemFeatureComponents.hpp
+            src/server/world/storage/anvil/components/ItemFeatureNbt.cpp
+            src/common/data/components/GameplayDataComponents.cpp
+            src/common/data/components/InlineBlockTransformer.cpp
+            src/common/data/components/GameplayDataComponents.hpp
+            src/server/world/storage/anvil/components/GameplayDataNbt.cpp
+            src/server/world/storage/anvil/components/ItemPredicateNbt.cpp
+            src/common/data/components/PresentationComponents.cpp
+            src/common/data/components/PresentationComponents.hpp
+            src/server/world/storage/anvil/components/PresentationNbt.cpp
+            src/common/data/components/ComponentTooltips.cpp
+            src/common/data/components/ComponentTooltips.hpp
+            src/common/data/NbtCompoundValue.cpp
+            src/common/data/NbtCompoundValue.hpp
+            src/server/world/storage/anvil/ComponentNbt.cpp
+            src/server/world/storage/anvil/ComponentNbt.hpp
             src/common/data/BookContent.hpp
             src/common/world/enchantment/Enchantment.cpp
             src/common/world/enchantment/Enchantment.hpp
@@ -2701,6 +2880,22 @@ endif()
 file(WRITE "${GAME_VERSION_DIR}/BuildVersion.hpp"
     "// Auto-generated by CMake - do not edit\n#pragma once\n#define BUILD_VERSION \"0.1.${_BUILD_NUM}\"\n")
 
+# ── obpatch: the release-side half of the launcher's binary patches ─────────
+# Diffs the previous release zip's changed files against the new one's
+# (launcher/updater/BinaryPatch) so the launcher downloads a few MB of
+# difference for the rebuilt executable instead of the whole entry. Built on
+# demand; the distribution builds below depend on it and auto_release runs it.
+add_executable(obpatch EXCLUDE_FROM_ALL
+    tools/obpatch/obpatch.cpp
+    src/launcher/updater/BinaryPatch.cpp
+    src/common/core/ZipArchive.cpp
+    src/common/core/Deflate.cpp
+)
+target_include_directories(obpatch PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(obpatch PRIVATE cxx_std_20)
+find_package(Threads REQUIRED)
+target_link_libraries(obpatch PRIVATE libdeflate::libdeflate_static Threads::Threads)
+
 # ── Auto version bump + release for game (JALIN builds only) ─────────────────
 if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         # Auto-increment game build number before compiling
@@ -2716,18 +2911,9 @@ if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         )
         add_dependencies(MyVoxelGame bump_game_version)
 
-        # POST_BUILD: zip + upload
-        add_custom_command(TARGET MyVoxelGame POST_BUILD
-            COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
-                game
-                "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
-                "0" "1"
-                "MyVoxelGame.app"
-                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
-                "ObiJello/MyVoxelGame-Download"
-            COMMENT "Auto-releasing game"
-        )
-        # Update Info.plist version in bundle
+        # Stamp the version into the bundle's Info.plist. Before the re-sign
+        # below: the signature binds Info.plist. (The zip + upload is after it,
+        # at the end of the file.)
         add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND bash "${PROJECT_SOURCE_DIR}/tools/update_plist_version.sh"
                 "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
@@ -2750,7 +2936,8 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
         )
         add_dependencies(MyVoxelGame bump_game_version)
 
-        # POST_BUILD: zip + upload
+        # POST_BUILD: zip + binary patch + upload
+        add_dependencies(MyVoxelGame obpatch)
         add_custom_command(TARGET MyVoxelGame POST_BUILD
             COMMAND powershell -ExecutionPolicy Bypass -File
                 "${PROJECT_SOURCE_DIR}/tools/auto_release.ps1"
@@ -2760,11 +2947,13 @@ elseif(WIN32 AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
                 -AppName MyVoxelGame.exe
                 -BinDir "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
                 -Repo "ObiJello/MyVoxelGame-Download"
+                -Obpatch "$<TARGET_FILE:obpatch>"
             COMMENT "Auto-releasing game (Windows)"
         )
 endif()
 
-# ── Re-sign app bundle (must be LAST post-build step) ──────────────────────
+# ── Re-sign app bundle (the last post-build step that changes the bundle) ──
+# Only the release zip (end of file), which packages the signed result, runs after it.
 # Every build, not just Tracy ones. Apple Silicon refuses to execute a binary
 # whose signature does not match its pages, and several steps above rewrite the
 # binary after the linker signed it: fix_vulkan_rpath.sh runs install_name_tool
@@ -2785,7 +2974,7 @@ if(APPLE)
         COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:MyVoxelGame>/.sentry-native"
         COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/MacOS/crashpad_handler"
         COMMAND codesign --force --sign - "$<TARGET_BUNDLE_DIR:MyVoxelGame>"
-        COMMENT "Re-signing app bundle for Tracy (must be last post-build step)"
+        COMMENT "Re-signing app bundle (last step that changes it)"
     )
 
     # ── Game-Mode-eligible copy in ~/Applications (Tracy and plain Release) ──
@@ -2814,6 +3003,27 @@ if(APPLE)
             COMMENT "Refreshing Game-Mode-eligible copy at ${PLAY_COPY_DEST}"
         )
     endif()
+endif()
+
+# ── Game release: zip + binary patch + upload (macOS JALIN builds) ──────────
+# After the re-sign above, never before: POST_BUILD steps run in the order they
+# are added, and a zip taken before the re-sign shipped every release up to
+# 0.1.149 with the unstamped 0.1.0 Info.plist, an unsigned x86_64
+# crashpad_handler and a stale CodeResources seal (`codesign --verify` failed).
+# auto_release.sh refuses to upload a bundle that does not verify.
+if(APPLE AND CMAKE_BUILD_TYPE STREQUAL "Release" AND JALIN)
+    add_dependencies(MyVoxelGame obpatch)
+    add_custom_command(TARGET MyVoxelGame POST_BUILD
+        COMMAND bash "${PROJECT_SOURCE_DIR}/tools/auto_release.sh"
+            game
+            "${PROJECT_SOURCE_DIR}/tools/game_build_number_mac"
+            "0" "1"
+            "MyVoxelGame.app"
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}"
+            "ObiJello/MyVoxelGame-Download"
+            "$<TARGET_FILE:obpatch>"
+        COMMENT "Auto-releasing game"
+    )
 endif()
 
 # ── Optional: Install targets ──────────────────────────────────────────────
@@ -2919,11 +3129,32 @@ if(CURL_FOUND)
         src/launcher/updater/GitHubAPI.cpp
         src/launcher/updater/Downloader.cpp
         src/launcher/updater/Installer.cpp
+        src/launcher/updater/BinaryPatch.cpp
+        src/launcher/updater/Extractor.cpp
+        src/launcher/updater/FileOps.cpp
+        src/launcher/updater/GameUpdater.cpp
+        src/launcher/updater/HttpSession.cpp
+        src/launcher/updater/InstallManifest.cpp
         src/launcher/net/FriendsServiceClient.cpp
         src/launcher/platform/ProcessLauncher.cpp
+        # Appearance view: stick-figure painter, skins, capes, skin editor
+        src/launcher/ui/LauncherWidgets.cpp
+        src/launcher/appearance/AppearanceSettings.cpp
+        src/launcher/appearance/AppearanceView.cpp
+        src/launcher/appearance/CapeLibrary.cpp
+        src/launcher/appearance/PlayerMesh.cpp
+        src/launcher/appearance/Preview3D.cpp
+        src/launcher/appearance/ProfileFetcher.cpp
+        src/launcher/appearance/SkinEditor.cpp
+        src/launcher/appearance/SkinIO.cpp
         # Shared code compiled into launcher
         src/common/core/Log.cpp
         src/common/entity/PlayerColors.cpp  # palette table shared with the game
+        # The player look shared with the game: PlayerAppearance (paint,
+        # skin validation/legacy conversion) and the game's own stick-figure
+        # builder, so the painter shows the in-game figure exactly.
+        src/common/entity/PlayerAppearance.cpp
+        src/client/renderer/entity/StickFigureGeometry.cpp
         src/platform/GameDirectory.cpp
         # GameSettings (in GameDirectory.cpp) picks its first-run defaults from
         # the detected hardware tier; only dependency is Log.cpp, already above.

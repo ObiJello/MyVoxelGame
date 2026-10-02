@@ -621,6 +621,11 @@ namespace Game {
         // player's view) — MC DamageSource.getEntity for a death recorded
         // by id (the sculk catalyst's killer). Null when gone / on a client.
         virtual Entity* ResolveEntityById(int32_t id) const { (void)id; return nullptr; }
+        // MC level.getEntity(id)'s position and eye height, for what only
+        // needs to LOOK at an entity (a wither's side heads): the client
+        // answers for its players too, which are not Entities there. The
+        // base asks ResolveEntityById. False when the id is unknown.
+        virtual bool ResolveEntityEye(int32_t id, glm::dvec3& feet, double& eyeY) const;
 
         // MC ServerPlayer.getWardenSpawnTracker. `player` is a player's
         // LivingEntity (the server's PlayerEntityView); null for anything
@@ -843,6 +848,13 @@ namespace Game {
         virtual void SpawnItemStackDrop(const glm::dvec3& pos, const ItemStack& stack) {
             (void)pos; (void)stack;
         }
+        // MC Entity.spawnAtLocation(level, stack) — a drop off an ENTITY at
+        // its exact position (no block-cell scatter), the default pickup
+        // delay; `extendedLifetime` is ItemEntity.setExtendedLifetime (age
+        // -6000: it lasts 15 minutes — the wither's nether star). Server.
+        virtual void SpawnAtLocation(const glm::dvec3& pos, const ItemStack& stack, bool extendedLifetime) {
+            (void)pos; (void)stack; (void)extendedLifetime;
+        }
 
         // MC Level.getEntitiesOfClass(ItemEntity.class, box, ...) for a mob
         // that picks items up (the sulfur cube swallowing a dropped block).
@@ -923,10 +935,12 @@ namespace Game {
         // MC BehaviorUtils.throwItem: an item entity launched with an
         // explicit velocity and pickup delay (a villager handing a neighbour
         // half its bread, a gift thrown to the Hero of the Village).
-        // Server-only; the default falls back to a plain drop.
+        // Server-only; the default falls back to a plain drop. `throwerId`
+        // (0 = none) is MC's setThrower / ItemEntity.getOwner — who threw it,
+        // for the thrown-item-picked-up advancement triggers.
         virtual void SpawnThrownItem(const glm::dvec3& pos, const glm::dvec3& velocity,
-                                     const ItemStack& stack, int pickupDelay) {
-            (void)velocity; (void)pickupDelay;
+                                     const ItemStack& stack, int pickupDelay, int32_t throwerId = 0) {
+            (void)velocity; (void)pickupDelay; (void)throwerId;
             SpawnItemStackDrop(pos, stack);
         }
 

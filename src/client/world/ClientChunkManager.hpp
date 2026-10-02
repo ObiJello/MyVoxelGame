@@ -239,6 +239,12 @@ namespace Client {
         // smoke column and the smoking food — off this index
         // (Client::ParticleTicks::TickBlockEntities).
         std::vector<glm::ivec3> campfires;
+        // Same contract for SKY BLOCKS: the chunk mesh draws nothing for
+        // them (Mesher::ProcessBlock) and Render::SkyBlockRenderer draws
+        // their faces as a depth-only window onto the sky off this index.
+        // The manager also keeps the set of chunks whose list is non-empty
+        // (SkyBlockChunks), so a world without sky blocks costs nothing.
+        std::vector<glm::ivec3> skyBlocks;
 
         ClientChunk(Game::Math::ChunkPos pos) 
             : position(pos), loadTime(std::chrono::steady_clock::now())
@@ -321,6 +327,12 @@ namespace Client {
         // Block + block-state index together (0 when the chunk isn't loaded).
         std::pair<Game::BlockID, Game::BlockStateIndex> GetBlockAndStateAt(const glm::ivec3& pos) const;
 
+        // The loaded chunks whose ClientChunk::skyBlocks is non-empty —
+        // Render::SkyBlockRenderer's whole walk. MAIN THREAD ONLY.
+        const std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>& SkyBlockChunks() const {
+            return m_skyBlockChunks;
+        }
+
         // Write a block into the client's chunk store and mark the affected
         // sections dirty. This is the shared body behind ProcessBlockChange,
         // predictions and rollbacks.
@@ -343,6 +355,10 @@ namespace Client {
         // block-entity render pass, so the mesh and the entity never draw
         // the same block in the same frame.
         void RetireLandedBlockEntities();
+        // The entity the cell's chunk holds, as stored — a landed moving
+        // piston included (ClientBlockAccess answers such a cell with the
+        // entity it carries). Null when the chunk is not loaded.
+        Game::BlockEntity* RawBlockEntityAt(const glm::ivec3& pos);
         int64_t ClientGameTime() const { return m_clientTicks; }
 
         
@@ -410,6 +426,12 @@ namespace Client {
         // Bumped whenever a chunk becomes or stops being LOADED, so a caller
         // deriving something from the loaded set can skip unchanged frames.
         uint64_t LoadedSetVersion() const { return m_loadedSetVersion; }
+        // Changes whenever the light any client read answers may have
+        // changed: a chunk's data (and its light) installed, a light update
+        // applied, a chunk loading or unloading (LoadedSetVersion — a chunk
+        // not loaded reads as open sky). Both counters only grow, so their
+        // sum moves with either.
+        uint64_t LightVersion() const { return m_loadedSetVersion + m_lightVersion; }
         template <class F>
         void ForEachLoadedChunkPos(F&& fn) const {
             for (const auto& [pos, chunk] : m_chunks) {
@@ -478,6 +500,7 @@ namespace Client {
         // the main thread's running time (Instruments, 2026-09-04).
         size_t m_loadedChunkCount = 0;
         uint64_t m_loadedSetVersion = 0;   // see LoadedSetVersion
+        uint64_t m_lightVersion = 0;       // see LightVersion
 
         // Index of chunks that (may) have dirty sections — lets the mesh
         // scheduler iterate only chunks with work instead of every loaded chunk
@@ -485,6 +508,15 @@ namespace Client {
         // chunk is gone or fully clean are lazily erased during scheduling, so
         // erase sites don't need to maintain it.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_chunksWithDirtySections;
+        // Loaded chunks with sky blocks (SkyBlockChunks). Kept exact at every
+        // place a chunk's index changes or the chunk comes and goes:
+        // arrival (after RebuildEndPortalIndex), SetBlockLocal's patch,
+        // RestoreRetainedChunk, UnloadChunk and ClearAllChunks.
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_skyBlockChunks;
+        void NoteSkyBlockIndex(const ClientChunk& chunk) {
+            if (chunk.skyBlocks.empty()) m_skyBlockChunks.erase(chunk.position);
+            else m_skyBlockChunks.insert(chunk.position);
+        }
         struct Retained {
             std::unique_ptr<ClientChunk> chunk;
             size_t bytes = 0;

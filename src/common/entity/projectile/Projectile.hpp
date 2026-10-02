@@ -52,6 +52,17 @@ namespace Game {
         Entity* GetOwner();                       // non-const: resolves lazily
         const EntityRef& OwnerRef() const { return m_ownerRef; }
 
+        // MC Projectile.mayInteract (server): a player owner may (no spawn
+        // protection or world border here); any other owner only under
+        // mob_griefing; no owner always may.
+        bool MayInteract();
+        // MC Projectile.mayBreak (server): #impact_projectiles, the
+        // projectiles_can_break_blocks rule, and canBreakBlockInAdventureMode —
+        // an adventure-mode player's shot, or any non-player owner's, carries
+        // no can_break predicate here, so it never breaks. What the decorated
+        // pot, the chorus flower and the speleothems ask before breaking.
+        bool MayBreak();
+
         // MC leftOwner (see m_leftOwner below). Public for the NBT layer.
         bool HasLeftOwner() const { return m_leftOwner; }
         void SetLeftOwner(bool left) { m_leftOwner = left; }

@@ -369,6 +369,7 @@ namespace Render {
         pose.headPitchDeg = player->visualPitch;
         pose.isCrouching  = false;
         pose.isSitting    = player->IsPassenger();
+        pose.player       = player;   // a skin look draws MC's model as the player is
         RenderStickFigureInInventory(
             g,
             leftPos + PREVIEW_X0, topPos + PREVIEW_Y0,

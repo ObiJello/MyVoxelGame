@@ -22,7 +22,13 @@
 
 #include "data/worldgen/BiomeFeatureRegistry.h"
 #include "data/worldgen/features/AetherFeatures.h"
+#include "data/worldgen/features/AquaticFeatures.h"
+#include "data/worldgen/features/CaveFeatures.h"
+#include "data/worldgen/features/EndFeatures.h"
 #include "data/worldgen/features/HushFeatures.h"
+#include "data/worldgen/features/MiscOverworldFeatures.h"
+#include "data/worldgen/features/NetherFeatures.h"
+#include "data/worldgen/features/OreFeatures.h"
 #include "data/worldgen/features/TreeFeatures.h"
 #include "data/worldgen/features/TwilightFeatureRegistry.h"
 #include "data/worldgen/features/VegetationFeatures.h"
@@ -322,56 +328,13 @@ namespace Game {
             mlg::ConfiguredFeature** feature;
         };
 
-        // Every configured feature the game names from outside worldgen.
-        // Pointers-to-pointers: the statics are filled by the bootstrap.
+        // Every configured feature the library carries (common/world/level/
+        // ConfiguredFeatureIds.inc — the same list /place feature completes
+        // from). Pointers-to-pointers: the statics are filled by the bootstrap.
         const NamedFeature kNamedFeatures[] = {
-            // TreeFeatures.java
-            {"minecraft:oak",                  &mwf::TreeFeatures::OAK},
-            {"minecraft:fancy_oak",            &mwf::TreeFeatures::FANCY_OAK},
-            {"minecraft:oak_bees_005",         &mwf::TreeFeatures::OAK_BEES_005},
-            {"minecraft:fancy_oak_bees_005",   &mwf::TreeFeatures::FANCY_OAK_BEES_005},
-            {"minecraft:oak_bees_002",         &mwf::TreeFeatures::OAK_BEES_002},
-            {"minecraft:fancy_oak_bees_002",   &mwf::TreeFeatures::FANCY_OAK_BEES_002},
-            {"minecraft:fancy_oak_bees",       &mwf::TreeFeatures::FANCY_OAK_BEES},
-            {"minecraft:birch",                &mwf::TreeFeatures::BIRCH},
-            {"minecraft:birch_bees_005",       &mwf::TreeFeatures::BIRCH_BEES_005},
-            {"minecraft:birch_bees_002",       &mwf::TreeFeatures::BIRCH_BEES_002},
-            {"minecraft:birch_bees_0002",      &mwf::TreeFeatures::BIRCH_BEES_0002},
-            {"minecraft:super_birch_bees",     &mwf::TreeFeatures::SUPER_BIRCH_BEES},
-            {"minecraft:super_birch_bees_0002", &mwf::TreeFeatures::SUPER_BIRCH_BEES_0002},
-            {"minecraft:spruce",               &mwf::TreeFeatures::SPRUCE},
-            {"minecraft:pine",                 &mwf::TreeFeatures::PINE},
-            {"minecraft:mega_spruce",          &mwf::TreeFeatures::MEGA_SPRUCE},
-            {"minecraft:mega_pine",            &mwf::TreeFeatures::MEGA_PINE},
-            {"minecraft:jungle_tree",          &mwf::TreeFeatures::JUNGLE_TREE},
-            {"minecraft:jungle_tree_no_vine",  &mwf::TreeFeatures::JUNGLE_TREE_NO_VINE},
-            {"minecraft:mega_jungle_tree",     &mwf::TreeFeatures::MEGA_JUNGLE_TREE},
-            {"minecraft:jungle_bush",          &mwf::TreeFeatures::JUNGLE_BUSH},
-            {"minecraft:acacia",               &mwf::TreeFeatures::ACACIA},
-            {"minecraft:cherry",               &mwf::TreeFeatures::CHERRY},
-            {"minecraft:cherry_bees_005",      &mwf::TreeFeatures::CHERRY_BEES_005},
-            {"minecraft:dark_oak",             &mwf::TreeFeatures::DARK_OAK},
-            {"minecraft:pale_oak",             &mwf::TreeFeatures::PALE_OAK},
-            {"minecraft:pale_oak_bonemeal",    &mwf::TreeFeatures::PALE_OAK_BONEMEAL},
-            {"minecraft:pale_oak_creaking",    &mwf::TreeFeatures::PALE_OAK_CREAKING},
-            {"minecraft:swamp_oak",            &mwf::TreeFeatures::SWAMP_OAK},
-            {"minecraft:azalea_tree",          &mwf::TreeFeatures::AZALEA_TREE},
-            {"minecraft:mangrove",             &mwf::TreeFeatures::MANGROVE},
-            {"minecraft:tall_mangrove",        &mwf::TreeFeatures::TALL_MANGROVE},
-            {"minecraft:red_poplar",           &mwf::TreeFeatures::RED_POPLAR},
-            {"minecraft:orange_poplar",        &mwf::TreeFeatures::ORANGE_POPLAR},
-            {"minecraft:yellow_poplar",        &mwf::TreeFeatures::YELLOW_POPLAR},
-            {"minecraft:crimson_fungus",         &mwf::TreeFeatures::CRIMSON_FUNGUS},
-            {"minecraft:warped_fungus",          &mwf::TreeFeatures::WARPED_FUNGUS},
-            {"minecraft:crimson_fungus_planted", &mwf::TreeFeatures::CRIMSON_FUNGUS_PLANTED},
-            {"minecraft:warped_fungus_planted",  &mwf::TreeFeatures::WARPED_FUNGUS_PLANTED},
-            {"minecraft:huge_red_mushroom",      &mwf::VegetationFeatures::HUGE_RED_MUSHROOM},
-            {"minecraft:huge_brown_mushroom",    &mwf::VegetationFeatures::HUGE_BROWN_MUSHROOM},
-            // The Hush (HushFeatures.cpp) and the Aether (AetherTreeGrowers'
-            // aether:skyroot_tree / aether:golden_oak_tree).
-            {"hush:whisperwood",               &mwf::HushFeatures::WHISPERWOOD},
-            {"aether:skyroot_tree",            &mwf::AetherFeatures::SKYROOT_TREE},
-            {"aether:golden_oak_tree",         &mwf::AetherFeatures::GOLDEN_OAK_TREE},
+#define CONFIGURED_FEATURE(id, cls, name) {id, &mwf::cls::name},
+#include "common/world/level/ConfiguredFeatureIds.inc"
+#undef CONFIGURED_FEATURE
         };
 
         mlg::ConfiguredFeature* ResolveFeature(std::string_view id) {

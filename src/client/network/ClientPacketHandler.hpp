@@ -76,10 +76,16 @@ namespace Client {
         void onMountScreenOpenS2C(const Network::MountScreenOpenS2CPacket& packet) override;
         void onPlayerSwingS2C(const Network::PlayerSwingS2CPacket& packet) override;
         void onShoulderParrotsS2C(const Network::ShoulderParrotsS2CPacket& packet) override;
+        // Another player's look (PlayerAppearancePackets.hpp → PlayerSkins).
+        void onPlayerAppearanceS2C(const Network::PlayerAppearanceS2CPacket& packet) override;
         // ── Signs ──────────────────────────────────────────────────────────
         void onOpenSignEditorS2C(const Network::OpenSignEditorS2CPacket& packet) override { handleOpenSignEditor(packet); }
         // MC handleOpenBook (BookPackets.hpp)
         void onOpenBookS2C(const Network::OpenBookS2CPacket& packet) override;
+        // Advancements (AdvancementPackets.hpp) — MC handleUpdateAdvancementsPacket,
+        // handleSelectAdvancementsTab.
+        void onUpdateAdvancementsS2C(const Network::UpdateAdvancementsS2CPacket& packet) override;
+        void onSelectAdvancementsTabS2C(const Network::SelectAdvancementsTabS2CPacket& packet) override;
         // MC handleMerchantOffers (MerchantPackets.hpp)
         void onMerchantOffersS2C(const Network::MerchantOffersS2CPacket& packet) override;
         // Spectator mode — MC ClientPacketListener.handleSetCamera.
@@ -106,6 +112,7 @@ namespace Client {
         // ── End dragon fight ───────────────────────────────────────────────
         void onBossEventS2C(const Network::BossEventS2CPacket& packet) override { handleBossEvent(packet); }
         void onEndCrystalBeamS2C(const Network::EndCrystalBeamS2CPacket& packet) override { handleEndCrystalBeam(packet); }
+        void onWitherHeadTargetsS2C(const Network::WitherHeadTargetsS2CPacket& packet) override { handleWitherHeadTargets(packet); }
         void onArmorStandDataS2C(const Network::ArmorStandDataS2CPacket& packet) override { handleArmorStandData(packet); }
         void onItemFrameDataS2C(const Network::ItemFrameDataS2CPacket& packet) override { handleItemFrameData(packet); }
         void onFishingHookDataS2C(const Network::FishingHookDataS2CPacket& packet) override;
@@ -116,6 +123,7 @@ namespace Client {
         void onBodyArmorS2C(const Network::BodyArmorS2CPacket& packet) override { handleBodyArmor(packet); }
         void onFireworkRocketDataS2C(const Network::FireworkRocketDataS2CPacket& packet) override;
         void onUpdateAttributesS2C(const Network::UpdateAttributesS2CPacket& packet) override;
+        void onTitlesS2C(const Network::TitlesS2CPacket& packet) override;
 
         // ── /tick state ────────────────────────────────────────────────────
         // Handled inline: both are two-field mirrors into the client's
@@ -238,6 +246,7 @@ namespace Client {
         void handleOpenSignEditor(const Network::OpenSignEditorS2CPacket& packet);
         void handleBossEvent(const Network::BossEventS2CPacket& packet);
         void handleEndCrystalBeam(const Network::EndCrystalBeamS2CPacket& packet);
+        void handleWitherHeadTargets(const Network::WitherHeadTargetsS2CPacket& packet);
         void handleArmorStandData(const Network::ArmorStandDataS2CPacket& packet);
         void handleItemFrameData(const Network::ItemFrameDataS2CPacket& packet);
         void handleSetEntityLink(const Network::SetEntityLinkS2CPacket& packet);

@@ -16,6 +16,7 @@
 //   (bow / crossbow pull stages, the trident's and spears' in-hand models,
 //   the shield) and resources/model/cuboid/ItemTransform.
 #include "client/renderer/entity/MobRenderer.hpp"
+#include "client/renderer/entity/ShieldTextures.hpp"
 #include "common/core/Ease.hpp"
 #include "common/entity/SpearItem.hpp"
 
@@ -25,6 +26,7 @@
 #include "client/renderer/texture/AtlasBuilder.hpp"
 #include "client/renderer/viewmodel/ItemMeshBuilder.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/data/components/BlockDataComponents.hpp"
 #include "common/entity/DyeColorUtil.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/Item.hpp"
@@ -270,6 +272,8 @@ namespace Render {
                 case EntityTypeId::Evoker: case EntityTypeId::Illusioner:
                 // VillagerRenderer, WanderingTraderRenderer.
                 case EntityTypeId::Villager: case EntityTypeId::WanderingTrader:
+                // CopperGolemRenderer.
+                case EntityTypeId::CopperGolem:
                     return true;
                 default:
                     return false;
@@ -298,7 +302,7 @@ namespace Render {
         bool DrawnAsHeadArmor(const Game::ItemStack& head) {
             const auto equippable = head.get(Game::DataComponents::EQUIPPABLE);
             return equippable && equippable->slot == EquipmentSlot::HEAD &&
-                   MobRenderer::EquipmentAssetFor(head.itemId) != nullptr;
+                   !MobRenderer::EquipmentAssetOf(head).empty();
         }
 
     } // namespace
@@ -309,6 +313,15 @@ namespace Render {
                                  ItemDisplay::Context context, const ItemUseState& use,
                                  const EmitFn& emit) {
         if (stack.IsEmpty()) return;
+        // ITEM_MODEL / CUSTOM_MODEL_DATA (Game::GetRenderStack).
+        {
+            Game::ItemStack scratch;
+            const Game::ItemStack& drawn = Game::GetRenderStack(stack, scratch);
+            if (&drawn != &stack) {
+                AppendItem(pose, drawn, context, use, emit);
+                return;
+            }
+        }
         const ResolvedItem item = ResolveItem(stack, context, use);
         if (item.kind == ResolvedItem::Kind::None) return;
         // ItemTransform.apply (the left-hand fix for THIRD_PERSON_LEFT_HAND),
@@ -373,8 +386,9 @@ namespace Render {
             }
             case ResolvedItem::Kind::Shield: {
                 // ShieldSpecialRenderer: scale(1, -1, -1), ShieldModel (plate
-                // 12x22x1, handle 2x6x6) on the pattern-less base sheet.
-                // (BANNER_PATTERNS / BASE_COLOR are not drawn here.)
+                // 12x22x1, handle 2x6x6) on the shield's sheet — its
+                // BANNER_PATTERNS / BASE_COLOR layers over shield_base
+                // (ShieldTextures).
                 if (!m_shieldModel) {
                     m_shieldModel = std::make_unique<ModelPart>();
                     ModelPart* plate = m_shieldModel->AddChild("plate", PartPose::Zero());
@@ -386,7 +400,7 @@ namespace Render {
                 shm = glm::scale(shm, glm::vec3(1.0f / 16.0f));
                 const size_t first = m_indices.size();
                 m_shieldModel->Build(shm, 64.0f, 64.0f, m_verts, m_indices);
-                emit(LoadTexture("assets/textures/entity/shield_base_nopattern.png"), first, false);
+                emit(ShieldTextures::ForStack(stack), first, false);
                 break;
             }
             case ResolvedItem::Kind::Banner: {
@@ -519,7 +533,7 @@ namespace Render {
             glm::mat4 pose;
             if (!ArmItemPose(model, type, entityMatrix, left, babyGrip, pose)) return;
             // submitArmWithItem's spear motions, in blocks on the grip:
-            const Game::Spear::SpearDefinition* spear = Game::Spear::Find(stack.itemId);
+            const std::optional<Game::Spear::SpearDefinition> spear = Game::Spear::ForStack(stack);
             const float invert = left ? -1.0f : 1.0f;
             const auto rotateAround = [&pose](float degrees, const glm::vec3& axis, const glm::vec3& pivot) {
                 pose = glm::translate(pose, pivot);
@@ -528,7 +542,7 @@ namespace Render {
             };
             // SpearAnimations.thirdPersonAttackItem — this arm's STAB swing.
             if (use.stabbing && use.swingAnimation > 0.0f) {
-                const float jetForward = spear ? spear->kinetic.forwardMovement : 0.0f;
+                const float jetForward = spear && spear->kineticWeapon ? spear->kineticWeapon->forwardMovement : 0.0f;
                 const float attack  = Game::Ease::InQuad(Game::Ease::Progress(use.swingAnimation, 0.05f, 0.2f));
                 const float retract = Game::Ease::InOutExpo(Game::Ease::Progress(use.swingAnimation, 0.4f, 1.0f));
                 rotateAround(-70.0f * (attack - retract), glm::vec3(1.0f, 0.0f, 0.0f),
@@ -538,15 +552,15 @@ namespace Render {
             // ArmPose.SPEAR.animateUseItem → SpearAnimations
             // .thirdPersonUseItem — the charging spear's raise, sway and
             // recoil on the arm in use.
-            if (use.spearPose && use.useTicks != 0.0f && spear) {
+            if (use.spearPose && use.useTicks != 0.0f && spear && spear->kineticWeapon) {
                 const Game::Spear::UseParams p =
-                    Game::Spear::UseParams::FromKineticWeapon(spear->kinetic, use.useTicks);
+                    Game::Spear::UseParams::FromKineticWeapon(*spear->kineticWeapon, use.useTicks);
                 const float attack  = Game::Ease::InQuad(Game::Ease::Progress(use.swingAnimation, 0.05f, 0.2f));
                 const float retract = Game::Ease::InOutExpo(Game::Ease::Progress(use.swingAnimation, 0.4f, 1.0f));
                 const float raiseModified = 1.0f - Game::Ease::OutBack(1.0f - p.raiseProgress);
                 const float hitFeedback = Game::Spear::HitFeedbackAmount(use.ticksSinceKineticHitFeedback);
                 pose = glm::translate(pose, glm::vec3(0.0f, -hitFeedback * 0.4f,
-                    -spear->kinetic.forwardMovement * (raiseModified - p.raiseBackProgress) + hitFeedback));
+                    -spear->kineticWeapon->forwardMovement * (raiseModified - p.raiseBackProgress) + hitFeedback));
                 rotateAround(-(70.0f * (p.raiseProgress - p.raiseBackProgress) - 40.0f * (attack - retract)),
                              glm::vec3(1.0f, 0.0f, 0.0f), glm::vec3(0.0f, -0.03125f, 0.125f));
                 rotateAround(invert * 90.0f * (p.raiseProgress - p.swayProgress + 3.0f * retract + attack),
@@ -573,6 +587,13 @@ namespace Render {
             case EntityTypeId::Villager: case EntityTypeId::ZombieVillager:
                 t.yOffset = -0.1171875f;
                 t.skullYOffset = -0.07421875f;
+                break;
+            // CopperGolemRenderer: Transforms.DEFAULT over CopperGolemModel,
+            // whose translateToHead ends translate(0, 0.125, 0),
+            // scale(1.0625).
+            case EntityTypeId::CopperGolem:
+                t.modelHeadYOffset = 0.125f;
+                t.modelHeadScale = 1.0625f;
                 break;
             default:
                 break;
@@ -609,6 +630,9 @@ namespace Render {
                                                          transforms.horizontalScale));
         m = m * headChain;
         m = glm::scale(m, glm::vec3(16.0f));   // pixels → blocks
+        // translateToHead's model-specific tail (CopperGolemModel).
+        m = glm::translate(m, glm::vec3(0.0f, transforms.modelHeadYOffset, 0.0f));
+        m = glm::scale(m, glm::vec3(transforms.modelHeadScale));
 
         if (skull) {
             const int kind = SkullKindOf(head.itemId);
@@ -719,8 +743,20 @@ namespace Render {
     void MobRenderer::AppendHumanoidArmor(ArmorFamily family, bool babyMesh,
                                           const Game::ItemStack* equipment, EntityModel& wearer,
                                           const EntityRenderState& state, const glm::dvec3& renderPos,
-                                          float bodyRot, const glm::vec3& cameraPos, const EmitFn& emit) {
+                                          float bodyRot, const glm::vec3& cameraPos, const EmitFn& emit,
+                                          const glm::mat4* rootOverride) {
         if (family == ArmorFamily::None || !equipment) return;
+        // One armour mesh onto the batch: the entity chain AppendMob builds,
+        // or the caller's own root (a skinned player's full pose stack).
+        const auto appendArmor = [&](HumanoidArmorModel& armorModel) {
+            if (!rootOverride) {
+                AppendMob(armorModel, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+                return;
+            }
+            armorModel.SetupAnim(state);
+            armorModel.Root().Build(*rootOverride, armorModel.TexWidth(), armorModel.TexHeight(),
+                                    m_verts, m_indices, armorModel.CullBackFaces());
+        };
         // HumanoidArmorLayer.submit's order: chest, legs, feet, head.
         static constexpr EquipmentSlot kOrder[4] = {
             EquipmentSlot::CHEST, EquipmentSlot::LEGS, EquipmentSlot::FEET, EquipmentSlot::HEAD };
@@ -730,8 +766,8 @@ namespace Render {
             if (piece.IsEmpty()) continue;
             const auto equippable = piece.get(Game::DataComponents::EQUIPPABLE);
             if (!equippable || equippable->slot != slot) continue;
-            const char* asset = EquipmentAssetFor(piece.itemId);
-            if (!asset) continue;
+            const std::string asset = EquipmentAssetOf(piece);
+            if (asset.empty()) continue;
             const bool inner = slot == EquipmentSlot::LEGS;   // usesInnerModel
             int index = 0;
             switch (family) {
@@ -760,12 +796,12 @@ namespace Render {
                                              : "assets/textures/entity/equipment/humanoid/";
             const TextureHandle sheet = LoadTexture(dir + asset + ".png");
             if (sheet == INVALID_TEXTURE) continue;
-            const bool leather = std::string_view(asset) == "leather";
+            const bool leather = asset == "leather";
             armor.ShowPartsForSlot(static_cast<int>(slot));
 
             const size_t first = m_indices.size();
             const size_t firstVert = m_verts.size();
-            AppendMob(armor, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+            appendArmor(armor);
             if (leather) {
                 // The dyeable layer: DyedItemColor, else colorWhenUndyed
                 // (-6265536, 0xA06540).
@@ -788,8 +824,18 @@ namespace Render {
                 const TextureHandle overlay = LoadTexture(dir + "leather_overlay.png");
                 if (overlay != INVALID_TEXTURE) {
                     const size_t overlayFirst = m_indices.size();
-                    AppendMob(armor, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+                    appendArmor(armor);
                     emit(overlay, overlayFirst, false);
+                }
+            }
+            // EquipmentLayerRenderer: the TRIM on the piece's layer — not on
+            // the baby layer (HUMANOID_BABY has no trims).
+            if (!babyMesh) {
+                const TextureHandle trimTex = TrimTexture(piece, asset, inner);
+                if (trimTex != INVALID_TEXTURE) {
+                    const size_t trimFirst = m_indices.size();
+                    appendArmor(armor);
+                    emit(trimTex, trimFirst, false);
                 }
             }
         }
@@ -877,6 +923,78 @@ namespace Render {
                 if (ArmItemPose(model, type, entityMatrix, false, state.isBaby, pose, &hand)) {
                     AppendItem(pose, held, Ctx::ThirdPersonRightHand, ItemUseState{}, emit);
                 }
+                return;
+            }
+            // CopperGolemRenderer: ItemInHandLayer over CopperGolemModel.
+            // translateToHand — root, body, the arm; then, IDLE, Y ∓90 and
+            // (0, 0, 0.125), else scale 0.55 and (-0.125, 0.3125, -0.1875)
+            // (blocks; ×16 in the pixel chain here) — and BlockDecorationLayer:
+            // the antenna's block (EQUIPMENT_SLOT_ANTENNA) through
+            // applyBlockOnAntennaTransform — root, body, head, then
+            // (0, -1.75, 0) — and UNIT_CUBE_BOTTOM_CENTER_TO_ANTENNA_CENTER,
+            // NO_OVERLAY. (The CustomHeadLayer is above.)
+            case EntityTypeId::CopperGolem: {
+                const auto* golem = dynamic_cast<const Game::CopperGolem*>(&mob);
+                if (!golem) return;
+                glm::mat4 body(1.0f), head(1.0f);
+                const ModelPart* arms[2] = { nullptr, nullptr };   // right, left
+                glm::mat4 armChain[2] = { glm::mat4(1.0f), glm::mat4(1.0f) };
+                std::function<void(const ModelPart&, const glm::mat4&)> walk =
+                    [&](const ModelPart& part, const glm::mat4& parent) {
+                        const glm::mat4 here = parent * part.LocalMatrix();
+                        if (part.name == "body") body = here;
+                        if (part.name == "head") head = here;
+                        if (part.name == "right_arm") { arms[0] = &part; armChain[0] = here; }
+                        if (part.name == "left_arm")  { arms[1] = &part; armChain[1] = here; }
+                        for (const auto& child : part.children) walk(*child, here);
+                    };
+                walk(model.Root(), glm::mat4(1.0f));
+                const bool idle = golem->GetState() == Game::CopperGolem::State::Idle;
+                // ItemInHandLayer: the right arm holds the main hand (the
+                // golem's main arm), the left the off hand.
+                for (int side = 0; side < 2; ++side) {
+                    const Game::ItemStack& stack = side == 0 ? rightItem : leftItem;
+                    if (stack.IsEmpty() || !arms[side]) continue;
+                    const bool left = side == 1;
+                    glm::mat4 hand = armChain[side];
+                    if (idle) {
+                        hand = glm::rotate(hand, glm::radians(left ? 90.0f : -90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                        hand = glm::translate(hand, glm::vec3(0.0f, 0.0f, 0.125f * 16.0f));
+                    } else {
+                        hand = glm::scale(hand, glm::vec3(0.55f));
+                        hand = glm::translate(hand, glm::vec3(-0.125f, 0.3125f, -0.1875f) * 16.0f);
+                    }
+                    glm::mat4 pose;
+                    if (ArmItemPose(model, type, entityMatrix, left, false, pose, &hand)) {
+                        AppendItem(pose, stack, left ? Ctx::ThirdPersonLeftHand : Ctx::ThirdPersonRightHand,
+                                   ItemUseState{}, emit);
+                    }
+                }
+                // BlockDecorationLayer: a BlockItem on the antenna, its
+                // BLOCK_STATE component applied to the block's default state.
+                const Game::ItemStack& antenna = mob.GetEquipment(Game::CopperGolem::kAntennaSlot);
+                if (!antenna.IsEmpty() && Game::ItemRegistry::IsBlockItem(antenna.itemId) && g_atlasBuilder) {
+                    const Game::BlockState blockState = Game::ApplyBlockItemStateProperties(
+                        antenna, Game::BlockStates::Default(Game::ItemRegistry::ToBlock(antenna.itemId)));
+                    std::vector<ItemCubeVert> bv;
+                    std::vector<uint32_t> bi;
+                    BlockCubeEntityRenderer::BuildStateMesh(blockState, bv, bi);
+                    if (!bv.empty()) {
+                        glm::mat4 m = glm::scale(entityMatrix * head, glm::vec3(16.0f));   // pixels -> blocks
+                        m = glm::translate(m, glm::vec3(0.0f, -1.75f, 0.0f));
+                        // UNIT_CUBE_BOTTOM_CENTER_TO_ANTENNA_CENTER:
+                        // translation(-0.5, 0, -0.5).rotateAround(Z 180°,
+                        // 0.5, 0.5, 0.5).
+                        m = glm::translate(m, glm::vec3(-0.5f, 0.0f, -0.5f));
+                        m = glm::translate(m, glm::vec3(0.5f));
+                        m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+                        m = glm::translate(m, glm::vec3(-0.5f));
+                        const size_t first = m_indices.size();
+                        AppendTransformed(bv, bi, m, 0u, m_verts, m_indices);
+                        emit(g_atlasBuilder->GetBackendTextureHandle(), first, false);
+                    }
+                }
+                (void)body;
                 return;
             }
             // WitchItemLayer (a CrossedArmsItemLayer): a potion goes to the

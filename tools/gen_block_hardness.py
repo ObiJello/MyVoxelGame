@@ -777,6 +777,9 @@ SLUG_ALIASES = {
     "blue_redstone_torch": "redstone_torch",
     "blue_redstone_wall_torch": "redstone_wall_torch",
     "display_block": "redstone_lamp",
+    # Sky Block (2026-10-02): a full opaque cube drawn as a window onto the
+    # sky; breaks, sounds, drops and blocks light like tinted glass.
+    "sky_block": "tinted_glass",
     # The Hush (engine dimension, 2026-09-21): each block breaks like the
     # vanilla block it is modelled on, and inherits its mineable/needs-tool tags.
     "hushstone": "deepslate",
@@ -803,6 +806,18 @@ SLUG_ALIASES = {
     "whisperwood_door": "oak_door",
     "whisperwood_trapdoor": "oak_trapdoor",
     "whisperwood_sapling": "oak_sapling",
+    # Flower pots for the engine dimensions' plants (2026-10-02): break, sound
+    # and light like any vanilla pot (EngineBlockLight.inc lights the bloom's).
+    "potted_resonance_bloom": "potted_dandelion",
+    "potted_whisperwood_sapling": "potted_dandelion",
+    "potted_twilight_oak_sapling": "potted_dandelion",
+    "potted_canopy_sapling": "potted_dandelion",
+    "potted_tf_mangrove_sapling": "potted_dandelion",
+    "potted_darkwood_sapling": "potted_dandelion",
+    "potted_skyroot_sapling": "potted_dandelion",
+    "potted_golden_oak_sapling": "potted_dandelion",
+    "potted_white_flower": "potted_dandelion",
+    "potted_purple_flower": "potted_dandelion",
     "hushstone_stairs": "cobbled_deepslate_stairs",
     "hushstone_slab": "cobbled_deepslate_slab",
     "polished_hushstone_stairs": "polished_deepslate_stairs",

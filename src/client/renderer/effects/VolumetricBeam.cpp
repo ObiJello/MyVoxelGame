@@ -10,6 +10,7 @@
 #include "VolumetricBeam.hpp"
 #include "client/renderer/backend/RenderBackend.hpp"
 #include "client/renderer/core/RenderOrigin.hpp"
+#include "client/renderer/core/WorldFramebuffer.hpp"
 #include "client/renderer/environment/EntityEnvironment.hpp"
 #include "client/renderer/environment/EnvironmentState.hpp"
 #include "client/renderer/environment/MobEffectEnvironment.hpp"
@@ -507,7 +508,9 @@ namespace Render {
         if (m_depthDisabled || g_renderBackend->GetType() != BackendType::OpenGL) return false;
 
         int w = 0, h = 0;
-        glfwGetFramebufferSize(g_renderBackend->GetWindow(), &w, &h);
+        // The frame's depth is the level's: the scaled scene's size under
+        // Render Resolution.
+        if (!WorldFramebuffer::Get(w, h)) glfwGetFramebufferSize(g_renderBackend->GetWindow(), &w, &h);
         if (w <= 0 || h <= 0) return false;
         if (m_depthTex == INVALID_TEXTURE || w != m_depthW || h != m_depthH) {
             if (m_depthTex != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(m_depthTex);

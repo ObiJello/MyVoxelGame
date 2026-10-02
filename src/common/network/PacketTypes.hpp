@@ -58,6 +58,7 @@
 #include "packets/game/SetEntityLinkS2CPacket.hpp"
 #include "packets/game/BodyArmorS2CPacket.hpp"
 #include "packets/game/UpdateAttributesS2CPacket.hpp"
+#include "packets/game/TitlesS2CPacket.hpp"
 #include "packets/game/FireworkRocketDataS2CPacket.hpp"
 #include "packets/game/PlayerInfoS2CPacket.hpp"
 #include "packets/game/ClientboundPlayerPositionPacket.hpp"
@@ -105,6 +106,7 @@
 #include "packets/game/VehiclePackets.hpp"
 #include "packets/game/PlayerSwingS2CPacket.hpp"
 #include "packets/game/ShoulderParrotsS2CPacket.hpp"
+#include "packets/game/PlayerAppearancePackets.hpp"
 #include "packets/game/OpenSignEditorS2CPacket.hpp"
 #include "packets/game/SignUpdateC2SPacket.hpp"
 #include "packets/game/ControlPackets.hpp"
@@ -121,6 +123,7 @@
 #include "packets/game/MerchantPackets.hpp"
 #include "packets/game/SpectatorPackets.hpp"
 #include "packets/game/AnvilPackets.hpp"
+#include "packets/game/AdvancementPackets.hpp"
 
 #include "PacketRegistry.hpp"
 

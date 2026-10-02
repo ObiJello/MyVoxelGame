@@ -16,8 +16,7 @@ namespace Game {
         : Mob(EntityTypeId::ArmorStand, level, NoAiTag{}) {
         // MC ArmorStand.createAttributes: createLivingAttributes + STEP_HEIGHT 0.
         CreateLivingAttributes(m_attributes);
-        if (m_attributes.Has(Attribute::StepHeight)) m_attributes.SetBaseValue(Attribute::StepHeight, 0.0);
-        else                                         m_attributes.Register(Attribute::StepHeight, 0.0);
+        m_attributes.Register(Attribute::StepHeight, 0.0);   // base AND reset default
         m_health = GetMaxHealth();
         ClearHoldsEntityRefs();
     }
@@ -296,7 +295,9 @@ namespace Game {
             Kill(attacker);
             return false;
         }
-        if (source == MobDamageSource::Lava || (source == MobDamageSource::Fire && !IsOnFire())) {
+        // #ignites_armor_stands holds a lit campfire's in-block damage too.
+        if (source == MobDamageSource::Lava || source == MobDamageSource::Campfire ||
+            (source == MobDamageSource::Fire && !IsOnFire())) {
             if (IsOnFire()) CauseDamage(source, attacker, 0.15f);
             else            IgniteForSeconds(5);
             return false;

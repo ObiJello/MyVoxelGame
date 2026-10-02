@@ -84,17 +84,19 @@ namespace Server {
                                   ServerConnection& connection,
                                   PlayerSessionManager& sessionManager) {
         const std::string sub = args.empty() ? std::string() : ToLower(args[0]);
-        auto session = source.sender ? sessionManager.GetSession(source.sender->getPlayerId()) : nullptr;
+        // Items and teleports go to the EXECUTOR (`/execute as Steve run aurelith keys`).
+        ServerPlayer* executor = source.ExecutorPlayer();
+        auto session = executor ? sessionManager.GetSession(executor->getPlayerId()) : nullptr;
 
         if (sub == "keys" || sub == "heldnote") {
             if (!session) return;
             if (sub == "keys") {
                 for (A::Voice v : A::kChordOrder) session->GiveItem(Game::ItemStack(A::KeyOf(v), 1));
-                connection.SendChatMessage("The four voice keys (from the floor to the crown: Bass, Tenor, "
-                                           "Alto, Soprano)", 1);
+                source.SendSuccess(connection, "The four voice keys (from the floor to the crown: Bass, Tenor, "
+                                           "Alto, Soprano)", true);
             } else {
                 session->GiveItem(Game::ItemStack(Game::Items::HeldNote, 1));
-                connection.SendChatMessage("The Held Note", 1);
+                source.SendSuccess(connection, "The Held Note", true);
             }
             return;
         }
@@ -119,7 +121,7 @@ namespace Server {
                           "(%lld ticks in)%s", city.heart.x, city.heart.y, city.heart.z, city.distance,
                           city.rotation, StateName(city.state), static_cast<long long>(city.stageTicks),
                           city.heldNoteGiven ? ", the Held Note given" : "");
-            connection.SendChatMessage(buf, 1);
+            source.SendSuccess(connection, buf, false);
             return;
         }
 
@@ -132,8 +134,10 @@ namespace Server {
                     connection.SendChatMessage("That city's rotation is unknown (generated before the quest)", 1);
                     return;
                 }
-                connection.Teleport(p.x + 0.5, p.y, p.z + 0.5, 0.0f, 0.0f);
-                connection.SendChatMessage(std::string("To ") + s.what, 1);
+                ServerConnection* travellerConnection = session ? session->GetConnection() : nullptr;
+                if (!travellerConnection) { connection.SendChatMessage(CommandSourceStack::kPlayerRequired, 1); return; }
+                travellerConnection->Teleport(p.x + 0.5, p.y, p.z + 0.5, 0.0f, 0.0f);
+                source.SendSuccess(connection, std::string("To ") + s.what, true);
                 return;
             }
             connection.SendChatMessage("Usage: /aurelith tp <" + SpotList() + ">", 1);
@@ -141,15 +145,15 @@ namespace Server {
         }
 
         if (sub == "sing") {
-            connection.SendChatMessage(cities->DebugSingTheChord(city.heart), 1);
+            source.SendSuccess(connection, cities->DebugSingTheChord(city.heart), true);
             return;
         }
         if (sub == "advance") {
-            connection.SendChatMessage(cities->DebugAdvance(city.heart), 1);
+            source.SendSuccess(connection, cities->DebugAdvance(city.heart), true);
             return;
         }
         if (sub == "reset") {
-            connection.SendChatMessage(cities->DebugReset(city.heart, source.sender), 1);
+            source.SendSuccess(connection, cities->DebugReset(city.heart, executor ? executor : source.sender), true);
             return;
         }
 

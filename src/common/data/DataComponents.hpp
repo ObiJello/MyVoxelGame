@@ -19,7 +19,7 @@
 //    4  CUSTOM_NAME                   11  EQUIPPABLE
 //    5  ITEM_NAME                     12  BLOCKS_ATTACKS
 //    6  LORE                          13  BUNDLE_CONTENTS
-//    7  RARITY                        14  SULFUR_CUBE_BUCKET
+//    7  RARITY                        14  (was SULFUR_CUBE_BUCKET, now SULFUR_CUBE_CONTENT 311)
 //   15  POTION_CONTENTS               16  POTION_DURATION_SCALE
 //   17  SUSPICIOUS_STEW_EFFECTS       18  WRITTEN_BOOK_CONTENT
 //   19  WRITABLE_BOOK_CONTENT         20  DYED_COLOR
@@ -40,6 +40,13 @@
 //   89  INSTRUMENT                    90  POT_DECORATIONS
 //   91  CONTAINER
 //  100  PORTAL_GUN_NEXT_COLOR        101  PORTAL_GUN_INSTANCE_ID
+//
+// The MC 26.3 component groups (components/*.hpp) own these ranges:
+//  200-209 AttributeComponents     210-229 StackComponents
+//  230-249 ConsumableComponents    250-269 ToolComponents
+//  270-289 WeaponComponents        290-339 EntityDataComponents
+//  340-369 BlockDataComponents     370-399 ItemFeatureComponents
+//  400-429 GameplayDataComponents  430-449 PresentationComponents
 #pragma once
 
 #include "DataComponentType.hpp"
@@ -51,6 +58,8 @@
 #include "BookContent.hpp"                 // WrittenBookContent, WritableBookContent
 #include "../world/map/MapTypes.hpp"       // Maps::MapDecorations, Maps::MapPostProcessing
 #include "FireworkExplosion.hpp"            // FireworkExplosion (FIREWORKS / FIREWORK_EXPLOSION)
+#include "NbtCompoundValue.hpp"             // BucketEntityData::extra (MC CustomData)
+#include "../text/TextComponent.hpp"         // ItemLore
 #include "../core/Features.hpp"
 #include <array>
 #include <cmath>
@@ -61,20 +70,54 @@
 
 namespace Game {
 
-    // Mirrors net.minecraft.world.item.component.Tool (a record carrying the
-    // mining-speed table + correct-tool tier). We collapse MC's "rules list"
-    // (per-block-tag overrides) into a single (toolType, tier, miningSpeed)
-    // tuple — sufficient for vanilla tools where the speed is uniform across
-    // the entire mineable/<tag> set.
+    struct Block;
+
+    // Mirrors net.minecraft.world.item.component.Tool, every field:
+    // (rules, default_mining_speed, damage_per_block,
+    //  can_destroy_blocks_in_creative). A rule is a block HolderSet with an
+    // optional mining speed and an optional correct-for-drops verdict;
+    // getMiningSpeed / isCorrectForDrops take the FIRST rule that matches
+    // the block AND carries the asked-for value. Vanilla tools are built
+    // exactly as ToolMaterial.applyToolProperties / applySwordProperties /
+    // ShearsItem / MaceItem / TridentItem.createToolProperties do
+    // (ToolComponents.hpp's builders). Rule block sets are HolderSet entries
+    // as written ("#minecraft:mineable/pickaxe", "minecraft:cobweb"),
+    // resolved against the block's tags at query time
+    // (BlockMatchesHolderSet).
     struct Tool {
-        ToolType   type        = ToolType::None;
-        MiningTier tier        = MiningTier::Wood;
-        float      miningSpeed = 1.0f;
+        struct Rule {
+            std::vector<std::string> blocks;
+            std::optional<float>     speed;             // POSITIVE_FLOAT
+            std::optional<bool>      correctForDrops;
+
+            // Tool.Rule.minesAndDrops / deniesDrops / overrideSpeed.
+            static Rule MinesAndDrops(std::vector<std::string> blocks, float speed) {
+                return Rule{std::move(blocks), speed, true};
+            }
+            static Rule DeniesDrops(std::vector<std::string> blocks) {
+                return Rule{std::move(blocks), std::nullopt, false};
+            }
+            static Rule OverrideSpeed(std::vector<std::string> blocks, float speed) {
+                return Rule{std::move(blocks), speed, std::nullopt};
+            }
+        };
+
+        std::vector<Rule> rules;
+        float defaultMiningSpeed = 1.0f;
         // MC Tool.damagePerBlock (codec default 1): the wear Item.mineBlock
         // deals per block with a non-zero destroy time. Swords, the mace and
         // the trident carry 2 (ToolMaterial.applySwordProperties, their
         // createToolProperties).
-        int        damagePerBlock = 1;
+        int   damagePerBlock = 1;
+        // MC Tool.canDestroyBlocksInCreative (default true): false on the
+        // swords, the mace and the trident — a creative player swinging one
+        // breaks nothing (Item.canDestroyBlock).
+        bool  canDestroyBlocksInCreative = true;
+
+        // Tool.getMiningSpeed(state) / isCorrectForDrops(state). Defined in
+        // ToolComponents.cpp.
+        float GetMiningSpeed(const Block& block) const;
+        bool  IsCorrectForDrops(const Block& block) const;
     };
 
     // Mirrors the Weapon record — world/item/component/Weapon.java:
@@ -98,22 +141,52 @@ namespace Game {
     };
 
     // Mirrors world/item/consume_effects/ConsumeEffect.java — a sealed
-    // interface with 5 record implementations. Data-only here: the appliers
-    // are log-stubbed until the status-effect / teleport systems exist, but
-    // the effect LIST is carried faithfully so food definitions are complete.
+    // interface with 5 record implementations, dispatched on the registered
+    // type ("minecraft:apply_effects" …). One struct carries every shape;
+    // the fields a type does not use keep their defaults (and are neither
+    // written nor read for it). Applied by ConsumableBehavior::
+    // ApplyConsumeEffect — on consume (Consumable.onConsumeEffects) and on a
+    // death protection's use (DeathProtection.deathEffects).
     struct ConsumeEffect {
         enum class Type : uint8_t {
-            ApplyStatusEffects   = 0,  // ApplyStatusEffectsConsumeEffect.java
-            RemoveStatusEffects  = 1,  // RemoveStatusEffectsConsumeEffect.java
-            ClearAllStatusEffects= 2,  // ClearAllStatusEffectsConsumeEffect.java
-            TeleportRandomly     = 3,  // TeleportRandomlyConsumeEffect.java
-            PlaySound            = 4,  // PlaySoundConsumeEffect.java
+            ApplyStatusEffects   = 0,  // apply_effects       ApplyStatusEffectsConsumeEffect
+            RemoveStatusEffects  = 1,  // remove_effects      RemoveStatusEffectsConsumeEffect
+            ClearAllStatusEffects= 2,  // clear_all_effects   ClearAllStatusEffectsConsumeEffect
+            TeleportRandomly     = 3,  // teleport_randomly   TeleportRandomlyConsumeEffect
+            PlaySound            = 4,  // play_sound          PlaySoundConsumeEffect
         };
-        Type        type = Type::PlaySound;
-        // Freeform payload until the target systems exist: effect slugs +
-        // durations for the status types, sound event name for PlaySound,
-        // diameter for TeleportRandomly. Logged on consume.
-        std::string payload;
+        Type type = Type::ClearAllStatusEffects;
+
+        // apply_effects (effects, probability — floatRange(0, 1), default 1).
+        std::vector<MobEffectInstance> effects;
+        float                          probability = 1.0f;
+        // remove_effects (effects: HolderSet<MobEffect>) — the holder set's
+        // raw entries: effect ids ("minecraft:poison") or one "#tag".
+        std::vector<std::string>       removeEffects;
+        // teleport_randomly (diameter — POSITIVE_FLOAT, default 16;
+        // directional_particles, default true).
+        float                          diameter = 16.0f;
+        bool                           directionalParticles = true;
+        // play_sound (sound — a sound event id, "entity.player.burp").
+        std::string                    sound;
+
+        static ConsumeEffect ApplyEffects(std::vector<MobEffectInstance> list, float chance = 1.0f) {
+            ConsumeEffect e; e.type = Type::ApplyStatusEffects; e.effects = std::move(list); e.probability = chance;
+            return e;
+        }
+        static ConsumeEffect RemoveEffects(std::vector<std::string> ids) {
+            ConsumeEffect e; e.type = Type::RemoveStatusEffects; e.removeEffects = std::move(ids);
+            return e;
+        }
+        static ConsumeEffect ClearAllEffects() { return ConsumeEffect{}; }
+        static ConsumeEffect TeleportRandomlyBy(float diameter = 16.0f) {
+            ConsumeEffect e; e.type = Type::TeleportRandomly; e.diameter = diameter;
+            return e;
+        }
+        static ConsumeEffect PlaySoundEvent(std::string soundId) {
+            ConsumeEffect e; e.type = Type::PlaySound; e.sound = std::move(soundId);
+            return e;
+        }
     };
 
     // Mirrors the Consumable record — Consumable.java:32:
@@ -121,7 +194,7 @@ namespace Game {
     struct Consumable {
         float                      consumeSeconds      = 1.6f;  // DEFAULT_CONSUME_SECONDS (:33)
         ItemUseAnimation           animation           = ItemUseAnimation::EAT;
-        std::string                sound               = "entity.generic.eat"; // Holder<SoundEvent> → name (log-stub)
+        std::string                sound               = "entity.generic.eat"; // Holder<SoundEvent> → its id
         bool                       hasConsumeParticles = true;
         std::vector<ConsumeEffect> onConsumeEffects;
 
@@ -134,23 +207,13 @@ namespace Game {
     // NOTE: `saturation` is the FINAL saturation value (MC's Builder converts
     // saturationModifier via FoodConstants.saturationByModifier at build time
     // — FoodProperties.java:60-62); our FoodDefs table does the same.
-    // MC DataComponents.SULFUR_CUBE_CONTENT (the swallowed block, an
-    // ItemStackTemplate) + the slice of BUCKET_ENTITY_DATA a sulfur cube
-    // writes (Bucketable.saveDefaultDataToBucketTag + SulfurCube.
-    // saveToBucketTag: age, age_locked; NoAI). One component here — the
-    // bucket of sulfur cube is the only item that carries either.
-    struct SulfurCubeBucketData {
-        std::string bodyItem;      // item slug of the swallowed block, "" = none
-        int         age = 0;
-        bool        ageLocked = false;
-        bool        noAi = false;
-    };
-
-    // MC DataComponents.BUCKET_ENTITY_DATA (a CustomData compound) as the
-    // mob buckets write it: Bucketable.saveDefaultDataToBucketTag's keys —
-    // each boolean only written when true, so false here IS "absent" — plus
-    // the per-type extras (Axolotl / Tadpole: Age, AgeLocked; Axolotl:
-    // HuntingCooldown). The sulfur cube keeps its own SULFUR_CUBE_BUCKET.
+    // MC DataComponents.BUCKET_ENTITY_DATA — a CustomData compound. The keys
+    // the mob buckets write and read (Bucketable.saveDefaultDataToBucketTag's
+    // — each boolean only written when true, so false here IS "absent" —
+    // plus the per-type extras: Axolotl / Tadpole Age, AgeLocked; Axolotl
+    // HuntingCooldown) are kept typed; EVERY other key (a sulfur cube's
+    // "age" / "age_locked", anything a /give or a datapack puts there)
+    // rides in `extra`, so the whole compound round-trips.
     struct BucketEntityData {
         bool noAi = false;                     // "NoAI"
         bool silent = false;                   // "Silent"
@@ -162,6 +225,7 @@ namespace Game {
         std::optional<int32_t> age;            // "Age"
         std::optional<bool>    ageLocked;      // "AgeLocked"
         std::optional<int64_t> huntingCooldown;// "HuntingCooldown"
+        NbtCompoundValue       extra;          // every other key, verbatim
     };
 
     struct FoodProperties {
@@ -197,11 +261,13 @@ namespace Game {
         }
     }
 
-    // Mirrors the ItemLore record — ItemLore.java (list of Components; plain
-    // strings here — no rich-text). MAX_LINES = 256 (ItemLore.java:22),
-    // enforced at the wire decode.
+    // Mirrors the ItemLore record — ItemLore.java: a list of text
+    // Components, drawn over LORE_STYLE (DARK_PURPLE, ITALIC — see
+    // PresentationComponents.hpp). MAX_LINES = 256 (ItemLore.java:22),
+    // enforced by the codecs.
     struct ItemLore {
-        std::vector<std::string> lines;
+        static constexpr size_t kMaxLines = 256;
+        std::vector<Text::Component> lines;
     };
 
     // Mirrors the BundleContents record — BundleContents.java:21-29. `items`
@@ -248,23 +314,25 @@ namespace Game {
         bool CanBeEquippedBy(std::string_view entityTypeId) const;
     };
 
-    // Mirrors the BlocksAttacks record — BlocksAttacks.java:30. The full data
-    // shape is carried (so shield definitions match Items.java verbatim) but
-    // the damage math is unused — no combat system. What IS consumed:
-    // blockDelayTicks() gates ServerPlayer::isBlocking(), and the sound names
-    // are log-stub fodder.
+    // Mirrors the BlocksAttacks record — BlocksAttacks.java, every field.
+    // LivingEntity::Hurt runs its math for players and mobs alike
+    // (applyItemBlocking → resolveBlockedDamage / hurtBlockingItem /
+    // onBlocked, Player.blockUsingItem → disable); the helpers are in
+    // components/WeaponComponents.hpp.
     struct BlocksAttacks {
         float blockDelaySeconds    = 0.0f;
         float disableCooldownScale = 1.0f;
-        // DamageReduction record — BlocksAttacks.java:89 (type filter omitted
-        // — no damage-type registry).
+        // DamageReduction record. `type` is the Optional<HolderSet<
+        // DamageType>> filter ("#minecraft:is_projectile", ids); empty = any
+        // damage type. Kept last so {angle, base, factor} initialisers hold.
         struct DamageReduction {
             float horizontalBlockingAngle = 90.0f;
             float base   = 0.0f;
             float factor = 1.0f;
+            std::vector<std::string> type;
         };
         std::vector<DamageReduction> damageReductions{DamageReduction{}};
-        // ItemDamageFunction record — BlocksAttacks.java:106; DEFAULT {1,0,1} (:117).
+        // ItemDamageFunction record; DEFAULT {1, 0, 1}.
         struct ItemDamageFunction {
             float threshold = 1.0f;
             float base      = 0.0f;
@@ -272,9 +340,13 @@ namespace Game {
         };
         ItemDamageFunction itemDamage{};
         std::string blockSound;     // Optional<Holder<SoundEvent>> → name ("" = none)
-        std::string disableSound;
+        std::string disableSound;   // MC's "disabled_sound"
+        // Optional<HolderSet<DamageType>> bypassed_by — a damage type in it
+        // is never blocked (the shield's #minecraft:bypasses_shield). Empty
+        // = none.
+        std::vector<std::string> bypassedBy;
 
-        // BlocksAttacks.blockDelayTicks — :71-73.
+        // BlocksAttacks.blockDelayTicks — Math.round(seconds * 20).
         int blockDelayTicks() const {
             return static_cast<int>(std::round(blockDelaySeconds * 20.0f));
         }
@@ -392,7 +464,6 @@ namespace Game::DataComponents {
     // Component in MC; plain string here — MC renders it italic, our font
     // has no italics). Wins over ITEM_NAME in the tooltip name line.
     extern const DataComponentType<std::string> CUSTOM_NAME;
-    extern const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET;
     // MC DataComponents.BUCKET_ENTITY_DATA — what a fish / axolotl / tadpole
     // bucket carries of its mob (Bucketable.saveToBucketTag).
     extern const DataComponentType<BucketEntityData> BUCKET_ENTITY_DATA;
@@ -642,3 +713,15 @@ namespace Game::DataComponents {
 #endif
 
 } // namespace Game::DataComponents
+
+// The MC 26.3 component groups (one header each; see their own comments).
+#include "components/AttributeComponents.hpp"
+#include "components/StackComponents.hpp"
+#include "components/ConsumableComponents.hpp"
+#include "components/ToolComponents.hpp"
+#include "components/WeaponComponents.hpp"
+#include "components/EntityDataComponents.hpp"
+#include "components/BlockDataComponents.hpp"
+#include "components/ItemFeatureComponents.hpp"
+#include "components/GameplayDataComponents.hpp"
+#include "components/PresentationComponents.hpp"

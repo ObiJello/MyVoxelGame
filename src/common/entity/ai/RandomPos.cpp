@@ -414,6 +414,41 @@ namespace Game::RandomPos {
         }, scoring);
     }
 
+    std::optional<glm::dvec3> GetLandPosTowards(PathfinderMob& mob, int horizontalDist,
+                                                int verticalDist, const glm::dvec3& towardsPos) {
+        if (!mob.Level()) return std::nullopt;
+        JavaRandom& rng = mob.Level()->Random();
+        const IBlockAccess* blocks = mob.Level()->Blocks();
+        const glm::dvec3 toward = towardsPos - mob.position;
+        const bool restrict = MobRestricted(mob, horizontalDist);
+
+        return BestOf(mob, [&](glm::ivec3& out) {
+            // LandRandomPos.getPosInDirection(mob, 0, xz, y, dir, restrict):
+            // generateRandomDirectionWithinRadians(…, PI/2).
+            glm::ivec3 dir;
+            if (!GenerateRandomDirectionWithinRadians(rng, horizontalDist, verticalDist, toward.x, toward.z,
+                                                      1.5707963705062866, dir)) {
+                return false;
+            }
+            // LandRandomPos.generateRandomPosTowardDirection, then
+            // movePosUpOutOfSolid (never water, never a malus) — as GetLandPos.
+            glm::ivec3 candidate = GenerateRandomPosTowardDirection(mob, horizontalDist, rng, dir);
+            if (IsOutsideLimits(candidate))               return false;
+            if (restrict && !mob.IsWithinHome(candidate)) return false;
+            if (!IsStable(mob, candidate))                return false;
+            if (blocks) {
+                while (candidate.y < 320 &&
+                       BlockRegistry::HasCollision(blocks->GetBlock(candidate.x, candidate.y, candidate.z))) {
+                    ++candidate.y;
+                }
+                if (blocks->ContainsWater(candidate.x, candidate.y, candidate.z)) return false;
+            }
+            if (HasMalus(mob, candidate)) return false;
+            out = candidate;
+            return true;
+        });
+    }
+
     std::optional<glm::dvec3> GetLandPosAway(PathfinderMob& mob, double minHorizontalDist,
                                              double maxHorizontalDist, int verticalDist,
                                              const glm::dvec3& avoidPos) {

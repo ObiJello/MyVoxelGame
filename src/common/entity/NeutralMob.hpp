@@ -54,6 +54,13 @@ namespace Game {
         LivingEntity* GetPersistentAngerTarget();      // non-const: resolves lazily
         void SetPersistentAngerTarget(LivingEntity* target);
         void SetPersistentAngerTargetUuid(const Uuid& uuid) { m_angryAtRef.SetUnresolved(uuid); }
+        // MC readPersistentAngerSaveData's tail: setTarget(the "angry_at"
+        // entity) — done on the mob's first anger update after the load,
+        // once it stands in a level that can resolve the reference.
+        void RestoreAngerTargetOnLoad(const Uuid& uuid) {
+            m_angryAtRef.SetUnresolved(uuid);
+            m_restoreTargetFromRef = true;
+        }
         const EntityRef& AngryAtRef() const { return m_angryAtRef; }
 
         // Each implementer samples ITS OWN PERSISTENT_ANGER_TIME — all six use
@@ -114,6 +121,7 @@ namespace Game {
         Mob*          m_neutralSelf;
         int64_t       m_persistentAngerEndTime = kNoAngerEndTime;
         EntityRef     m_angryAtRef;
+        bool          m_restoreTargetFromRef = false;
     };
 
 } // namespace Game

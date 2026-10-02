@@ -288,13 +288,38 @@ namespace Game {
                              const std::function<void(Attribute, const AttributeModifier&)>& consumer);
 
         // A player attribute as its client and ServerPlayer (which keep no
-        // AttributeMap) read it: `base`, the worn items' enchantment
-        // modifiers (collectEquipmentChanges' forEachModifier), the
+        // AttributeMap) read it: `base`, the worn items' modifiers —
+        // ATTRIBUTE_MODIFIERS entries and enchantment effects alike
+        // (collectEquipmentChanges' ItemStack.forEachModifier) — the
         // location-effect modifiers already folded into `locationModifiers`
         // (may be null), and the effect templates — MC's one fold.
-        double PlayerAttributeValue(Attribute attribute, double base, Inventory& inventory,
+        double PlayerAttributeValue(Attribute attribute, double base, const Inventory& inventory,
                                     const std::vector<MobEffectInstance>& effects,
                                     const AttributeMap* locationModifiers = nullptr);
+        // The same from the player's own base (PlayerBaseAttributeValue).
+        inline double PlayerAttributeValue(Attribute attribute, const Inventory& inventory,
+                                           const std::vector<MobEffectInstance>& effects,
+                                           const AttributeMap* locationModifiers = nullptr) {
+            return PlayerAttributeValue(attribute, PlayerBaseAttributeValue(attribute), inventory, effects,
+                                        locationModifiers);
+        }
+
+        // The player's whole attribute instance — MC's one AttributeInstance
+        // on the player: `own`'s row (the player's base value and its own
+        // modifiers: /attribute's permanent ones, the step-height rule's;
+        // Player.createAttributes' defaults when `own` is null or lacks the
+        // row), then the worn items', the location effects' and the status
+        // effects' modifiers. What /attribute reads and what every player
+        // attribute value below folds.
+        AttributeInstance PlayerAttributeInstance(Attribute attribute, const AttributeMap* own,
+                                                  const Inventory& inventory,
+                                                  const std::vector<MobEffectInstance>& effects,
+                                                  const AttributeMap* locationModifiers = nullptr);
+        inline double PlayerAttributeValue(Attribute attribute, const AttributeMap* own, const Inventory& inventory,
+                                           const std::vector<MobEffectInstance>& effects,
+                                           const AttributeMap* locationModifiers = nullptr) {
+            return PlayerAttributeInstance(attribute, own, inventory, effects, locationModifiers).GetValue();
+        }
 
     } // namespace EnchantmentHelper
 } // namespace Game

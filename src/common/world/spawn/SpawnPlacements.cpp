@@ -793,6 +793,13 @@ namespace Game {
     bool CheckSpawnRules(EntityTypeId type, const SpawnRuleContext& ctx,
                          const glm::ivec3& pos) {
         EntityLevel& level = ctx.level;
+        // MC SpawnPlacements.checkSpawnRules' own first line: a type that is
+        // not allowed in peaceful never passes on PEACEFUL, whatever its
+        // predicate says (hoglins, zombified piglins, phantoms, the mod ports'
+        // hostiles — predicates that do not test the difficulty themselves).
+        if (GetEntityTypeInfo(type).notInPeaceful && level.GetDifficulty() == Difficulty::Peaceful) {
+            return false;
+        }
         switch (type) {
             // Monster.checkMonsterSpawnRules rows.
             case EntityTypeId::Bogged:

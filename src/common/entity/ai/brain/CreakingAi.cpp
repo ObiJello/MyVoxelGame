@@ -6,6 +6,8 @@
 #include "common/entity/ai/brain/CoreBehaviors.hpp"
 #include "common/entity/mobs/AnimatedMobs.hpp"
 
+#include <algorithm>
+
 namespace Game {
 
     namespace {
@@ -35,37 +37,6 @@ namespace Game {
                 auto* creaking = dynamic_cast<Creaking*>(&body);
                 return creaking && creaking->CanMove()
                     && MeleeAttack::CheckExtraStartConditions(level, body);
-            }
-        };
-
-        // MC CreakingAi.isAttackTargetStillReachable, wrapped in
-        // StopAttackingIfTargetInvalid: the target stays valid only while it
-        // is still in NEAREST_VISIBLE_ATTACKABLE_PLAYERS.
-        class CreakingStopAttacking : public Behavior {
-        public:
-            CreakingStopAttacking()
-                : Behavior({ { MemoryModule::AttackTarget, MemoryStatus::ValuePresent } },
-                           1) {}
-            const char* DebugString() const override { return "CreakingStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
-                Brain* brain = body.GetBrain();
-                if (!brain) return false;
-                Entity* target = brain->GetEntity(MemoryModule::AttackTarget);
-                auto* living = dynamic_cast<LivingEntity*>(target);
-
-                bool reachable = false;
-                if (living && living->IsAlive()) {
-                    if (const std::vector<Entity*>* players = brain->GetEntityList(
-                            MemoryModule::NearestVisibleAttackablePlayers)) {
-                        for (Entity* e : *players) {
-                            if (e == target) { reachable = true; break; }
-                        }
-                    }
-                }
-                if (!reachable) brain->EraseMemory(MemoryModule::AttackTarget);
-                return true;
             }
         };
 
@@ -124,7 +95,18 @@ namespace Game {
         std::vector<BehaviorPtr> fight;
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(1.0f));
         fight.push_back(std::make_unique<CreakingMeleeAttack>(40));
-        fight.push_back(std::make_unique<CreakingStopAttacking>());
+        // MC StopAttackingIfTargetInvalid.create(!isAttackTargetStillReachable):
+        // the target stays valid only while it is still one of
+        // NEAREST_VISIBLE_ATTACKABLE_PLAYERS.
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(
+            [](EntityLevel&, Mob& body, LivingEntity& target) {
+                const Brain* b = body.GetBrain();
+                const std::vector<Entity*>* players =
+                    b ? b->GetEntityList(MemoryModule::NearestVisibleAttackablePlayers) : nullptr;
+                if (!players || !target.IsPlayer()) return true;
+                return std::find(players->begin(), players->end(),
+                                 static_cast<Entity*>(&target)) == players->end();
+            }));
         brain.AddActivityWithConditions(
             Activity::Fight, 10, std::move(fight),
             { MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent } });

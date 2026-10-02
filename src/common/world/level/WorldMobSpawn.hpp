@@ -14,6 +14,10 @@
 
 #include <glm/glm.hpp>
 #include <functional>
+#include <memory>
+#include <string_view>
+
+namespace World { class NBTTagCompound; }
 
 namespace Game {
 
@@ -50,6 +54,19 @@ namespace Game {
     // nether portal's zombified-piglin spawn asks it. False with no server.
     bool AnyPlayerCloseEnoughForSpawning(DimensionId dimension, const glm::ivec3& pos);
 
+    // MC Entity.saveWithoutId for a block entity that keeps a mob inside it
+    // (BeehiveBlockEntity.Occupant.of): the mob's full saved compound, `id`
+    // left out. Null when the mob cannot be saved.
+    std::shared_ptr<::World::NBTTagCompound> SaveMobData(const Mob& mob);
+
+    // MC EntityType.loadEntityRecursive + Level.addFreshEntity for a stored
+    // mob (BeehiveBlockEntity.releaseOccupant): builds `typeSlug` ("bee") in
+    // `dimension`, applies `data`, lets `place` position it, adds it to the
+    // level. The new mob, or null when it could not be made or added.
+    Mob* SpawnMobFromSavedData(DimensionId dimension, std::string_view typeSlug,
+                               const ::World::NBTTagCompound& data,
+                               const std::function<void(Mob&)>& place);
+
     struct ItemStack;
 
     // MC EnderEyeItem.use's tail (EnderEyeItem.java:85-101): locate the
@@ -65,9 +82,11 @@ namespace Game {
     // WITHOUT taking the item, which is what stops an eye being wasted in a
     // world that has nowhere to send it — so the caller must not shrink the
     // stack when this answers false.
-    bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack);
-
+    // `thrower` (optional) is the player the USED_ENDER_EYE advancement
+    // trigger is fired for, with the stronghold the eye flies to.
     class IUsePlayer;
+    bool ThrowEnderEye(int dimensionId, const glm::dvec3& from, const ItemStack& stack,
+                       IUsePlayer* thrower = nullptr);
 
     // MC EnderpearlItem.use's server half: spawn a ThrownEnderpearl owned by
     // the throwing player (shootFromRotation, power 1.5, inaccuracy 1.0).

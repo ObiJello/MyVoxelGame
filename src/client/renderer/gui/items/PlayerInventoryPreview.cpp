@@ -2,9 +2,14 @@
 #include "PlayerInventoryPreview.hpp"
 #include "../GuiRenderState.hpp"
 #include "../../entity/StickFigureGeometry.hpp"
+#include "../../entity/MobRenderer.hpp"
+#include "../../entity/SkinnedPlayerPoses.hpp"
+#include "client/entity/Player.hpp"
+#include "client/entity/PlayerSkins.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <algorithm>
 #include <cmath>
 #include <vector>
 
@@ -84,6 +89,104 @@ namespace Render {
             return (uint32_t(a) << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
         }
 
+        // MC InventoryScreen.extractEntityInInventoryFollowsMouse for a
+        // Minecraft-skin look: the player model, its armour and held items,
+        // captured by MobRenderer (CaptureForGui's contract — the capture
+        // MountInventoryScreen draws a mount with) and drawn as depth-tested
+        // QuadCommands through MC's GUI transform. False when it cannot be
+        // drawn (no renderer yet, no skin): the caller falls back to the
+        // stick figure.
+        bool RenderSkinnedPlayerInInventory(GuiGraphics& g, GuiRenderState* rs,
+                                            int x0, int y0, int x1, int y1,
+                                            int size, float offsetY,
+                                            float xAngle, float yAngle,
+                                            const StickFigurePose& base) {
+            MobRenderer* renderer = MobRenderer::Instance();
+            if (!renderer) return false;
+
+            // The body as it is (crouch, walk, what it holds and wears) —
+            // with InventoryScreen's overrides: bodyRot = 180 + xAngle·20,
+            // the head xAngle·20 off it, xRot = −yAngle·20.
+            MobRenderer::SkinnedPlayerPose pose;
+            if (base.player) {
+                pose = LocalSkinnedPose(*base.player, glm::dvec3(0.0), 0.0f, 0.0f, 1.0f, 0u);
+            } else {
+                const Client::PlayerSkins::Textures tex = Client::PlayerSkins::Get().LocalTextures();
+                pose.skin = tex.skin;
+                pose.slim = tex.slim;
+                pose.modelParts = tex.modelParts;
+                pose.cape = tex.cape;
+                pose.passenger = base.isSitting;
+            }
+            if (pose.skin == INVALID_TEXTURE) return false;
+            pose.position = glm::dvec3(0.0);
+            pose.bodyYaw  = 180.0f + xAngle * 20.0f;
+            pose.headYaw  = pose.bodyYaw + xAngle * 20.0f;
+            pose.pitch    = -yAngle * 20.0f;
+            // No light from the level: lightCoords 15728880 (full bright).
+            pose.onFire   = false;
+            pose.bedFacing = -1;
+
+            // rotation = rotateZ(π) · rotateX(yAngle · 20°).
+            glm::mat4 rotation = glm::rotate(glm::mat4(1.0f), 3.1415927f, glm::vec3(0.0f, 0.0f, 1.0f));
+            rotation = glm::rotate(rotation, yAngle * 20.0f * 0.017453292f, glm::vec3(1.0f, 0.0f, 0.0f));
+
+            // Lighting.ENTITY_IN_UI's two lights, given in the box's space
+            // (GUI y down, +z toward the viewer), carried back into the
+            // capture's render space (MountInventoryScreen's derivation).
+            static const glm::vec3 kInventoryLight0 = glm::normalize(glm::vec3( 0.2f, -1.0f, 1.0f));
+            static const glm::vec3 kInventoryLight1 = glm::normalize(glm::vec3(-0.2f, -1.0f, 0.0f));
+            const glm::mat3 normalToGui = glm::mat3(glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, 1.0f, -1.0f)) * rotation);
+            const glm::vec3 light0 = glm::normalize(glm::transpose(normalToGui) * kInventoryLight0);
+            const glm::vec3 light1 = glm::normalize(glm::transpose(normalToGui) * kInventoryLight1);
+
+            static std::vector<MobRenderer::GuiEntityBatch> s_batches;
+            if (!renderer->CapturePlayerSkinForGui(pose, light0, light1, s_batches)) return false;
+
+            // The pose's box height, unscaled (MC boundingBoxHeight / scale):
+            // standing, crouching, or the 0.6 swim / glide box.
+            float boxHeight = 1.8f;
+            if (pose.crouching) boxHeight = 1.5f;
+            if (pose.visuallySwimming || pose.fallFlying || pose.autoSpinAttack) boxHeight = 0.6f;
+
+            // PictureInPictureRenderer.prepare: translate(centre),
+            // scale(size, size, −size); GuiEntityRenderer.renderToTexture:
+            // translate(0, boxHeight / 2 + offsetY, 0), rotate(rotation).
+            const float centerX = static_cast<float>(x0 + x1) * 0.5f;
+            const float centerY = static_cast<float>(y0 + y1) * 0.5f;
+            glm::mat4 m = glm::translate(glm::mat4(1.0f), glm::vec3(centerX, centerY, 0.0f));
+            m = glm::scale(m, glm::vec3(static_cast<float>(size), static_cast<float>(size),
+                                        -static_cast<float>(size)));
+            m = glm::translate(m, glm::vec3(0.0f, boxHeight / 2.0f + offsetY, 0.0f));
+            m = m * rotation;
+
+            g.EnableScissor(x0, y0, x1, y1);
+            for (const MobRenderer::GuiEntityBatch& batch : s_batches) {
+                for (size_t i = 0; i + 2 < batch.triangles.size(); i += 3) {
+                    const ModelVertex* v[3] = { &batch.triangles[i], &batch.triangles[i + 1],
+                                                &batch.triangles[i + 2] };
+                    QuadCommand q;
+                    q.texture = batch.texture;
+                    q.useDepth = true;
+                    // The model bakes its shade into the vertex colour.
+                    q.color = PackColorRGBA(v[0]->r, v[0]->g, v[0]->b, v[0]->a);
+                    // A triangle as a quad whose last corner repeats.
+                    for (int c = 0; c < 4; ++c) {
+                        const ModelVertex& mv = *v[std::min(c, 2)];
+                        const glm::vec4 p = m * glm::vec4(mv.x, mv.y, mv.z, 1.0f);
+                        q.px[c] = p.x;
+                        q.py[c] = p.y;
+                        q.pz[c] = p.z;
+                        q.u[c]  = mv.u;
+                        q.v[c]  = mv.v;
+                    }
+                    rs->SubmitQuad(q);
+                }
+            }
+            g.DisableScissor();
+            return true;
+        }
+
     } // namespace
 
     void RenderStickFigureInInventory(GuiGraphics& g,
@@ -108,7 +211,12 @@ namespace Render {
         // projects toward the camera (we orthographic-project X→screenX,
         // Y→screenY, ignore Z). It was 90° while the engine used the old
         // camera yaw convention; the turn direction is unchanged either way.
-        (void)pose;  // base pose (player's world facing) intentionally ignored
+        // A Minecraft skin: MC's player model instead of the figure.
+        if (Client::PlayerSkins::Get().LocalSkinned() &&
+            RenderSkinnedPlayerInInventory(g, rs, x0, y0, x1, y1, size, offsetY, xAngle, yAngle, pose)) {
+            return;
+        }
+
         StickFigurePose effective{};
         effective.bodyYawDeg   = xAngle * 20.0f;
         effective.headYawDeg   = xAngle * 20.0f;
@@ -120,8 +228,13 @@ namespace Render {
         // ringTris holds the head outline + smile as flat annular ring triangles
         // (gap-free at any angle); discTris holds the back-of-head disc which we
         // skip in the inventory preview (always a front-facing view, no need).
+        // The figure's colour, or the launcher's painted figure.
         const auto& colorEntry = Game::LookupPlayerColor(colorId);
-        PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
+        const PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
+        const Game::PlayerAppearance& look = Client::PlayerSkins::Get().Local();
+        const StickFigureColors colors = (!look.IsSkin() && look.hasPaint)
+            ? StickFigureColors::FromPaint(look.paint, [](PlayerColor c) { return c; })
+            : StickFigureColors::Uniform(color);
         std::vector<StickVertex> lineVerts;
         std::vector<StickVertex> ringTris;
         std::vector<StickVertex> discTris;
@@ -129,7 +242,7 @@ namespace Render {
                          /*feetPos*/ glm::vec3(0.0f),
                          effective.headYawDeg, effective.bodyYawDeg,
                          effective.headPitchDeg, effective.isCrouching,
-                         color, effective.isSitting);
+                         colors, effective.isSitting);
 
         // ─── Outer view rotation ─────────────────────────────────────────────
         // We negate Y inside ProjectToScreen (world-Y-up → screen-Y-down) so we

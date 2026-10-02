@@ -25,6 +25,8 @@
 #include "../network/PacketRegistry.hpp"  // Network::PacketBuffer / PacketReader (header-only)
 #include <memory>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace Game {
 
@@ -75,6 +77,12 @@ namespace Game {
         // Look up a component type by its wire id. Returns nullptr for unknown
         // ids (protocol error — caller throws). Defined in DataComponents.cpp.
         const DataComponentTypeBase* ById(uint32_t networkId);
+        // By registry name without the namespace ("max_damage"); nullptr
+        // for a name no component type is registered under.
+        const DataComponentTypeBase* ByName(std::string_view name);
     }
+
+    // Every registered component type (registration order is not kept).
+    std::vector<const DataComponentTypeBase*> AllComponentTypes();
 
 } // namespace Game

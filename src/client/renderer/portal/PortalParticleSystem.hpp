@@ -88,10 +88,13 @@ namespace Render {
         // Server placement remains instant; this is purely visual.
         // The bolt flies in the level the player stands in; EmitProjectileIn
         // puts one in `dimension` (the far leg of a shot through a portal).
+        // `speed` (blocks/s, 0 = the gun's own 57.15): the shot's launch
+        // speed with the shooter's motion added, so the bolt arrives when
+        // the logical projectile does.
         void EmitProjectile(const glm::dvec3& start, const glm::dvec3& end,
-                            bool isOrange);
+                            bool isOrange, float speed = 0.0f);
         void EmitProjectileIn(Game::DimensionId dimension, const glm::dvec3& start,
-                              const glm::dvec3& end, bool isOrange);
+                              const glm::dvec3& end, bool isOrange, float speed = 0.0f);
 
     private:
         // Particle classification — mirrors Portal's two separate continuous

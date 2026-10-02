@@ -197,7 +197,7 @@ namespace Server {
                 job.spaced = n;
             } else if (q == "at") {
                 if (i + 3 >= args.size()) { Reply(connection, "at wants x y z"); return; }
-                const glm::dvec3 origin = sender.getPosition();
+                const glm::dvec3 origin = source.position;
                 if (!ParseCoord(args[i + 1], origin.x, true, at.x) ||
                     !ParseCoord(args[i + 2], origin.y, false, at.y) ||
                     !ParseCoord(args[i + 3], origin.z, true, at.z)) {
@@ -214,7 +214,7 @@ namespace Server {
 
         // Facing, snapped to the nearest cardinal so walls stand square to
         // you. MC yaw convention: 0 faces +Z (south).
-        const float yaw = sender.getYaw();
+        const float yaw = source.rotation.yRot;   // the source's (`/execute rotated|at`)
         const double rad = static_cast<double>(yaw) * 3.14159265358979323846 / 180.0;
         const glm::dvec3 look(-std::sin(rad), 0.0, std::cos(rad));
         glm::ivec3 fwd = std::abs(look.x) >= std::abs(look.z)
@@ -230,7 +230,7 @@ namespace Server {
                                   static_cast<int>(std::floor(at.y)),
                                   static_cast<int>(std::floor(at.z)));
         } else {
-            const glm::dvec3 pos = sender.getPosition();
+            const glm::dvec3 pos = source.position;
             const int forward = job.ForwardExtent() / 2 + 4;
             job.base = glm::ivec3(
                 static_cast<int>(std::floor(pos.x)) + fwd.x * forward,
@@ -238,6 +238,7 @@ namespace Server {
                 static_cast<int>(std::floor(pos.z)) + fwd.z * forward);
         }
 
+        job.dimension = source.dimension;
         const int64_t volume = job.BoundingVolume();
         constexpr int64_t kMaxVolume = 140LL * 1000 * 1000;   // ~512^2 walls, 512-cubes refused
         if (volume > kMaxVolume) {
@@ -252,7 +253,7 @@ namespace Server {
         Log::Info("[Shape] %s building %s of '%s' (%d %d %d) at (%d,%d,%d)",
                   sender.getName().c_str(), form.c_str(), args[0].c_str(),
                   job.a, job.b, job.c, job.base.x, job.base.y, job.base.z);
-        Reply(connection, "Building " + form + " of " + args[0] + "...");
+        source.SendSuccess(connection, "Building " + form + " of " + args[0] + "...", true);
     }
 
 } // namespace Server

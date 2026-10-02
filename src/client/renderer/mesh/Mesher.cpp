@@ -1,5 +1,6 @@
 // File: src/client/renderer/mesh/Mesher.cpp
 #include "Mesher.hpp"
+#include "BlockModelLighter.hpp"
 #include "common/world/block/RedstoneWire.hpp"
 #include "common/world/block/GeneratedBlockStates.hpp"
 #include "MeshCensus.hpp"
@@ -85,7 +86,7 @@ namespace Render {
 
     void Mesher::SetDimension(Game::DimensionId dimension) {
         m_dimension = dimension;
-        if (m_fluidBuilder) m_fluidBuilder->netherCardinalLight = dimension == Game::DimensionId::Nether;
+        if (m_fluidBuilder) m_fluidBuilder->netherCardinalLight = Game::UsesNetherCardinalLight(dimension);
         std::shared_ptr<const std::vector<AoExclusion>> list;
         std::shared_ptr<const std::vector<PortalFace>>  faces;
         {
@@ -300,22 +301,6 @@ namespace Render {
     // Positions outside the cached halo return Air (the fluid builder and AO
     // only ever sample within +/-1 of the section, which the halo covers).
     namespace {
-        // The `age` of a melon/pumpkin stem, for the StemAge tint. Reads the
-        // state definition rather than assuming state index == age: that
-        // happens to hold today (stems declare `age` as their only property)
-        // but would silently produce wrong colours the moment one gained a
-        // second property.
-        int StemAgeOf(Game::BlockID id, Game::BlockStateIndex stateIndex) {
-            const std::string_view v =
-                Game::BlockRegistry::GetStateDefinition(id).ValueOf(stateIndex, "age");
-            int n = 0;
-            for (char c : v) {
-                if (c < '0' || c > '9') return 0;
-                n = n * 10 + (c - '0');
-            }
-            return n;
-        }
-
         class CacheBlockAccess final : public Game::IBlockAccess {
         public:
             CacheBlockAccess(const Game::BlockID (&cache)[18][18][18],
@@ -710,88 +695,9 @@ namespace Render {
                 }
             }
 
-            // MC BlockColors.createDefault, in its own registration order.
-            // Matched on model name so a snapshot bump picks new members of
-            // each family up automatically, the way the mining/collision
-            // classifiers in BlockRegistry already do.
-            {
-                using TS = CachedBlockProps::TintSource;
-                const std::string& n = block.modelName;
-                auto has = [&](std::string_view sub) { return n.find(sub) != std::string::npos; };
-                auto is  = [&](std::string_view ex)  { return n == ex; };
-
-                auto& p = s_blockPropsCache[i];
-                p.tintSource = TS::None;
-
-                // GRASS: grass_block, fern, short_grass, potted_fern, bush,
-                // sugar_cane, and both halves of large_fern / tall_grass.
-                //
-                // The double plants are substring matches because this engine
-                // splits each into two BlockIDs whose model names carry a
-                // _bottom / _top suffix. MC samples the UPPER half's biome at
-                // pos.below(); with biomes on a 4-block grid and a 5x5 blend,
-                // one block of vertical offset changes the result only where a
-                // biome border also happens to fall on a quart boundary, so the
-                // plant's own position is used here.
-                if (is("grass_block") || is("grass_block_snow") ||
-                    is("fern") || is("short_grass") || is("potted_fern") ||
-                    is("bush") || is("sugar_cane") ||
-                    has("large_fern") || has("tall_grass")) {
-                    p.tintSource = TS::Biome;
-                    p.tintChannel = static_cast<uint8_t>(BiomeChannel::Grass);
-                } else if (has("pink_petals") || has("wildflowers")) {
-                    // tintIndex 0 is the petals (already coloured, untinted);
-                    // anything else is the stem, which takes grass.
-                    p.tintSource = TS::FlowerBed;
-                } else if (is("spruce_leaves")) {
-                    p.tintSource = TS::Constant;  // FoliageColor.FOLIAGE_EVERGREEN
-                    p.tintConstant = 0x619961;
-                } else if (is("birch_leaves")) {
-                    p.tintSource = TS::Constant;  // FoliageColor.FOLIAGE_BIRCH
-                    p.tintConstant = 0x80A755;
-                } else if (has("leaf_litter")) {
-                    p.tintSource = TS::Biome;
-                    p.tintChannel = static_cast<uint8_t>(BiomeChannel::DryFoliage);
-                } else if (is("oak_leaves") || is("jungle_leaves") ||
-                           is("acacia_leaves") || is("dark_oak_leaves") ||
-                           is("mangrove_leaves") || is("vine")) {
-                    // EXACTLY MC's foliage list (BlockColors.java:47), not a
-                    // "_leaves" substring. cherry_leaves and pale_oak_leaves
-                    // carry tintindex 0 in their models but are NOT registered
-                    // in vanilla, so they render from their own artwork —
-                    // a substring match turns cherry blossom green.
-                    p.tintSource = TS::Biome;
-                    p.tintChannel = static_cast<uint8_t>(BiomeChannel::Foliage);
-                } else if (is("water") || is("bubble_column") ||
-                           has("water_cauldron")) {
-                    p.tintSource = TS::Biome;
-                    p.tintChannel = static_cast<uint8_t>(BiomeChannel::Water);
-                } else if (is("lily_pad")) {
-                    p.tintSource = TS::Constant;  // BlockColors.LILY_PAD_IN_WORLD
-                    p.tintConstant = 0x208030;
-                } else if (is("attached_melon_stem") || is("attached_pumpkin_stem")) {
-                    p.tintSource = TS::Constant;  // BlockColors.java: -2046180
-                    p.tintConstant = 0xE0C71C;
-                } else if (is("redstone_wire")) {
-                    // MC BlockColors registers RedstoneWireBlock.getColorForPower
-                    // with addColoringState(POWER): the dust texture is
-                    // greyscale and its whole colour — dark red at 0, bright
-                    // red at 15 — comes from the state's power.
-                    p.tintSource = TS::RedstonePower;
-                } else if (is("melon_stem") || is("pumpkin_stem")) {
-                    // BlockColors.java:54-57 — a growing stem fades from green
-                    // to the attached stem's yellow as it ages:
-                    //   ARGB.color(age * 32, 255 - age * 8, age * 4)
-                    // MC also calls addColoringState(StemBlock.AGE, …), which
-                    // is what tells it to re-bake per state; here the per-state
-                    // part is the stateIndex threaded into AddBlockFace.
-                    //
-                    // There is only ONE stem texture (melon_stem.png), greyscale
-                    // — every stage's colour comes from this tint, so without it
-                    // a whole field of stems renders identically grey-green.
-                    p.tintSource = TS::StemAge;
-                }
-            }
+            // MC BlockColors.createDefault (BlockTint.hpp — the same table
+            // the moving-block pass reads).
+            s_blockPropsCache[i].tint = BlockTint::Classify(block.modelName);
             switch (block.renderLayer) {
                 case Game::RenderLayer::Cutout:      s_blockPropsCache[i].renderLayer = RenderLayer::Cutout; break;
                 case Game::RenderLayer::Translucent:  s_blockPropsCache[i].renderLayer = RenderLayer::Translucent; break;
@@ -1218,131 +1124,41 @@ namespace Render {
             }
             return Game::Direction::Up;
         }
-        // MC BlockModelLighter.AdjacencyInfo.corners, by Direction ordinal.
-        constexpr Game::Direction kLightCorners[6][4] = {
-            /* Down  */ { Game::Direction::West, Game::Direction::East, Game::Direction::North, Game::Direction::South },
-            /* Up    */ { Game::Direction::East, Game::Direction::West, Game::Direction::North, Game::Direction::South },
-            /* North */ { Game::Direction::Up,   Game::Direction::Down, Game::Direction::East,  Game::Direction::West  },
-            /* South */ { Game::Direction::West, Game::Direction::East, Game::Direction::Down,  Game::Direction::Up    },
-            /* West  */ { Game::Direction::Up,   Game::Direction::Down, Game::Direction::North, Game::Direction::South },
-            /* East  */ { Game::Direction::Down, Game::Direction::Up,   Game::Direction::North, Game::Direction::South },
-        };
-        // MC prepareQuadShape's faceCubic: the quad lies flat on the side of
-        // its cell it faces (or the block's collision is a full cube), so
-        // its light and shade come from the neighbour cell.
-        bool FaceCubic(Game::Direction dir, const glm::vec3 (&localPos)[4], bool fullCollision) {
-            glm::vec3 mn(32.0f), mx(-32.0f);
-            for (const glm::vec3& p : localPos) { mn = glm::min(mn, p); mx = glm::max(mx, p); }
-            constexpr float kLo = 1.0e-4f, kHi = 0.9999f;
-            switch (dir) {
-                case Game::Direction::Down:  return mn.y == mx.y && (mn.y < kLo || fullCollision);
-                case Game::Direction::Up:    return mn.y == mx.y && (mx.y > kHi || fullCollision);
-                case Game::Direction::North: return mn.z == mx.z && (mn.z < kLo || fullCollision);
-                case Game::Direction::South: return mn.z == mx.z && (mx.z > kHi || fullCollision);
-                case Game::Direction::West:  return mn.x == mx.x && (mn.x < kLo || fullCollision);
-                case Game::Direction::East:  return mn.x == mx.x && (mx.x > kHi || fullCollision);
-            }
-            return false;
-        }
-        // Bilinear weight of a cell-face corner that sits on the `d` side,
-        // at a vertex whose block-local coordinate along d's axis is `p`.
-        inline float CornerWeight(Game::Direction d, const glm::vec3& p) {
-            const int axis = d == Game::Direction::East || d == Game::Direction::West ? 0
-                           : d == Game::Direction::Up   || d == Game::Direction::Down ? 1 : 2;
-            const bool positive = d == Game::Direction::East || d == Game::Direction::Up || d == Game::Direction::South;
-            const float c = std::clamp(p[axis], 0.0f, 1.0f);
-            return positive ? c : 1.0f - c;
-        }
     }
+
+    // BlockModelLighter's view of this mesher: the section snapshot's
+    // caches, exactly what the build reads everywhere else.
+    struct Mesher::LighterLevel {
+        const Mesher& m;
+        Game::BlockState StateAt(int x, int y, int z) const { return m.GetCachedBlockState(x, y, z); }
+        int LightCoordsWith(Game::BlockState s, int x, int y, int z) const { return m.LightCoordsWith(s, x, y, z); }
+        bool LightPermeableAt(int x, int y, int z) const { return m.LightPermeableAt(x, y, z); }
+        float ShadeAt(int x, int y, int z) const {
+            return Game::Lighting::BlockLightProperties::ShadeBrightness(m.GetCachedBlockState(x, y, z));
+        }
+    };
 
     void Mesher::ComputeFaceLight(Game::BlockState state, int worldX, int worldY, int worldZ,
                                   BlockFace face, int cullfaceDir, bool smooth,
                                   const glm::vec3 (&localPos)[4], std::array<uint32_t, 4>& outLight) const {
-        namespace LC = Game::Lighting::LightCoords;
-        using Game::Lighting::BlockLightProperties;
         const Game::Direction dir = DirectionOf(face);
-        const int dx = Game::StepX(dir), dy = Game::StepY(dir), dz = Game::StepZ(dir);
-
-        // MC prepareQuadShape: the quad's bounds decide whether it lies on
-        // the cell boundary (faceCubic: its light comes from the neighbour
-        // cell) and whether it covers the whole face (else facePartial: the
-        // per-vertex weighted blend).
-        const bool faceCubic = FaceCubic(dir, localPos, BlockLightProperties::FullCollision(state));
+        const LighterLevel level{*this};
 
         if (!smooth) {
-            // MC tesselateFlat: a culled quad reads the cell its cullface
-            // names; an unculled one the neighbour when it lies on the face,
-            // else its own cell — both through the block's OWN state
-            // (emission, emissiveRendering).
-            int lx = worldX, ly = worldY, lz = worldZ;
-            if (cullfaceDir >= 0) {
-                const Game::Direction cd = FaceDirToDirection(static_cast<Game::FaceDir>(cullfaceDir));
-                lx += Game::StepX(cd); ly += Game::StepY(cd); lz += Game::StepZ(cd);
-            } else if (faceCubic) {
-                lx += dx; ly += dy; lz += dz;
-            }
-            const uint32_t word = TerrainVertex::LightWord(LightCoordsWith(state, lx, ly, lz));
+            // MC tesselateFlat (BlockModelLighter::QuadLightFlat).
+            Game::Direction cullface{};
+            const bool culled = cullfaceDir >= 0;
+            if (culled) cullface = FaceDirToDirection(static_cast<Game::FaceDir>(cullfaceDir));
+            const uint32_t word = TerrainVertex::LightWord(BlockModelLighter::QuadLightFlat(
+                level, state, worldX, worldY, worldZ, dir, culled ? &cullface : nullptr, localPos));
             outLight = { word, word, word, word };
             return;
         }
 
         // MC prepareQuadAmbientOcclusion, light half.
-        const int bx = faceCubic ? worldX + dx : worldX;
-        const int by = faceCubic ? worldY + dy : worldY;
-        const int bz = faceCubic ? worldZ + dz : worldZ;
-        const Game::Direction (&corners)[4] = kLightCorners[static_cast<int>(dir)];
-        int light[4];
-        bool permeable[4];
-        for (int i = 0; i < 4; ++i) {
-            const Game::Direction c = corners[i];
-            const int cx = bx + Game::StepX(c), cy = by + Game::StepY(c), cz = bz + Game::StepZ(c);
-            light[i] = LightCoordsAt(cx, cy, cz);
-            permeable[i] = LightPermeableAt(cx + dx, cy + dy, cz + dz);
-        }
-        auto diagonal = [&](int a, int b) {
-            const Game::Direction ca = corners[a], cb = corners[b];
-            return LightCoordsAt(bx + Game::StepX(ca) + Game::StepX(cb),
-                                 by + Game::StepY(ca) + Game::StepY(cb),
-                                 bz + Game::StepZ(ca) + Game::StepZ(cb));
-        };
-        // Where both side cells are opaque the diagonal is hidden: MC takes
-        // the first side's light instead (26.x: light0 for all four).
-        const int lightCorner02 = (!permeable[2] && !permeable[0]) ? light[0] : diagonal(0, 2);
-        const int lightCorner03 = (!permeable[3] && !permeable[0]) ? light[0] : diagonal(0, 3);
-        const int lightCorner12 = (!permeable[2] && !permeable[1]) ? light[0] : diagonal(1, 2);
-        const int lightCorner13 = (!permeable[3] && !permeable[1]) ? light[0] : diagonal(1, 3);
-
-        int lightCenter = LightCoordsWith(state, worldX, worldY, worldZ);
-        {
-            const Game::BlockState next = GetCachedBlockState(worldX + dx, worldY + dy, worldZ + dz);
-            if (faceCubic || !BlockLightProperties::SolidRender(next)) {
-                lightCenter = LightCoordsWith(next, worldX + dx, worldY + dy, worldZ + dz);
-            }
-        }
-
-        // The four cell-face corner values (MC _tc1.._tc4) and where each
-        // sits: (c3, c0), (c2, c0), (c2, c1), (c3, c1).
-        const int tc[4] = {
-            LC::SmoothBlend(light[3], light[0], lightCorner03, lightCenter),
-            LC::SmoothBlend(light[2], light[0], lightCorner02, lightCenter),
-            LC::SmoothBlend(light[2], light[1], lightCorner12, lightCenter),
-            LC::SmoothBlend(light[3], light[1], lightCorner13, lightCenter),
-        };
-        static constexpr int kCornerSides[4][2] = { {3, 0}, {2, 0}, {2, 1}, {3, 1} };
-
-        // Each vertex takes the bilinear blend of the four at its position on
-        // the face — for a full face that is exactly one corner's value; for
-        // a partial one it is MC's smoothWeightedBlend with the quad-shape
-        // weights (the vertices sit on the corners of the quad's bounds).
-        for (int v = 0; v < 4; ++v) {
-            float w[4];
-            for (int k = 0; k < 4; ++k) {
-                w[k] = CornerWeight(corners[kCornerSides[k][0]], localPos[v]) *
-                       CornerWeight(corners[kCornerSides[k][1]], localPos[v]);
-            }
-            const int blended = LC::SmoothWeightedBlend(tc[0], tc[1], tc[2], tc[3], w[0], w[1], w[2], w[3]);
-            outLight[static_cast<size_t>(v)] = TerrainVertex::LightWord(blended);
-        }
+        int coords[4];
+        BlockModelLighter::QuadLightSmooth(level, state, worldX, worldY, worldZ, dir, localPos, coords);
+        for (int v = 0; v < 4; ++v) outLight[static_cast<size_t>(v)] = TerrainVertex::LightWord(coords[v]);
     }
 
     void Mesher::BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
@@ -1481,6 +1297,14 @@ namespace Render {
                 return;
             }
         }
+
+        // The sky block draws nothing in the chunk mesh — like the end
+        // portal, its look is a screen-space pass (Render::SkyBlockRenderer:
+        // depth-only faces that leave the view's sky showing). Its model is
+        // a full cube all the same, so it stays an opaque occluder: the
+        // neighbours' faces against it cull and the occlusion graph treats
+        // it as solid.
+        if (blockId == Game::BlockID::SkyBlock) return;
 
         // Buried: all six neighbours opaque and every face of the model culls
         // against one of them, so the face loop below would drop each face at
@@ -1830,50 +1654,16 @@ namespace Render {
         // MC BlockColors.getColor(state, level, pos, tintIndex): the BLOCK
         // selects the resolver, and tintIndex only filters inside it. A face
         // whose block has no registered resolver stays white — vanilla's -1.
+        // The dispatch is BlockTint's, shared with the moving-block pass;
+        // the biome colour is this level's blended one (calculateBlockTint).
         if (m_config.enableBiomeTinting && faceDef.tintIndex >= 0) {
-            using TS = CachedBlockProps::TintSource;
-            const auto& props = s_blockPropsCache[static_cast<size_t>(blockId)];
-            switch (props.tintSource) {
-                case TS::None:
-                    break;
-                case TS::Constant:
-                    tintColor = glm::vec4(((props.tintConstant >> 16) & 0xFF) / 255.0f,
-                                          ((props.tintConstant >> 8) & 0xFF) / 255.0f,
-                                          (props.tintConstant & 0xFF) / 255.0f, 1.0f);
-                    break;
-                case TS::Biome:
-                    tintColor = BlendedBiomeTint(static_cast<BiomeChannel>(props.tintChannel),
-                                                 worldX, worldY, worldZ);
-                    break;
-                case TS::FlowerBed:
-                    // BlockColors.java:37-42 — tintIndex 0 returns -1.
-                    if (faceDef.tintIndex != 0) {
-                        tintColor = BlendedBiomeTint(BiomeChannel::Grass, worldX, worldY, worldZ);
-                    }
-                    break;
-                case TS::RedstonePower: {
-                    const Game::BlockState st = Game::BlockStates::FromIndex(blockId, stateIndex);
-                    const uint32_t c = Game::RedstoneWireColorForPower(st.GetIndex(Game::PropertyId::POWER));
-                    tintColor = glm::vec4(static_cast<float>((c >> 16) & 0xFF) / 255.0f,
-                                          static_cast<float>((c >> 8)  & 0xFF) / 255.0f,
-                                          static_cast<float>( c        & 0xFF) / 255.0f,
-                                          1.0f);
-                    break;
-                }
-                case TS::StemAge: {
-                    // BlockColors.java:54-57, verbatim:
-                    //   ARGB.color(age * 32, 255 - age * 8, age * 4)
-                    // age 0 = (0, 255, 0) bright green; age 7 = (224, 199, 28),
-                    // which is exactly the attached stem's constant, so a stem
-                    // that matures and attaches does not visibly change colour.
-                    const int age = StemAgeOf(blockId, stateIndex);
-                    tintColor = glm::vec4(static_cast<float>(age * 32)       / 255.0f,
-                                          static_cast<float>(255 - age * 8)  / 255.0f,
-                                          static_cast<float>(age * 4)        / 255.0f,
-                                          1.0f);
-                    break;
-                }
-            }
+            const uint32_t c = BlockTint::ColorInWorld(
+                s_blockPropsCache[static_cast<size_t>(blockId)].tint, faceDef.tintIndex,
+                Game::BlockStates::FromIndex(blockId, stateIndex),
+                [&](BiomeChannel channel) { return BlendedBiomeTintPacked(channel, worldX, worldY, worldZ); });
+            tintColor = glm::vec4(static_cast<float>((c >> 16) & 0xFF) / 255.0f,
+                                  static_cast<float>((c >> 8) & 0xFF) / 255.0f,
+                                  static_cast<float>(c & 0xFF) / 255.0f, 1.0f);
         }
 
         // Convert face direction to our BlockFace enum
@@ -1935,9 +1725,10 @@ namespace Render {
         // Both multipliers are OPT-OUT in vanilla, on two different scopes:
         //
         //   • `shade` is per ELEMENT. ModelBlockRenderer.java:259 passes it to
-        //     ClientLevel.getShade(dir, shade), which returns a flat 1.0 for
-        //     every direction when it is false (ClientLevel.java:722) instead of
-        //     the 0.8 / 0.6 / 0.5 face table.
+        //     ClientLevel.getShade(dir, shade), which returns the table's flat
+        //     UP value for every direction when it is false (ClientLevel.java:722
+        //     — 1.0, or 0.9 in the Nether) instead of the 0.8 / 0.6 / 0.5 face
+        //     table (Game::ElementShade; 26.3's shade_direction_override "up").
         //   • `ambientocclusion` is per MODEL (ModelBlockRenderer.java:42).
         //
         // Vanilla's cross-shaped plant parents — block/cross, block/tinted_cross,
@@ -1945,7 +1736,8 @@ namespace Render {
         // made short_grass/tall_grass render at 0.36-0.8 brightness with the two
         // crossed planes at visibly different shades and their bases darkened
         // against the ground block, where vanilla draws them uniformly at 1.0.
-        const float directionalShade = element.shade ? GetDirectionalShade(blockFace) : 1.0f;
+        const float directionalShade =
+            Game::ElementShade(faceDir, element.shade, Game::UsesNetherCardinalLight(m_dimension));
         // MC ModelBlockRenderer.tesselateBlock:42 — the per-model flag AND
         // the Smooth Lighting option (Minecraft.useAmbientOcclusion()). Off
         // takes renderModelFaceFlat's single value per face.
@@ -2159,25 +1951,22 @@ namespace Render {
         return m_biomeAccess ? m_biomeAccess->GetBiome(worldX, worldY, worldZ) : 0;
     }
 
-    // MC ClientLevel.calculateBlockTint — the biome blend.
-    //
-    //   int radius = options.biomeBlendRadius().get();          // default 2
-    //   if (radius == 0) return resolver.getColor(biome(pos), x, z);
-    //   int size = (radius*2+1)^2;
-    //   ...accumulate r/g/b over the square at THIS y...
-    //   return (r/size)<<16 | (g/size)<<8 | (b/size);
-    //
-    // The square is horizontal only — every sample uses the block's own Y. The
-    // per-channel integer average (not a colour-space blend) is what gives
-    // vanilla its characteristic 5-block-wide biome gradient, so anything
-    // cheaper here shows up as a hard seam at every biome border.
+    // MC ClientLevel.calculateBlockTint — the (2r+1)² biome blend at the
+    // block's own Y (BlockTint::BlendedColor), cached per section cell.
     glm::vec4 Mesher::BlendedBiomeTint(BiomeChannel channel,
                                        int worldX, int worldY, int worldZ) const {
+        const uint32_t packed = BlendedBiomeTintPacked(channel, worldX, worldY, worldZ);
+        return glm::vec4(((packed >> 16) & 0xFF) / 255.0f,
+                         ((packed >> 8) & 0xFF) / 255.0f,
+                         (packed & 0xFF) / 255.0f, 1.0f);
+    }
+
+    uint32_t Mesher::BlendedBiomeTintPacked(BiomeChannel channel,
+                                            int worldX, int worldY, int worldZ) const {
         const int lx = worldX - m_sectionBaseWorldX;
         const int ly = worldY - m_sectionBaseWorldY;
         const int lz = worldZ - m_sectionBaseWorldZ;
         static const bool s_noTintCache = std::getenv("OBEY_NO_MESH_TINT_CACHE") != nullptr;   // A/B switch
-        uint32_t packed;
         if (!s_noTintCache && m_biomeCacheGen != 0 && ((lx | ly | lz) & ~15) == 0) {
             const size_t i = (static_cast<size_t>(channel) << 12) |
                              static_cast<size_t>((ly << 8) | (lz << 4) | lx);
@@ -2185,51 +1974,18 @@ namespace Render {
                 m_tintCacheValue[i] = BlendedBiomeColor(channel, worldX, worldY, worldZ);
                 m_tintCacheStamp[i] = m_biomeCacheGen;
             }
-            packed = m_tintCacheValue[i];
-        } else {
-            packed = BlendedBiomeColor(channel, worldX, worldY, worldZ);
+            return m_tintCacheValue[i];
         }
-        return glm::vec4(((packed >> 16) & 0xFF) / 255.0f,
-                         ((packed >> 8) & 0xFF) / 255.0f,
-                         (packed & 0xFF) / 255.0f, 1.0f);
+        return BlendedBiomeColor(channel, worldX, worldY, worldZ);
     }
 
     uint32_t Mesher::BlendedBiomeColor(BiomeChannel channel,
                                        int worldX, int worldY, int worldZ) const {
-        // Options.biomeBlendRadius (0..7), published per build. Radius 0 is
-        // MC's single-lookup fast path — the loop below degenerates to one
-        // sample, which is the same thing without a second code path.
-        const int kRadius = s_activeMeshOptions.biomeBlendRadius;
-        const int kSize = (kRadius * 2 + 1) * (kRadius * 2 + 1);
-
-        int r = 0, g = 0, b = 0;
-        for (int dz = -kRadius; dz <= kRadius; ++dz) {
-            for (int dx = -kRadius; dx <= kRadius; ++dx) {
-                const int sx = worldX + dx;
-                const int sz = worldZ + dz;
-                const uint16_t biome = ResolveBiome(sx, worldY, sz);
-
-                uint32_t c = 0;
-                switch (channel) {
-                    case BiomeChannel::Grass:
-                        c = Game::BiomeRegistry::GrassColor(biome, sx, sz);
-                        break;
-                    case BiomeChannel::Foliage:
-                        c = Game::BiomeRegistry::FoliageColor(biome);
-                        break;
-                    case BiomeChannel::DryFoliage:
-                        c = Game::BiomeRegistry::DryFoliageColor(biome);
-                        break;
-                    case BiomeChannel::Water:
-                        c = Game::BiomeRegistry::WaterColor(biome);
-                        break;
-                }
-                r += (c >> 16) & 0xFF;
-                g += (c >> 8) & 0xFF;
-                b += c & 0xFF;
-            }
-        }
-        return static_cast<uint32_t>(((r / kSize) << 16) | ((g / kSize) << 8) | (b / kSize));
+        // Options.biomeBlendRadius (0..7), published per build; the blend
+        // itself is BlockTint's (MC ClientLevel.calculateBlockTint).
+        return BlockTint::BlendedColor(channel, worldX, worldY, worldZ,
+                                       s_activeMeshOptions.biomeBlendRadius,
+                                       [this](int x, int y, int z) { return ResolveBiome(x, y, z); });
     }
 
     // **NEW**: Grass-specific tinting (tint index 1)
@@ -2948,7 +2704,7 @@ namespace Render {
         // block has to be shaded identically to the one it came from. The
         // level's cardinal lighting picks the table (MC ClientLevel.
         // cardinalLighting: the Nether's up/down faces are 0.9).
-        const bool nether = m_dimension == Game::DimensionId::Nether;
+        const bool nether = Game::UsesNetherCardinalLight(m_dimension);
         switch (face) {
             case BlockFace::PositiveY: return Game::DirectionalShade(Game::FaceDir::Up, nether);
             case BlockFace::NegativeY: return Game::DirectionalShade(Game::FaceDir::Down, nether);
@@ -2981,55 +2737,8 @@ namespace Render {
             outAO[0] = outAO[1] = outAO[2] = outAO[3] = 1.0f;
             return;
         }
-        using Game::Lighting::BlockLightProperties;
-        const Game::Direction dir = DirectionOf(face);
-        const int dx = Game::StepX(dir), dy = Game::StepY(dir), dz = Game::StepZ(dir);
-        const bool faceCubic = FaceCubic(dir, localPos, BlockLightProperties::FullCollision(state));
-        const int bx = faceCubic ? worldX + dx : worldX;
-        const int by = faceCubic ? worldY + dy : worldY;
-        const int bz = faceCubic ? worldZ + dz : worldZ;
-        auto shadeAt = [&](int x, int y, int z) {
-            return BlockLightProperties::ShadeBrightness(GetCachedBlockState(x, y, z));
-        };
-
-        const Game::Direction (&corners)[4] = kLightCorners[static_cast<int>(dir)];
-        float shade[4];
-        bool permeable[4];
-        for (int i = 0; i < 4; ++i) {
-            const Game::Direction c = corners[i];
-            const int cx = bx + Game::StepX(c), cy = by + Game::StepY(c), cz = bz + Game::StepZ(c);
-            shade[i] = shadeAt(cx, cy, cz);
-            permeable[i] = LightPermeableAt(cx + dx, cy + dy, cz + dz);
-        }
-        auto diagonal = [&](int a, int b) {
-            const Game::Direction ca = corners[a], cb = corners[b];
-            return shadeAt(bx + Game::StepX(ca) + Game::StepX(cb),
-                           by + Game::StepY(ca) + Game::StepY(cb),
-                           bz + Game::StepZ(ca) + Game::StepZ(cb));
-        };
-        const float shadeCorner02 = (!permeable[2] && !permeable[0]) ? shade[0] : diagonal(0, 2);
-        const float shadeCorner03 = (!permeable[3] && !permeable[0]) ? shade[0] : diagonal(0, 3);
-        const float shadeCorner12 = (!permeable[2] && !permeable[1]) ? shade[0] : diagonal(1, 2);
-        const float shadeCorner13 = (!permeable[3] && !permeable[1]) ? shade[0] : diagonal(1, 3);
-        // MC: faceCubic ? shade(basePosition) : shade(centerPosition) — the
-        // same cell either way, since base is the centre when not cubic.
-        const float shadeCenter = shadeAt(bx, by, bz);
-
-        const float level[4] = {
-            (shade[3] + shade[0] + shadeCorner03 + shadeCenter) * 0.25f,
-            (shade[2] + shade[0] + shadeCorner02 + shadeCenter) * 0.25f,
-            (shade[2] + shade[1] + shadeCorner12 + shadeCenter) * 0.25f,
-            (shade[3] + shade[1] + shadeCorner13 + shadeCenter) * 0.25f,
-        };
-        static constexpr int kCornerSides[4][2] = { {3, 0}, {2, 0}, {2, 1}, {3, 1} };
-        for (int v = 0; v < 4; ++v) {
-            float ao = 0.0f;
-            for (int k = 0; k < 4; ++k) {
-                ao += level[k] * CornerWeight(corners[kCornerSides[k][0]], localPos[v]) *
-                                 CornerWeight(corners[kCornerSides[k][1]], localPos[v]);
-            }
-            outAO[v] = std::clamp(ao, 0.0f, 1.0f);
-        }
+        const LighterLevel level{*this};
+        BlockModelLighter::QuadShade(level, state, worldX, worldY, worldZ, DirectionOf(face), localPos, outAO);
     }
 
     // Render layer classification — uses thread-local cache when available,

@@ -53,16 +53,15 @@ namespace Server {
                                      "Click to Copy to Clipboard"});
         packet.segments.push_back(
             Network::ChatSegmentData{"]", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
-        connection.SendChatMessage(packet);
+        source.SendSuccess(connection, packet, false);
 
         // Imported Minecraft saves never get SetGenerationSeed called (the
         // launch path only seeds procedurally-created worlds, and level.dat
         // isn't parsed), so the number above is the generation-config default
         // rather than the save's real seed. Say so instead of quietly lying.
         if (g_integratedServer->GetConfig().useMinecraftSave) {
-            connection.SendChatMessage(
-                "Note: this world was imported from a Minecraft save, whose seed isn't read yet - "
-                "the value above is this engine's generator default.", 1);
+            source.SendSuccess(connection, "Note: this world was imported from a Minecraft save, whose seed isn't read yet - "
+                "the value above is this engine's generator default.", false);
         }
 
         Log::Info("[SeedCommand] Reported world seed %lld", static_cast<long long>(seed));

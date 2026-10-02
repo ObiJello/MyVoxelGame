@@ -215,9 +215,9 @@ namespace Server {
             return;
         }
         // commands.playsound.success.single / .multiple
-        connection.SendChatMessage(played == 1
+        source.SendSuccess(connection, played == 1
             ? "Played sound " + sound + " to " + lastName
-            : "Played sound " + sound + " to " + std::to_string(played) + " players", 1);
+            : "Played sound " + sound + " to " + std::to_string(played) + " players", true);
     }
 
 } // namespace Server

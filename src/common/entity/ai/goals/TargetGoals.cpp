@@ -7,7 +7,9 @@
 #include "common/entity/ai/Sensing.hpp"
 #include "common/entity/mobs/Monsters.hpp"
 #include "common/entity/mobs/Animals.hpp"
+#include "common/entity/raid/Raider.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/world/level/GameRules.hpp"
 
 #include <vector>
 
@@ -29,7 +31,9 @@ namespace Game {
         if (!target) target = m_targetMob;
         if (!target) return false;
 
-        if (!target->IsAlive()) return false;
+        // MC: mob.canAttack(target) (alive, not invulnerable/spectator, no
+        // player on Peaceful, the mob's own exclusions), then the scoreboard
+        // team test — no teams exist in this engine, so that one never fails.
         if (!m_mob->CanAttack(*target)) return false;
 
         const double follow = GetFollowDistance();
@@ -69,6 +73,9 @@ namespace Game {
         const int64_t stamp = m_mob->GetLastHurtByMobTimestamp();
         Entity* attacker = m_mob->GetLastHurtByMob();
         if (!attacker || stamp == m_timestamp) return false;
+        // MC: a player hit under universal_anger is ResetUniversalAngerTarget-
+        // Goal's business, not a personal grudge.
+        if (attacker->IsPlayer() && Rules::GetBool(Rules::Id::UniversalAnger)) return false;
 
         LivingEntity* living = dynamic_cast<LivingEntity*>(attacker);
         if (!living || !living->IsAlive()) return false;
@@ -80,16 +87,21 @@ namespace Game {
         // restriction is not pursued — the retaliation leash.
         if (!m_mob->IsWithinHome(living->BlockPosition())) return false;
 
-        // MC uses HURT_BY_TARGETING: ignores line of sight AND invisibility.
-        return m_mob->CanAttack(*living);
+        // MC HURT_BY_TARGETING = forCombat().ignoreLineOfSight()
+        // .ignoreInvisibilityTesting(): the attacker must still be one the mob
+        // may fight (Mob.canAttack) and not an ally (isAlliedTo).
+        return TargetingConditions::ForCombat().IgnoreLineOfSight().IgnoreInvisibility()
+                   .Test(m_mob, *living);
     }
 
     void HurtByTargetGoal::Start() {
-        Entity* attacker = m_mob->GetLastHurtByMob();
-        if (LivingEntity* living = dynamic_cast<LivingEntity*>(attacker)) {
-            m_mob->SetTarget(living);
-            m_targetMob = living;
-        }
+        // MC: setTarget(getLastHurtByMob()); targetMob = getTarget(). The
+        // cache is read back from the mob, not the attacker: a target the mob
+        // refuses (a creeper's goat, a tame animal's owner) must not become
+        // the remembered one CanContinueToUse falls back to — that would keep
+        // this goal running, re-offering a target the mob never takes.
+        m_mob->SetTarget(dynamic_cast<LivingEntity*>(m_mob->GetLastHurtByMob()));
+        m_targetMob = m_mob->GetTarget();
         m_timestamp = m_mob->GetLastHurtByMobTimestamp();
         // Retaliation memory is five times longer than ordinary pursuit.
         m_unseenMemoryTicks = 300;
@@ -102,7 +114,9 @@ namespace Game {
         EntityLevel* level = m_mob->Level();
         if (!level) return;
 
-        LivingEntity* attacker = m_mob->GetTarget();
+        // MC hands every alerted mob getLastHurtByMob() — the attacker, not
+        // whatever the hurt mob ended up targeting.
+        LivingEntity* attacker = dynamic_cast<LivingEntity*>(m_mob->GetLastHurtByMob());
         if (!attacker) return;
 
         // MC's alert box: AABB.unitCubeFromLowerCorner(position) inflated by
@@ -138,6 +152,14 @@ namespace Game {
             if (const auto* tamable = dynamic_cast<const TamableAnimal*>(m_mob)) {
                 const auto* otherTamable = dynamic_cast<const TamableAnimal*>(other);
                 if (!otherTamable || tamable->GetOwner() != otherTamable->GetOwner()) continue;
+            }
+            // MC: `other.isAlliedTo(lastHurtByMob)` — no one is rallied
+            // against an ally: an illager against its kin, or a tame animal
+            // against its owner (TamableAnimal.considersEntityAsAlly).
+            if (Raiders::IsAlliedTo(*other, *attacker)) continue;
+            if (const auto* otherTamable = dynamic_cast<const TamableAnimal*>(other);
+                otherTamable && otherTamable->IsTame() && otherTamable->GetOwner() == attacker) {
+                continue;
             }
             AlertOther(*other, *attacker);
         }
@@ -234,12 +256,26 @@ namespace Game {
         m_conditions.range = follow;
 
         if (m_targetsPlayers) {
-            LivingEntity* nearest = level->GetNearestPlayer(
-                m_mob->position.x, m_mob->GetEyeY(), m_mob->position.z, follow);
-            m_target = (nearest && m_conditions.Test(m_mob, *nearest) &&
-                        (!m_selector || m_selector(*m_mob, *nearest)))
-                           ? nearest
-                           : nullptr;
+            // MC ServerLevel.getNearestPlayer(targetConditions, mob, x, eyeY,
+            // z): the nearest player that PASSES the conditions (selector
+            // included) — not the nearest player, then tested. A creative
+            // player, or one the selector rejects, standing closer must not
+            // hide a valid one further out.
+            std::vector<LivingEntity*> players;
+            level->GetPlayers(players);
+            const double eyeY = m_mob->GetEyeY();
+            LivingEntity* best = nullptr;
+            double bestDistSq = -1.0;
+            for (LivingEntity* player : players) {
+                if (!player || !m_conditions.Test(m_mob, *player)) continue;
+                if (m_selector && !m_selector(*m_mob, *player)) continue;
+                const double dx = player->position.x - m_mob->position.x;
+                const double dy = player->position.y - eyeY;
+                const double dz = player->position.z - m_mob->position.z;
+                const double d = dx * dx + dy * dy + dz * dz;
+                if (bestDistSq == -1.0 || d < bestDistSq) { best = player; bestDistSq = d; }
+            }
+            m_target = best;
             return;
         }
 
@@ -257,6 +293,10 @@ namespace Game {
         LivingEntity* best = nullptr;
         double bestDistSq = 0.0;
         for (Entity* e : nearby) {
+            // MC getEntitiesOfClass(<mob class>) never returns a player; a
+            // player's server view answers the box query but its type id is
+            // a placeholder (PlayerEntityView), so it must not match a type.
+            if (e->IsPlayer()) continue;
             bool wanted = false;
             for (int i = 0; i < m_typeCount; ++i) {
                 if (e->GetType() == m_types[i]) { wanted = true; break; }
@@ -383,9 +423,8 @@ namespace Game {
     }
 
     bool ResetUniversalAngerTargetGoal::CanUse() {
-        // MC gates on the UNIVERSAL_ANGER game rule, which defaults OFF —
-        // see the constant's note in the header.
-        return kUniversalAnger && m_neutral != nullptr && WasHurtByPlayer();
+        // MC gates on the universal_anger game rule (default off).
+        return Rules::GetBool(Rules::Id::UniversalAnger) && m_neutral != nullptr && WasHurtByPlayer();
     }
 
     void ResetUniversalAngerTargetGoal::Start() {

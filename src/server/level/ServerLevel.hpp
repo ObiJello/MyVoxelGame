@@ -73,6 +73,7 @@ namespace Server {
     class MobManager;
     class EndDragonFight;
     class SilentWardenBossBars;
+    class WitherBossEvents;
     class HushStillness;
     class AurelithCities;
     class ChunkKeeper;
@@ -100,17 +101,11 @@ namespace Server {
         // Anvil::SaveRoot::Dimension(dim) adds DIM-1 / DIM1 where applicable;
         // nothing else may. Empty = do not persist.
         std::string savePath;
+        // Applied by ServerLevel to the Nether and End only. The overworld's
+        // seed and world-type customization are pushed by PlatformMain
+        // (ApplyWorldGenSettings); see the ServerLevel constructor.
         int64_t seed           = 0;
         bool    generateStructures = true;
-
-        // World-type customization. Overworld only — the Nether and the End
-        // have no presets in vanilla, and passing "amplified" to a nether
-        // generator would silently select the wrong noise router.
-        std::string worldType     = "default";
-        std::string flatPreset;
-        std::string flatLayers;
-        std::string singleBiome;
-        std::string worldgenTweaks;
 
         // MC ServerChunkCache sizing. The overworld is where players spend
         // their time; a nether cache the same size is ~5000 chunks of resident
@@ -158,6 +153,9 @@ namespace Server {
         // The Silent Warden's boss bar (The Hush) — every level, since the
         // boss can be summoned anywhere. Null only during teardown.
         SilentWardenBossBars*     WardenBossBars() const { return m_wardenBossBars.get(); }
+        // Every wither's boss bar (WitherBossEvents.hpp) — every level. Null
+        // only during teardown.
+        WitherBossEvents*         WitherBossBars() const { return m_witherBossEvents.get(); }
         // The Hush's stillness (HushStillness.hpp) — non-null only for the
         // Hush.
         HushStillness*            Stillness() const { return m_stillness.get(); }
@@ -315,6 +313,7 @@ namespace Server {
         // End only (MC ServerLevel.dragonFight).
         std::unique_ptr<EndDragonFight>           m_dragonFight;
         std::unique_ptr<SilentWardenBossBars>     m_wardenBossBars;
+        std::unique_ptr<WitherBossEvents>         m_witherBossEvents;
         // Hush only.
         std::unique_ptr<HushStillness>            m_stillness;
         std::unique_ptr<AurelithCities>           m_aurelith;

@@ -19,6 +19,7 @@
 
 // Include stb_image for PNG loading
 #include "../../../ext/stb_image/stb_image.h"
+#include "PalettedPermutations.hpp"
 
 // stb_image_write (the atlas debug dumps and the last-world panorama). Its
 // PNG deflate is libdeflate's: stb's own compressor took ~480 ms for one
@@ -232,6 +233,8 @@ namespace Render {
                 } catch (const std::regex_error& e) {
                     Log::Warning("Filter source: bad pattern (%s)", e.what());
                 }
+            } else if (coreType == "paletted_permutations") {
+                ProcessPalettedPermutationsSource(source, texturesRoot, sources);
             } else {
                 Log::Warning("Unknown source type: %s", coreType.c_str());
             }
@@ -288,6 +291,68 @@ namespace Render {
 
             //Log::Debug("  Added texture: %s -> %s", textureKey.c_str(), pngFile.c_str());
         }
+    }
+
+    void AtlasBuilder::ProcessPalettedPermutationsSource(const nlohmann::json& source,
+                                                         const std::string& texturesRoot,
+                                                         std::vector<TextureSource>& sources) {
+        // MC PalettedPermutations.run: for every base texture and every
+        // permutation, the sprite <texture><separator><suffix> — the base
+        // recoloured from the palette_key palette to the permutation's.
+        auto stripNamespace = [](std::string id) {
+            if (id.rfind("minecraft:", 0) == 0) id = id.substr(10);
+            return id;
+        };
+        if (!source.contains("textures") || !source["textures"].is_array() ||
+            !source.contains("palette_key") || !source.contains("permutations") ||
+            !source["permutations"].is_object()) {
+            Log::Warning("paletted_permutations source missing required fields");
+            return;
+        }
+        const std::string separator = source.value("separator", std::string("_"));
+        const auto file = [&](const std::string& id) {
+            return Core::Assets::Locate(texturesRoot + "/" + stripNamespace(id) + ".png");
+        };
+        const std::vector<uint32_t> key = PalettedPermutations::LoadPalette(file(source["palette_key"].get<std::string>()));
+        if (key.empty()) {
+            Log::Error("Failed to load palette image %s", source["palette_key"].get<std::string>().c_str());
+            return;
+        }
+        std::vector<std::pair<std::string, std::vector<uint32_t>>> palettes;
+        for (const auto& [suffix, palette] : source["permutations"].items()) {
+            if (!palette.is_string()) continue;
+            std::vector<uint32_t> target = PalettedPermutations::LoadPalette(file(palette.get<std::string>()));
+            if (target.size() != key.size()) {
+                Log::Warning("Palette %s does not match its key (%zu != %zu)",
+                             palette.get<std::string>().c_str(), target.size(), key.size());
+                continue;
+            }
+            palettes.emplace_back(suffix, std::move(target));
+        }
+        size_t added = 0;
+        for (const auto& textureId : source["textures"]) {
+            if (!textureId.is_string()) continue;
+            const std::string id = stripNamespace(textureId.get<std::string>());
+            int w = 0, h = 0;
+            std::vector<unsigned char> base;
+            if (!LoadPNG(file(id), w, h, base)) {
+                Log::Warning("Unable to find texture %s", id.c_str());
+                continue;
+            }
+            for (const auto& [suffix, target] : palettes) {
+                TextureSource tex;
+                tex.key = id + separator + suffix;
+                tex.path = file(id);
+                tex.width = w;
+                tex.height = h;
+                tex.data = base;
+                tex.generated = PalettedPermutations::Apply(tex.data, key, target);
+                if (!tex.generated) continue;
+                sources.push_back(std::move(tex));
+                ++added;
+            }
+        }
+        Log::Debug("paletted_permutations: %zu sprite(s)", added);
     }
 
     void AtlasBuilder::ProcessSingleSource(const nlohmann::json& source,
@@ -379,6 +444,12 @@ namespace Render {
         size_t failedCount = 0;
 
         for (auto& source : sources) {
+            // A generated sprite (paletted_permutations) already has its
+            // pixels; it carries no animation or mipmap meta of its own.
+            if (source.generated) {
+                loadedCount++;
+                continue;
+            }
             // Check for .mcmeta file first
             std::string mcmetaPath = source.path + ".mcmeta";
             TextureAnimation animation;

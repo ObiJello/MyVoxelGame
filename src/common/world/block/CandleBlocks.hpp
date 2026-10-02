@@ -88,5 +88,15 @@ namespace Game {
     // Wires the candle, candle cake and cake hooks. Called from
     // BlockRegistry_RegisterBehaviors.
     void RegisterCandleBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
+    // MC ComposterBlock (ComposterBlock.cpp).
+    void RegisterComposterBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
+    // MC BeehiveBlock (BeehiveBlock.cpp): honey harvest, comparator, fire.
+    void RegisterBeehiveBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
+
+    // MC ShearsDispenseItemBehavior.tryShearBeehive: a beehive or bee nest
+    // at `pos` full of honey (level 5) is sheared — BEEHIVE_SHEAR, the
+    // honeycomb dropped, the bees let out (BEE_RELEASED) and the honey reset,
+    // the SHEAR game event. False (nothing done) otherwise. Server side.
+    bool TryShearBeehiveFromDispenser(ILevelWrite& level, const glm::ivec3& pos);
 
 } // namespace Game

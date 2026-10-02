@@ -12,6 +12,7 @@
 // world/entity/projectile/arrow/AbstractArrow.java (the weapon's pierce).
 
 #include "common/world/level/FireworkLaunch.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "server/IntegratedServer.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
@@ -131,7 +132,9 @@ namespace Game::FireworkLaunch {
                 if (ammoToUse > source.count) continue;
                 ItemStack used = source;
                 if (ammoToUse == 0) {
+                    // copyWithCount(1), marked INTANGIBLE_PROJECTILE.
                     used.count = 1;
+                    used.components.set(DataComponents::INTANGIBLE_PROJECTILE, true);
                 } else {
                     used.count = ammoToUse;
                     if (i == 0 && slot >= 0) {
@@ -273,6 +276,9 @@ namespace Game::FireworkLaunch {
         const std::vector<ItemStack> projectiles = loaded->items;
         FireworkItems::SetChargedProjectiles(crossbow, ChargedProjectiles{});
         player->markSlotDirty(player->handSlotIndex(hand));
+        // performShooting: CriteriaTriggers.SHOT_CROSSBOW with the weapon (a
+        // copy: the volley below may wear it out).
+        Server::CriteriaTriggers::ShotCrossbow(*player, ItemStack(crossbow));
 
         // getShootingPower: a rocket anywhere in the load flies slower.
         const float power = loaded->Contains(Items::FireworkRocket) ? FireworkItems::kCrossbowFireworkPower
@@ -328,9 +334,11 @@ namespace Game::FireworkLaunch {
                 // The pickup: the arrow shot, ALLOWED — CREATIVE_ONLY for an
                 // INTANGIBLE_PROJECTILE (useAmmo's free copies: Multishot's
                 // side arrows, anything drawn with infinite materials).
-                arrow->SetPickupItemStack(ammo);
-                arrow->SetPickup(i > 0 || player->isCreative() ? Arrow::Pickup::CreativeOnly
-                                                               : Arrow::Pickup::Allowed);
+                ItemStack pickup = ammo;
+                const bool intangible = pickup.has(DataComponents::INTANGIBLE_PROJECTILE);
+                pickup.components.remove(DataComponents::INTANGIBLE_PROJECTILE);
+                arrow->SetPickupItemStack(pickup);
+                arrow->SetPickup(intangible ? Arrow::Pickup::CreativeOnly : Arrow::Pickup::Allowed);
                 arrow->position = glm::dvec3(pos.x, eyeY - 0.1, pos.z);
                 arrow->oldPosition = arrow->position;
                 projectile = std::move(arrow);

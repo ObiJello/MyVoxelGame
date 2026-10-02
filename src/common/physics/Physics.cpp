@@ -457,15 +457,28 @@ namespace Game {
         // that this continuous model matches with v = √(2·g·h): 0.42 gives
         // the 9.04 b/s JUMP_VELOCITY above, and JUMP_BOOST's +0.1/level
         // gives MC's exact extra height (1.84 blocks at I, 2.52 at II).
-        float JumpVelocityForPower(float power) {
+        // `gravity` is the per-tick Attributes.GRAVITY; the continuous model
+        // keeps √(2·g·h) with g scaled the same way. With no (or negative)
+        // gravity the per-tick power is the whole impulse.
+        float JumpVelocityForPower(float power, float gravity = 0.08f) {
             if (power <= 1.0e-5f) return 0.0f;   // MC jumpFromGround's gate
+            if (gravity <= 1.0e-6f) return power * 20.0f;
             double v = power, y = 0.0, apex = 0.0;
             for (int i = 0; i < 4096 && v > 0.0; ++i) {
                 y += v;
-                v = (v - 0.08) * 0.98;
+                v = (v - static_cast<double>(gravity)) * 0.98;
                 apex = std::max(apex, y);
             }
-            return static_cast<float>(std::sqrt(2.0 * -static_cast<double>(PlayerPhysics::GRAVITY) * apex));
+            const double g = -static_cast<double>(PlayerPhysics::GRAVITY) * static_cast<double>(gravity) / 0.08;
+            return static_cast<float>(std::sqrt(2.0 * g * apex));
+        }
+
+        // LivingEntity.getJumpPower (JUMP_STRENGTH + JUMP_BOOST's +0.1/level)
+        // as this model's launch speed, blocks/s before the portal scale.
+        float PlayerJumpVelocity(const PlayerPhysics& physics) {
+            const float power = physics.jumpStrength + physics.effectJumpBoost;
+            if (physics.gravityAttribute == 0.08f && power == 0.42f) return PlayerPhysics::JUMP_VELOCITY;
+            return JumpVelocityForPower(power, physics.gravityAttribute);
         }
     }
 
@@ -493,12 +506,16 @@ namespace Game {
         // MC getEffectiveGravity: SLOW_FALLING caps gravity at 0.01 (an
         // eighth of 0.08) while falling; the 0.98 drag then settles at
         // 0.49 blocks a tick.
+        // Attributes.GRAVITY scales every term (0.08 is this model's
+        // GRAVITY); the 0.98 drag's terminal speed scales with it.
         const bool slowFalling = physics.effectSlowFalling && physics.velocity.y <= 0.0f;
-        const float gravityScale = slowFalling ? 0.125f : 1.0f;
+        const float gravityScale = physics.EffectiveGravity(physics.velocity.y <= 0.0f) / 0.08f;
         physics.velocity.y += PlayerPhysics::GRAVITY * physics.scale * gravityScale * deltaTime;
 
-        const float terminal = (slowFalling ? -9.8f : PlayerPhysics::TERMINAL_VELOCITY) * physics.scale;
-        if (physics.velocity.y < terminal) {
+        const float terminal = (slowFalling ? -9.8f * (gravityScale / 0.125f)
+                                            : PlayerPhysics::TERMINAL_VELOCITY * gravityScale) * physics.scale;
+        if (gravityScale != 0.0f &&
+            (gravityScale > 0.0f ? physics.velocity.y < terminal : physics.velocity.y > terminal)) {
             physics.velocity.y = terminal;
         }
     }
@@ -519,9 +536,7 @@ namespace Game {
         // A scaled player jumps their own height in the usual time: with
         // gravity scaled too (ApplyGravity), the velocity scales linearly.
         // JUMP_BOOST adds its +0.1/level to MC's 0.42 jump power.
-        const float jumpVelocity = (physics.effectJumpBoost > 0.0f
-            ? JumpVelocityForPower(0.42f + physics.effectJumpBoost)
-            : PlayerPhysics::JUMP_VELOCITY) * physics.scale;
+        const float jumpVelocity = PlayerJumpVelocity(physics) * physics.scale;
         if (stuckInBlock) {
             physics.velocity.y = jumpVelocity;
             physics.lastJumpTime = physics.totalTime;
@@ -624,7 +639,7 @@ namespace Game {
             // getEffectiveGravity: SLOW_FALLING caps a falling body's at
             // 0.01. Gravity scales with the body here (ApplyGravity).
             const bool   falling = v.y <= 0.0;
-            const double gravity = ((physics.effectSlowFalling && falling) ? 0.01 : 0.08) *
+            const double gravity = static_cast<double>(physics.EffectiveGravity(falling)) *
                                    static_cast<double>(physics.scale);
             const double cosLean = std::cos(static_cast<double>(leanAngle));
             const double liftForce = cosLean * cosLean;
@@ -788,7 +803,10 @@ namespace Game {
             // the player is under it — sprint-swimming is the only sprint
             // there is in water.
             const bool  sprint      = physics.isSprinting && (lavaTravel || physics.isEyeInWater);
-            const bool  swimming    = !lavaTravel && sprint && physics.isEyeInWater;   // updateSwimming
+            // A water animal's morph strokes as that mob (PlayerPhysics::
+            // morphSwimAccel) — its own travelInWater, not the player's swim.
+            const bool  morphSwim   = !lavaTravel && physics.morphed && physics.morphSwimAccel > 0.0f;
+            const bool  swimming    = !lavaTravel && sprint && physics.isEyeInWater && !morphSwim;   // updateSwimming
 
             glm::vec3 vt = physics.waterVelocity / 20.0f;   // blocks per tick
 
@@ -830,9 +848,7 @@ namespace Game {
                     if (physics.noJumpDelayTicks <= 0.0f) {
                         // jumpFromGround → getJumpPower: JUMP_BOOST's +0.1 a
                         // level applies to a wading jump exactly as on land.
-                        const float jumpVelocity = physics.effectJumpBoost > 0.0f
-                            ? JumpVelocityForPower(0.42f + physics.effectJumpBoost)
-                            : PlayerPhysics::JUMP_VELOCITY;
+                        const float jumpVelocity = PlayerJumpVelocity(physics);
                         vt.y = (jumpVelocity * physics.scale) / 20.0f;
                         physics.isOnGround = false;
                         physics.lastJumpTime = physics.totalTime;
@@ -856,13 +872,30 @@ namespace Game {
             if (glm::dot(inputDir, inputDir) > 1.0f) inputDir = glm::normalize(inputDir);
             if (physics.isSneaking) inputDir *= physics.sneakingSpeed;
             float speed = 0.02f;
+            // The water animal's stroke goes where it looks: MC
+            // SmoothSwimmingMoveControl's zza = cos(xRot)·speed and
+            // yya = −sin(xRot)·speed (the fish controls' vertical nudge does
+            // the same) — the forward part of the input pitched with the
+            // look, a strafe kept level.
+            float strokeY = 0.0f;
+            if (morphSwim) {
+                const glm::vec3 look = physics.lookDir;
+                const float lookLen = glm::length(look);
+                const float hLen = std::sqrt(look.x * look.x + look.z * look.z);
+                if (lookLen > 1.0e-4f && hLen > 1.0e-4f) {
+                    const glm::vec3 forwardH(look.x / hLen, 0.0f, look.z / hLen);
+                    const float forward = glm::dot(inputDir, forwardH);
+                    inputDir += forwardH * (forward * (hLen / lookLen - 1.0f));
+                    strokeY = forward * (look.y / lookLen);
+                }
+            }
 
             // MC travelInFluid's baseGravity is getEffectiveGravity(): with
             // SLOW_FALLING and the body not rising (isFalling, sampled after
             // the jump/swim impulses above) it is min(0.08, 0.01) — a slow
             // faller sinks through water and lava at an eighth of the rate.
             const bool  fluidFalling = vt.y + verticalInput <= 0.0f;
-            const float baseGravity  = (physics.effectSlowFalling && fluidFalling) ? 0.01f : 0.08f;
+            const float baseGravity  = physics.EffectiveGravity(fluidFalling);
 
             float hDrag, vDrag, gravityTerm;
             if (!lavaTravel) {
@@ -885,6 +918,15 @@ namespace Game {
                 // getFluidFallingAdjustedMovement: gravity/16 — 0.08/16 —
                 // unless sprinting (a sprint-swimmer does not sink).
                 gravityTerm = sprint ? 0.0f : baseGravity / 16.0f;
+                if (morphSwim) {
+                    // The mob's travelInWater: moveRelative(its stroke),
+                    // scale(0.9) on every axis, and no sink (its move control
+                    // adds back the 0.005 the travel takes). The player's
+                    // sprint is the mob's ×1.3, as on land.
+                    speed = physics.morphSwimAccel * (physics.isSprinting ? 1.3f : 1.0f);
+                    hDrag = vDrag = 0.9f;
+                    gravityTerm = 0.0f;
+                }
             } else if (lavaShallow) {
                 hDrag = 0.5f; vDrag = 0.8f;
                 gravityTerm = baseGravity / 16.0f + baseGravity / 4.0f;   // sixteenth, then the quarter
@@ -896,7 +938,7 @@ namespace Game {
             glm::vec3 disp(0.0f);
             vt.x = tickAxis(vt.x, inputDir.x * speed, hDrag, 0.0f, disp.x);
             vt.z = tickAxis(vt.z, inputDir.z * speed, hDrag, 0.0f, disp.z);
-            vt.y = tickAxis(vt.y, verticalInput,       vDrag, gravityTerm, disp.y);
+            vt.y = tickAxis(vt.y, verticalInput + strokeY * speed, vDrag, gravityTerm, disp.y);
             // getFluidFallingAdjustedMovement's −0.003 snap is not carried:
             // its two conditions, |y − 0.005| >= 0.003 and |y − gravity/16|
             // < 0.003, are the same quantity at the player's gravity of 0.08
@@ -1046,6 +1088,8 @@ namespace Game {
             if (physics.isSneaking) {
                 horizontalMovement *= physics.sneakingSpeed;   // SNEAKING_SPEED (Swift Sneak)
             }
+            // Using an item: its USE_EFFECTS speed multiplier (modifyInput).
+            horizontalMovement *= physics.itemUseSpeedMultiplier;
 
             // Add residual horizontal velocity (set by portal teleports
             // when src=floor/ceiling and dst=wall — the player's vertical
@@ -1081,7 +1125,13 @@ namespace Game {
                 const glm::ivec3 below = BlockPosBelowThatAffectsMovement(physics.position);
                 const BlockID belowId = context.GetBlockState(below.x, below.y, below.z).Block();
                 const glm::dvec3 motionPerTick(physics.velocity.x / 20.0, 0.0, physics.velocity.z / 20.0);
-                const float friction = GetBlockFriction(belowId, motionPerTick);
+                float friction = GetBlockFriction(belowId, motionPerTick);
+                // MC 26.3 LivingEntity.computeModifiedFriction(friction,
+                // FRICTION_MODIFIER); kept off zero, where 0.216 / f³ below
+                // would divide by it.
+                if (physics.frictionModifier != 1.0f) {
+                    friction = std::clamp(1.0f - (1.0f - friction) * physics.frictionModifier, 0.01f, 1.0f);
+                }
                 constexpr float kDefaultFriction = 0.6f;
                 if (friction != kDefaultFriction) {
                     slide = true;
@@ -1219,7 +1269,8 @@ namespace Game {
                         static_cast<int>(std::floor(physics.position.z)));
                     physics.landingFallReduction = FallDistanceReduction(landedOn);
                     const float impact = physics.velocity.y;   // blocks/s, negative
-                    const float oneTickOfGravity = -PlayerPhysics::GRAVITY * physics.scale * 0.05f;
+                    const float oneTickOfGravity = -PlayerPhysics::GRAVITY * physics.scale * 0.05f *
+                                                   (physics.gravityAttribute / 0.08f);
                     const float restitution =
                         (!physics.isSneaking && !SuppressesBounce(landedOn))
                             ? BounceRestitution(landedOn) : 0.0f;
@@ -1265,7 +1316,8 @@ namespace Game {
             // rather than levitating). maxUpStep = 0.6 in vanilla (Entity.java
             // line 3932), which is just enough to clear a 0.5-block slab but
             // not a full block.
-            constexpr float kMaxUpStep = 0.6f;
+            // LivingEntity.maxUpStep: Attributes.STEP_HEIGHT.
+            const float kMaxUpStep = physics.stepHeight;
             auto tryStepUp = [&](float dx, float dz) -> bool {
                 if (!physics.isOnGround) return false;
                 // 1. Vertical clearance above current position.

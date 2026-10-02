@@ -15,8 +15,8 @@
 // returns null (a block particle of air, an item with no sprite) returns false.
 
 #include "MobParticleSystem.hpp"
-#include "BlockParticleTint.hpp"
 
+#include "../mesh/BlockTint.hpp"
 #include "../mesh/Mesher.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -31,6 +31,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <optional>
 
 namespace Render {
 
@@ -80,8 +81,15 @@ namespace Render {
             return FindSprite("item/" + name, out) || FindSprite("block/" + name, out);
         }
 
-        int64_t TerrainParticleTint(Game::BlockState state, const Game::IBlockAccess* blocks, const glm::ivec3& pos) {
-            return BlockTintColor(state, blocks, pos, /*asTerrainParticle=*/true);
+        // MC BlockColors.getTintSource(state, 0).colorAsTerrainParticle(state,
+        // level, pos) — BlockTint's table, the one the section mesher tints
+        // with; empty when the block registers no tint source.
+        std::optional<uint32_t> TerrainParticleTint(Game::BlockState state, const Game::IBlockAccess* blocks,
+                                                    const glm::ivec3& pos) {
+            return BlockTint::Layer0Color(state, pos.x, pos.y, pos.z, Mesher::GetMeshOptions().biomeBlendRadius,
+                                          /*asTerrainParticle=*/true, [blocks](int x, int y, int z) {
+                                              return blocks ? blocks->GetBiome(x, y, z) : Game::kFallbackBiomeId;
+                                          });
         }
 
         // RenderShape.INVISIBLE (air aside): the blocks drawn by nothing.
@@ -384,11 +392,13 @@ namespace Render {
             quad7(x, y, z, xa, ya, za);
             p.gravity = 1.0f;
             color(0.6f, 0.6f, 0.6f);
-            const glm::ivec3 pos(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)),
-                                 static_cast<int>(std::floor(z)));
-            const int64_t tint = TerrainParticleTint(state, blocks, pos);
-            if (tint >= 0) {
-                const glm::vec3 c = Rgb(static_cast<uint32_t>(tint));
+            // The constructor's pos: the caller's block, else containing(x, y, z).
+            const glm::ivec3 pos = q.hasBlockPos
+                ? q.blockPos
+                : glm::ivec3(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)),
+                             static_cast<int>(std::floor(z)));
+            if (const std::optional<uint32_t> tint = TerrainParticleTint(state, blocks, pos)) {
+                const glm::vec3 c = Rgb(*tint);
                 p.rCol *= c.r; p.gCol *= c.g; p.bCol *= c.b;
             }
             p.quadSize /= 2.0f;
@@ -654,15 +664,17 @@ namespace Render {
             case K::FallingDust: {
                 glm::vec3 c(o.r, o.g, o.b);
                 if (q.hasOptions) {
-                    // FallingDustParticle.Provider: the falling block's dust
-                    // colour, else layer 0's terrain tint, else the map colour.
+                    // FallingDustParticle.Provider: a FallingBlock's dust
+                    // colour, else layer 0's colorAsTerrainParticle (white for
+                    // grass_block, whose source answers -1), else the map
+                    // colour (FallingBlockDustColor's default).
                     const Game::BlockState state = Game::BlockState::FromRawId(o.blockState);
                     if (state.Block() != Game::BlockID::Air && IsInvisibleRenderShape(state.Block())) return false;
                     const glm::ivec3 pos(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)),
                                          static_cast<int>(std::floor(z)));
-                    const int64_t tint = TerrainParticleTint(state, blocks, pos);
-                    c = Rgb(tint >= 0 && state.Block() != Game::BlockID::Grass
-                                ? static_cast<uint32_t>(tint) : Game::FallingBlockDustColor(state));
+                    std::optional<uint32_t> tint;
+                    if (!Game::IsFallingBlock(state.Block())) tint = TerrainParticleTint(state, blocks, pos);
+                    c = Rgb(tint ? *tint : Game::FallingBlockDustColor(state));
                 }
                 quad4(x, y, z);
                 color(c.r, c.g, c.b);

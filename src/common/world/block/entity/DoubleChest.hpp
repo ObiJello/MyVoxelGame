@@ -25,12 +25,15 @@
 
 #include "../Blocks.hpp"
 #include "../BlockState.hpp"
+#include "../Direction.hpp"
 #include <glm/glm.hpp>
 #include <optional>
 
 namespace Game {
 
     struct IBlockAccess;
+    struct ScheduledTickAccess;
+    class ILevelWrite;
 
     struct ChestPairing {
         glm::ivec3 partnerPos{0, 0, 0};
@@ -83,5 +86,37 @@ namespace Game {
     // `block.withPropertiesOf(state)` between two chests: the same FACING,
     // TYPE and WATERLOGGED on another ChestBlock.
     BlockState ChestWithPropertiesOf(BlockID block, BlockState state);
+
+    // MC ChestBlock.updateShape (the BlockUpdateShapeFn hook of the chest,
+    // the trapped chest, and — through CopperChestBlock's own hook, which
+    // runs this first — the copper chests). A SINGLE chest beside a chest
+    // it can connect to that already points back at it (same facing, the
+    // partner LEFT/RIGHT) takes the opposite type; a paired chest whose
+    // connected neighbour is no longer a chest it can connect to falls back
+    // to SINGLE. This is what keeps both halves' TYPE in step through every
+    // write: a placed chest's partner, a broken or replaced half, a half
+    // pushed away by a piston. The waterlogged tick is World::UpdateShape's.
+    bool ChestUpdateShape(const IBlockAccess& level, const glm::ivec3& pos, BlockState state,
+                          Direction toNeighbour, BlockID neighbourId, BlockState& outState,
+                          ScheduledTickAccess* ticks);
+
+    // The TYPE a chest carried by a piston (pistons_move_block_entities)
+    // lands with. MC has no rule — chests never move — so this is the
+    // placement rule applied to the landing:
+    //   * a half whose partner moved with it (the partner cell is a moving
+    //     piston carrying the matching half, or the partner already landed
+    //     pointing back at this cell) keeps its pairing — a double chest
+    //     pushed as a whole stays one;
+    //   * anything else lands SINGLE and then takes MC
+    //     ChestBlock.getChestType's scan: a lone (SINGLE) chest it can
+    //     connect to with the same facing on its clockwise side makes it
+    //     LEFT, else one on its counter-clockwise side makes it RIGHT. An
+    //     existing double chest is never split; the partner it chose follows
+    //     through ChestUpdateShape when the landing write updates it.
+    // `movedState` is what the piston carried, `landingState` the state after
+    // Block.updateFromNeighbourShapes. Anything not a ChestBlock comes back
+    // as `landingState`.
+    BlockState ChestLandingState(ILevelWrite& level, const glm::ivec3& pos, BlockState movedState,
+                                 BlockState landingState);
 
 } // namespace Game

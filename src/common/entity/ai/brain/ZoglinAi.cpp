@@ -11,11 +11,11 @@ namespace Game {
 
     namespace {
 
-        // MC Zoglin.findNearestValidAttackTarget + isTargetable — the nearest
-        // visible living entity that is not a zoglin, not a creeper, and
-        // attackable (Sensor.isEntityAttackable's reachable half is
-        // Mob::CanAttack). The check runs INSIDE the closest-first scan, as
-        // in MC, so an untargetable nearest entity does not mask the next.
+        // MC Zoglin.findNearestValidAttackTarget — the nearest visible living
+        // entity that is not a zoglin, not a creeper, and passes
+        // Sensor.isEntityAttackable. The check runs INSIDE the closest-first
+        // scan, as in MC, so an untargetable nearest entity does not mask the
+        // next.
         LivingEntity* FindTarget(Mob& mob) {
             const Brain* brain = mob.GetBrain();
             if (!brain) return nullptr;
@@ -25,7 +25,7 @@ namespace Game {
             return visible->FindClosest([&mob](LivingEntity* e) {
                 return e->GetType() != EntityTypeId::Zoglin
                     && e->GetType() != EntityTypeId::Creeper
-                    && mob.CanAttack(*e);
+                    && SensorTargeting::IsEntityAttackable(mob, *e);
             });
         }
 

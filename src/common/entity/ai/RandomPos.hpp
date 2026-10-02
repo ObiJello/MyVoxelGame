@@ -71,6 +71,12 @@ namespace Game {
                                              int verticalDist,
                                              const std::function<double(const glm::ivec3&)>& scoring);
 
+        // MC LandRandomPos.getPosTowards(mob, xz, y, towardsPos) — a land
+        // target in the half-pi cone toward `towardsPos` (the iron golem's
+        // village stroll toward a villager or a POI).
+        std::optional<glm::dvec3> GetLandPosTowards(PathfinderMob& mob, int horizontalDist,
+                                                    int verticalDist, const glm::dvec3& towardsPos);
+
         // MC LandRandomPos.getPosAway(mob, minHorizontalDist,
         // maxHorizontalDist, verticalDist, avoidPos) — a land target in the
         // hemisphere away from `avoidPos`, between the two horizontal

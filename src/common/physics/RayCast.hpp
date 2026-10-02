@@ -28,6 +28,16 @@ namespace Game {
         float distance;             // Distance from ray origin to hit point
         int hitFace;                // Which face was hit (0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z)
         bool insideBlock;           // True if raycast started inside this block volume
+        // The unit direction of the ray that found this hit, in the hit
+        // block's own space. Equal to the player's look vector for a plain
+        // hit; for a hit reached THROUGH a portal it is the look vector
+        // mapped through that portal (rotated, mirrored) — the direction
+        // the player sees themselves looking on the far side, which is what
+        // a placed block's facing must be derived from (MC BlockPlaceContext
+        // reads the player's rotation, which on the far side IS this).
+        // Zero when the hit was not produced by a ray (synthesised hits):
+        // consumers then fall back to the live look angles.
+        glm::vec3 rayDirection{0.0f};
     };
 
     class Raycast {

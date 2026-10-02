@@ -80,7 +80,7 @@ namespace Server {
     // (commands.defaultgamemode.success). Vanilla also moves every player
     // whose mode is not forced… only when the mode is forced (setDefaultGameType
     // → forceGameMode); this engine applies it to future joins.
-    void WorldOptionsCommand::ExecuteDefaultGameMode(const CommandSourceStack& /*source*/,
+    void WorldOptionsCommand::ExecuteDefaultGameMode(const CommandSourceStack& source,
                                                      const std::vector<std::string>& args,
                                                      ServerConnection& connection,
                                                      PlayerSessionManager& /*sessionManager*/) {
@@ -96,13 +96,13 @@ namespace Server {
             return;
         }
         g_integratedServer->SetWorldGameType(*mode);
-        connection.SendChatMessage(std::string("The default game mode is now ") + GameModeDisplayName(*mode), 1);
+        source.SendSuccess(connection, std::string("The default game mode is now ") + GameModeDisplayName(*mode), true);
         Log::Info("[WorldOptions] default game mode -> %s", GameModeDisplayName(*mode));
     }
 
     // MC PublishCommand: "/publish [port]" → "Local game hosted on port %s",
     // "Multiplayer game is already hosted on port %s", "Unable to host local game".
-    void WorldOptionsCommand::ExecutePublish(const CommandSourceStack& /*source*/,
+    void WorldOptionsCommand::ExecutePublish(const CommandSourceStack& source,
                                              const std::vector<std::string>& args,
                                              ServerConnection& connection,
                                              PlayerSessionManager& /*sessionManager*/) {
@@ -126,7 +126,7 @@ namespace Server {
             return;
         }
         g_integratedServer->SetJoinable(true);
-        connection.SendChatMessage("Local game hosted on port " + std::to_string(g_integratedServer->GetPort()), 1);
+        source.SendSuccess(connection, "Local game hosted on port " + std::to_string(g_integratedServer->GetPort()), true);
     }
 
     void WorldOptionsCommand::Execute(const CommandSourceStack& /*source*/,
@@ -135,6 +135,7 @@ namespace Server {
                                       PlayerSessionManager& /*sessionManager*/) {
         static const char* kUsage =
             "Usage: /worldoptions (allow_commands|guest_command_access|force_game_mode|joinable) <on|off> | "
+            "/worldoptions difficulty <peaceful|easy|normal|hard> | "
             "/worldoptions difficulty_lock | /worldoptions port <1024-65535>";
         if (!g_integratedServer) return;
         if (!RequireOwner(connection)) return;
@@ -142,6 +143,28 @@ namespace Server {
         const std::string option = Lower(args[0]);
         auto& server = *g_integratedServer;
 
+        // The World Options screen's difficulty button (MC
+        // Minecraft.getSingleplayerServer().setDifficulty(d, false) — a
+        // direct call, not the permission-gated /difficulty, so it works with
+        // cheats off). Not forced: a locked difficulty stays, and a hardcore
+        // world stays HARD.
+        if (option == "difficulty") {
+            static const char* kNames[] = {"peaceful", "easy", "normal", "hard"};
+            if (args.size() < 2) { connection.SendChatMessage(kUsage, 1); return; }
+            const std::string wanted = Lower(args[1]);
+            int difficulty = -1;
+            for (int i = 0; i < 4; ++i) if (wanted == kNames[i]) difficulty = i;
+            if (difficulty < 0) { connection.SendChatMessage(kUsage, 1); return; }
+            if (server.IsDifficultyLocked()) {
+                connection.SendChatMessage("Difficulty is locked.", 1);
+                return;
+            }
+            if (server.IsHardcore()) difficulty = 3;
+            if (difficulty == server.GetDifficulty()) return;
+            server.SetDifficulty(difficulty);
+            connection.SendChatMessage(std::string("The difficulty has been set to ") + kNames[difficulty], 1);
+            return;
+        }
         if (option == "difficulty_lock") {
             if (server.IsDifficultyLocked()) {
                 connection.SendChatMessage("Difficulty is locked.", 1);

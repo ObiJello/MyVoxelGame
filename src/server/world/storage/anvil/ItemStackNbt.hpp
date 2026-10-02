@@ -12,7 +12,7 @@
 //   custom_name, stored_enchantments, potion_contents, potion_duration_scale,
 //   suspicious_stew_effects, written_book_content, writable_book_content
 //   (plus this engine's own obeycraft: ones).
-// (bundle_contents is set on stacks too and is still not saved.)
+// (bundle_contents and enchantment_glint_override: StackNbt.cpp codecs.)
 // Everything else exists purely as Item::defaultComponents, which ItemStack::get
 // falls back to and which is never stored on the stack — and several of our
 // component structs are shape-simplified against vanilla's, so emitting them
@@ -44,7 +44,9 @@ namespace Game::Anvil {
 
     // Reads one. Returns an empty stack for anything unrecognised rather than
     // failing, matching vanilla's tolerance for items it does not know.
-    ItemStack ReadItemStack(const ::World::NBTTagCompound& tag);
+    // `error`, when given, receives the first component the codecs rejected
+    // (or the stack validation's complaint) — the item argument reports it.
+    ItemStack ReadItemStack(const ::World::NBTTagCompound& tag, std::string* error = nullptr);
 
     // PotionContents.CODEC in its FULL (compound) form, as vanilla encodes
     // it: { potion?: "minecraft:<id>", custom_color?: int,
@@ -68,5 +70,8 @@ namespace Game::Anvil {
     // Writes `component` under `name` in the open compound: a string when it
     // collapses (Component.tryCollapseToString), else the compound form.
     void WriteTextComponent(Nbt::Writer& w, std::string_view name, const Text::Component& component);
+    // The full (compound) form's fields of `component` into an already open
+    // compound — a list element of a component list (lore lines).
+    void WriteTextComponentBody(Nbt::Writer& w, const Text::Component& component);
 
 } // namespace Game::Anvil

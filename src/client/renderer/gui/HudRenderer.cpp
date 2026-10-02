@@ -1,8 +1,10 @@
 // File: src/client/renderer/gui/HudRenderer.cpp
 #include "SpectatorGui.hpp"
 #include "HudRenderer.hpp"
+#include <unordered_map>
 #include "EffectsInInventory.hpp"
 #include "BossBarState.hpp"
+#include "TitleOverlay.hpp"
 #include "common/entity/Inventory.hpp"
 #include "common/entity/Item.hpp"
 #include "common/data/DataComponents.hpp"
@@ -12,6 +14,8 @@
 #include "common/core/Mth.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "client/resource/ResourcePacks.hpp"
+#include "client/sound/ClientSounds.hpp"
+#include "common/sound/SoundEvents.hpp"
 #include "stb_image.h"
 #include <algorithm>
 #include <chrono>
@@ -90,6 +94,8 @@ namespace Render {
         // overlay, the in-wall block, fire) in the world pass, under the
         // whole GUI. Same place in the stack here: first, under everything.
         RenderWaterOverlay(graphics);
+        // Gui.extractCameraOverlays: the worn equipment's overlays.
+        RenderCameraOverlays(graphics);
 
         // MC render order: boss bar first (BossHealthOverlay renders before
         // the hotbar layer), then crosshair → hotbar → health/food/armor → XP.
@@ -139,6 +145,8 @@ namespace Render {
         RenderSleepOverlay(graphics);
         graphics.NextStratum();
         RenderOverlayMessage(graphics);
+        // MC Hud: extractOverlayMessage, then extractTitle (/title).
+        GetTitleOverlay().Render(graphics, deltaTime);
     }
 
     void HudRenderer::RenderEffects(GuiGraphics& graphics) {
@@ -247,6 +255,46 @@ namespace Render {
                       m_waterOverlayU,        m_waterOverlayV, color);
     }
 
+    void HudRenderer::RenderCameraOverlays(GuiGraphics& graphics) {
+        if (m_cameraOverlays.empty()) return;
+        // One texture per overlay path, loaded on first use and dropped with
+        // the resource packs.
+        static std::unordered_map<std::string, TextureHandle> s_cache;
+        static int s_packGeneration = -1;
+        if (Resources::CacheStale(s_packGeneration)) {
+            for (auto& [path, tex] : s_cache) {
+                if (tex != INVALID_TEXTURE && g_renderBackend) g_renderBackend->DestroyTexture(tex);
+            }
+            s_cache.clear();
+        }
+        for (const std::string& path : m_cameraOverlays) {
+            auto it = s_cache.find(path);
+            if (it == s_cache.end()) {
+                TextureHandle tex = INVALID_TEXTURE;
+                const std::string full = PlatformMain::GetAssetPath(path);
+                if (g_renderBackend && std::filesystem::exists(full)) {
+                    int w = 0, h = 0, ch = 0;
+                    stbi_set_flip_vertically_on_load(0);
+                    if (unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha)) {
+                        tex = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
+                        stbi_image_free(pixels);
+                        if (tex != INVALID_TEXTURE) {
+                            g_renderBackend->SetTextureFilter(tex, TextureFilter::Linear, TextureFilter::Linear);
+                        }
+                    }
+                } else {
+                    Log::Warning("[HudRenderer] camera overlay texture missing at %s", full.c_str());
+                }
+                it = s_cache.emplace(path, tex).first;
+            }
+            if (it->second == INVALID_TEXTURE) continue;
+            // renderTextureOverlay(graphics, texture, 1.0F): the whole
+            // screen, white at full alpha.
+            graphics.Blit(it->second, 0, 0, graphics.GuiWidth(), graphics.GuiHeight(), 0.0f, 0.0f, 1.0f, 1.0f,
+                          0xFFFFFFFFu);
+        }
+    }
+
     void HudRenderer::RenderSleepOverlay(GuiGraphics& graphics) {
         // MC Gui.renderSleepOverlay (26.3 Hud.extractSleepOverlay):
         //   float amount = sleepTimer / 100.0F;
@@ -298,49 +346,55 @@ namespace Render {
     // ========================================================================
 
     void HudRenderer::RenderBossBar(GuiGraphics& graphics) {
-        // MC BossHealthOverlay.render: a 182x5 bar centred at y=12 per event,
-        // the name centred 9px above it. One bar here (the dragon) — see
-        // BossBarState.hpp. The sprites are vanilla's own
+        // MC BossHealthOverlay.extractRenderState: per event, in insertion
+        // order, a 182x5 bar centred at yOffset (12 for the first) with its
+        // name centred 9 px above it, the next one 19 px further down, until
+        // a third of the screen is used. The sprites are vanilla's own
         // gui/sprites/boss_bar/*.png, auto-loaded by GuiAtlas.
-        const Client::BossBarState& bar = Client::g_bossBarState;
-        if (!bar.visible) return;
+        const Client::BossBarOverlay& overlay = Client::g_bossBars;
+        if (overlay.Empty()) return;
 
         static const char* kColorNames[] = {
             "pink", "blue", "red", "green", "yellow", "purple", "white",
         };
-        const uint8_t colorIndex =
-            bar.color < 7 ? bar.color : 0;
 
-        const int x = graphics.GuiWidth() / 2 - 91;
-        const int y = 12;
+        int yOffset = 12;
+        for (const auto& [id, bar] : overlay.Bars()) {
+            (void)id;
+            const uint8_t colorIndex = bar.color < 7 ? bar.color : 0;
+            const int x = graphics.GuiWidth() / 2 - 91;
+            const int y = yOffset;
 
-        const std::string background =
-            std::string("boss_bar/") + kColorNames[colorIndex] + "_background";
-        const std::string progress =
-            std::string("boss_bar/") + kColorNames[colorIndex] + "_progress";
+            const std::string background =
+                std::string("boss_bar/") + kColorNames[colorIndex] + "_background";
+            const std::string progress =
+                std::string("boss_bar/") + kColorNames[colorIndex] + "_progress";
 
-        graphics.BlitSprite(background, x, y, 182, 5);
-        const int fill = static_cast<int>(bar.progress * 183.0f);
-        if (fill > 0) {
-            graphics.BlitSprite(progress, 182, 5, 0, 0, x, y,
-                                std::min(fill, 182), 5);
-        }
-        if (bar.notches != 0) {
-            const std::string notchBg = "boss_bar/notched_" +
-                std::to_string(bar.notches) + "_background";
-            const std::string notchFg = "boss_bar/notched_" +
-                std::to_string(bar.notches) + "_progress";
-            graphics.BlitSprite(notchBg, x, y, 182, 5);
-            if (fill > 0) {
-                graphics.BlitSprite(notchFg, 182, 5, 0, 0, x, y,
-                                    std::min(fill, 182), 5);
+            // extractBar: the background at full width, then the progress at
+            // Mth.lerpDiscrete(progress, 0, 182), each with the notch overlay
+            // for a NOTCHED_* bar.
+            const float p = std::clamp(bar.progress, 0.0f, 1.0f);
+            const int fill = static_cast<int>(std::floor(p * 181.0f)) + (p > 0.0f ? 1 : 0);
+            graphics.BlitSprite(background, x, y, 182, 5);
+            if (bar.notches != 0) {
+                graphics.BlitSprite("boss_bar/notched_" + std::to_string(bar.notches) + "_background",
+                                    x, y, 182, 5);
             }
-        }
+            if (fill > 0) {
+                graphics.BlitSprite(progress, 182, 5, 0, 0, x, y, std::min(fill, 182), 5);
+                if (bar.notches != 0) {
+                    graphics.BlitSprite("boss_bar/notched_" + std::to_string(bar.notches) + "_progress",
+                                        182, 5, 0, 0, x, y, std::min(fill, 182), 5);
+                }
+            }
 
-        // The name, white with the usual shadow, 9 px above the bar.
-        if (!bar.name.empty()) {
-            graphics.DrawCenteredString(bar.name, graphics.GuiWidth() / 2, y - 9,
-                                        0xFFFFFFFF);
+            // The name, white with the usual shadow, 9 px above the bar.
+            if (!bar.name.empty()) {
+                graphics.DrawCenteredString(bar.name, graphics.GuiWidth() / 2, y - 9, 0xFFFFFFFF);
+            }
+
+            yOffset += 10 + 9;
+            if (yOffset >= graphics.GuiHeight() / 3) break;
         }
     }
 
@@ -516,13 +570,16 @@ namespace Render {
         const int oldHealth = m_displayHealth;
 
         // The jitter and the hunger shake draw from a per-tick seeded random
-        // so every frame of a tick agrees.
-        m_random.SetSeed(static_cast<int64_t>(m_tickCount) * 312871);
+        // so every frame of a tick agrees. MC's seed is
+        // `(long)(this.tickCount * 312871)` — an INT product, so it wraps
+        // past tick 6863 (~6 minutes in) and the jitter pattern with it.
+        m_random.SetSeed(static_cast<int64_t>(static_cast<int32_t>(
+            static_cast<uint32_t>(m_tickCount) * 312871u)));
 
         const int xLeft     = graphics.GuiWidth() / 2 - 91;
         const int xRight    = graphics.GuiWidth() / 2 + 91;
         const int yLineBase = graphics.GuiHeight() - 39;
-        const float maxHealth = std::max(static_cast<float>(m_maxHealth),
+        const float maxHealth = std::max(m_maxHealth,
                                          static_cast<float>(std::max(oldHealth, currentHealth)));
         const int totalAbsorption = static_cast<int>(std::ceil(m_absorption));
         const int numHealthRows   = static_cast<int>(std::ceil((maxHealth + static_cast<float>(totalAbsorption)) / 2.0f / 10.0f));
@@ -541,11 +598,12 @@ namespace Render {
         if (m_vehicleHearts == 0) {
             RenderFood(graphics, yLineBase, xRight);
             yLineAir -= 10;
-        } else {
-            // getAirBubbleYLine.
-            const int rows = (m_vehicleHearts + 9) / 10;
-            yLineAir -= (rows - 1) * 10;
         }
+        // extractAirBubbles → getAirBubbleYLine: up by the vehicle's heart
+        // rows minus one — which is -1 with no mount, so the bubbles come
+        // back down to sit directly on the food row (yLineBase - 10).
+        const int vehicleRows = (m_vehicleHearts + 9) / 10;   // ceil(hearts / 10.0)
+        yLineAir -= (vehicleRows - 1) * 10;
         RenderAir(graphics, yLineAir, xRight);
     }
 
@@ -664,14 +722,14 @@ namespace Render {
     }
 
     // MC Hud.extractAirBubbles: full bubbles, the one bursting at the
-    // water line, and the empty ones — which wobble once every bubble is
-    // gone and the drowning damage is landing. The pop sound waits on the
-    // sound system.
+    // water line (with its pop sound), and the empty ones — which wobble
+    // once every bubble is gone and the drowning damage is landing.
     void HudRenderer::RenderAir(GuiGraphics& graphics, int yLineAir, int xRight) {
         const int maxAir = std::max(m_maxAir, 1);
         const int curAir = std::clamp(m_air, 0, maxAir);
         const bool isUnderWater = m_isUnderWater;
         if (!isUnderWater && curAir >= maxAir) return;
+        if (!isUnderWater) m_lastBubblePopSoundPlayed = 0;
         const auto bubble = [&](int tickOffset) {
             return static_cast<int>(std::ceil(static_cast<float>((curAir + tickOffset) * 10) /
                                               static_cast<float>(maxAir)));
@@ -687,6 +745,15 @@ namespace Render {
                 graphics.BlitSprite(AIR_SPRITE, xo, yLineAir, 9, 9);
             } else if (isPoppingBubble && airBubble == poppingAirBubblePosition && isUnderWater) {
                 graphics.BlitSprite(AIR_POPPING_SPRITE, xo, yLineAir, 9, 9);
+                // playAirBubblePoppedSound: once per bubble, louder and higher
+                // the more bubbles are already gone.
+                if (m_lastBubblePopSoundPlayed != airBubble) {
+                    const float volume = 0.5f + 0.1f * static_cast<float>(std::max(0, emptyAirBubbles - 3 + 1));
+                    const float pitch  = 1.0f + 0.1f * static_cast<float>(std::max(0, emptyAirBubbles - 5 + 1));
+                    Client::Sounds::PlayLocal(m_playerPosition, Game::SoundEvents::BUBBLE_POP,
+                                              Game::SoundSource::Players, volume, pitch);
+                    m_lastBubblePopSoundPlayed = airBubble;
+                }
             } else if (airBubble > 10 - emptyAirBubbles) {
                 const int wobble = (emptyAirBubbles == 10 && m_tickCount % 2 == 0) ? m_random.NextInt(2) : 0;
                 graphics.BlitSprite(AIR_EMPTY_SPRITE, xo, yLineAir + wobble, 9, 9);
@@ -701,9 +768,10 @@ namespace Render {
         // Background (full width)
         graphics.BlitSprite(XP_BAR_BG_SPRITE, screenCenter - 91, y, 182, 5);
 
-        // Progress fill
+        // Progress fill — MC ExperienceBar: (int)(experienceProgress * 183),
+        // one past the sprite so a full bar has no gap (the blit clips).
         if (m_experience > 0.0f) {
-            int progressWidth = static_cast<int>(m_experience * 182.0f);
+            int progressWidth = std::min(static_cast<int>(m_experience * 183.0f), 182);
             if (progressWidth > 0) {
                 graphics.BlitSprite(XP_BAR_PROGRESS_SPRITE, 182, 5,
                                    0, 0, screenCenter - 91, y, progressWidth, 5);
@@ -754,12 +822,18 @@ namespace Render {
     void HudRenderer::RenderExperienceLevel(GuiGraphics& graphics) {
         if (m_experienceLevel <= 0) return;
 
-        std::string levelStr = std::to_string(m_experienceLevel);
-        int x = graphics.GuiWidth() / 2;
-        int y = graphics.GuiHeight() - 31 - 4;
-
-        // MC renders XP level in green (0xFF80FF20) with black shadow
-        graphics.DrawCenteredString(levelStr, x, y, 0xFF80FF20);
+        // MC ContextualBar.extractExperienceLevel: "gui.experience.level"
+        // ("%s"), left at (guiWidth - width) / 2 and 24 + 9 + 2 up from the
+        // bottom, drawn as a black OUTLINE — four unshadowed copies offset a
+        // pixel each way — under the green (-8323296 = 0xFF80FF20) number.
+        const std::string levelStr = std::to_string(m_experienceLevel);
+        const int x = (graphics.GuiWidth() - graphics.GetStringWidth(levelStr)) / 2;
+        const int y = graphics.GuiHeight() - 24 - 9 - 2;
+        graphics.DrawString(levelStr, x + 1, y, 0xFF000000u, /*dropShadow=*/false);
+        graphics.DrawString(levelStr, x - 1, y, 0xFF000000u, /*dropShadow=*/false);
+        graphics.DrawString(levelStr, x, y + 1, 0xFF000000u, /*dropShadow=*/false);
+        graphics.DrawString(levelStr, x, y - 1, 0xFF000000u, /*dropShadow=*/false);
+        graphics.DrawString(levelStr, x, y, 0xFF80FF20u, /*dropShadow=*/false);
     }
 
 } // namespace Render

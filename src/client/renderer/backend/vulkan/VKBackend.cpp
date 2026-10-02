@@ -148,6 +148,8 @@ namespace Render {
         vkDeviceWaitIdle(m_device);
         ReclaimDetachedSubmits(/*waitAll=*/true);
         OitDestroyTargets();   // before the textures and pools it lives in
+        DestroySceneTargets();
+        DestroyScenePasses();
         // Persist the pipeline cache first: everything below is destruction
         // and none of it can add to the cache.
         SavePipelineCache(/*synchronous=*/true);
@@ -320,6 +322,29 @@ namespace Render {
         // frames (see m_frameDepthPreserved).
         if (m_frameDepthPreservedWanted != m_frameDepthPreserved) ApplyFrameDepthPreserved();
 
+        // Render Resolution: this frame's scene, if one was asked for
+        // (RequestScaledScene). Built or rebuilt here, between frames —
+        // a rebuild idles the device, which only a size change pays.
+        m_sceneActive = false;
+        bool useScene = false;
+        {
+            const VkExtent2D sceneReq = m_sceneRequest;
+            m_sceneRequest = {0, 0};
+            if (sceneReq.width > 0 && sceneReq.height > 0) {
+                if (!m_swapchainTransferDst) {
+                    if (!m_sceneUnsupportedLogged) {
+                        m_sceneUnsupportedLogged = true;
+                        Log::Warning("VKBackend: the swapchain cannot be a transfer destination - "
+                                     "Render Resolution is drawn at 100%%");
+                    }
+                } else {
+                    useScene = EnsureSceneTargets(sceneReq);
+                }
+            } else if (m_sceneExtent.width != 0) {
+                DestroySceneTargets();   // back at 100 %: free the slots
+            }
+        }
+
         // Acquire swapchain image (1 second timeout).
         //
         // Separate zone from the fence wait because the two mean different
@@ -348,6 +373,9 @@ namespace Render {
         // Committed to this frame: from here on, queued texture updates belong
         // to the NEXT frame's flush (see m_texStaging).
         ++m_frameNumber;
+        // The frame's pass opens on the scene from here (FrameBeginPass,
+        // FrameFramebuffer, FrameExtent all follow m_sceneActive).
+        m_sceneActive = useScene;
 
         // Reset and begin command buffer
         vkResetCommandBuffer(m_commandBuffers[m_currentFrame], 0);
@@ -363,7 +391,7 @@ namespace Render {
         renderPassInfo.renderPass = FrameBeginPass();
         renderPassInfo.framebuffer = FrameFramebuffer();
         renderPassInfo.renderArea.offset = {0, 0};
-        renderPassInfo.renderArea.extent = m_swapchainExtent;
+        renderPassInfo.renderArea.extent = FrameExtent();
 
         std::array<VkClearValue, 2> clearValues{};
         clearValues[0].color = m_clearColor;
@@ -453,18 +481,19 @@ namespace Render {
 
         // Set dynamic viewport and scissor
         // Negative height flips Y to match OpenGL convention without affecting winding order
+        const VkExtent2D frameExtent = FrameExtent();
         VkViewport viewport{};
         viewport.x = 0.0f;
-        viewport.y = static_cast<float>(m_swapchainExtent.height);
-        viewport.width = static_cast<float>(m_swapchainExtent.width);
-        viewport.height = -static_cast<float>(m_swapchainExtent.height);
+        viewport.y = static_cast<float>(frameExtent.height);
+        viewport.width = static_cast<float>(frameExtent.width);
+        viewport.height = -static_cast<float>(frameExtent.height);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(m_commandBuffers[m_currentFrame], 0, 1, &viewport);
 
         VkRect2D scissor{};
         scissor.offset = {0, 0};
-        scissor.extent = m_swapchainExtent;
+        scissor.extent = frameExtent;
         vkCmdSetScissor(m_commandBuffers[m_currentFrame], 0, 1, &scissor);
 
         m_frameActive = true; // All setup succeeded — safe to call EndFrame
@@ -477,6 +506,9 @@ namespace Render {
         // pass, so the swapchain image ends the frame in PRESENT_SRC.
         if (m_oitPassOpen) OitEndPass();
         if (m_activeTarget != INVALID_RENDER_TARGET) BindRenderTarget(INVALID_RENDER_TARGET);
+        // A scaled scene nobody resolved: onto the swapchain image now, or
+        // the frame would present an image nothing was drawn into.
+        if (m_sceneActive) ResolveScaledScene();
         m_frameActive = false;
 
         // End render pass
@@ -628,7 +660,10 @@ namespace Render {
     }
 
     bool VKBackend::RequestBackbufferReadback(int x, int y, int w, int h) {
-        if (!m_frameActive || !m_swapchainTransferSrc || m_renderPassLoad == VK_NULL_HANDLE) return false;
+        // The frame: the swapchain image (TRANSFER_SRC if the surface
+        // allows it), or the scaled scene (always created with it).
+        if (!m_frameActive || (!m_sceneActive && !m_swapchainTransferSrc) ||
+            FrameResumePass() == VK_NULL_HANDLE) return false;
         // The frame pass is what this suspends and resumes; with a render
         // target bound there is none to resume.
         if (m_activeTarget != INVALID_RENDER_TARGET) return false;
@@ -643,8 +678,9 @@ namespace Render {
 
         // Clamp to the image. The rectangle is bottom-left based (the
         // SetViewport convention); the image's rows run top-down.
-        const int sw = static_cast<int>(m_swapchainExtent.width);
-        const int sh = static_cast<int>(m_swapchainExtent.height);
+        const VkExtent2D frameExtent = FrameExtent();
+        const int sw = static_cast<int>(frameExtent.width);
+        const int sh = static_cast<int>(frameExtent.height);
         x = std::clamp(x, 0, sw);
         y = std::clamp(y, 0, sh);
         w = std::clamp(w, 0, sw - x);
@@ -672,16 +708,16 @@ namespace Render {
         }
 
         VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
-        VkImage         image = m_swapchainImages[m_currentImageIndex];
+        VkImage         image = FrameColorImage();
 
         // Out of the frame's pass: its finalLayout puts the image in
-        // PRESENT_SRC. Copy from there, then leave it as a colour attachment
-        // for the resumed pass.
+        // PRESENT_SRC (the scene's: COLOR_ATTACHMENT_OPTIMAL). Copy from
+        // there, then leave it as a colour attachment for the resumed pass.
         vkCmdEndRenderPass(cmd);
 
         VkImageMemoryBarrier toSrc{};
         toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        toSrc.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        toSrc.oldLayout = FrameFinalLayout();
         toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -715,7 +751,7 @@ namespace Render {
         resume.renderPass = FrameResumePass();
         resume.framebuffer = FrameFramebuffer();
         resume.renderArea.offset = {0, 0};
-        resume.renderArea.extent = m_swapchainExtent;
+        resume.renderArea.extent = frameExtent;
         std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
         clearValues[0].color = m_clearColor;
         clearValues[1].depthStencil = {1.0f, 0};
@@ -737,7 +773,8 @@ namespace Render {
     }
 
     bool VKBackend::CopyFramebufferToRenderTarget(RenderTargetHandle dst) {
-        if (!m_frameActive || !m_swapchainTransferSrc || m_renderPassLoad == VK_NULL_HANDLE) return false;
+        if (!m_frameActive || (!m_sceneActive && !m_swapchainTransferSrc) ||
+            FrameResumePass() == VK_NULL_HANDLE) return false;
         // The frame pass is what this suspends and resumes (as the read-back
         // does); with a target bound there is none.
         if (m_activeTarget != INVALID_RENDER_TARGET) return false;
@@ -746,20 +783,22 @@ namespace Render {
         VKRenderTargetInfo& rt = it->second;
         // vkCmdCopyImage: same format (a target's colour IS the swapchain
         // format) and here the same extent.
-        if (static_cast<uint32_t>(rt.width) != m_swapchainExtent.width ||
-            static_cast<uint32_t>(rt.height) != m_swapchainExtent.height) {
+        const VkExtent2D frameExtent = FrameExtent();
+        if (static_cast<uint32_t>(rt.width) != frameExtent.width ||
+            static_cast<uint32_t>(rt.height) != frameExtent.height) {
             return false;
         }
 
         VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
-        VkImage         image = m_swapchainImages[m_currentImageIndex];
+        VkImage         image = FrameColorImage();
         vkCmdEndRenderPass(cmd);
 
-        // Swapchain: PRESENT_SRC (the frame pass's finalLayout) -> TRANSFER_SRC.
+        // Frame: PRESENT_SRC (the frame pass's finalLayout; the scene's is
+        // COLOR_ATTACHMENT_OPTIMAL) -> TRANSFER_SRC.
         // Target: resting SHADER_READ_ONLY -> TRANSFER_DST.
         VkImageMemoryBarrier pre[2]{};
         pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        pre[0].oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        pre[0].oldLayout = FrameFinalLayout();
         pre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -779,7 +818,7 @@ namespace Render {
         VkImageCopy region{};
         region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-        region.extent = {m_swapchainExtent.width, m_swapchainExtent.height, 1};
+        region.extent = {frameExtent.width, frameExtent.height, 1};
         vkCmdCopyImage(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        rt.colorImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
@@ -804,14 +843,14 @@ namespace Render {
         resume.renderPass = FrameResumePass();
         resume.framebuffer = FrameFramebuffer();
         resume.renderArea.offset = {0, 0};
-        resume.renderArea.extent = m_swapchainExtent;
+        resume.renderArea.extent = frameExtent;
         std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
         clearValues[0].color = m_clearColor;
         clearValues[1].depthStencil = {1.0f, 0};
         resume.clearValueCount = static_cast<uint32_t>(clearValues.size());
         resume.pClearValues = clearValues.data();
         vkCmdBeginRenderPass(cmd, &resume, VK_SUBPASS_CONTENTS_INLINE);
-        SetViewport(0, 0, static_cast<int>(m_swapchainExtent.width), static_cast<int>(m_swapchainExtent.height));
+        SetViewport(0, 0, static_cast<int>(frameExtent.width), static_cast<int>(frameExtent.height));
         ClearScissorRect();
         return true;
     }
@@ -3404,6 +3443,12 @@ namespace Render {
         m_swapchainTransferSrc =
             (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
         if (m_swapchainTransferSrc) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        // Render Resolution blits its scaled scene onto the image. MoltenVK
+        // already gives up framebufferOnly for TRANSFER_SRC, so asking for
+        // DST as well changes nothing about how the drawable is created.
+        m_swapchainTransferDst =
+            (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT) != 0;
+        if (m_swapchainTransferDst) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
 
         uint32_t queueFamilyIndices[] = {
             m_queueFamilies.graphicsFamily.value(),
@@ -3604,7 +3649,7 @@ namespace Render {
                 return { static_cast<uint32_t>(it->second.width), static_cast<uint32_t>(it->second.height) };
             }
         }
-        return m_swapchainExtent;
+        return FrameExtent();
     }
 
     bool VKBackend::CreateTargetRenderPass() {
@@ -3927,8 +3972,10 @@ namespace Render {
         vkDeviceWaitIdle(m_device);
         m_frameDepthPreserved = m_frameDepthPreservedWanted;
 
-        // Improved Transparency's framebuffers hold the old depth views.
+        // Improved Transparency's framebuffers hold the old depth views; the
+        // scaled scene's depth changes usage too (rebuilt on its next frame).
         OitDestroyTargets();
+        DestroySceneTargets();
         for (auto fb : m_framebuffers) vkDestroyFramebuffer(m_device, fb, nullptr);
         m_framebuffers.clear();
         for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
@@ -4238,8 +4285,11 @@ namespace Render {
     bool VKBackend::OitEnsureTargets(int width, int height) {
         if (width <= 0 || height <= 0 || !m_frameDepthPreserved) return false;
         if (!EnsureOitLayouts()) return false;
-        if (m_oitCreated && m_oitWidth == width && m_oitHeight == height) return true;
+        // Built on the other frame depth (the scaled scene's vs the slot's
+        // own): the framebuffers attach the wrong image — rebuild.
+        if (m_oitCreated && m_oitWidth == width && m_oitHeight == height && m_oitOnScene == m_sceneActive) return true;
         OitDestroyTargets();
+        m_oitOnScene = m_sceneActive;
         // MC blends MAX into RGBA32F and ADD into RGBA16F.
         for (VkFormat f : {VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R16G16B16A16_SFLOAT}) {
             VkFormatProperties props{};
@@ -4339,15 +4389,15 @@ namespace Render {
                 return false;
             }
             slot.cloudDepthView = CreateImageView(slot.cloudDepthImage, m_depthFormat, depthAspect, 1);
-            if (slot.cloudDepthView == VK_NULL_HANDLE || m_depthSampleViews[s] == VK_NULL_HANDLE) {
+            if (slot.cloudDepthView == VK_NULL_HANDLE || FrameDepthSampleView(s) == VK_NULL_HANDLE) {
                 OitDestroyTargets();
                 return false;
             }
-            slot.frameDepthTexture = makeTexture(m_depthSampleViews[s], m_depthFormat, width, height);
+            slot.frameDepthTexture = makeTexture(FrameDepthSampleView(s), m_depthFormat, width, height);
             if (slot.frameDepthTexture == INVALID_TEXTURE) { OitDestroyTargets(); return false; }
 
             // The framebuffers, by OitPass.
-            const VkImageView frameDepth = m_depthImageViews[s];
+            const VkImageView frameDepth = FrameDepthView(s);
             auto makeFb = [&](OitPass pass, std::initializer_list<VkImageView> views) {
                 std::vector<VkImageView> list(views);
                 VkFramebufferCreateInfo fb{};
@@ -4535,8 +4585,8 @@ namespace Render {
         OitSlot& slot = m_oitSlots[static_cast<size_t>(m_currentFrame)];
         const VkFramebuffer fb = slot.framebuffers[static_cast<size_t>(pass)];
         if (rp == VK_NULL_HANDLE || fb == VK_NULL_HANDLE) return false;
-        if (static_cast<uint32_t>(m_oitWidth) != m_swapchainExtent.width ||
-            static_cast<uint32_t>(m_oitHeight) != m_swapchainExtent.height) {
+        if (static_cast<uint32_t>(m_oitWidth) != FrameExtent().width ||
+            static_cast<uint32_t>(m_oitHeight) != FrameExtent().height || m_oitOnScene != m_sceneActive) {
             return false;
         }
 
@@ -4575,7 +4625,7 @@ namespace Render {
             d.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             d.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            d.image = m_depthImages[static_cast<size_t>(m_currentFrame)];
+            d.image = FrameDepthImage(static_cast<size_t>(m_currentFrame));
             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
             if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
             d.subresourceRange = {aspect, 0, 1, 0, 1};
@@ -4653,7 +4703,7 @@ namespace Render {
             d.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             d.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             d.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            d.image = m_depthImages[static_cast<size_t>(m_currentFrame)];
+            d.image = FrameDepthImage(static_cast<size_t>(m_currentFrame));
             VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
             if (DepthFormatHasStencil(m_depthFormat)) aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
             d.subresourceRange = {aspect, 0, 1, 0, 1};
@@ -4673,7 +4723,7 @@ namespace Render {
         resume.renderPass = FrameResumePass();
         resume.framebuffer = FrameFramebuffer();
         resume.renderArea.offset = {0, 0};
-        resume.renderArea.extent = m_swapchainExtent;
+        resume.renderArea.extent = FrameExtent();
         std::array<VkClearValue, 2> clearValues{};   // LOAD ops: unused, but the count must match
         clearValues[0].color = m_clearColor;
         clearValues[1].depthStencil = {1.0f, 0};
@@ -4682,7 +4732,7 @@ namespace Render {
         vkCmdBeginRenderPass(cmd, &resume, VK_SUBPASS_CONTENTS_INLINE);
         m_currentPipeline = VK_NULL_HANDLE;
         ResetRecordedBindings();
-        SetViewport(0, 0, static_cast<int>(m_swapchainExtent.width), static_cast<int>(m_swapchainExtent.height));
+        SetViewport(0, 0, static_cast<int>(FrameExtent().width), static_cast<int>(FrameExtent().height));
         ClearScissorRect();
     }
 
@@ -4721,10 +4771,10 @@ namespace Render {
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
         } else {
             // The frame's pass leaves the swapchain image in PRESENT_SRC
-            // (its finalLayout); m_renderPassLoad resumes it from
-            // COLOR_ATTACHMENT_OPTIMAL.
-            barrier.image = m_swapchainImages[m_currentImageIndex];
-            barrier.oldLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            // (its finalLayout; a scaled scene's stays an attachment);
+            // FrameResumePass resumes it from COLOR_ATTACHMENT_OPTIMAL.
+            barrier.image = FrameColorImage();
+            barrier.oldLayout = FrameFinalLayout();
             barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
             vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -4737,7 +4787,7 @@ namespace Render {
         if (m_oitPassOpen) return;   // an OIT pass is open: OitEndPass returns to the frame
         auto rtIt = handle != INVALID_RENDER_TARGET ? m_renderTargets.find(handle) : m_renderTargets.end();
         if (handle != INVALID_RENDER_TARGET && rtIt == m_renderTargets.end()) return;
-        if (handle == INVALID_RENDER_TARGET && m_renderPassLoad == VK_NULL_HANDLE) return;
+        if (handle == INVALID_RENDER_TARGET && FrameResumePass() == VK_NULL_HANDLE) return;
         if (rtIt != m_renderTargets.end() && rtIt->second.framebuffer == VK_NULL_HANDLE) return;
 
         VkCommandBuffer cmd = m_commandBuffers[m_currentFrame];
@@ -4775,7 +4825,7 @@ namespace Render {
         } else {
             begin.renderPass  = FrameResumePass();
             begin.framebuffer = FrameFramebuffer();
-            begin.renderArea.extent = m_swapchainExtent;
+            begin.renderArea.extent = FrameExtent();
         }
         vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
         m_activeTarget = handle;
@@ -4799,6 +4849,307 @@ namespace Render {
         if (handle == INVALID_RENDER_TARGET && !m_frameDepthPreserved) {
             Clear(false, true, DepthFormatHasStencil(m_depthFormat));
         }
+    }
+
+    // ========================================================================
+    // SCALED SCENE (Render Resolution — see m_sceneSlots)
+    // ========================================================================
+
+    bool VKBackend::CreateFrameShapedPass(VkRenderPass& out, VkAttachmentLoadOp colorLoad,
+                                          VkImageLayout colorInitial, VkImageLayout colorFinal,
+                                          bool loadDepth, bool keepDepth) {
+        // CreateRenderPassVariant's attachments, subpass and dependency —
+        // only the load/store ops and the layouts differ, none of which take
+        // part in render-pass compatibility.
+        VkAttachmentDescription color{};
+        color.format         = m_swapchainFormat;
+        color.samples        = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp         = colorLoad;
+        color.storeOp        = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout  = colorInitial;
+        color.finalLayout    = colorFinal;
+
+        VkAttachmentDescription depth{};
+        depth.format         = m_depthFormat;
+        depth.samples        = VK_SAMPLE_COUNT_1_BIT;
+        depth.loadOp         = loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp        = keepDepth ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.stencilLoadOp  = loadDepth ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.stencilStoreOp = keepDepth ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        depth.initialLayout  = loadDepth ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                         : VK_IMAGE_LAYOUT_UNDEFINED;
+        depth.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkAttachmentReference depthRef{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount    = 1;
+        subpass.pColorAttachments       = &colorRef;
+        subpass.pDepthStencilAttachment = &depthRef;
+
+        VkSubpassDependency dependency{};
+        dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
+        dependency.dstSubpass    = 0;
+        dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.srcAccessMask = 0;
+        dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                   VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+        std::array<VkAttachmentDescription, 2> attachments = {color, depth};
+        VkRenderPassCreateInfo info{};
+        info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+        info.attachmentCount = static_cast<uint32_t>(attachments.size());
+        info.pAttachments    = attachments.data();
+        info.subpassCount    = 1;
+        info.pSubpasses      = &subpass;
+        info.dependencyCount = 1;
+        info.pDependencies   = &dependency;
+        return vkCreateRenderPass(m_device, &info, nullptr, &out) == VK_SUCCESS;
+    }
+
+    bool VKBackend::CreateScenePasses() {
+        if (m_scenePass != VK_NULL_HANDLE) return true;
+        constexpr VkImageLayout kAttachment = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        const bool ok =
+            // The scene: begun cleared, resumed loaded; its colour never
+            // leaves the attachment layout inside the frame (the blit takes
+            // it from there).
+            CreateFrameShapedPass(m_scenePass, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_IMAGE_LAYOUT_UNDEFINED, kAttachment,
+                                  /*loadDepth=*/false, /*keepDepth=*/false) &&
+            CreateFrameShapedPass(m_scenePassLoad, VK_ATTACHMENT_LOAD_OP_LOAD, kAttachment, kAttachment,
+                                  /*loadDepth=*/true, /*keepDepth=*/false) &&
+            CreateFrameShapedPass(m_scenePassKeepDepth, VK_ATTACHMENT_LOAD_OP_CLEAR, VK_IMAGE_LAYOUT_UNDEFINED,
+                                  kAttachment, /*loadDepth=*/false, /*keepDepth=*/true) &&
+            CreateFrameShapedPass(m_scenePassLoadKeepDepth, VK_ATTACHMENT_LOAD_OP_LOAD, kAttachment, kAttachment,
+                                  /*loadDepth=*/true, /*keepDepth=*/true) &&
+            // The swapchain after the blit: colour as the blit left it, the
+            // slot's depth started fresh for the GUI, presented at the end.
+            CreateFrameShapedPass(m_renderPassAfterScene, VK_ATTACHMENT_LOAD_OP_LOAD, kAttachment,
+                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, /*loadDepth=*/false, /*keepDepth=*/false) &&
+            CreateFrameShapedPass(m_renderPassAfterSceneKeepDepth, VK_ATTACHMENT_LOAD_OP_LOAD, kAttachment,
+                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, /*loadDepth=*/false, /*keepDepth=*/true);
+        if (!ok) {
+            DestroyScenePasses();
+            Log::Error("VKBackend: scaled-scene render passes could not be created - Render Resolution off");
+        }
+        return ok;
+    }
+
+    void VKBackend::DestroyScenePasses() {
+        for (VkRenderPass* rp : {&m_scenePass, &m_scenePassLoad, &m_scenePassKeepDepth, &m_scenePassLoadKeepDepth,
+                                 &m_renderPassAfterScene, &m_renderPassAfterSceneKeepDepth}) {
+            if (*rp != VK_NULL_HANDLE) vkDestroyRenderPass(m_device, *rp, nullptr);
+            *rp = VK_NULL_HANDLE;
+        }
+    }
+
+    void VKBackend::DestroySceneTargets() {
+        if (m_device == VK_NULL_HANDLE) return;
+        bool any = false;
+        for (const SceneSlot& slot : m_sceneSlots) {
+            if (slot.colorImage != VK_NULL_HANDLE || slot.depthImage != VK_NULL_HANDLE) { any = true; break; }
+        }
+        if (!any) {
+            m_sceneExtent = {0, 0};
+            return;
+        }
+        // Every slot's images may still be read by a frame in flight.
+        vkDeviceWaitIdle(m_device);
+        // Improved Transparency's framebuffers may attach these depth views.
+        if (m_oitCreated && m_oitOnScene) OitDestroyTargets();
+        for (SceneSlot& slot : m_sceneSlots) {
+            if (slot.framebuffer != VK_NULL_HANDLE)     vkDestroyFramebuffer(m_device, slot.framebuffer, nullptr);
+            if (slot.depthSampleView != VK_NULL_HANDLE) vkDestroyImageView(m_device, slot.depthSampleView, nullptr);
+            if (slot.depthView != VK_NULL_HANDLE)       vkDestroyImageView(m_device, slot.depthView, nullptr);
+            if (slot.depthImage != VK_NULL_HANDLE)      vkDestroyImage(m_device, slot.depthImage, nullptr);
+            if (slot.depthMemory != VK_NULL_HANDLE)     vkFreeMemory(m_device, slot.depthMemory, nullptr);
+            if (slot.colorView != VK_NULL_HANDLE)       vkDestroyImageView(m_device, slot.colorView, nullptr);
+            if (slot.colorImage != VK_NULL_HANDLE)      vkDestroyImage(m_device, slot.colorImage, nullptr);
+            if (slot.colorMemory != VK_NULL_HANDLE)     vkFreeMemory(m_device, slot.colorMemory, nullptr);
+            slot = SceneSlot{};
+        }
+        if (m_sceneExtent.width > 0 && m_sceneExtent.height > 0) {
+            // Accounted as colour 4 B + depth 4 B a pixel per slot (EnsureSceneTargets).
+            const size_t bytes = static_cast<size_t>(m_sceneExtent.width) * m_sceneExtent.height * 8u *
+                                 static_cast<size_t>(MAX_FRAMES_IN_FLIGHT);
+            m_memStats.textureMemory  -= std::min(m_memStats.textureMemory, bytes);
+            m_memStats.totalAllocated -= std::min(m_memStats.totalAllocated, bytes);
+        }
+        m_sceneExtent = {0, 0};
+    }
+
+    bool VKBackend::EnsureSceneTargets(VkExtent2D extent) {
+        if (m_sceneExtent.width == extent.width && m_sceneExtent.height == extent.height &&
+            m_sceneBuiltPreserved == m_frameDepthPreserved && m_sceneSlots[0].framebuffer != VK_NULL_HANDLE) {
+            return true;
+        }
+        if (!CreateScenePasses()) return false;
+        // The scene is blitted onto the swapchain image: the colour format
+        // must allow it (BGRA8/RGBA8 UNORM always do in practice).
+        VkFormatProperties props{};
+        vkGetPhysicalDeviceFormatProperties(m_physicalDevice, m_swapchainFormat, &props);
+        const VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+        if ((props.optimalTilingFeatures & blit) != blit) {
+            if (!m_sceneUnsupportedLogged) {
+                m_sceneUnsupportedLogged = true;
+                Log::Warning("VKBackend: the swapchain format cannot be blitted - Render Resolution is drawn at 100%%");
+            }
+            return false;
+        }
+        m_sceneBlitFilter = (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)
+                                ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        DestroySceneTargets();   // idles the device if there was anything to free
+
+        VkImageAspectFlags depthAspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (DepthFormatHasStencil(m_depthFormat)) depthAspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        const VkImageUsageFlags depthUsage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+            (m_frameDepthPreserved ? VK_IMAGE_USAGE_SAMPLED_BIT : 0u);
+        for (SceneSlot& slot : m_sceneSlots) {
+            // TRANSFER_SRC: the resolve blit, the read-back and the post
+            // chains' copy all read the scene's colour.
+            const bool ok =
+                CreateVkImage(extent.width, extent.height, 1, m_swapchainFormat, VK_IMAGE_TILING_OPTIMAL,
+                              VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, slot.colorImage, slot.colorMemory) &&
+                (slot.colorView = CreateImageView(slot.colorImage, m_swapchainFormat, VK_IMAGE_ASPECT_COLOR_BIT, 1)) != VK_NULL_HANDLE &&
+                CreateVkImage(extent.width, extent.height, 1, m_depthFormat, VK_IMAGE_TILING_OPTIMAL, depthUsage,
+                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, slot.depthImage, slot.depthMemory) &&
+                (slot.depthView = CreateImageView(slot.depthImage, m_depthFormat, depthAspect, 1)) != VK_NULL_HANDLE &&
+                (!m_frameDepthPreserved ||
+                 (slot.depthSampleView = CreateImageView(slot.depthImage, m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT, 1)) != VK_NULL_HANDLE);
+            if (ok) {
+                std::array<VkImageView, 2> views = {slot.colorView, slot.depthView};
+                VkFramebufferCreateInfo fbInfo{};
+                fbInfo.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                fbInfo.renderPass      = m_scenePass;
+                fbInfo.attachmentCount = static_cast<uint32_t>(views.size());
+                fbInfo.pAttachments    = views.data();
+                fbInfo.width           = extent.width;
+                fbInfo.height          = extent.height;
+                fbInfo.layers          = 1;
+                if (vkCreateFramebuffer(m_device, &fbInfo, nullptr, &slot.framebuffer) == VK_SUCCESS) continue;
+            }
+            Log::Error("VKBackend: scaled scene %ux%u could not be created - drawn at 100%%",
+                       extent.width, extent.height);
+            m_sceneExtent = {0, 0};   // so DestroySceneTargets accounts nothing it did not add
+            DestroySceneTargets();
+            return false;
+        }
+        m_sceneExtent = extent;
+        m_sceneBuiltPreserved = m_frameDepthPreserved;
+        const size_t bytes = static_cast<size_t>(extent.width) * extent.height * 8u *
+                             static_cast<size_t>(MAX_FRAMES_IN_FLIGHT);
+        m_memStats.textureMemory  += bytes;
+        m_memStats.totalAllocated += bytes;
+        Log::Info("VKBackend: scaled scene %ux%u (window %ux%u)", extent.width, extent.height,
+                  m_swapchainExtent.width, m_swapchainExtent.height);
+        return true;
+    }
+
+    void VKBackend::RequestScaledScene(int width, int height) {
+        m_sceneRequest = {0, 0};
+        if (width <= 0 || height <= 0 || m_device == VK_NULL_HANDLE) return;
+        // The window's own size is the 100 % path: no scene, no extra pass.
+        int fbW = 0, fbH = 0;
+        if (m_window) glfwGetFramebufferSize(m_window, &fbW, &fbH);
+        if (width == fbW && height == fbH) return;
+        if (m_sceneMaxDim == 0) {
+            VkPhysicalDeviceProperties devProps{};
+            vkGetPhysicalDeviceProperties(m_physicalDevice, &devProps);
+            const uint32_t maxFb = std::min(devProps.limits.maxFramebufferWidth,
+                                            devProps.limits.maxFramebufferHeight);
+            m_sceneMaxDim = static_cast<int>(std::max(1u, std::min(devProps.limits.maxImageDimension2D, maxFb)));
+        }
+        m_sceneRequest = {static_cast<uint32_t>(std::min(width, m_sceneMaxDim)),
+                          static_cast<uint32_t>(std::min(height, m_sceneMaxDim))};
+    }
+
+    void VKBackend::ResolveScaledScene() {
+        if (!m_sceneActive) return;
+        if (!m_frameActive) { m_sceneActive = false; return; }
+        PROFILE_ZONE_N("Vk.ResolveScaledScene");
+        // Back on the scene's own pass first: an OIT pass or a render target
+        // may still be open.
+        if (m_oitPassOpen) OitEndPass();
+        if (m_activeTarget != INVALID_RENDER_TARGET) BindRenderTarget(INVALID_RENDER_TARGET);
+
+        VkCommandBuffer cmd   = m_commandBuffers[m_currentFrame];
+        const SceneSlot& slot = m_sceneSlots[static_cast<size_t>(m_currentFrame)];
+        VkImage swapImage     = m_swapchainImages[m_currentImageIndex];
+        const VkExtent2D sceneExtent = m_sceneExtent;
+        vkCmdEndRenderPass(cmd);   // the scene's colour stays COLOR_ATTACHMENT_OPTIMAL
+
+        // Scene: attachment -> blit source. Swapchain image: whatever it held
+        // -> blit destination. COLOR_ATTACHMENT_OUTPUT as the source stage
+        // chains the swapchain's transition after the acquire semaphore's
+        // wait (submitted at that stage), as the frame pass's own would be.
+        VkImageMemoryBarrier pre[2]{};
+        pre[0].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        pre[0].oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        pre[0].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        pre[0].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pre[0].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        pre[0].image = slot.colorImage;
+        pre[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        pre[0].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        pre[1] = pre[0];
+        pre[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;   // fully overwritten below
+        pre[1].newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        pre[1].image = swapImage;
+        pre[1].srcAccessMask = 0;
+        pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 2, pre);
+
+        // Bilinear both ways (VK_FILTER_LINEAR): a smooth upscale below
+        // 100 %, a 2×2 box at 200 %. Both images are stored top row first,
+        // so the blit keeps the picture the right way up.
+        VkImageBlit region{};
+        region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.srcOffsets[0]  = {0, 0, 0};
+        region.srcOffsets[1]  = {static_cast<int32_t>(sceneExtent.width), static_cast<int32_t>(sceneExtent.height), 1};
+        region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.dstOffsets[0]  = {0, 0, 0};
+        region.dstOffsets[1]  = {static_cast<int32_t>(m_swapchainExtent.width),
+                                 static_cast<int32_t>(m_swapchainExtent.height), 1};
+        vkCmdBlitImage(cmd, slot.colorImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region, m_sceneBlitFilter);
+
+        VkImageMemoryBarrier post = pre[1];
+        post.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        post.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        post.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        post.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &post);
+
+        // The frame is the swapchain again: its pass opens on the blitted
+        // colour with the slot's depth cleared, for the GUI.
+        m_sceneActive = false;
+        std::array<VkClearValue, 2> clearValues{};
+        clearValues[0].color = m_clearColor;   // LOAD: unused, but the count must match
+        clearValues[1].depthStencil = {1.0f, 0};
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = m_frameDepthPreserved ? m_renderPassAfterSceneKeepDepth : m_renderPassAfterScene;
+        begin.framebuffer = FrameFramebuffer();
+        begin.renderArea.offset = {0, 0};
+        begin.renderArea.extent = m_swapchainExtent;
+        begin.clearValueCount = static_cast<uint32_t>(clearValues.size());
+        begin.pClearValues = clearValues.data();
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        m_currentPipeline = VK_NULL_HANDLE;
+        ResetRecordedBindings();
+        SetViewport(0, 0, static_cast<int>(m_swapchainExtent.width), static_cast<int>(m_swapchainExtent.height));
+        ClearScissorRect();
     }
 
     bool VKBackend::CreateCommandPool() {
@@ -5716,6 +6067,10 @@ namespace Render {
             // Improved Transparency's passes (rebuilt on their next use).
             DestroyKeepDepthPasses();
             DestroyOitPasses();
+            // The scaled scene's passes and images carry the formats too
+            // (rebuilt on the next scaled frame).
+            DestroySceneTargets();
+            DestroyScenePasses();
             if (m_frameDepthPreserved) {
                 CreateRenderPassVariant(false, m_renderPassKeepDepth, /*keepDepth=*/true);
                 CreateRenderPassVariant(true, m_renderPassLoadKeepDepth, /*keepDepth=*/true);

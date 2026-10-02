@@ -1,5 +1,6 @@
 // File: src/server/commands/SheepEatCommand.cpp
 #include "SheepEatCommand.hpp"
+#include "../level/ServerLevel.hpp"
 #include "../IntegratedServer.hpp"
 #include "../entity/MobManager.hpp"
 #include "../network/ServerConnection.hpp"
@@ -47,14 +48,16 @@ namespace Server {
             return;
         }
 
-        MobManager* mobs = g_integratedServer->GetMobs();
-        Game::World* world = g_integratedServer->GetWorld();
+        // The source's level and position (`/execute in|at ...`).
+        ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
+        MobManager* mobs = level ? level->Mobs() : nullptr;
+        Game::World* world = level ? level->World() : nullptr;
         if (!mobs || !world) {
             connection.SendChatMessage("No world", 1);
             return;
         }
 
-        // Optional radius around the sender. Omitted = every loaded sheep.
+        // Optional radius around the source. Omitted = every loaded sheep.
         double radiusSq = -1.0;
         if (!args.empty()) {
             try {
@@ -70,7 +73,7 @@ namespace Server {
             }
         }
 
-        const glm::dvec3 origin = sender.getPosition();
+        const glm::dvec3 origin = source.position;
 
         int forced = 0;
         int noBlock = 0;
@@ -112,7 +115,7 @@ namespace Server {
         if (noBlock > 0) {
             msg += " (" + std::to_string(noBlock) + " on nothing edible)";
         }
-        connection.SendChatMessage(msg, 1);
+        source.SendSuccess(connection, msg, true);
 
         Log::Info("[SheepEatCommand] %s forced %d/%d sheep to graze (%d had no block)",
                   sender.getName().c_str(), forced, total, noBlock);

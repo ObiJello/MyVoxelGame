@@ -1,5 +1,6 @@
 // File: src/common/entity/Entity.cpp
 #include "common/entity/Entity.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/world/block/BlockBounce.hpp"
 #include "common/core/Profiling_Tracy.hpp"
@@ -11,6 +12,7 @@
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/ContactDamageBlocks.hpp"   // PointedDripstone::IsStalagmiteTip
 #include "common/entity/LivingEntity.hpp"
 #include "common/sound/EntitySounds.hpp"
 #include "common/sound/SoundEvents.hpp"
@@ -725,6 +727,15 @@ namespace Game {
                     static_cast<int>(std::floor(position.y - 0.500001));
                 speedFactor = factorOf(blocks->GetBlock(p.x, belowY, p.z));
             }
+            // LivingEntity.getBlockSpeedFactor: lerp(MOVEMENT_EFFICIENCY,
+            // factor, 1) — Soul Speed, or /attribute … movement_efficiency.
+            if (speedFactor != 1.0f) {
+                if (const LivingEntity* living = AsLiving()) {
+                    const float efficiency = std::clamp(
+                        static_cast<float>(living->GetAttributeValue(Attribute::MovementEfficiency)), 0.0f, 1.0f);
+                    speedFactor += (1.0f - speedFactor) * efficiency;
+                }
+            }
             if (speedFactor != 1.0f) {
                 velocity.x *= speedFactor;
                 velocity.z *= speedFactor;
@@ -758,10 +769,15 @@ namespace Game {
                 // causeFallDamage itself; see PropagateFallToPassengers's
                 // header note for why it is called from here instead.
                 float reduction = 0.0f;
+                bool stalagmite = false;
                 if (const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr) {
                     const glm::ivec3 p = BlockPosition();
                     const glm::ivec3 onPos(p.x, static_cast<int>(std::floor(position.y - 0.2)), p.z);
                     reduction = FallDistanceReduction(blocks->GetBlock(onPos.x, onPos.y, onPos.z));
+                    // MC PointedDripstoneBlock.fallOn overrides Block.fallOn
+                    // outright: a stalagmite tip impales instead.
+                    stalagmite = PointedDripstone::IsStalagmiteTip(
+                        blocks->GetBlockState(onPos.x, onPos.y, onPos.z));
                     // The block's own fallOn reaction (a turtle egg cracked
                     // by the landing), server-side, ahead of the damage.
                     if (!m_level->IsClientSide()) {
@@ -773,9 +789,17 @@ namespace Game {
                         }
                     }
                 }
-                const float fd = fallDistance * (1.0f - reduction);
-                PropagateFallToPassengers(fd, 1.0f);
-                CauseFallDamage(fd, 1.0f);
+                if (stalagmite) {
+                    // causeFallDamage(fallDistance + 2.5, 2.0F, stalagmite()).
+                    const LivingEntity::FallDamageSourceScope source(MobDamageSource::Stalagmite);
+                    const double fd = static_cast<double>(fallDistance) + PointedDripstone::kStalagmiteExtraFall;
+                    PropagateFallToPassengers(fd, PointedDripstone::kStalagmiteDamageMultiplier);
+                    CauseFallDamage(fd, PointedDripstone::kStalagmiteDamageMultiplier);
+                } else {
+                    const float fd = fallDistance * (1.0f - reduction);
+                    PropagateFallToPassengers(fd, 1.0f);
+                    CauseFallDamage(fd, 1.0f);
+                }
                 // MC checkFallDamage: gameEvent(HIT_GROUND, position,
                 // Context.of(this, <the main supporting block's state, else
                 // the landed-on one>)).
@@ -1034,29 +1058,45 @@ namespace Game {
                         // of the server tick, spent establishing that there is
                         // no portal.
                         if (state.Block() == BlockID::Air) continue;
+                        // MC ServerPlayer.onInsideBlock: every block a server
+                        // player is inside is CriteriaTriggers.ENTER_BLOCK
+                        // (an end gateway's advancement).
+                        if (IsPlayer() && !level.IsClientSide()) {
+                            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(this)) {
+                                Server::CriteriaTriggers::EnterBlock(*player, state);
+                            }
+                        }
                         const Block& def = BlockRegistry::Get(state.Block());
                         if (!def.entityInside) continue;
 
-                        // MC tests the entity's box against the block's SHAPE,
-                        // not its cell — and does so even for blocks with no
-                        // collision, which is the whole point here: a nether
-                        // portal is 4/16 thin on its short axis, so standing in
-                        // the cell in front of one must not count as standing
-                        // in it.
-                        const auto shapes = BlockRegistry::GetBlockShapeSet(state);
-                        bool overlaps = false;
-                        for (const auto& sh : shapes) {
-                            if (box.max.x - kShrink > x + sh.min.x &&
-                                box.min.x + kShrink < x + sh.max.x &&
-                                box.max.y - kShrink > y + sh.min.y &&
-                                box.min.y + kShrink < y + sh.max.y &&
-                                box.max.z - kShrink > z + sh.min.z &&
-                                box.min.z + kShrink < z + sh.max.z) {
-                                overlaps = true;
-                                break;
+                        // MC getEntityInsideCollisionShape: `Shapes.block()`
+                        // by default — being in the CELL is being inside, the
+                        // test above already answered it. That default is what
+                        // lets a cactus prick the player held off by its 1/16
+                        // inset collision box, and a berry bush scratch
+                        // anything walking through its cell.
+                        //
+                        // A block that narrows it (EntityInsideShape::Outline)
+                        // is tested against its outline boxes instead, even
+                        // with no collision: a nether portal is 4/16 thin on
+                        // its short axis, so standing in the cell in front of
+                        // one must not count as standing in it.
+                        if (def.entityInsideShape == EntityInsideShape::Outline) {
+                            const auto shapes = BlockRegistry::GetBlockShapeSet(state);
+                            bool overlaps = false;
+                            for (const auto& sh : shapes) {
+                                if (box.max.x - kShrink > x + sh.min.x &&
+                                    box.min.x + kShrink < x + sh.max.x &&
+                                    box.max.y - kShrink > y + sh.min.y &&
+                                    box.min.y + kShrink < y + sh.max.y &&
+                                    box.max.z - kShrink > z + sh.min.z &&
+                                    box.min.z + kShrink < z + sh.max.z) {
+                                    overlaps = true;
+                                    break;
+                                }
                             }
+                            if (!overlaps) continue;
                         }
-                        if (!overlaps) continue;
 
                         const glm::ivec3 cell(x, y, z);
                         bool seen = false;
@@ -1260,6 +1300,14 @@ namespace Game {
     // Out of line so the by-value unique_ptr parameter is destroyed where
     // Entity is complete (see EntityLevel.hpp). The base level takes no
     // ownership: the client has no entity list, the server overrides.
+    bool EntityLevel::ResolveEntityEye(int32_t id, glm::dvec3& feet, double& eyeY) const {
+        const Entity* entity = ResolveEntityById(id);
+        if (!entity) return false;
+        feet = entity->position;
+        eyeY = entity->GetEyeY();
+        return true;
+    }
+
     void EntityLevel::AddFreshEntity(std::unique_ptr<Entity> entity) {
         (void)entity;
     }

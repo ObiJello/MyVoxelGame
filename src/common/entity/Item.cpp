@@ -13,10 +13,16 @@
 #include "../data/DataComponents.hpp"
 #include "../core/Mth.hpp"
 #include "../core/Log.hpp"
+#include "../text/Language.hpp"
 #include "../world/block/BlockModel.hpp"   // BakeCompositeItemModels
 #include "server/player/ServerPlayer.hpp"  // startUsingItem in Item_DefaultUse
+#include "WeaponItems.hpp"
                                            // (common→server precedent: PortalGunBehavior.cpp)
 #include <nlohmann/json.hpp>
+#include <mutex>
+#include <memory>
+#include <atomic>
+#include <array>
 #include <unordered_map>
 #include <string_view>
 #include <vector>
@@ -168,6 +174,45 @@ namespace Game {
             g_echoCompassRotation = WrapToUnit(g_echoCompassRotation + g_echoCompassVelocity);
         }
 
+        // CompassAngleState's LODESTONE target: a compass with a
+        // LODESTONE_TRACKER points at its lodestone when the viewer is in
+        // that dimension; otherwise (another dimension, or the lodestone is
+        // gone) the needle spins at random, as the echo compass's does.
+        float    g_lodestoneSpinRotation = 0.0f;
+        float    g_lodestoneSpinVelocity = 0.0f;
+        uint32_t g_lodestoneSpinSeed     = 0x7F4A7C15u;
+
+        void TickLodestoneSpin() {
+            g_lodestoneSpinSeed = g_lodestoneSpinSeed * 1664525u + 1013904223u;
+            const float target = static_cast<float>(g_lodestoneSpinSeed >> 8) / 16777216.0f;
+            float delta = target - g_lodestoneSpinRotation;
+            if (delta >  0.5f) delta -= 1.0f;
+            if (delta < -0.5f) delta += 1.0f;
+            g_lodestoneSpinVelocity *= COMPASS_INERTIA;
+            g_lodestoneSpinVelocity += delta * COMPASS_STIFFNESS;
+            g_lodestoneSpinRotation = WrapToUnit(g_lodestoneSpinRotation + g_lodestoneSpinVelocity);
+        }
+
+        std::string Sprite_LodestoneCompass(const ItemStack& stack) {
+            const auto tracker = stack.get(DataComponents::LODESTONE_TRACKER);
+            if (!tracker) return {};
+            const Item& item = ItemRegistry::Get(stack.itemId);
+            if (item.spriteFrames.empty()) return {};
+            const ItemRenderContext& ctx = g_renderContext;
+            float revolutions = g_lodestoneSpinRotation;
+            const std::string_view here = DimensionRegistryName(DimensionFromRaw(ctx.dimensionRaw));
+            if (tracker->target && tracker->target->dimension == here) {
+                ItemRenderContext aimed = ctx;
+                aimed.compassTargetX = static_cast<float>(tracker->target->pos.x) + 0.5f;
+                aimed.compassTargetZ = static_cast<float>(tracker->target->pos.z) + 0.5f;
+                revolutions = ComputeCompassTargetRevolutions(aimed);
+            }
+            const int frames = static_cast<int>(item.spriteFrames.size());
+            int frame = static_cast<int>(std::floor(revolutions * static_cast<float>(frames) + 0.5f)) % frames;
+            if (frame < 0) frame += frames;
+            return item.spriteFrames[static_cast<size_t>(frame)];
+        }
+
         int EchoCompassFrameSelector(const ItemRenderContext& /*ctx*/) {
             int frame = static_cast<int>(std::floor(g_echoCompassRotation * 32.0f + 0.5f)) % 32;
             if (frame < 0) frame += 32;
@@ -211,6 +256,168 @@ namespace Game {
             }();
             return air;
         }
+    }
+
+    bool ApplyClientItemDesc(Item& item, const ClientItemDesc& desc) {
+        if (desc.kind == ClientItemKind::Missing) return false;
+        switch (desc.kind) {
+            case ClientItemKind::BlockModel:
+                item.renderType        = ItemRenderType::Block;
+                item.blockModelOverride = desc.restSlug; // e.g. "oak_trapdoor_bottom"
+                item.spriteName        = "";
+                break;
+            case ClientItemKind::Composite:
+                // The synthetic model does not exist yet — the block
+                // models load after the items. BakeCompositeItemModels
+                // registers it under this name once they have.
+                item.renderType         = ItemRenderType::Block;
+                item.blockModelOverride = desc.restSlug;
+                item.compositeChildren  = desc.compositeChildren;
+                item.spriteName         = "";
+                break;
+            case ClientItemKind::FlatSprite:
+            case ClientItemKind::Special:
+                item.renderType = ItemRenderType::Sprite;
+                item.spriteName = desc.restSlug;
+                // The new client-item only gives us the MODEL identifier
+                // (e.g. "item/glass_pane"). The actual texture name lives in
+                // the legacy `models/item/{slug}.json` `textures.layer0` —
+                // for glass_pane that's "block/glass", not "glass_pane". Try
+                // to refine spriteName + multi-layer info from the legacy
+                // model. If the legacy file is missing, fall through.
+                {
+                    Item probe;
+                    try {
+                        if (ItemModelLoader::LoadInto(probe, desc.restSlug)) {
+                            if (!probe.spriteName.empty()) item.spriteName = probe.spriteName;
+                            if (!probe.spriteLayers.empty()) item.spriteLayers = std::move(probe.spriteLayers);
+                        }
+                    } catch (...) {}
+                }
+                // Tints from the items/{slug}.json `tints` array — index N
+                // applies to layerN. 0 means untinted/white; non-zero is
+                // ARGB. Used by leather armor, spawn eggs, potions, etc.
+                if (!desc.layerTints.empty()) {
+                    item.layerTints     = desc.layerTints;
+                    item.layerTintKinds = desc.layerTintKinds;
+                }
+
+                // ── Auto-attach the `_overlay.png` companion ONLY when
+                // the items.json carries tints. Mirrors MC's
+                // `ItemModelGenerators.generateItemWithTintedBaseLayer`
+                // (ItemModelGenerators.java:104), which generates a
+                // TWO_LAYERED_ITEM (layer0 tinted, layer1 untinted overlay)
+                // ONLY for items with a default tinted base. Items whose
+                // un-dyed branch declares no tint (e.g. wolf_armor's
+                // `condition on_false` branch) must stay single-layer —
+                // otherwise the overlay's white pixels render on top.
+                if (item.spriteLayers.size() == 1
+                    && !item.layerTints.empty()
+                    && !item.spriteName.empty()) {
+                    const std::string overlayName = item.spriteName + "_overlay";
+                    const std::string overlayPng = PlatformMain::GetAssetPath(
+                        "assets/textures/item/" + overlayName + ".png");
+                    if (std::filesystem::exists(overlayPng)) {
+                        item.spriteLayers.push_back(overlayName);
+                    }
+                }
+                // Carry the BEWLR hints onto the Item so per-kind renderers
+                // (chest, shulker_box, …) can pick the right texture variant.
+                item.specialKind    = desc.specialKind;
+                item.specialTexture = desc.specialTexture;
+                break;
+            case ClientItemKind::Missing:
+                break;
+        }
+        // Animation frames + property → selector mapping.
+        // The loader gives us MODEL slugs from the range_dispatch entries
+        // (e.g. "brush_brushing_0"), but the renderer needs TEXTURE
+        // names. For clock these happen to match (clock_00.json's layer0
+        // is "item/clock_00"), but brush's brushing-frame models all
+        // reference "item/brush" — different from their model name. So
+        // resolve each frame's model JSON via ItemModelLoader and use
+        // its layer0 as the actual frame texture.
+        if (!desc.frameSlugs.empty()) {
+            item.spriteFrames.clear();
+            item.spriteFrames.reserve(desc.frameSlugs.size());
+            for (const auto& slug : desc.frameSlugs) {
+                std::string textureName = slug; // fallback to slug
+                try {
+                    Item frameProbe;
+                    if (ItemModelLoader::LoadInto(frameProbe, slug)
+                        && !frameProbe.spriteName.empty()) {
+                        textureName = frameProbe.spriteName;
+                    }
+                } catch (...) {}
+                item.spriteFrames.push_back(std::move(textureName));
+            }
+            item.predicateName = desc.property;
+        }
+        // A custom_model_data tint needs its colour index; and a definition
+        // that reads CUSTOM_MODEL_DATA anywhere is drawn per stack.
+        if (!desc.layerTintIndices.empty()) item.layerTintIndices = desc.layerTintIndices;
+        item.modelReadsCustomModelData = desc.readsCustomModelData;
+        return true;
+    }
+
+    ItemFrameSelector ItemFrameSelectorFor(std::string_view property, std::string_view slug, bool hasFrames) {
+        std::string_view pred = property;
+        if (pred.rfind("minecraft:", 0) == 0) pred.remove_prefix(10);
+        if (slug == "echo_compass" && hasFrames) return &EchoCompassFrameSelector;
+        if (pred == "angle" || pred.rfind("compass/", 0) == 0 || pred == "compass") {
+            return slug == "recovery_compass" ? &RecoveryCompassFrameSelector : &CompassFrameSelector;
+        }
+        if (pred == "time") return &ClockFrameSelector;
+        return hasFrames ? &StaticFrame0Selector : nullptr;
+    }
+
+    namespace {
+        // ItemRegistry::RegisterRenderVariant's store: a fixed table of
+        // slots published through an atomic count, so Get() on any thread
+        // reads a slot without a lock once the count covers it.
+        constexpr size_t kMaxRenderVariants = 8192;
+        struct RenderVariant {
+            Item        item;
+            std::string slug;
+        };
+        struct RenderVariantStore {
+            std::mutex                                              mutex;
+            std::unordered_map<std::string, ItemID>                 byKey;
+            std::array<std::unique_ptr<RenderVariant>, kMaxRenderVariants> slots;
+            std::atomic<size_t>                                     count{0};
+        };
+        RenderVariantStore& RenderVariants() {
+            static RenderVariantStore store;
+            return store;
+        }
+        const RenderVariant* FindRenderVariant(ItemID id) {
+            const size_t index = static_cast<size_t>(id - ItemRegistry::RENDER_VARIANT_BASE);
+            RenderVariantStore& store = RenderVariants();
+            if (index >= store.count.load(std::memory_order_acquire)) return nullptr;
+            return store.slots[index].get();
+        }
+    }
+
+    ItemID ItemRegistry::RegisterRenderVariant(const std::string& key, const std::string& slug,
+                                               const std::function<Item()>& build) {
+        RenderVariantStore& store = RenderVariants();
+        std::lock_guard<std::mutex> lock(store.mutex);
+        if (auto it = store.byKey.find(key); it != store.byKey.end()) return it->second;
+        const size_t index = store.count.load(std::memory_order_relaxed);
+        if (index >= kMaxRenderVariants) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                Log::Warning("[ItemRegistry] render variant table full (%zu) — further item_model / "
+                             "custom_model_data looks draw as their own item", kMaxRenderVariants);
+            }
+            return Items::Air;
+        }
+        store.slots[index] = std::make_unique<RenderVariant>(RenderVariant{build(), slug});
+        const ItemID id = RENDER_VARIANT_BASE + static_cast<ItemID>(index);
+        store.byKey.emplace(key, id);
+        store.count.store(index + 1, std::memory_order_release);
+        return id;
     }
 
     void ItemRegistry::BakeCompositeItemModels() {
@@ -263,102 +470,7 @@ namespace Game {
         // + blockModelOverride based on the resolved model kind. Caller has
         // already populated `name`, `blockId`, etc.
         auto applyClientItem = [](Item& item, const std::string& slug) {
-            ClientItemDesc desc = ClientItemLoader::Load(slug);
-            if (desc.kind == ClientItemKind::Missing) return false;
-            switch (desc.kind) {
-                case ClientItemKind::BlockModel:
-                    item.renderType        = ItemRenderType::Block;
-                    item.blockModelOverride = desc.restSlug; // e.g. "oak_trapdoor_bottom"
-                    item.spriteName        = "";
-                    break;
-                case ClientItemKind::Composite:
-                    // The synthetic model does not exist yet — the block
-                    // models load after the items. BakeCompositeItemModels
-                    // registers it under this name once they have.
-                    item.renderType         = ItemRenderType::Block;
-                    item.blockModelOverride = desc.restSlug;
-                    item.compositeChildren  = desc.compositeChildren;
-                    item.spriteName         = "";
-                    break;
-                case ClientItemKind::FlatSprite:
-                case ClientItemKind::Special:
-                    item.renderType = ItemRenderType::Sprite;
-                    item.spriteName = desc.restSlug;
-                    // The new client-item only gives us the MODEL identifier
-                    // (e.g. "item/glass_pane"). The actual texture name lives in
-                    // the legacy `models/item/{slug}.json` `textures.layer0` —
-                    // for glass_pane that's "block/glass", not "glass_pane". Try
-                    // to refine spriteName + multi-layer info from the legacy
-                    // model. If the legacy file is missing, fall through.
-                    {
-                        Item probe;
-                        try {
-                            if (ItemModelLoader::LoadInto(probe, desc.restSlug)) {
-                                if (!probe.spriteName.empty()) item.spriteName = probe.spriteName;
-                                if (!probe.spriteLayers.empty()) item.spriteLayers = std::move(probe.spriteLayers);
-                            }
-                        } catch (...) {}
-                    }
-                    // Tints from the items/{slug}.json `tints` array — index N
-                    // applies to layerN. 0 means untinted/white; non-zero is
-                    // ARGB. Used by leather armor, spawn eggs, potions, etc.
-                    if (!desc.layerTints.empty()) {
-                        item.layerTints     = desc.layerTints;
-                        item.layerTintKinds = desc.layerTintKinds;
-                    }
-
-                    // ── Auto-attach the `_overlay.png` companion ONLY when
-                    // the items.json carries tints. Mirrors MC's
-                    // `ItemModelGenerators.generateItemWithTintedBaseLayer`
-                    // (ItemModelGenerators.java:104), which generates a
-                    // TWO_LAYERED_ITEM (layer0 tinted, layer1 untinted overlay)
-                    // ONLY for items with a default tinted base. Items whose
-                    // un-dyed branch declares no tint (e.g. wolf_armor's
-                    // `condition on_false` branch) must stay single-layer —
-                    // otherwise the overlay's white pixels render on top.
-                    if (item.spriteLayers.size() == 1
-                        && !item.layerTints.empty()
-                        && !item.spriteName.empty()) {
-                        const std::string overlayName = item.spriteName + "_overlay";
-                        const std::string overlayPng = PlatformMain::GetAssetPath(
-                            "assets/textures/item/" + overlayName + ".png");
-                        if (std::filesystem::exists(overlayPng)) {
-                            item.spriteLayers.push_back(overlayName);
-                        }
-                    }
-                    // Carry the BEWLR hints onto the Item so per-kind renderers
-                    // (chest, shulker_box, …) can pick the right texture variant.
-                    item.specialKind    = desc.specialKind;
-                    item.specialTexture = desc.specialTexture;
-                    break;
-                case ClientItemKind::Missing:
-                    break;
-            }
-            // Animation frames + property → selector mapping.
-            // The loader gives us MODEL slugs from the range_dispatch entries
-            // (e.g. "brush_brushing_0"), but the renderer needs TEXTURE
-            // names. For clock these happen to match (clock_00.json's layer0
-            // is "item/clock_00"), but brush's brushing-frame models all
-            // reference "item/brush" — different from their model name. So
-            // resolve each frame's model JSON via ItemModelLoader and use
-            // its layer0 as the actual frame texture.
-            if (!desc.frameSlugs.empty()) {
-                item.spriteFrames.clear();
-                item.spriteFrames.reserve(desc.frameSlugs.size());
-                for (const auto& slug : desc.frameSlugs) {
-                    std::string textureName = slug; // fallback to slug
-                    try {
-                        Item frameProbe;
-                        if (ItemModelLoader::LoadInto(frameProbe, slug)
-                            && !frameProbe.spriteName.empty()) {
-                            textureName = frameProbe.spriteName;
-                        }
-                    } catch (...) {}
-                    item.spriteFrames.push_back(std::move(textureName));
-                }
-                item.predicateName = desc.property;
-            }
-            return true;
+            return ApplyClientItemDesc(item, ClientItemLoader::Load(slug));
         };
 
         // Max stack size for the block items that aren't the default 64 (beds,
@@ -533,6 +645,10 @@ namespace Game {
             }
             g_pureItems[PURE_ITEM_BASE + i] = std::move(it);
         }
+        // CompassItem with a LODESTONE_TRACKER: its own needle.
+        if (auto it = g_pureItems.find(Items::Compass); it != g_pureItems.end()) {
+            it->second.stackSprite = &Sprite_LodestoneCompass;
+        }
 
         // Apply MC's per-item DataComponent defaults. Mirrors the
         // `Item.Properties.component(...)` calls in MC's Items.java. Future
@@ -566,6 +682,25 @@ namespace Game {
         // enchantable / repairable, the tool materials' WEAPON). After the
         // behaviours: it amends the TOOL components they set.
         ItemRegistry_RegisterDurability(g_pureItems);
+        // Every weapon's / tool's / armour piece's ATTRIBUTE_MODIFIERS
+        // (AttributeComponents.cpp).
+        ItemRegistry_RegisterAttributeModifiers(g_pureItems);
+        // use_cooldown / use_effects / death_protection defaults
+        // (ConsumableComponents.cpp).
+        ItemRegistry_RegisterConsumableComponents(g_pureItems);
+        // The spears' KINETIC_WEAPON / PIERCING_WEAPON / ATTACK_RANGE /
+        // MINIMUM_ATTACK_CHARGE / ATTACK_ANIMATION / DAMAGE_TYPE
+        // (WeaponComponents.cpp).
+        ItemRegistry_RegisterWeaponComponents(g_pureItems);
+        // The spawn eggs' ENTITY_DATA (EntityDataComponents.cpp).
+        ItemRegistry_RegisterEntityDataDefaults(g_pureItems);
+        // compostable / cooking_fuel / brewing_fuel / villager_food /
+        // mob_visibility (GameplayDataComponents.cpp) — block items too.
+        ItemRegistry_RegisterGameplayDefaults(g_blockItems, g_pureItems);
+        // jukebox_playable / provides_* / dye / recipes defaults, the
+        // compass's lodestone lock and the knowledge book
+        // (ItemFeatureComponents.cpp).
+        ItemRegistry_RegisterItemFeatureDefaults(g_pureItems);
 
 #if ENABLE_PORTAL_GUN
         // ── Portal Gun (custom non-MC item, behind compile-time feature flag) ──
@@ -699,6 +834,11 @@ namespace Game {
             player->startUsingItem(hand);
             return UseResult::Consume;
         }
+        // 4. KINETIC_WEAPON → startUsingItem + kineticWeapon.makeSound → CONSUME
+        //    (:209-214) — any stack a component patch makes a spear.
+        if (stack.get(DataComponents::KINETIC_WEAPON)) {
+            return WeaponItems::SpearBegin(*player, hand);
+        }
         return UseResult::Pass;  // Item.java:215
     }
 
@@ -710,6 +850,10 @@ namespace Game {
         // BLOCKS_ATTACKS → BLOCK (:308-309)
         if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
             return ItemUseAnimation::BLOCK;
+        }
+        // KINETIC_WEAPON → SPEAR.
+        if (stack.get(DataComponents::KINETIC_WEAPON)) {
+            return ItemUseAnimation::SPEAR;
         }
         // An Item subclass's own override (BowItem.getUseAnimation → BOW).
         if (!stack.IsEmpty()) return ItemRegistry::Get(stack.itemId).useAnimation;
@@ -725,6 +869,10 @@ namespace Game {
         if (stack.get(DataComponents::BLOCKS_ATTACKS)) {
             return 72000;
         }
+        // KINETIC_WEAPON → 72000 (the spear's charge).
+        if (stack.get(DataComponents::KINETIC_WEAPON)) {
+            return 72000;
+        }
         // An Item subclass's own override (BowItem.getUseDuration → 72000).
         if (!stack.IsEmpty()) return ItemRegistry::Get(stack.itemId).useDuration;
         return 0;  // :320 (neither component present)
@@ -735,6 +883,8 @@ namespace Game {
         if (auto override = get(DataComponents::ENCHANTMENT_GLINT_OVERRIDE)) {
             return *override;
         }
+        // CompassItem.isFoil: a lodestone compass glints.
+        if (itemId == Items::Compass && has(DataComponents::LODESTONE_TRACKER)) return true;
         // Item.isFoil: itemStack.isEnchanted() — a non-empty ENCHANTMENTS.
         // (An enchanted book glints through its default GLINT_OVERRIDE.)
         return IsEnchanted(*this);
@@ -762,6 +912,16 @@ namespace Game {
                 return static_cast<uint32_t>(*dyed) | 0xFF000000u;
             }
             return fixed;
+        }
+        if (layer < item.layerTintKinds.size() &&
+            item.layerTintKinds[layer] == ItemTintKind::CustomModelData) {
+            // MC CustomModelDataSource.calculate: the stack's
+            // CUSTOM_MODEL_DATA colors[index], else the default — opaque.
+            const int index = layer < item.layerTintIndices.size() ? item.layerTintIndices[layer] : 0;
+            if (auto cmd = stack.get(DataComponents::CUSTOM_MODEL_DATA)) {
+                if (auto color = cmd->GetColor(index)) return static_cast<uint32_t>(*color) | 0xFF000000u;
+            }
+            return fixed | 0xFF000000u;
         }
         if (layer < item.layerTintKinds.size() &&
             item.layerTintKinds[layer] == ItemTintKind::MapColor) {
@@ -803,6 +963,11 @@ namespace Game {
             if (auto contents = stack.get(DataComponents::POTION_CONTENTS)) {
                 return contents->GetName(ItemRegistry::Slug(stack.itemId));
             }
+        }
+        // CompassItem.getName: a compass with a LODESTONE_TRACKER is the
+        // "Lodestone Compass".
+        if (stack.itemId == Items::Compass && stack.has(DataComponents::LODESTONE_TRACKER)) {
+            return Language::GetOrDefault("item.minecraft.lodestone_compass", "Lodestone Compass");
         }
         // Item.getName: ITEM_NAME, which in MC every item carries by default
         // (its translated registry name) — here the registry display name.
@@ -868,6 +1033,7 @@ namespace Game {
         while (g_compassTickAccum >= COMPASS_TICK_DT) {
             TickCompass(g_renderContext);
             TickEchoCompass(g_renderContext);
+            TickLodestoneSpin();
             g_compassTickAccum -= COMPASS_TICK_DT;
         }
     }
@@ -876,12 +1042,20 @@ namespace Game {
         if (id < g_blockItems.size()) {
             return g_blockItems[id];
         }
+        if (IsRenderVariant(id)) {
+            if (const RenderVariant* v = FindRenderVariant(id)) return v->item;
+            return AirItem();
+        }
         auto it = g_pureItems.find(id);
         if (it != g_pureItems.end()) return it->second;
         return AirItem();
     }
 
     std::string_view ItemRegistry::Slug(ItemID id) {
+        if (IsRenderVariant(id)) {
+            const RenderVariant* v = FindRenderVariant(id);
+            return v ? std::string_view(v->slug) : std::string_view();
+        }
         if (id >= PURE_ITEM_BASE) {
             const size_t index = static_cast<size_t>(id - PURE_ITEM_BASE);
             if (index < kPureItemTableSize && kPureItemTable[index].slug) {

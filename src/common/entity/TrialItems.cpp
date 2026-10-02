@@ -35,7 +35,7 @@ namespace Game {
         consumable.sound               = "entity.generic.drink";
         consumable.hasConsumeParticles = false;
         consumable.onConsumeEffects.push_back(
-            ConsumeEffect{ ConsumeEffect::Type::PlaySound, SoundEvents::OMINOUS_BOTTLE_DISPOSE });
+            ConsumeEffect::PlaySoundEvent(SoundEvents::OMINOUS_BOTTLE_DISPOSE));
         bottle.defaultComponents.set(DataComponents::CONSUMABLE, consumable);
         bottle.defaultComponents.set(DataComponents::OMINOUS_BOTTLE_AMPLIFIER, 0);
         bottle.defaultComponents.set(DataComponents::RARITY, Rarity::UNCOMMON);

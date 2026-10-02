@@ -1,5 +1,6 @@
 // File: src/common/world/block/entity/BrushableBlockEntity.cpp
 #include "BrushableBlockEntity.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -71,7 +72,6 @@ namespace Game {
     }
 
     bool BrushableBlockEntity::Brush(ILevelWrite& level, IUsePlayer* user, int direction) {
-        (void)user;
         if (level.IsClientSide()) return false;
         // A generated entity may not have been handed its level yet by the
         // tick walker; the stroke is what needs it (setChanged's broadcast).
@@ -83,6 +83,13 @@ namespace Game {
         if (gameTime < m_coolDownEndsAtTick) return false;
 
         m_coolDownEndsAtTick = gameTime + kBrushCooldownTicks;
+        // MC unpackLootTable(level, player): the brushing player's
+        // CriteriaTriggers.GENERATE_LOOT for the table about to be rolled.
+        if (!m_lootTable.empty()) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(user)) {
+                Server::CriteriaTriggers::GenerateContainerLoot(*player, m_lootTable);
+            }
+        }
         UnpackLootTable(level);
         const int previousCompletionState = GetCompletionState();
         if (++m_brushCount >= kRequiredBrushesToBreak) {

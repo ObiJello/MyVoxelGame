@@ -1,5 +1,6 @@
 // File: src/common/entity/ItemCooldowns.cpp
 #include "common/entity/ItemCooldowns.hpp"
+#include "common/data/DataComponents.hpp"
 
 #include "common/entity/Item.hpp"
 
@@ -45,6 +46,11 @@ namespace Game {
     }
 
     std::string ItemCooldowns::GetCooldownGroup(const ItemStack& item) {
+        // MC ItemCooldowns.getCooldownGroup: the stack's USE_COOLDOWN
+        // cooldown_group when it names one, else the item's registry id.
+        if (auto cooldown = item.get(DataComponents::USE_COOLDOWN); cooldown && !cooldown->cooldownGroup.empty()) {
+            return cooldown->cooldownGroup;
+        }
         return GetCooldownGroup(item.itemId);
     }
 
@@ -67,20 +73,22 @@ namespace Game {
     }
 
     int UseCooldownTicks(ItemID item) {
-        // Items.java: ENDER_PEARL .useCooldown(1.0F), WIND_CHARGE
-        // .useCooldown(0.5F), CHORUS_FRUIT .useCooldown(1.0F).
-        const auto ticks = [](float seconds) { return static_cast<int>(seconds * 20.0f); };
-        if (item == Items::EnderPearl)  return ticks(1.0f);
-        if (item == Items::WindCharge)  return ticks(0.5f);
-        if (item == Items::ChorusFruit) return ticks(1.0f);
+        // The prototype's USE_COOLDOWN (Items.java: ENDER_PEARL
+        // .useCooldown(1.0F), WIND_CHARGE .useCooldown(0.5F), CHORUS_FRUIT
+        // .useCooldown(1.0F) — ConsumableComponents.cpp).
+        if (auto cooldown = ItemRegistry::Get(item).defaultComponents.get(DataComponents::USE_COOLDOWN)) {
+            return cooldown->Ticks();
+        }
         return 0;
     }
 
     bool ApplyUseCooldown(ItemCooldowns& cooldowns, const ItemStack& stackBeforeUsing) {
+        // MC UseCooldown.apply(stack, entity): the stack's USE_COOLDOWN
+        // (any item a component patch gives one) on its cooldown group.
         if (stackBeforeUsing.IsEmpty()) return false;
-        const int ticks = UseCooldownTicks(stackBeforeUsing.itemId);
-        if (ticks <= 0) return false;
-        cooldowns.AddCooldown(stackBeforeUsing, ticks);
+        const auto cooldown = stackBeforeUsing.get(DataComponents::USE_COOLDOWN);
+        if (!cooldown || cooldown->Ticks() <= 0) return false;
+        cooldowns.AddCooldown(stackBeforeUsing, cooldown->Ticks());
         return true;
     }
 

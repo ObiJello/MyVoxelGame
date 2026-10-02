@@ -23,6 +23,7 @@
 #include "server/session/PlayerSessionManager.hpp"
 
 #include "common/core/Log.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/core/Mth.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -583,7 +584,6 @@ namespace Game::HushItems {
         const int count = EnchantmentHelper::ProcessProjectileCount(bridge, bow, *view, 1);
         const ItemStack projectileCopy = projectile;
         std::vector<ItemStack> drawn;
-        std::vector<bool> intangible;
         for (int i = 0; i < count; ++i) {
             const bool forceInfinite = i > 0;
             const ItemStack& source = i == 0 ? projectile : projectileCopy;
@@ -592,7 +592,9 @@ namespace Game::HushItems {
             if (ammoToUse > source.count) continue;
             ItemStack used = source;
             if (ammoToUse == 0) {
+                // copyWithCount(1), marked INTANGIBLE_PROJECTILE.
                 used.count = 1;
+                used.components.set(DataComponents::INTANGIBLE_PROJECTILE, true);
             } else {
                 // projectile.split(ammoToUse) from the inventory's stack.
                 used.count = ammoToUse;
@@ -603,7 +605,6 @@ namespace Game::HushItems {
                 }
             }
             drawn.push_back(std::move(used));
-            intangible.push_back(ammoToUse == 0);
         }
         if (drawn.empty()) return;
 
@@ -639,9 +640,13 @@ namespace Game::HushItems {
             // CREATIVE_ONLY when it was an INTANGIBLE_PROJECTILE (useAmmo
             // spent nothing: infinite materials, Infinity, Multishot's
             // extras).
-            arrow->SetPickupItemStack(ammo);
-            arrow->SetPickup(intangible[static_cast<size_t>(i)] ? Arrow::Pickup::CreativeOnly
-                                                                : Arrow::Pickup::Allowed);
+            // (AbstractArrow's constructor: an INTANGIBLE_PROJECTILE
+            // pickup stack is CREATIVE_ONLY, the flag itself removed.)
+            ItemStack pickup = ammo;
+            const bool intangible = pickup.has(DataComponents::INTANGIBLE_PROJECTILE);
+            pickup.components.remove(DataComponents::INTANGIBLE_PROJECTILE);
+            arrow->SetPickupItemStack(pickup);
+            arrow->SetPickup(intangible ? Arrow::Pickup::CreativeOnly : Arrow::Pickup::Allowed);
             if (power == 1.0f) arrow->SetCritArrow(true);
             arrow->position = glm::dvec3(pos.x, pos.y + player->getEyeHeight() - 0.1, pos.z);
             // BowItem.shootProjectile: shootFromRotation(player, xRot, yRot +

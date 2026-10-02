@@ -55,12 +55,12 @@ namespace Game {
             if (pot->IsEmpty()) {
                 pot->SetItem(0, awarded);
                 pitchBend = static_cast<float>(awarded.count) /
-                            static_cast<float>(ItemRegistry::Get(awarded.itemId).maxStackSize);
+                            static_cast<float>(Game::GetMaxStackSize(awarded));
             } else {
                 ItemStack grown = pot->GetItem(0);
                 grown.count += 1;
                 pitchBend = static_cast<float>(grown.count) /
-                            static_cast<float>(ItemRegistry::Get(grown.itemId).maxStackSize);
+                            static_cast<float>(Game::GetMaxStackSize(grown));
                 pot->SetItem(0, grown);
             }
             level->PlaySound(nullptr, pos, SoundEvents::DECORATED_POT_INSERT, SoundSource::Blocks,
@@ -96,22 +96,12 @@ namespace Game {
         void PotOnProjectileHit(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
                                 const glm::dvec3& /*hitPos*/, Direction /*face*/, Entity& projectile) {
             if (level.IsClientSide()) return;
-            // Projectile.mayInteract: a player owner may (spawn protection
-            // aside); another mob owner only under mobGriefing; no owner may.
-            if (auto* shot = dynamic_cast<Projectile*>(&projectile)) {
-                if (Entity* owner = shot->GetOwner();
-                    owner && !owner->IsPlayer() &&
-                    !Rules::GetBool(Rules::Id::MobGriefing)) {
-                    return;
-                }
-            }
-            // Projectile.mayBreak: #impact_projectiles and the
-            // projectiles_can_break_blocks rule.
-            if (!DataTags::HasTag(DataTags::Registry::EntityType, projectile.TypeInfo().slug,
-                                  "minecraft:impact_projectiles") ||
-                !Rules::GetBool(Rules::Id::ProjectilesCanBreakBlocks)) {
-                return;
-            }
+            // Projectile.mayInteract (a player owner may; another owner only
+            // under mob_griefing; no owner may) and Projectile.mayBreak
+            // (#impact_projectiles, the projectiles_can_break_blocks rule,
+            // canBreakBlockInAdventureMode).
+            auto* shot = dynamic_cast<Projectile*>(&projectile);
+            if (!shot || !shot->MayInteract() || !shot->MayBreak()) return;
             // setBlock(pos, state.setValue(CRACKED, true), 260), then
             // destroyBlock(pos, true, projectile).
             level.SetBlock(pos.x, pos.y, pos.z, state.SetName(PropertyId::CRACKED, "true"),

@@ -197,6 +197,17 @@ namespace Game {
                                     BlockState newState, BlockState oldState,
                                     bool movedByPiston);
 
+    // MC `Block.setPlacedBy(level, pos, state, by, itemStack)` — a block
+    // item finished placing this block (BlockItem.place), only when the cell
+    // still holds the placed block afterwards: a golem or a wither built by
+    // the placement has already cleared it and the hook does not run. Runs
+    // after the block entity took the stack's data. `by` is the placing
+    // player (null for a non-player placer); `stack` is the item as placed
+    // (before the count shrinks). Both sides in MC; the server dispatch is
+    // PlayerSession's.
+    using BlockSetPlacedByFn = void (*)(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                                        IUsePlayer* by, const ItemStack& stack);
+
     // An entity's bounding box overlaps this block's cell. Port of MC's
     // `BlockBehaviour.entityInside(state, level, pos, entity, effectApplier,
     // isPrecise)`, driven per tick rather than per movement step.
@@ -207,6 +218,19 @@ namespace Game {
     // distinguishes a swept test from a sampled one. Portals ignore both.
     using BlockEntityInsideFn = void (*)(ILevelWrite& level, const glm::ivec3& pos,
                                          BlockState state, Entity& entity);
+
+    // MC `BlockBehaviour.getEntityInsideCollisionShape` — what an entity's
+    // (deflated) box has to overlap for `entityInside` to fire. MC's default
+    // is `Shapes.block()`, the WHOLE CELL: a cactus pricks the player pushed
+    // against its 1/16-inset collision box, a berry bush scratches anything
+    // in its cell. Only a handful of blocks narrow it to their outline
+    // (end portal, tripwire in MC; this engine also keeps the thin nether-
+    // style portals on their outline so standing beside the 4/16 sheet is not
+    // standing in it).
+    enum class EntityInsideShape : uint8_t {
+        FullBlock,   // Shapes.block() — MC's default
+        Outline,     // state.getShape(level, pos) — the block's outline boxes
+    };
 
     // `BlockBehaviour.attack(state, level, pos, player)` — the block's
     // reaction to a left-click PRESS, before any mining happens. Fired from
@@ -363,7 +387,9 @@ namespace Game {
 
         // Lifecycle / contact callbacks. See the typedefs above.
         BlockOnPlaceFn               onPlace               = nullptr;
+        BlockSetPlacedByFn           setPlacedBy           = nullptr;
         BlockEntityInsideFn          entityInside          = nullptr;
+        EntityInsideShape            entityInsideShape     = EntityInsideShape::FullBlock;
         BlockAttackFn                attack                = nullptr;
 
         // Redstone callbacks — see the typedefs above. All default to null,

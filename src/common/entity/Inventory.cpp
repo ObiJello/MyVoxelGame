@@ -67,7 +67,9 @@ namespace Game {
         if (id == Items::Air || count <= 0) return count;
 
         int remaining = count;
-        const int maxStack = ItemRegistry::Get(id).maxStackSize;
+        // MC Inventory.getMaxStackSize(stack): the stack's own limit (a
+        // `[max_stack_size=…]` patch included) under the container's 99.
+        const int maxStack = std::min(GetMaxStackSize(), Game::GetMaxStackSize(proto));
 
         // MC's Inventory.add() priority order (Inventory.java add() →
         // getSlotWithRemainingSpace() → getFreeSlot()). MC's items list is laid out
@@ -138,7 +140,7 @@ namespace Game {
 
     void Inventory::SetSlot(int index, ItemID id, int count) {
         if (index >= 0 && index < TOTAL_SIZE) {
-            slots[index] = {id, std::min(count, ItemRegistry::Get(id).maxStackSize)};
+            slots[index] = {id, std::min(count, Game::GetMaxStackSize(ItemStack(id, 1)))};
         }
     }
 
@@ -163,7 +165,7 @@ namespace Game {
 
     int Inventory::AddToSlot(int slotIndex, ItemID id, int count) {
         if (slotIndex < 0 || slotIndex >= TOTAL_SIZE || count <= 0) return 0;
-        const int maxStack = ItemRegistry::Get(id).maxStackSize;
+        const int maxStack = Game::GetMaxStackSize(ItemStack(id, 1));
         auto& slot = slots[slotIndex];
         if (slot.IsEmpty()) {
             slot.itemId = id;

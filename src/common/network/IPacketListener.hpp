@@ -48,6 +48,7 @@ namespace Network {
     struct RidingCommandC2SPacket;
     struct MountScreenOpenS2CPacket;
     struct UpdateAttributesS2CPacket;
+    struct TitlesS2CPacket;
     struct PlayerSwingS2CPacket;
     struct ShoulderParrotsS2CPacket;
     struct OpenSignEditorS2CPacket;
@@ -65,6 +66,9 @@ namespace Network {
     struct LevelParticlesS2CPacket;
     struct SelfParticleStateS2CPacket;
     struct OpenBookS2CPacket;
+    struct UpdateAdvancementsS2CPacket;
+    struct SelectAdvancementsTabS2CPacket;
+    struct SeenAdvancementsC2SPacket;
     struct EditBookC2SPacket;
     struct ContainerButtonClickC2SPacket;
     struct MerchantOffersS2CPacket;
@@ -73,6 +77,8 @@ namespace Network {
     struct SpectatorActionC2SPacket;
     struct TeleportToEntityC2SPacket;
     struct RenameItemC2SPacket;
+    struct PlayerAppearanceC2SPacket;
+    struct PlayerAppearanceS2CPacket;
     struct RemoveMobEffectS2CPacket;
     struct TickingStateS2CPacket;
     struct TickingStepS2CPacket;
@@ -82,6 +88,7 @@ namespace Network {
     struct ExplodeS2CPacket;
     struct BossEventS2CPacket;
     struct EndCrystalBeamS2CPacket;
+    struct WitherHeadTargetsS2CPacket;
     struct ArmorStandDataS2CPacket;
     struct ItemFrameDataS2CPacket;
     struct FishingHookDataS2CPacket;
@@ -206,6 +213,8 @@ namespace Network {
         virtual void onMountScreenOpenS2C(const MountScreenOpenS2CPacket& packet) {}
         // A mob's syncable attributes (UpdateAttributesS2CPacket.hpp)
         virtual void onUpdateAttributesS2C(const UpdateAttributesS2CPacket& packet) {}
+        // /title: a title, subtitle, times or clear (TitlesS2CPacket.hpp)
+        virtual void onTitlesS2C(const TitlesS2CPacket& packet) {}
         virtual void onMoveVehicleS2C(const MoveVehicleS2CPacket& packet) {}
         virtual void onVehicleDataS2C(const VehicleDataS2CPacket& packet) {}
         // Another player swung an arm (PlayerSwingS2CPacket.hpp)
@@ -237,6 +246,10 @@ namespace Network {
         virtual void onSelfParticleStateS2C(const SelfParticleStateS2CPacket& packet) {}
         // Show the written book in a hand (BookPackets.hpp) — MC handleOpenBook
         virtual void onOpenBookS2C(const OpenBookS2CPacket& packet) {}
+        // Advancements (AdvancementPackets.hpp) — MC handleUpdateAdvancementsPacket
+        // and handleSelectAdvancementsTab.
+        virtual void onUpdateAdvancementsS2C(const UpdateAdvancementsS2CPacket& packet) {}
+        virtual void onSelectAdvancementsTabS2C(const SelectAdvancementsTabS2CPacket& packet) {}
         // A merchant's offers (MerchantPackets.hpp) — MC handleMerchantOffers
         virtual void onMerchantOffersS2C(const MerchantOffersS2CPacket& packet) {}
         // Spectator mode (SpectatorPackets.hpp).
@@ -246,6 +259,7 @@ namespace Network {
         // ── End dragon fight ───────────────────────────────────────────────
         virtual void onBossEventS2C(const BossEventS2CPacket& packet) {}
         virtual void onEndCrystalBeamS2C(const EndCrystalBeamS2CPacket& packet) {}
+        virtual void onWitherHeadTargetsS2C(const WitherHeadTargetsS2CPacket& packet) {}
         // Armor stand poses + equipment (ArmorStandDataS2CPacket.hpp)
         virtual void onArmorStandDataS2C(const ArmorStandDataS2CPacket& packet) {}
         // Item frame's framed item (ItemFrameDataS2CPacket.hpp)
@@ -381,6 +395,9 @@ namespace Network {
         virtual void onSignUpdateC2S(const SignUpdateC2SPacket& packet) {}
         // Book and quill saved / signed (BookPackets.hpp) — MC handleEditBook
         virtual void onEditBookC2S(const EditBookC2SPacket& packet) {}
+        // The Advancements screen opened a tab or closed (AdvancementPackets.hpp)
+        // — MC handleSeenAdvancements
+        virtual void onSeenAdvancementsC2S(const SeenAdvancementsC2SPacket& packet) {}
         // A menu button (the lectern's) (BookPackets.hpp) — MC handleContainerButtonClick
         virtual void onContainerButtonClickC2S(const ContainerButtonClickC2SPacket& packet) {}
         // A trade picked in the list (MerchantPackets.hpp) — MC handleSelectTrade
@@ -389,6 +406,10 @@ namespace Network {
         virtual void onSpectatorActionC2S(const SpectatorActionC2SPacket& packet) {}
         virtual void onTeleportToEntityC2S(const TeleportToEntityC2SPacket& packet) {}
         virtual void onRenameItemC2S(const RenameItemC2SPacket& packet) {}
+        // How a player looks (PlayerAppearancePackets.hpp): a client's own,
+        // and the server's relay of another player's.
+        virtual void onPlayerAppearanceC2S(const PlayerAppearanceC2SPacket& packet) {}
+        virtual void onPlayerAppearanceS2C(const PlayerAppearanceS2CPacket& packet) {}
 
         // Play phase - Inventory clicks
         virtual void onInventoryClickC2S(const InventoryClickC2SPacket& packet) {}

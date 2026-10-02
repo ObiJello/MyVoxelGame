@@ -84,6 +84,23 @@ namespace Game::Cmd {
         EntityNbt,       // CompoundTagArgument for the entity named by the "entity" argument
         Nbt,             // CompoundTagArgument
         SoundSource,     // a SoundSource name (master, music, record …)
+        NbtPath,         // NbtPathArgument: a.b[0].c{k:v} (keys from the target's kind)
+        NbtTag,          // NbtTagArgument: any SNBT value
+        StorageId,       // a command storage id (ResourceLocation)
+        FloatProvider,   // ResourceOrIdArgument<context_float_provider>: an id or inline SNBT
+        IntProvider,     // ResourceOrIdArgument<context_int_provider>
+        Attribute,       // ResourceArgument<attribute>: an attribute id (step_height, scale …)
+        AttributeModifierId, // IdentifierArgument + the modifiers on the "attribute" argument (the local player's)
+        AttributeValue,  // DoubleArgumentType for the "attribute" argument (its default, the local player's base)
+        ItemPredicate,   // ItemPredicateArgument: * | id | #tag, then [component tests]
+        DamageType,      // ResourceArgument<damage_type> (data/<ns>/damage_type)
+        SlotRange,       // SlotSourceArgument's slot ranges: container.5, armor.*, weapon.offhand …
+        ItemModifier,    // ResourceOrIdArgument<item_modifier>: an id or an inline SNBT function
+        Message,         // MessageArgument: the rest of the line, `@` selectors completed (greedy)
+        TextComponent,   // ComponentArgument: SNBT/JSON text component, the rest of the line (greedy)
+        ConfiguredFeature, // ResourceOrIdArgument<configured_feature> (common/world/level/ConfiguredFeatureIds.inc)
+        Advancement,          // ResourceKeyArgument<advancement> (data/<ns>/advancement)
+        AdvancementCriterion, // the criteria of the "advancement" argument (MC greedyString; vanilla names are one word)
         Count
     };
 

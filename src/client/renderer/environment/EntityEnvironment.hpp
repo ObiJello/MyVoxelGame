@@ -75,9 +75,20 @@ namespace Render::EntityEnvironment {
     // state, else the cell's light with block light raised to the state's
     // own emission (a lit campfire's food at 15).
     int LevelLightCoordsAt(const glm::ivec3& pos);
+    // The same with the light read at another cell: `statePos`'s block
+    // supplies the emission, `lightPos` the stored sky and block light (a
+    // carried block entity lit from the cell its move started in).
+    int LevelLightCoordsAt(const glm::ivec3& statePos, const glm::ivec3& lightPos);
     // The lightmap colour for a packed light, on the lightmap of the frame
     // being drawn. OBEY_LIGHT=0: Lit() / FullBlockLight() as grey.
     glm::vec3 LightColor(int packedLight);
+    // The same for light coords in either form (LightCoords.hpp) — the
+    // smooth blend's fractional levels included, interpolated between the
+    // texels around them exactly as the terrain shader's LINEAR sample of
+    // the lightmap does per vertex (terrain.vert sampleLightmap). What a
+    // block model lit per vertex off the CPU (a moving piston block) takes,
+    // so it matches the section mesh it hands over to.
+    glm::vec3 LightColorCoords(int lightCoords);
     glm::vec3 LitAt(const glm::dvec3& probe);
     glm::vec3 FullBlockAt(const glm::dvec3& probe);
     // A light colour as an RGBA8 word (r in the low byte, alpha 255) — for

@@ -435,22 +435,29 @@ namespace Game {
     VexCopyOwnerTargetGoal::VexCopyOwnerTargetGoal(Vex* vex)
         : TargetGoal(vex, /*mustSee=*/false), m_vex(vex) {
         // MC: forNonCombat().ignoreLineOfSight().ignoreInvisibilityTesting().
-        m_copyOwnerTargeting = TargetingConditions::ForNonCombat();
+        m_copyOwnerTargeting =
+            TargetingConditions::ForNonCombat().IgnoreLineOfSight().IgnoreInvisibility();
     }
 
     bool VexCopyOwnerTargetGoal::CanUse() {
+        // MC: owner.getTarget() != null && canAttack(owner.getTarget(),
+        // copyOwnerTargeting) — TargetGoal.canAttack: the conditions, then
+        // the home restriction (mustReach is false). No Mob.canAttack call of
+        // its own: forNonCombat skips it, as MC does.
         Mob* owner = m_vex->GetVexOwner();
-        return owner != nullptr && owner->GetTarget() != nullptr &&
-               m_vex->CanAttack(*owner->GetTarget()) &&
-               m_copyOwnerTargeting.Test(m_vex, *owner->GetTarget());
+        if (owner == nullptr) return false;
+        LivingEntity* target = owner->GetTarget();
+        return target != nullptr &&
+               m_copyOwnerTargeting.Test(m_vex, *target) &&
+               m_vex->IsWithinHome(target->BlockPosition());
     }
 
     void VexCopyOwnerTargetGoal::Start() {
+        // MC start(): setTarget(owner's target) + super only — targetMob is
+        // never cached, so CanContinueToUse never re-applies a target the vex
+        // has since lost.
         Mob* owner = m_vex->GetVexOwner();
-        LivingEntity* target =
-            owner != nullptr ? owner->GetTarget() : nullptr;
-        m_vex->SetTarget(target);
-        m_targetMob = target;
+        m_vex->SetTarget(owner != nullptr ? owner->GetTarget() : nullptr);
         TargetGoal::Start();
     }
 

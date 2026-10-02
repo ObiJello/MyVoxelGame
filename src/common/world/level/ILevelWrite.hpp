@@ -225,6 +225,17 @@ namespace Game {
         // before writing the block it carried.
         virtual void RemoveBlockEntity(const glm::ivec3& pos) { (void)pos; }
 
+        // Detach the block entity at `pos` and hand it to the caller, with no
+        // side effects (nothing spilled, nothing sent): the block stays as it
+        // is. How a piston picks up the entity of a block it is about to move
+        // under the pistons_move_block_entities rule (PistonBlockEntities.hpp)
+        // — the entity is installed again where the block lands. Null when
+        // there is none, or on a level that keeps none.
+        virtual std::unique_ptr<BlockEntity> TakeBlockEntity(const glm::ivec3& pos) {
+            (void)pos;
+            return nullptr;
+        }
+
         // MC ServerLevel.isHandlingTick: true while the level is inside its
         // block-tick / block-event phase. PistonBaseBlock.checkIfExtend reads
         // it to decide whether a retraction may drop the carried block.

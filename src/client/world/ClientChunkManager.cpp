@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include "common/world/block/entity/BlockEntity.hpp"
 #include "common/world/block/entity/PistonMovingBlockEntity.hpp"
+#include "common/world/block/entity/BlockEntityType.hpp"
+#include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/block/BedBlock.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -180,6 +182,9 @@ namespace Client {
             PROFILE_ZONE_N("Unload.Diffs");
             m_pendingDiffs->DropChunkDiffs(chunkPos);
         }
+        // Parked or freed, its sky blocks are no longer drawn
+        // (RestoreRetainedChunk lists them again).
+        m_skyBlockChunks.erase(chunkPos);
 
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->chunkData && m_meshes) {
@@ -652,6 +657,7 @@ namespace Client {
             if (light.skyMask & (1u << i))   dst.sky[u]   = light.sky[u];
             if (light.blockMask & (1u << i)) dst.block[u] = light.block[u];
         }
+        ++m_lightVersion;
         // Exactly the sections the server's light run affected (its set
         // already includes a neighbour section wherever a changed cell sits
         // on a section edge — MC SectionPos.aroundAndAtBlockPos). Light index
@@ -815,6 +821,28 @@ namespace Client {
             } else {
                 chunk->chunkData->RemoveBlockEntity(localX, pos.y, localZ);
             }
+        } else if (!fromPlayer && prevBlockId != blockId) {
+            // MC LevelChunk.setBlockState on the client: the entity of a
+            // block that is gone goes with it (unless the new block shares
+            // it — a copper chest oxidizing). The server's own removal
+            // packet usually got here first; this is what clears the cell a
+            // piston carried a block entity away from for a client that
+            // never saw the move (out of block-event range), since the
+            // server detaches a carried entity without a removal packet
+            // (World::TakeBlockEntity). A predicted edit keeps it: if the
+            // server refuses the edit, the block comes back with no fresh
+            // entity data.
+            if (Game::BlockEntity* be = chunk->chunkData->GetBlockEntity(localX, pos.y, localZ)) {
+                const Game::BlockEntityType* type = be->GetType();
+                if (!type || !type->IsValidFor(blockId)) {
+                    chunk->chunkData->RemoveBlockEntity(localX, pos.y, localZ);
+                } else if (type->TypeId() != Game::BlockEntityTypeIds::PISTON) {
+                    // Kept: it follows its block (MC BlockEntity.setBlockState)
+                    // — an entity whose data outran its block arrives built
+                    // for whatever the cell held then.
+                    be->RebindBlock(blockId);
+                }
+            }
         }
         chunk->chunkData->SetBlock(localX, pos.y, localZ, blockId, stateIndex);
 
@@ -858,6 +886,14 @@ namespace Client {
             } else if (!wasBed && isBed) {
                 chunk->beds.push_back(pos);
             }
+        }
+        if (prevBlockId == Game::BlockID::SkyBlock && blockId != Game::BlockID::SkyBlock) {
+            auto& list = chunk->skyBlocks;
+            list.erase(std::remove(list.begin(), list.end(), pos), list.end());
+            NoteSkyBlockIndex(*chunk);
+        } else if (prevBlockId != Game::BlockID::SkyBlock && blockId == Game::BlockID::SkyBlock) {
+            chunk->skyBlocks.push_back(pos);
+            NoteSkyBlockIndex(*chunk);
         }
 
         // Mark section as dirty for remeshing
@@ -996,6 +1032,7 @@ namespace Client {
         built->pos = chunkPos;
         built->modStamp.store(packet.modStamp, std::memory_order_relaxed);
         chunk->chunkData = built;
+        ++m_lightVersion;   // the chunk's light came with it
         for (int y = 0; y < Game::Math::SECTIONS_PER_CHUNK &&
                         y < static_cast<int>(packet.sections.size()); ++y) {
             auto* section = chunk->chunkData->GetSection(y);
@@ -1056,6 +1093,7 @@ namespace Client {
         // SetBlockLocal) and would otherwise not be reflected. A partial
         // (non-groundUp) update rescans too: it can have replaced any section.
         RebuildEndPortalIndex(*chunk);
+        NoteSkyBlockIndex(*chunk);
 
         // Mark all dirty sections for meshing
         for (int section : chunk->dirtySections) {
@@ -1076,6 +1114,7 @@ namespace Client {
         chunk.endGateways.clear();
         chunk.beds.clear();
         chunk.campfires.clear();
+        chunk.skyBlocks.clear();
         if (!chunk.chunkData) return;
 
         for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
@@ -1098,6 +1137,7 @@ namespace Client {
                         id == Game::BlockID::EndGateway ||
                         id == Game::BlockID::Campfire ||
                         id == Game::BlockID::SoulCampfire ||
+                        id == Game::BlockID::SkyBlock ||
                         IsEntityRenderedBed(id)) {
                         present = true;
                         break;
@@ -1113,8 +1153,9 @@ namespace Client {
                         const Game::BlockID id = section->GetBlockID(x, y, z);
                         const bool bed = IsEntityRenderedBed(id);
                         const bool campfire = id == Game::BlockID::Campfire || id == Game::BlockID::SoulCampfire;
+                        const bool sky = id == Game::BlockID::SkyBlock;
                         if (id != Game::BlockID::EndPortal &&
-                            id != Game::BlockID::EndGateway && !bed && !campfire) {
+                            id != Game::BlockID::EndGateway && !bed && !campfire && !sky) {
                             continue;
                         }
                         const glm::ivec3 pos{
@@ -1123,6 +1164,8 @@ namespace Client {
                             chunk.position.z * Game::Math::CHUNK_SIZE_Z + z};
                         if (bed) {
                             chunk.beds.push_back(pos);
+                        } else if (sky) {
+                            chunk.skyBlocks.push_back(pos);
                         } else if (campfire) {
                             chunk.campfires.push_back(pos);
                         } else if (id == Game::BlockID::EndPortal) {
@@ -2001,6 +2044,7 @@ namespace Client {
         }
         m_chunks.emplace(pos, std::move(chunk));
         TransitionChunkState(raw, ChunkState::LOADED);
+        NoteSkyBlockIndex(*raw);   // the parked index came back with it
         if (m_meshes) m_meshes->UnparkChunkGPUData(pos);
         if (!raw->dirtySections.empty()) { m_chunksWithDirtySections.insert(pos); m_schedulerSkip = 0; }
 
@@ -2108,6 +2152,7 @@ namespace Client {
         m_chunks.clear();
         m_loadedChunkCount = 0;
         m_chunksWithDirtySections.clear();
+        m_skyBlockChunks.clear();
         // Predictions reference positions in chunks that no longer exist —
         // drop them rather than letting a late ack roll back into a chunk
         // that has since been reloaded from scratch.
@@ -2179,6 +2224,12 @@ namespace Client {
         m_tickingBlockEntities.push_back(pos);
     }
 
+    Game::BlockEntity* ClientChunkManager::RawBlockEntityAt(const glm::ivec3& pos) {
+        ClientChunk* chunk = GetChunk({pos.x >> 4, pos.z >> 4});
+        if (!chunk || !chunk->chunkData) return nullptr;
+        return chunk->chunkData->GetBlockEntity(pos.x & 0xF, pos.y, pos.z & 0xF);
+    }
+
     void ClientChunkManager::RetireLandedBlockEntities() {
         ASSERT_MAIN_THREAD();
         if (m_tickingBlockEntities.empty()) return;
@@ -2211,7 +2262,23 @@ namespace Client {
                               info.uploadedVersion, piston->LandedVersion(), stale ? 1 : 0);
                 }
                 if (meshShowsIt || stale) {
-                    chunk->chunkData->RemoveBlockEntity(lx, pos.y, lz);
+                    // The block entity it carried (pistons_move_block_entities)
+                    // takes the cell over — the server's copy when its data
+                    // has arrived (HandleBlockEntityData hands it to the
+                    // moving cell), else this client's own.
+                    std::unique_ptr<Game::BlockEntity> carried = piston->TakeCarried();
+                    chunk->chunkData->RemoveBlockEntity(lx, pos.y, lz);   // `piston` is dead
+                    if (carried) {
+                        const Game::BlockID here = chunk->chunkData->GetBlock(lx, pos.y, lz);
+                        const Game::BlockEntityType* type = carried->GetType();
+                        if (type && type->IsValidFor(here) && !chunk->chunkData->GetBlockEntity(lx, pos.y, lz)) {
+                            carried->MoveCarriedTo(pos);
+                            carried->RebindBlock(here);
+                            const bool ticks = carried->NeedsTicking();
+                            chunk->chunkData->SetBlockEntity(lx, pos.y, lz, std::move(carried));
+                            if (ticks) keep.push_back(pos);
+                        }
+                    }
                     continue;
                 }
             }
@@ -2229,10 +2296,26 @@ namespace Client {
         std::vector<glm::ivec3> positions = m_tickingBlockEntities;
         std::vector<glm::ivec3> keep;
         for (const glm::ivec3& pos : positions) {
-            Game::BlockEntity* be = level.GetBlockEntity(pos);
+            // The cell's own entity, not the level's answer: a landed moving
+            // piston reads through the level as the entity it carries
+            // (ClientBlockAccess::GetBlockEntity), but the bridge itself must
+            // stay listed until RetireLandedBlockEntities lets it go. Its
+            // carried entity animates meanwhile (a chest lid closing as it
+            // lands).
+            if (auto* landed = dynamic_cast<Game::PistonMovingBlockEntity*>(RawBlockEntityAt(pos));
+                landed && landed->IsLanded()) {
+                if (Game::BlockEntity* carried = landed->Carried(); carried && carried->NeedsTicking()) {
+                    carried->ClientTick(level);
+                }
+                keep.push_back(pos);
+                continue;
+            }
+            Game::BlockEntity* be = RawBlockEntityAt(pos);
             if (!be || !be->NeedsTicking()) continue;
             be->ClientTick(level);
-            if (level.GetBlockEntity(pos) == be) keep.push_back(pos);
+            // Still the cell's — a moving piston whose own landing write
+            // just landed it in place included.
+            if (RawBlockEntityAt(pos) == be) keep.push_back(pos);
         }
         // Registrations made during the ticks survive; retired ones do not.
         std::vector<glm::ivec3> merged = keep;

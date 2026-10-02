@@ -13,7 +13,12 @@
 #include "../entity/MorphCarry.hpp"
 #include "../entity/MorphBlockAnchor.hpp"
 #include "common/entity/Mob.hpp"
+#include "common/entity/FallingBlockEntity.hpp"
+#include "common/entity/mobs/Animals.hpp"    // Parrot
 #include "common/entity/mobs/Fish.hpp"
+#include "common/entity/mobs/Monsters.hpp"   // Phantom
+#include "common/entity/mobs/Slime.hpp"
+#include "common/entity/vehicle/VehicleEntity.hpp"
 #include "SnbtParser.hpp"
 #include "../world/storage/anvil/EntityNbt.hpp"
 #include "common/entity/Morph.hpp"
@@ -29,6 +34,7 @@
 #include "common/world/level/DimensionId.hpp"
 #include "common/core/Log.hpp"
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <string>
@@ -52,7 +58,71 @@ namespace Server {
             if (const auto* salmon = dynamic_cast<const Game::Salmon*>(&mob)) {
                 return static_cast<int32_t>(salmon->GetSize());
             }
+            if (const auto* parrot = dynamic_cast<const Game::Parrot*>(&mob)) {
+                return static_cast<int32_t>(parrot->GetVariant());
+            }
             return Game::Morph::DefaultVariantOf(code);
+        }
+
+        // The body's size off a built instance (Game::Morph::MobSizeOf's
+        // per-type meaning), into the code's size bits.
+        uint32_t WithSizeOf(const Game::Mob& mob, uint32_t code) {
+            if (!Game::Morph::HasMobSize(mob.GetType())) return code;
+            int size = 0;
+            if (const auto* slime = dynamic_cast<const Game::Slime*>(&mob)) {
+                size = slime->GetSize();
+            } else if (const auto* phantom = dynamic_cast<const Game::Phantom*>(&mob)) {
+                size = phantom->GetPhantomSize();
+            } else if (const auto* puffer = dynamic_cast<const Game::Pufferfish*>(&mob)) {
+                size = puffer->GetPuffState();
+            }
+            return Game::Morph::WithMobSize(code, static_cast<uint32_t>(std::max(0, size)));
+        }
+
+        // Entities with no body a player can wear: drawn by renderers that
+        // need the entity itself (a painting's art, a frame's item, a boat's
+        // paddles, a cart's rail), or nothing solid at all (a cloud, a bolt,
+        // a knot, a bobber, a spawner's floating item).
+        bool NoBodyToWear(Game::EntityTypeId type) {
+            switch (type) {
+                case Game::EntityTypeId::Painting:
+                case Game::EntityTypeId::ItemFrame:
+                case Game::EntityTypeId::GlowItemFrame:
+                case Game::EntityTypeId::Cushion:
+                case Game::EntityTypeId::LeashKnot:
+                case Game::EntityTypeId::FishingBobber:
+                case Game::EntityTypeId::AreaEffectCloud:
+                case Game::EntityTypeId::LightningBolt:
+                case Game::EntityTypeId::OminousItemSpawner:
+                    return true;
+                default:
+                    return Game::IsVehicleEntityType(type);
+            }
+        }
+
+        // The pace a mob's own AI walks it at on land where that is not the
+        // move control's full MOVEMENT_SPEED (the land rule's modifier 1.0):
+        // the factor MC folds in before Mob.setSpeed.
+        float LandPaceOf(Game::EntityTypeId type) {
+            switch (type) {
+                // AxolotlMoveControl's outsideWaterSpeedModifier 0.5 and
+                // AxolotlAi.SPEED_MULTIPLIER_ON_LAND 0.15 — its only land
+                // pace (an axolotl's 1.0 MOVEMENT_SPEED is a swim speed).
+                case Game::EntityTypeId::Axolotl:         return 0.5f * 0.15f;
+                // TurtleMoveControl.updateSpeed: on the ground the speed is
+                // halved (a turtle's 0.25 is its swim speed).
+                case Game::EntityTypeId::Turtle:          return 0.5f;
+                // Villager.registerBrainGoals: every activity package walks
+                // at 0.5.
+                case Game::EntityTypeId::Villager:        return 0.5f;
+                // WanderingTrader.registerGoals: its strolls and wanders at
+                // 0.35 (its 0.7 is the attribute default, never walked at).
+                case Game::EntityTypeId::WanderingTrader: return 0.35f;
+                // BreezeAi: it strolls and slides at 0.6
+                // (SPEED_MULTIPLIER_WHEN_SLIDING) — never its full 0.63.
+                case Game::EntityTypeId::Breeze:          return 0.6f;
+                default:                                  return 1.0f;
+            }
         }
     }
 
@@ -77,16 +147,31 @@ namespace Server {
                                const std::vector<std::string>& args,
                                ServerConnection& connection,
                                PlayerSessionManager& sessionManager) {
-        auto session = sessionManager.GetSession(connection.GetPlayerId());
-        ServerPlayer* player = session ? session->GetPlayer() : nullptr;
-        if (!player) {
-            connection.SendChatMessage("Only a player can morph", 1);
-            return;
-        }
         if (args.empty()) {
             connection.SendChatMessage(kUsage, 1);
             return;
         }
+        // Who morphs: the EXECUTOR (`/execute as Steve run morph cow`). The
+        // morph's own acts (lock, unlock, ability, boom, rotate) come from a
+        // client's key bindings and are always that client's own player.
+        const std::string firstWord = Lower(args[0]);
+        const bool keyAct = firstWord == "lock" || firstWord == "unlock" || firstWord == "ability" ||
+                            firstWord == "boom" || firstWord == "rotate";
+        ServerPlayer* player = nullptr;
+        if (keyAct) {
+            auto own = sessionManager.GetSession(connection.GetPlayerId());
+            player = own ? own->GetPlayer() : nullptr;
+        } else {
+            player = source.ExecutorPlayer();
+        }
+        if (!player) {
+            connection.SendChatMessage("Only a player can morph", 1);
+            return;
+        }
+        const uint32_t playerId = player->getPlayerId();
+        auto playerSession = sessionManager.GetSession(playerId);
+        ServerConnection* playerConnection = playerSession ? playerSession->GetConnection() : nullptr;
+        if (!playerConnection) playerConnection = &connection;
 
         // The code rides the next PlayerUpdateS2C broadcast for everyone
         // else; the morphed client itself learns its new body from the
@@ -96,7 +181,7 @@ namespace Server {
         auto apply = [&](uint32_t code, float walkSpeed, const std::string& what,
                          std::optional<int32_t> look = std::nullopt) {
             // A different morph is not the locked block any more.
-            if (g_integratedServer) g_integratedServer->BlockAnchor().Unlock(connection.GetPlayerId());
+            if (g_integratedServer) g_integratedServer->BlockAnchor().Unlock(playerId);
             player->setMorph(code, walkSpeed);
             if (look) player->setMorphVariant(*look);
             // A fresh item waits like a fresh drop before anyone can pick it
@@ -104,10 +189,11 @@ namespace Server {
             // held player go on its next tick when they stop being an item.
             if (g_integratedServer && Game::Morph::IsValid(code) &&
                 Game::Morph::KindOf(code) == Game::Morph::Kind::Item) {
-                g_integratedServer->Carry().SetPickupDelay(connection.GetPlayerId(), 20);
+                g_integratedServer->Carry().SetPickupDelay(playerId, 20);
             }
-            connection.SendPlayerAbilities(*player);
-            connection.SendChatMessage(what, 1);
+            playerConnection->SendPlayerAbilities(*player);
+            // Feedback to whoever typed it; a morph of someone else names them.
+            connection.SendChatMessage(player == source.sender ? what : player->getName() + ": " + what, 1);
             Log::Info("[MorphCommand] %s -> %s", player->getName().c_str(), what.c_str());
         };
 
@@ -293,6 +379,15 @@ namespace Server {
                 }
                 return;
             }
+            if (type == Game::EntityTypeId::Pufferfish) {
+                // Puffs up / lets the air out (MC Pufferfish's STATE_FULL /
+                // STATE_SMALL): the puff state is the code's size, so the
+                // box and the drawn mesh follow on every client.
+                const uint32_t puffed = Game::Morph::MobSizeOf(code) >= 2 ? 0u : 2u;
+                player->setMorph(Game::Morph::WithMobSize(code, puffed), player->getMorphSpeed());
+                connection.SendPlayerAbilities(*player);
+                return;
+            }
             if (type == Game::EntityTypeId::Armadillo) {
                 // Rolls up / unrolls (MC Armadillo.rollUp / rollOut): the
                 // flag bit, drawn as the shell pose everywhere.
@@ -420,6 +515,23 @@ namespace Server {
                 connection.SendChatMessage(error.empty() ? "Unknown block: " + args[1] : error, 1);
                 return;
             }
+            // MC FallingBlockRenderer draws only RenderShape.MODEL: a block
+            // with no model of its own (the fluids, a bubble column, the
+            // invisible technical blocks) has no body to show.
+            switch (state.Block()) {
+                case Game::BlockID::Water:
+                case Game::BlockID::Lava:
+                case Game::BlockID::BubbleColumn:
+                case Game::BlockID::Barrier:
+                case Game::BlockID::StructureVoid:
+                case Game::BlockID::Light:
+                case Game::BlockID::MovingPiston:
+                    connection.SendChatMessage("Cannot morph into " + Game::BlockRegistry::Get(state.Block()).name +
+                                               ": it has no model to show", 1);
+                    return;
+                default:
+                    break;
+            }
             apply(Game::Morph::Encode(Game::Morph::Kind::Block, static_cast<uint32_t>(state.Block())), 0.0f,
                   "You are now a " + Game::BlockRegistry::Get(state.Block()).name + " block");
             return;
@@ -463,6 +575,10 @@ namespace Server {
             return;
         }
         const std::string slug(Game::GetEntityTypeInfo(type).slug);
+        if (NoBodyToWear(type)) {
+            connection.SendChatMessage("Cannot morph into " + slug + ": it has no body to wear", 1);
+            return;
+        }
 
         // The speed the mob's own move control walks it at: MOVEMENT_SPEED
         // times the land factor MC's SmoothSwimmingMoveControl applies out
@@ -477,10 +593,25 @@ namespace Server {
         bool  built = false;
         int32_t variant = 0;
         bool    rolled = false;
+        uint32_t sized = Game::Morph::Encode(Game::Morph::Kind::Mob, static_cast<uint32_t>(type));
         ServerLevel* level = g_integratedServer ? g_integratedServer->GetLevel(source.dimension) : nullptr;
         if (level && level->MobLevel()) {
             if (std::unique_ptr<Game::Mob> mob = MakeMobForLoad(type, level->MobLevel())) {
                 built = true;
+                // A falling block or primed TNT is a block body: the block
+                // morph of what it carries (MC FallingBlockEntity's default
+                // is sand; the compound's BlockState picks another).
+                if (type == Game::EntityTypeId::FallingBlock || type == Game::EntityTypeId::Tnt) {
+                    if (nbt) Game::Anvil::ApplyMobNbt(*nbt, *mob);
+                    Game::BlockID block = Game::BlockID::Tnt;
+                    if (const auto* falling = dynamic_cast<const Game::FallingBlockEntity*>(mob.get())) {
+                        block = falling->CarriedState().Block();
+                        if (block == Game::BlockID::Air) block = Game::BlockID::Sand;
+                    }
+                    apply(Game::Morph::Encode(Game::Morph::Kind::Block, static_cast<uint32_t>(block)), 0.0f,
+                          "You are now a " + Game::BlockRegistry::Get(block).name + " block");
+                    return;
+                }
                 if (baby) {
                     // The baby's own speed where the type has one (a baby
                     // zombie's SPEED_MODIFIER_BABY rides SetBaby), and the
@@ -496,20 +627,31 @@ namespace Server {
                 // salmon's 30/50/15 size; nothing else of a fish's spawn
                 // reaches past this throwaway instance), unless the compound
                 // names it, as /summon's does (no finalizeSpawn then).
+                // The same for a slime's or magma cube's size (Slime.
+                // finalizeSpawn: 1, 2 or 4) and a parrot's colour (Parrot.
+                // finalizeSpawn: one of the five). Only these spawn rolls:
+                // the rest of a finalizeSpawn (jockeys, gear) has no place on
+                // a throwaway.
                 if (nbt) {
                     Game::Anvil::ApplyMobNbt(*nbt, *mob);
-                } else if (dynamic_cast<Game::Fish*>(mob.get())) {
+                } else if (dynamic_cast<Game::Fish*>(mob.get()) ||
+                           (dynamic_cast<Game::Slime*>(mob.get()) && type != Game::EntityTypeId::SulfurCube)) {
                     mob->FinalizeSpawn(Game::SpawnReason::Command, nullptr);
+                } else if (auto* parrot = dynamic_cast<Game::Parrot*>(mob.get())) {
+                    parrot->SetVariant(Game::Parrot::VariantById(
+                        level->MobLevel()->Random().NextInt(Game::Parrot::kVariantCount)));
                 }
                 variant = MorphVariantOf(*mob, Game::Morph::Encode(Game::Morph::Kind::Mob,
                                                                    static_cast<uint32_t>(type)));
+                sized = WithSizeOf(*mob, sized);
                 rolled = true;
                 if (mob->HasAiControls()) {
                     float land = mob->GetLandSpeedFactor();
                     if (const auto* swim = dynamic_cast<const Game::SmoothSwimmingMoveControl*>(&mob->GetMoveControl())) {
                         land *= swim->OutsideWaterSpeedModifier();
                     }
-                    speed = static_cast<float>(mob->GetAttributeValue(Game::Attribute::MovementSpeed)) * land;
+                    speed = static_cast<float>(mob->GetAttributeValue(Game::Attribute::MovementSpeed)) * land *
+                            LandPaceOf(type);
                 }
             }
         }
@@ -517,8 +659,7 @@ namespace Server {
             connection.SendChatMessage("Cannot morph into " + slug, 1);
             return;
         }
-        const uint32_t code = Game::Morph::WithBaby(
-            Game::Morph::Encode(Game::Morph::Kind::Mob, static_cast<uint32_t>(type)), baby);
+        const uint32_t code = Game::Morph::WithBaby(sized, baby);
         apply(code, speed, std::string("You are now a ") + (baby ? "baby " : "") + slug,
               rolled ? std::optional<int32_t>(variant) : std::nullopt);
     }

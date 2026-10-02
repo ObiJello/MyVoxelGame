@@ -147,12 +147,64 @@ namespace Server {
                     /*default*/ IntegratedServer::kDefaultVeinMineMaxBlocks,
                 },
                 EngineRule{
+                    // Every player's step-up height, in tenths of a block —
+                    // an engine extension over MC's minecraft:step_height
+                    // attribute (vanilla has no such game rule; it changes
+                    // the attribute per player with /attribute). Applied as
+                    // a modifier (ServerPlayer::applyStepHeightRule), so a
+                    // player's own /attribute base and modifiers still add
+                    // to it. Per world (level.dat obeycraft).
+                    "player_step_height", "playerStepHeight", "Player step height",
+                    "How high every player steps up onto a block without jumping, in tenths of a block: 6 is normal (just over a slab), 10 walks up full blocks, 0 never steps. Adds to each player's own step_height attribute (/attribute).",
+                    [] { return g_integratedServer ? g_integratedServer->PlayerStepHeight()
+                                                   : IntegratedServer::kDefaultPlayerStepHeight; },
+                    [](int v) { if (g_integratedServer) g_integratedServer->SetPlayerStepHeight(v); },
+                    /*isInt*/ true, /*min*/ 0, /*max*/ IntegratedServer::kMaxPlayerStepHeight,
+                    /*default*/ IntegratedServer::kDefaultPlayerStepHeight,
+                },
+                EngineRule{
                     // One health and one hunger for everyone in the world
                     // (PlayerSessionManager::ShareVitals). Per world (level.dat).
                     "shared_vitals", "sharedVitals", "Shared health and hunger",
                     "Every player in the world has the same health and hunger: damage, healing, eating and exhaustion taken by one happen to all, and when the shared health runs out everyone dies together.",
                     [] { return g_integratedServer && g_integratedServer->SharedVitalsEnabled(); },
                     [](bool v) { if (g_integratedServer) g_integratedServer->SetSharedVitals(v); },
+                },
+                EngineRule{
+                    // Advancements stop progressing in a world with cheats
+                    // on unless this is set (ServerAdvancements.hpp).
+                    // Per world (level.dat obeycraft).
+                    "advancements_with_cheats", "advancementsWithCheats", "Advancements work with cheats on",
+                    "Whether advancements can be earned in a world with cheats (commands) allowed. Off, a world with cheats on earns no advancement progress; the Advancements screen still shows what was already earned.",
+                    [] { return g_integratedServer && g_integratedServer->AdvancementsWithCheats(); },
+                    [](bool v) { if (g_integratedServer) g_integratedServer->SetAdvancementsWithCheats(v); },
+                    /*isInt*/ false, /*min*/ 0, /*max*/ 1, /*default*/ 0,
+                },
+                EngineRule{
+                    // A crafting table's grid lives on the block and is shared
+                    // by everyone using it (CraftingTableBlockEntity). Per
+                    // world (level.dat obeycraft). Off keeps what tables
+                    // store until they are next opened (handed to the opener)
+                    // or broken (dropped).
+                    "shared_crafting_tables", "sharedCraftingTables", "Shared crafting tables",
+                    "Crafting tables keep their items and players using the same table see each other's grid",
+                    [] { return g_integratedServer && g_integratedServer->SharedCraftingTablesEnabled(); },
+                    [](int v) { if (g_integratedServer) g_integratedServer->SetSharedCraftingTables(v != 0); },
+                    /*isInt*/ false, /*min*/ 0, /*max*/ 1, /*default*/ 0,
+                },
+                EngineRule{
+                    // Pistons push and pull blocks that have a block entity,
+                    // carrying it along (PistonBlockEntities.hpp). Per world
+                    // (level.dat obeycraft). Off = vanilla.
+                    "pistons_move_block_entities", "pistonsMoveBlockEntities", "Pistons move block entities",
+                    "Pistons can push and pull chests, barrels, furnaces, hoppers, dispensers, signs, banners and other blocks with stored contents, which keep everything they hold. Spawners, vaults, jukeboxes and sculk sensors still stay put. Turned off, pistons treat these blocks as immovable, as in vanilla.",
+                    [] { return !g_integratedServer || g_integratedServer->PistonsMoveBlockEntitiesEnabled(); },
+                    [](bool v) { if (g_integratedServer) g_integratedServer->SetPistonsMoveBlockEntities(v); },
+                    // On by default everywhere: IntegratedServerConfig,
+                    // LevelDatData (a world without the key opens with it
+                    // on), PistonBlockEntities::g_enabled (the client's
+                    // mirror before WorldRulesS2C arrives).
+                    /*isInt*/ false, /*min*/ 0, /*max*/ 1, /*default*/ 1,
                 },
                 EngineRule{
                     // The Twilight Forest port (docs/mod-ports.md). Off: the
@@ -178,6 +230,15 @@ namespace Server {
                     "Whether the portal gun can place portals. Turning this off closes every placed pair.",
                     [] { return Game::Portals::PortalGunAllowed(); },
                     [](bool v) { if (g_integratedServer) g_integratedServer->SetPortalGunAllowed(v); },
+                },
+                EngineRule{
+                    // Off-grid portal-gun placement (PortalRegistry::
+                    // PlacePortal). Per world (level.dat obeycraft).
+                    "portal_gun_free_placement", "portalGunFreePlacement", "Portal gun free placement",
+                    "Portal-gun portals open exactly where they are shot instead of snapping to the block grid, moved only as far as needed to fit on solid blocks with space in front. Portals already placed stay where they are.",
+                    [] { return g_integratedServer && g_integratedServer->PortalGunFreePlacement(); },
+                    [](bool v) { if (g_integratedServer) g_integratedServer->SetPortalGunFreePlacement(v); },
+                    /*isInt*/ false, /*min*/ 0, /*max*/ 1, /*default*/ 0,
                 },
 #endif
             };
@@ -276,7 +337,6 @@ namespace Server {
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
                                   PlayerSessionManager& /*sessionManager*/) {
-        (void)source;
         Game::World* world = g_integratedServer ? g_integratedServer->GetWorld() : nullptr;
         if (!world) {
             connection.SendChatMessage("Gamerules are unavailable (no world)", 1);
@@ -301,9 +361,9 @@ namespace Server {
         // ── the engine's own rules ──────────────────────────────────────────
         if (const EngineRule* engine = FindEngineRule(args[0])) {
             if (args.size() < 2) {
-                connection.SendChatMessage(
+                source.SendSuccess(connection,
                     "Game rule " + std::string(engine->id) + " is currently set to " +
-                    EngineText(*engine, engine->get()), 1);
+                    EngineText(*engine, engine->get()), false);
                 return;
             }
             int value = 0;
@@ -335,8 +395,8 @@ namespace Server {
             }
             engine->set(value);
             g_integratedServer->WriteLevelDat();
-            connection.SendChatMessage(
-                "Game rule " + std::string(engine->id) + " is now set to " + EngineText(*engine, value), 1);
+            source.SendSuccess(connection,
+                "Game rule " + std::string(engine->id) + " is now set to " + EngineText(*engine, value), true);
             return;
         }
 
@@ -366,8 +426,8 @@ namespace Server {
         // Query form: /gamerule <rule>
         // MC: Component.translatable("commands.gamerule.query", id, serialize(value))
         if (args.size() < 2) {
-            connection.SendChatMessage(
-                "Game rule " + std::string(def->key) + " is currently set to " + ReadValue(def->key), 1);
+            source.SendSuccess(connection,
+                "Game rule " + std::string(def->key) + " is currently set to " + ReadValue(def->key), false);
             return;
         }
 
@@ -425,7 +485,7 @@ namespace Server {
         if (!Game::Rules::IsImplemented(def->id)) {
             message += " (not implemented yet: stored, no effect)";
         }
-        connection.SendChatMessage(message, 1);
+        source.SendSuccess(connection, message, true);
     }
 
     void GameRuleCommand::Register(CommandDispatcher& dispatcher) {

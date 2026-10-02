@@ -68,9 +68,26 @@ namespace Render {
     // Going through the same call is the point: it makes a falling anvil and
     // the anvil it becomes on landing the same geometry BY CONSTRUCTION, rather
     // than by two lookups that have to agree.
+    //
+    // `quads`, when given, receives one entry per emitted quad, in emission
+    // order (quad i owns vertices 4i..4i+3 and indices 6i..6i+5): what the
+    // world renderers need to re-colour a quad the way the section mesher
+    // does — its face, tint index, cullface and the element's `shade` — plus
+    // the four vertex positions BEFORE the element's rotation (the mesher
+    // samples ambient occlusion against those). The vertex colours this
+    // builder writes are the item look (default grass tint, the DEFAULT
+    // shade table); a world renderer overwrites them from this record.
+    struct BlockModelQuad {
+        Game::FaceDir dir;
+        int           tintIndex;
+        int8_t        cullfaceDir;   // FaceDef::cullfaceDir, -1 for none
+        bool          shade;         // Element::shade
+        glm::vec3     unrotated[4];
+    };
     bool BuildBlockModelMeshFrom(const Game::BlockModel& model,
                                  std::vector<ItemCubeVert>& verts,
-                                 std::vector<uint32_t>& idx);
+                                 std::vector<uint32_t>& idx,
+                                 std::vector<BlockModelQuad>* quads = nullptr);
 
     // Fallback: force the block into a 1×1×1 cube and take only its TEXTURES
     // from the model. Correct for a full cube and wrong for everything else — a

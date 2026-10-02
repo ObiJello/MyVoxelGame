@@ -168,7 +168,8 @@ namespace Game {
 
     void NautilusAi::SetAngerTarget(Mob& nautilus, LivingEntity& target) {
         Brain* brain = nautilus.GetBrain();
-        if (!brain || !nautilus.CanAttack(target)) return;
+        // MC: gated on Sensor.isEntityAttackableIgnoringLineOfSight.
+        if (!brain || !SensorTargeting::IsEntityAttackableIgnoringLineOfSight(nautilus, target)) return;
         brain->EraseMemory(MemoryModule::CantReachWalkTargetSince);
         brain->SetMemoryWithExpiry(MemoryModule::AngryAt,
                                    static_cast<Entity*>(&target), kAngerDuration);
@@ -187,7 +188,12 @@ namespace Game {
 
         if (auto* angry =
                 dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt))) {
-            if (angry->IsInWater() && mob.CanAttack(*angry)) return angry;
+            // MC: in water and Sensor.isEntityAttackableIgnoringLineOfSight —
+            // a grudge past follow range no longer picks the target.
+            if (angry->IsInWater()
+                && SensorTargeting::IsEntityAttackableIgnoringLineOfSight(mob, *angry)) {
+                return angry;
+            }
         }
         if (brain->HasMemoryValue(MemoryModule::AttackTargetCooldown)) return nullptr;
 

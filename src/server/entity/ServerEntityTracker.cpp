@@ -511,7 +511,7 @@ namespace Server {
                     // MC ServerEntity.sendPairingData: the syncable
                     // attributes (UpdateAttributesS2C) of a mob whose client
                     // copy needs them (a mount's rolled speed / jump / health).
-                    if (mob.SyncsAttributesToClient()) {
+                    if (mob.ShouldSyncAttributes()) {
                         Network::UpdateAttributesS2CPacket attributes;
                         attributes.entityId = id;
                         attributes.attributes = Network::SyncableAttributes(mob.Attributes());
@@ -544,6 +544,20 @@ namespace Server {
                                    EntityPacketOut::Kind::Data, out);
                         }
                     }
+                    // A wither's side-head targets (MC DATA_TARGET_B / _C) —
+                    // only when a head has one; the client's default is none.
+                    if (mob.GetType() == Game::EntityTypeId::Wither) {
+                        const auto& wither = static_cast<const Game::Wither&>(mob);
+                        if (wither.GetHeadTargetId(0) != 0 || wither.GetHeadTargetId(1) != 0) {
+                            Network::WitherHeadTargetsS2CPacket heads;
+                            heads.entityId = id;
+                            heads.targets[0] = wither.GetHeadTargetId(0);
+                            heads.targets[1] = wither.GetHeadTargetId(1);
+                            EmitTo(connId, Network::PacketId::WitherHeadTargetsS2C,
+                                   Network::Serialization::Serialize(heads),
+                                   EntityPacketOut::Kind::Data, out);
+                        }
+                    }
                     if (const auto* crystal =
                             dynamic_cast<const Game::EndCrystal*>(&mob);
                         crystal && crystal->HasBeamTarget()) {
@@ -572,6 +586,23 @@ namespace Server {
                     const bool stillHere = std::any_of(players.begin(), players.end(),
                         [&](const TrackedPlayer& p) { return p.connectionId == *it; });
                     it = stillHere ? std::next(it) : tracked.watchers.erase(it);
+                }
+            }
+
+            // A wither whose side-head targets changed this tick tells every
+            // current watcher.
+            if (mobPtr->GetType() == Game::EntityTypeId::Wither) {
+                auto& wither = static_cast<Game::Wither&>(*mobPtr);
+                if (wither.ConsumeHeadTargetsDirty()) {
+                    Network::WitherHeadTargetsS2CPacket heads;
+                    heads.entityId = id;
+                    heads.targets[0] = wither.GetHeadTargetId(0);
+                    heads.targets[1] = wither.GetHeadTargetId(1);
+                    const auto payload = Network::Serialization::Serialize(heads);
+                    for (uint32_t connId : tracked.watchers) {
+                        EmitTo(connId, Network::PacketId::WitherHeadTargetsS2C,
+                               payload, EntityPacketOut::Kind::Data, out);
+                    }
                 }
             }
 
@@ -622,9 +653,12 @@ namespace Server {
             // current watcher — MC sendDirtyEntityData's attribute half. The
             // first look only records: every watcher so far had them at
             // pairing.
-            if (mobPtr->SyncsAttributesToClient()) {
+            if (mobPtr->ShouldSyncAttributes()) {
                 const uint64_t signature = Network::SyncableAttributesSignature(mobPtr->Attributes());
-                if (tracked.attributesSignatureKnown && signature != tracked.lastAttributesSignature &&
+                // A mob that only now syncs (customized after its watchers
+                // paired without its attributes) sends on its first look.
+                const bool pairedWithout = !tracked.attributesSignatureKnown && !mobPtr->SyncsAttributesToClient();
+                if ((pairedWithout || (tracked.attributesSignatureKnown && signature != tracked.lastAttributesSignature)) &&
                     !tracked.watchers.empty()) {
                     Network::UpdateAttributesS2CPacket attributes;
                     attributes.entityId = id;
@@ -1184,6 +1218,11 @@ namespace Server {
                    EntityPacketOut::Kind::Remove, out);
         }
         m_tracked.erase(it);
+    }
+
+    const std::unordered_set<uint32_t>* ServerEntityTracker::WatchersOf(int32_t entityId) const {
+        const auto it = m_tracked.find(entityId);
+        return it == m_tracked.end() ? nullptr : &it->second.watchers;
     }
 
     void ServerEntityTracker::RemovePlayer(uint32_t connectionId) {

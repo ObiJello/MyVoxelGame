@@ -237,6 +237,10 @@ namespace Game {
         // MC pierceLevel / piercingIgnoreEntityIds / soundEvent.
         int                  m_pierceLevel = 0;
         std::vector<int32_t> m_piercingIgnore;
+        // MC piercedAndKilledEntities: what this piercing flight has killed
+        // (ids, resolved when KILLED_BY_ARROW fires); cleared with the
+        // ignore list (resetPiercedEntities).
+        std::vector<int32_t> m_piercedAndKilled;
         std::string          m_soundEvent;
         Pickup    m_pickup = Pickup::Disallowed;
         ItemStack m_pickupItemStack;

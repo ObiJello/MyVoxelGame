@@ -13,7 +13,10 @@
 #include "common/world/block/entity/ChestBlockEntity.hpp"
 #include "common/world/block/entity/DoubleChest.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/BlockClip.hpp"
 #include "common/world/level/ILevelWrite.hpp"
+#include "common/world/block/RedstoneSignal.hpp"
+#include "common/sound/SoundEvents.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -34,6 +37,8 @@ namespace Game {
         constexpr int   kTransportItemHorizontalSearchRadius = 32;
         constexpr int   kTransportItemVerticalSearchRadius   = 8;
         constexpr int   kTickToStartOnReachedInteraction = 1;
+        // MC CopperGolemAi's TICK_TO_PLAY_ON_REACHED_SOUND.
+        constexpr int   kTickToPlayOnReachedSound = 9;
 
         // MC TRANSPORT_ITEM_SOURCE_BLOCK = BlockTags.COPPER_CHESTS — every
         // copper chest, waxed or not, whatever its oxidation. Copper chests
@@ -59,12 +64,41 @@ namespace Game {
             BlockID           block = BlockID::Air;
         };
 
-        TransportItemTarget MakeTarget(ChestBlockEntity& blockEntity) {
+        // MC ChestBlock.isChestBlockedAt: a redstone conductor above the
+        // chest (isBlockedChestByBlock) or a cat sitting in the cell above
+        // (isCatSittingOnChest — the AABB(x, y + 1, z, x + 1, y + 2, z + 1)).
+        bool IsChestBlockedAt(EntityLevel& level, const glm::ivec3& pos) {
+            const glm::ivec3 above = pos + glm::ivec3(0, 1, 0);
+            if (const IBlockAccess* blocks = level.Blocks();
+                blocks && IsRedstoneConductor(*blocks, above)) {
+                return true;
+            }
+            std::vector<Entity*> entities;
+            level.GetEntitiesInBox(AABB::FromMinMax(glm::vec3(above), glm::vec3(above) + glm::vec3(1.0f)),
+                                   nullptr, entities);
+            for (Entity* e : entities) {
+                auto* cat = dynamic_cast<Cat*>(e);
+                if (cat && cat->IsInSittingPose()) return true;
+            }
+            return false;
+        }
+
+        std::optional<TransportItemTarget> MakeTarget(EntityLevel& level, ChestBlockEntity& blockEntity) {
             // MC TransportItemTarget.tryCreatePossibleTarget(blockEntity,
-            // level). Its null branch — getBlockEntityContainer failing —
-            // cannot happen here: a ChestBlockEntity IS its container.
-            return { blockEntity.GetWorldPos(), &blockEntity,
-                     blockEntity.GetBlockId() };
+            // level): null when getBlockEntityContainer is — for a chest that
+            // is ChestBlock.getContainer(…, ignoreBeingBlocked = false), which
+            // DoubleBlockCombiner.combineWithNeigbour answers with acceptNone
+            // (no container) when the chest, or for a double chest its
+            // partner half, isChestBlockedAt.
+            const glm::ivec3 pos = blockEntity.GetWorldPos();
+            if (IsChestBlockedAt(level, pos)) return std::nullopt;
+            if (const IBlockAccess* blocks = level.Blocks()) {
+                if (auto pairing = FindChestPartner(*blocks, pos);
+                    pairing && IsChestBlockedAt(level, pairing->partnerPos)) {
+                    return std::nullopt;
+                }
+            }
+            return TransportItemTarget{ pos, &blockEntity, blockEntity.GetBlockId() };
         }
 
         // MC ChestBlock.getContainer — the chest's own 27 slots, or the
@@ -102,7 +136,7 @@ namespace Game {
                 if (auto pairing = FindChestPartner(*blocks, target.pos)) {
                     if (auto* partner = dynamic_cast<ChestBlockEntity*>(
                             level.GetContainerBlockEntity(pairing->partnerPos))) {
-                        out.push_back(MakeTarget(*partner));
+                        if (auto connected = MakeTarget(level, *partner)) out.push_back(*connected);
                     }
                 }
             }
@@ -122,31 +156,6 @@ namespace Game {
             const double dy = pos.y + 0.5 - p.y;
             const double dz = pos.z + 0.5 - p.z;
             return dx * dx + dy * dy + dz * dz;
-        }
-
-        // The COLLIDER clip (same quarter-block DDA as Sensing), returning the
-        // first colliding block rather than a boolean — MC's canSeeAnyTargetSide
-        // needs the hit BLOCK to be the chest itself.
-        std::optional<glm::ivec3> FirstCollidingBlock(const IBlockAccess& blocks,
-                                                      const glm::dvec3& from,
-                                                      const glm::dvec3& to) {
-            const glm::dvec3 delta = to - from;
-            const double dist = std::sqrt(delta.x * delta.x + delta.y * delta.y
-                                          + delta.z * delta.z);
-            if (dist < 1.0e-4) return std::nullopt;
-            const int steps = static_cast<int>(std::ceil(dist * 4.0));
-            const glm::dvec3 step = delta / static_cast<double>(steps);
-            glm::dvec3 p = from;
-            for (int i = 1; i <= steps; ++i) {
-                p += step;
-                const glm::ivec3 bp(static_cast<int>(std::floor(p.x)),
-                                    static_cast<int>(std::floor(p.y)),
-                                    static_cast<int>(std::floor(p.z)));
-                if (BlockRegistry::HasCollision(blocks.GetBlock(bp.x, bp.y, bp.z))) {
-                    return bp;
-                }
-            }
-            return std::nullopt;
         }
 
         // ── TransportItemsBetweenContainers ────────────────────────────────
@@ -218,11 +227,15 @@ namespace Game {
             }
 
         protected:
-            void Start(EntityLevel&, LivingEntity&, int64_t) override {
-                // MC flips GroundPathNavigation.setCanPathToTargetsBelowSurface
-                // (true) here — the pathfinder has no below-surface toggle, so
-                // a chest sunk into the floor may be unreachable and takes the
-                // unreachable-cooldown path instead.
+            void Start(EntityLevel&, LivingEntity& body, int64_t) override {
+                // MC: a GroundPathNavigation may path to targets below the
+                // surface while transporting — a chest sunk into the floor
+                // stays the path's own end.
+                if (auto* mob = dynamic_cast<PathfinderMob*>(&body)) {
+                    if (auto* ground = dynamic_cast<GroundPathNavigation*>(&mob->GetNavigation())) {
+                        ground->SetCanPathToTargetsBelowSurface(true);
+                    }
+                }
             }
 
             bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
@@ -263,9 +276,10 @@ namespace Game {
             void Stop(EntityLevel&, LivingEntity& body, int64_t) override {
                 if (auto* mob = dynamic_cast<PathfinderMob*>(&body)) {
                     OnStartTravelling(*mob);
+                    if (auto* ground = dynamic_cast<GroundPathNavigation*>(&mob->GetNavigation())) {
+                        ground->SetCanPathToTargetsBelowSurface(false);
+                    }
                 }
-                // MC resets setCanPathToTargetsBelowSurface(false) — skipped
-                // with Start's half.
             }
 
         private:
@@ -471,7 +485,9 @@ namespace Game {
                     pos.z >= center.z - h && pos.z <= center.z + h;
                 if (!isWithinSearchArea) return std::nullopt;
 
-                TransportItemTarget transportItemTarget = MakeTarget(blockEntity);
+                const std::optional<TransportItemTarget> possibleTarget = MakeTarget(level, blockEntity);
+                if (!possibleTarget) return std::nullopt;
+                const TransportItemTarget& transportItemTarget = *possibleTarget;
                 const bool isValidTarget =
                     IsWantedBlock(body, transportItemTarget.block)
                     && !IsPositionAlreadyVisited(level, transportItemTarget)
@@ -535,24 +551,8 @@ namespace Game {
 
             static bool IsTargetBlocked(EntityLevel& level,
                                         const TransportItemTarget& target) {
-                // MC ChestBlock.isChestBlockedAt: a solid block above
-                // (isRedstoneConductor — IsBlockSolid stands in) or a cat
-                // sitting on the lid.
-                const glm::ivec3 above = target.pos + glm::ivec3(0, 1, 0);
-                const IBlockAccess* blocks = level.Blocks();
-                if (blocks && blocks->IsBlockSolid(above.x, above.y, above.z)) {
-                    return true;
-                }
-                std::vector<Entity*> entities;
-                level.GetEntitiesInBox(
-                    AABB(glm::vec3(above.x + 0.5f, above.y + 0.5f, above.z + 0.5f),
-                         glm::vec3(1.0f, 1.0f, 1.0f)),
-                    nullptr, entities);
-                for (Entity* e : entities) {
-                    auto* cat = dynamic_cast<Cat*>(e);
-                    if (cat && cat->IsInSittingPose()) return true;
-                }
-                return false;
+                // MC ChestBlock.isChestBlockedAt(level, target.pos).
+                return IsChestBlockedAt(level, target.pos);
             }
 
             static bool TargetHasNotChanged(EntityLevel& level,
@@ -681,14 +681,15 @@ namespace Game {
                     { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 },
                 };
                 for (const glm::dvec3& direction : kDirections) {
-                    // MC clips to the exact face centre (0.5 along the axis);
-                    // the epsilon pulls the endpoint just inside the chest's
-                    // own cell so the voxel walk can report the chest as the
-                    // hit block, the way MC's shape clip does from a face hit.
-                    const glm::dvec3 hitTarget = center + (0.5 - 1.0e-3) * direction;
-                    const std::optional<glm::ivec3> hit =
-                        FirstCollidingBlock(*blocks, eyePosition, hitTarget);
-                    if (hit && *hit == target.pos) return true;
+                    // MC: level.clip(ClipContext(eyePosition, center + 0.5 ·
+                    // direction, Block.COLLIDER, Fluid.NONE, body)) hitting a
+                    // BLOCK whose pos is the chest's — the collision shapes
+                    // decide (ClipBlocksCollider).
+                    const glm::dvec3 hitTarget = center + 0.5 * direction;
+                    glm::ivec3 hit;
+                    if (ClipBlocksCollider(*blocks, eyePosition, hitTarget, hit) && hit == target.pos) {
+                        return true;
+                    }
                 }
                 return false;
             }
@@ -703,8 +704,7 @@ namespace Game {
             }
 
             static bool IsPickingUpItems(const PathfinderMob& body) {
-                // MC body.getMainHandItem().isEmpty() — the hand stack lives
-                // on CopperGolem (no equipment system).
+                // MC body.getMainHandItem().isEmpty().
                 auto* golem = dynamic_cast<const CopperGolem*>(&body);
                 return golem && golem->GetMainHandItem().IsEmpty();
             }
@@ -734,9 +734,11 @@ namespace Game {
             void PickUpItems(PathfinderMob& body, IContainer& container) {
                 auto* golem = dynamic_cast<CopperGolem*>(&body);
                 if (!golem) return;
+                // MC setItemSlot(MAINHAND, pickupItemFromContainer(container))
+                // and setGuaranteedDrop(MAINHAND) — what CopperGolem::
+                // DropEquipment's dropPreservedEquipment then always drops.
                 golem->SetItemInHand(PickupItemFromContainer(container));
-                // MC setGuaranteedDrop(MAINHAND) — CopperGolem::Die drops the
-                // hand stack.
+                golem->SetGuaranteedDrop(EquipmentSlot::MAINHAND);
                 container.SetChanged();
                 ClearMemoriesAfterMatchingTargetFound(body);
             }
@@ -781,11 +783,10 @@ namespace Game {
                         container.SetItem(slot, itemStack);
                         return ItemStack{};
                     }
-                    // MC containerItemStack.getMaxStackSize() — the item's own
-                    // ceiling (the per-stack MAX_STACK_SIZE component override
-                    // is not consulted, matching the menus' merge paths).
+                    // MC containerItemStack.getMaxStackSize() — the stack's own
+                    // ceiling, its MAX_STACK_SIZE patch included.
                     const int maxStackSize =
-                        ItemRegistry::Get(containerItemStack.itemId).maxStackSize;
+                        Game::GetMaxStackSize(containerItemStack);
                     if (IsSameItemSameComponents(containerItemStack, itemStack)
                         && containerItemStack.count < maxStackSize) {
                         const int countThatCanBeAdded =
@@ -890,24 +891,29 @@ namespace Game {
             return found;
         }
 
-        // MC CopperGolemAi.onReachedTargetInteraction(state, sound) — each
-        // state's sound (COPPER_GOLEM_ITEM_GET / NO_GET / DROP / NO_DROP, at
-        // TICK_TO_PLAY_ON_REACHED_SOUND = 9) waits on a sound system.
+        // MC CopperGolemAi.onReachedTargetInteraction(state, sound): the
+        // chest opened and the state set at tick 1, the state's sound
+        // (COPPER_GOLEM_ITEM_GET / NO_GET / DROP / NO_DROP) at
+        // TICK_TO_PLAY_ON_REACHED_SOUND, the chest closed at 60.
         TransportItemsBetweenContainers::OnTargetReachedInteraction
-        OnReachedTargetInteraction(CopperGolem::State state) {
-            return [state](PathfinderMob& body, const TransportItemTarget& target,
-                           int ticksSinceReachingTarget) {
+        OnReachedTargetInteraction(CopperGolem::State state, const char* sound) {
+            return [state, sound](PathfinderMob& body, const TransportItemTarget& target,
+                                  int ticksSinceReachingTarget) {
                 auto* copperGolem = dynamic_cast<CopperGolem*>(&body);
                 if (!copperGolem) return;
                 if (ticksSinceReachingTarget == kTickToStartOnReachedInteraction) {
                     // MC container.startOpen(copperGolem): the lid rises —
                     // both halves when the container is a double chest's
-                    // CompoundContainer.
-                    ForEachTargetChest(body, target, [](ChestBlockEntity& chest, ILevelWrite& level) {
-                        chest.StartOpen(level);
+                    // CompoundContainer — with the golem as the
+                    // CONTAINER_OPEN event's source.
+                    ForEachTargetChest(body, target, [copperGolem](ChestBlockEntity& chest, ILevelWrite& level) {
+                        chest.StartOpen(level, copperGolem);
                     });
                     copperGolem->SetOpenedChestPos(target.pos);
                     copperGolem->SetState(state);
+                }
+                if (ticksSinceReachingTarget == kTickToPlayOnReachedSound && sound) {
+                    copperGolem->PlaySound(sound);
                 }
                 if (ticksSinceReachingTarget
                     == TransportItemsBetweenContainers::kTargetInteractionTime) {
@@ -919,8 +925,8 @@ namespace Game {
                     // pos is cleared just below.
                     const bool single = ForEachTargetChest(body, target, nullptr) == 1;
                     if (single && copperGolem->OpenedChestPos() == target.pos) {
-                        ForEachTargetChest(body, target, [](ChestBlockEntity& chest, ILevelWrite& level) {
-                            chest.StopOpen(level);
+                        ForEachTargetChest(body, target, [copperGolem](ChestBlockEntity& chest, ILevelWrite& level) {
+                            chest.StopOpen(level, copperGolem);
                         });
                     }
                     copperGolem->ClearOpenedChestPos();
@@ -933,10 +939,14 @@ namespace Game {
         GetTargetReachedInteractions() {
             using CIS = TransportItemsBetweenContainers::ContainerInteractionState;
             std::map<CIS, TransportItemsBetweenContainers::OnTargetReachedInteraction> map;
-            map[CIS::PickupItem]   = OnReachedTargetInteraction(CopperGolem::State::GettingItem);
-            map[CIS::PickupNoItem] = OnReachedTargetInteraction(CopperGolem::State::GettingNoItem);
-            map[CIS::PlaceItem]    = OnReachedTargetInteraction(CopperGolem::State::DroppingItem);
-            map[CIS::PlaceNoItem]  = OnReachedTargetInteraction(CopperGolem::State::DroppingNoItem);
+            map[CIS::PickupItem]   = OnReachedTargetInteraction(CopperGolem::State::GettingItem,
+                                                                SoundEvents::COPPER_GOLEM_ITEM_GET);
+            map[CIS::PickupNoItem] = OnReachedTargetInteraction(CopperGolem::State::GettingNoItem,
+                                                                SoundEvents::COPPER_GOLEM_ITEM_NO_GET);
+            map[CIS::PlaceItem]    = OnReachedTargetInteraction(CopperGolem::State::DroppingItem,
+                                                                SoundEvents::COPPER_GOLEM_ITEM_DROP);
+            map[CIS::PlaceNoItem]  = OnReachedTargetInteraction(CopperGolem::State::DroppingNoItem,
+                                                                SoundEvents::COPPER_GOLEM_ITEM_NO_DROP);
             return map;
         }
 
@@ -952,12 +962,13 @@ namespace Game {
 
         // MC CopperGolemAi.shouldQueueForTarget.
         std::function<bool(const TransportItemTarget&)> ShouldQueueForTarget() {
-            return [](const TransportItemTarget&) {
-                // MC: !chestBlockEntity.getEntitiesWithContainerOpen()
-                // .isEmpty() — the ContainerOpenersCounter does not exist, so
-                // no golem ever queues; the QUEUING machinery above stays MC's
-                // for when it does.
-                return false;
+            return [](const TransportItemTarget& target) {
+                // MC: `blockEntity instanceof ChestBlockEntity` and
+                // !getEntitiesWithContainerOpen().isEmpty() — a player or
+                // another golem has it open: the chest's openers count
+                // (ContainerOpenersCounter, rechecked from the world every 5
+                // ticks while anyone is counted).
+                return target.blockEntity != nullptr && target.blockEntity->GetOpenerCount() > 0;
             };
         }
 
@@ -965,8 +976,8 @@ namespace Game {
 
     void CopperGolemAi::InitBrain(CopperGolem& golem, Brain& brain) {
         (void)golem;
-        // MC CopperGolemAi.MEMORY_TYPES, in declaration order. DOORS_TO_CLOSE
-        // is omitted with InteractWithDoor below.
+        // The memories its sensors and behaviours use (MC derives them from
+        // Brain.provider(sensors, activities)).
         for (MemoryModule m : { MemoryModule::IsPanicking,
                                 MemoryModule::HurtBy,
                                 MemoryModule::HurtByEntity,
@@ -979,7 +990,8 @@ namespace Game {
                                 MemoryModule::GazeCooldownTicks,
                                 MemoryModule::TransportItemsCooldownTicks,
                                 MemoryModule::VisitedBlockPositions,
-                                MemoryModule::UnreachableTransportBlockPositions }) {
+                                MemoryModule::UnreachableTransportBlockPositions,
+                                MemoryModule::DoorsToClose }) {
             brain.RegisterMemory(m);
         }
 
@@ -988,12 +1000,16 @@ namespace Game {
         brain.AddSensor(std::make_unique<HurtBySensor>());
 
         // ── CORE (MC initCoreActivity) ─────────────────────────────────────
-        // InteractWithDoor.create() is skipped — no brain door behaviour (the
-        // goal system's DoorGoals are the door port).
         std::vector<BehaviorPtr> core;
         core.push_back(std::make_unique<AnimalPanic>(kSpeedMultiplierWhenPanicking));
         core.push_back(std::make_unique<LookAtTargetSink>(45, 90));
         core.push_back(std::make_unique<MoveToTargetSink>());
+        // InteractWithDoor.create(): the golem's navigation opens doors
+        // (CopperGolem's constructor), and this opens and closes them.
+        core.push_back(std::make_unique<InteractWithDoor>(
+            [](LivingEntity& body) -> std::vector<glm::ivec3>& {
+                return static_cast<CopperGolem&>(body).DoorsToClose();
+            }));
         core.push_back(std::make_unique<CountDownCooldownTicks>(
             MemoryModule::GazeCooldownTicks));
         core.push_back(std::make_unique<CountDownCooldownTicks>(

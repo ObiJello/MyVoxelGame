@@ -148,6 +148,9 @@ namespace Game::EntityNbtHints {
                 add("variant", QuotedAll({"temperate", "warm", "cold"}));
                 add("IsChickenJockey", kTrue);
                 break;
+            case T::Frog:
+                add("variant", QuotedAll({"temperate", "warm", "cold"}));
+                break;
             case T::Sheep:
                 add("Color", DyeBytes());
                 add("Sheared", kTrue);
@@ -259,6 +262,9 @@ namespace Game::EntityNbtHints {
                 break;
             case T::SnowGolem:
                 add("Pumpkin", {"0b", "1b"});
+                break;
+            case T::IronGolem:
+                add("PlayerCreated", {"0b", "1b"});
                 break;
             case T::Slime:
             case T::MagmaCube:

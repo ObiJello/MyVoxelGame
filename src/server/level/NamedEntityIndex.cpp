@@ -432,6 +432,10 @@ namespace Server::NamedEntities {
 
     void SetNamesChangedCallback(void (*callback)()) { S().namesChanged = callback; }
 
+    void ResendCommands() {
+        if (S().namesChanged) S().namesChanged();
+    }
+
     void Save() {
         State& st = S();
         if (st.readOnly) return;

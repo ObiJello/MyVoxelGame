@@ -733,12 +733,21 @@ namespace Game {
 
     // MC ZombieNautilus — never a baby, never breeds, and hostile through the
     // shared target finder; tamed and ridden exactly as the nautilus. Its
-    // biome texture variant (temperate/cold/warm) is SKIPPED: the port ships
-    // one zombie_nautilus.png.
+    // ZombieNautilusVariant (temperate — zombie_nautilus, the normal mesh;
+    // warm — zombie_nautilus_coral, the coral-grown mesh) is picked by biome
+    // in finalizeSpawn (#spawns_coral_variant_zombie_nautilus: warm ocean),
+    // saved as "variant" and carried by the wire's variant byte.
     class ZombieNautilus : public AbstractNautilus {
     public:
         explicit ZombieNautilus(EntityLevel* level);
         void UpdateBrainActivity() override;
+
+        // 0 temperate, 1 warm.
+        uint8_t GetVariantByte() const override { return m_variant; }
+        void    SetVariantByte(uint8_t v) override { m_variant = v == 1 ? 1 : 0; }
+        static const char* VariantName(uint8_t v) { return v == 1 ? "warm" : "temperate"; }
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         bool IsBaby() const override { return false; }
 
@@ -754,6 +763,9 @@ namespace Game {
             return IsUnderWater() ? SoundEvents::ZOMBIE_NAUTILUS_DASH_READY
                                   : SoundEvents::ZOMBIE_NAUTILUS_DASH_READY_ON_LAND;
         }
+
+    private:
+        uint8_t m_variant = 0;
     };
 
 } // namespace Game

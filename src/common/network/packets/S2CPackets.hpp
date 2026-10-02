@@ -628,6 +628,34 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // MC ClientboundUpdateAdvancementsPacket (AdvancementPackets.hpp).
+    class UpdateAdvancementsS2CPacketImpl : public IS2CPacket {
+    private:
+        UpdateAdvancementsS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit UpdateAdvancementsS2CPacketImpl(UpdateAdvancementsS2CPacket data)
+            : m_data(std::move(data)), m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onUpdateAdvancementsS2C(m_data); }
+        const UpdateAdvancementsS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::UpdateAdvancementsS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // MC ClientboundSelectAdvancementsTabPacket (AdvancementPackets.hpp).
+    class SelectAdvancementsTabS2CPacketImpl : public IS2CPacket {
+    private:
+        SelectAdvancementsTabS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SelectAdvancementsTabS2CPacketImpl(SelectAdvancementsTabS2CPacket data)
+            : m_data(std::move(data)), m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSelectAdvancementsTabS2C(m_data); }
+        const SelectAdvancementsTabS2CPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SelectAdvancementsTabS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     // MC ClientboundSetCameraPacket (SpectatorPackets.hpp).
     class SetCameraS2CPacketImpl : public IS2CPacket {
     private:
@@ -907,6 +935,27 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // /title — see TitlesS2CPacket.hpp.
+    class TitlesS2CPacketImpl : public IS2CPacket {
+    private:
+        TitlesS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit TitlesS2CPacketImpl(TitlesS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onTitlesS2C(m_data);
+        }
+
+        const TitlesS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::TitlesS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     // Another player swung an arm — see PlayerSwingS2CPacket.hpp.
     class PlayerSwingS2CPacketImpl : public IS2CPacket {
     private:
@@ -921,6 +970,27 @@ namespace Packets {
         void apply(IPacketListener& listener) override { listener.onPlayerSwingS2C(m_data); }
         const PlayerSwingS2CPacket& getData() const { return m_data; }
         PacketId getId() const override { return PacketId::PlayerSwingS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // One player's look, relayed by the server (PlayerAppearancePackets.hpp).
+    class PlayerAppearanceS2CPacketImpl : public IS2CPacket {
+    private:
+        PlayerAppearanceS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit PlayerAppearanceS2CPacketImpl(PlayerAppearanceS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onPlayerAppearanceS2C(m_data);
+        }
+
+        const PlayerAppearanceS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::PlayerAppearanceS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
@@ -1282,6 +1352,26 @@ namespace Packets {
         const EndCrystalBeamS2CPacket& getData() const { return m_data; }
 
         PacketId getId() const override { return PacketId::EndCrystalBeamS2C; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    class WitherHeadTargetsS2CPacketImpl : public IS2CPacket {
+    private:
+        WitherHeadTargetsS2CPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+
+    public:
+        explicit WitherHeadTargetsS2CPacketImpl(WitherHeadTargetsS2CPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+
+        void apply(IPacketListener& listener) override {
+            listener.onWitherHeadTargetsS2C(m_data);
+        }
+
+        const WitherHeadTargetsS2CPacket& getData() const { return m_data; }
+
+        PacketId getId() const override { return PacketId::WitherHeadTargetsS2C; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

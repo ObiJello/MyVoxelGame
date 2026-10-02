@@ -7,6 +7,7 @@
 #include "ClientLevel.hpp"
 #include "ClientWorkerPool.hpp"
 #include "client/renderer/mesh/MeshPriority.hpp"
+#include "client/renderer/mesh/ChunkRenderer.hpp"
 #include "common/core/Features.hpp"
 #include "common/portal/PortalRoute.hpp"
 #if ENABLE_IMMERSIVE_PORTALS
@@ -50,7 +51,16 @@ namespace Client {
         // default both span more than that), or the eye practically at it.
         constexpr double kViewConeCos      = 0.5;
         constexpr double kAlwaysInViewDist = 2.0;
-        constexpr size_t kMaxPortalTargets = 16;
+        constexpr size_t kMaxPortalTargets = 96;
+        // Per portal view: its first sections within this many blocks of
+        // where the view comes out, at most this many of them.
+        constexpr double kPortalViewDepth    = 32.0;
+        // ClientChunkManager::ScheduleMeshBuildsWithSnapshots admits a dirty
+        // section outside every view only within this many blocks of the
+        // viewer (directly or through a portal route); targets keep inside.
+        constexpr double kNearAdmitBlocks    = 48.0;
+        constexpr double kAdmitMargin        = 6.0;
+        constexpr size_t kMaxSectionsPerView = 24;
 
         // MC LevelRenderer.isSectionCompiledAndVisible for one section of
         // one level — see IsPlayerSectionCompiled for each half.
@@ -72,6 +82,7 @@ namespace Client {
         m_playerSectionReadyAt = {};
         m_portalTargets.clear();
         m_portalDecisionsLogged = false;
+        m_loadedAt = {};
         // The first mesh pass of each level whose order a portal changed
         // logs it once ([MeshOrder], ClientChunkManager).
         ::Render::MeshPriority::ArmOrderLog();
@@ -198,28 +209,73 @@ namespace Client {
             areas.push_back({dimension, farPoint, static_cast<uint32_t>(areas.size() + 1)});
             return areas.back().key;
         };
-        // The sections the view opens into: just past where it comes out,
-        // and one section further along the far side's depth.
+        // The sections the view actually opens onto: non-air sections of
+        // the far level within kPortalViewDepth blocks of where the view
+        // comes out, on the far side's content side, inside the view's cone
+        // as seen from the eye's image through the portal — its first
+        // screenful, nearest first, at most kMaxSectionsPerView of them.
+        //
+        // Only sections that CAN complete are chosen: the mesh scheduler
+        // admits an out-of-view dirty section only within kNearAdmitBlocks
+        // (ClientChunkManager, "near" counted through the portal route), and
+        // the portal view's own frustum is tighter than this cone — so a
+        // target past that radius could wait for a view that never lists it
+        // (the fixed 19/24, 22/24 timeouts). Targets stay a margin inside it.
         auto push = [&](Game::DimensionId dimension, const glm::dvec3& farPoint, const glm::dvec3& inward,
-                        uint32_t portalId) {
+                        const glm::dvec3& imageEye, const glm::dvec3& farForward, uint32_t portalId,
+                        double entryCost, double invScale) {
             const uint32_t key = areaKey(dimension, farPoint);
-            for (const double depth : { 1.0, 17.0 }) {
-                if (out.size() >= kMaxPortalTargets) return;
-                const glm::dvec3 p = farPoint + inward * depth;
-                const int by = static_cast<int>(std::floor(p.y));
-                const int sectionY = (by + 64) >> 4;
-                if (by + 64 < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) continue;
-                PortalViewTarget t;
-                t.dimension = dimension;
-                t.chunk     = Game::Math::ChunkPos{ static_cast<int>(std::floor(p.x)) >> 4,
-                                                    static_cast<int>(std::floor(p.z)) >> 4 };
-                t.sectionY  = sectionY;
-                t.portalId  = portalId;
-                t.viewKey   = key;
+            const ClientLevel* level = ClientLevels::Get(dimension);
+            const ClientChunkManager* chunks = level ? level->Chunks() : nullptr;
+            struct Cand { PortalViewTarget t; double dist; };
+            std::vector<Cand> cands;
+            const int fcx = static_cast<int>(std::floor(farPoint.x)) >> 4;
+            const int fcz = static_cast<int>(std::floor(farPoint.z)) >> 4;
+            const int fsy = (static_cast<int>(std::floor(farPoint.y)) + 64) >> 4;
+            const int reach = static_cast<int>(kPortalViewDepth / 16.0) + 1;
+            for (int cz = fcz - reach; cz <= fcz + reach; ++cz) {
+                for (int cx = fcx - reach; cx <= fcx + reach; ++cx) {
+                    for (int sy = std::max(0, fsy - reach); sy <= std::min(Game::Math::SECTIONS_PER_CHUNK - 1, fsy + reach); ++sy) {
+                        const glm::dvec3 c(cx * 16.0 + 8.0, -64.0 + sy * 16.0 + 8.0, cz * 16.0 + 8.0);
+                        const double dist = glm::length(c - farPoint);
+                        const bool home = (cx == fcx && cz == fcz && sy == fsy);
+                        // The scheduler's route-admission test for the column
+                        // (MeshPriority::ColumnRouteDistance < 48 blocks).
+                        const double hx = c.x - farPoint.x, hz = c.z - farPoint.z;
+                        const double columnRoute = entryCost + std::sqrt(hx * hx + hz * hz) * invScale;
+                        if (!home && columnRoute > kNearAdmitBlocks - kAdmitMargin) continue;
+                        if (!home) {
+                            if (dist > kPortalViewDepth + 8.0) continue;
+                            if (glm::dot(c - farPoint, inward) < -8.0) continue;         // behind the far surface
+                            const glm::dvec3 toC = c - imageEye;
+                            const double len = glm::length(toC);
+                            if (len > 1e-6 && glm::dot(toC / len, farForward) < kViewConeCos) continue;
+                        }
+                        const Game::Math::ChunkPos chunk{cx, cz};
+                        if (chunks) {
+                            const auto* info = chunks->GetSectionInfo(chunk, sy);
+                            if (info && info->isAllAir && info->hasCpuData) continue;   // known air: nothing to show
+                        }
+                        PortalViewTarget t;
+                        t.dimension = dimension;
+                        t.chunk     = chunk;
+                        t.sectionY  = sy;
+                        t.portalId  = portalId;
+                        t.viewKey   = key;
+                        cands.push_back({t, dist});
+                    }
+                }
+            }
+            std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.dist < b.dist; });
+            size_t taken = 0;
+            for (const Cand& c : cands) {
+                if (taken >= kMaxSectionsPerView || out.size() >= kMaxPortalTargets) break;
                 const bool dup = std::any_of(out.begin(), out.end(), [&](const PortalViewTarget& o) {
-                    return o.dimension == t.dimension && o.chunk == t.chunk && o.sectionY == t.sectionY;
+                    return o.dimension == c.t.dimension && o.chunk == c.t.chunk && o.sectionY == c.t.sectionY;
                 });
-                if (!dup) out.push_back(t);
+                if (dup) continue;
+                out.push_back(c.t);
+                ++taken;
             }
         };
         // A far side right beside the player (same level, within the wait's
@@ -255,7 +311,9 @@ namespace Client {
                 return;
             }
             decision(p.id, "in view, waited for", route->farPoint, route->entryCost);
-            push(route->dimension, route->farPoint, p.ContentDirection(), p.id);
+            const glm::dvec3 farForward = glm::normalize(p.TransformLocalVecNonScale(forward));
+            push(route->dimension, route->farPoint, p.ContentDirection(), p.TransformPoint(eye), farForward, p.id,
+                 route->entryCost, route->invScale);
         });
 #endif
 #if ENABLE_PORTAL_GUN
@@ -284,7 +342,17 @@ namespace Client {
                     continue;
                 }
                 decision(0, "gun pair: in view, waited for", route->farPoint, route->entryCost);
-                push(route->dimension, route->farPoint, glm::dvec3(to.normal), 0);
+                // The pair's transform: (right, up, normal) here maps to
+                // (-right, up, -normal) there.
+                auto through = [&](const glm::dvec3& v) {
+                    const double r = glm::dot(v, glm::dvec3(from.right));
+                    const double u = glm::dot(v, glm::dvec3(from.upDir));
+                    const double n = glm::dot(v, glm::dvec3(from.normal));
+                    return -r * glm::dvec3(to.right) + u * glm::dvec3(to.upDir) - n * glm::dvec3(to.normal);
+                };
+                const glm::dvec3 imageEye = to.origin + through(eye - from.origin);
+                push(route->dimension, route->farPoint, glm::dvec3(to.normal), imageEye,
+                     glm::normalize(through(forward)), 0, route->entryCost, route->invScale);
             }
         });
 #endif
@@ -294,6 +362,35 @@ namespace Client {
         const ClientLevel* level = ClientLevels::Get(target.dimension);
         const ClientChunkManager* chunks = level ? level->Chunks() : nullptr;
         return chunks && SectionShown(*chunks, target.chunk, target.sectionY);
+    }
+
+    std::string LevelLoadTracker::DescribeTargetWait(const PortalViewTarget& t) {
+        const ClientLevel* level = ClientLevels::Get(t.dimension);
+        const ClientChunkManager* chunks = level ? level->Chunks() : nullptr;
+        if (!chunks) return "level not on the client";
+        if (!chunks->IsChunkLoaded(t.chunk)) return "column not loaded";
+        const auto* info = chunks->GetSectionInfo(t.chunk, t.sectionY);
+        if (!info) return "no section info";
+        if (info->builtOnce || info->meshResolvedEmpty) {
+            return "compiled, fading in (fadeStart " + std::to_string(info->fadeStartMs) + " ms)";
+        }
+        static constexpr int kDX[8] = { -1, 0, 1, 0, -1, -1, 1, 1 };
+        static constexpr int kDZ[8] = { 0, -1, 0, 1, -1, 1, -1, 1 };
+        std::string missing;
+        for (int i = 0; i < 8; ++i) {
+            const Game::Math::ChunkPos n{t.chunk.x + kDX[i], t.chunk.z + kDZ[i]};
+            if (!chunks->IsChunkLoaded(n)) missing += " (" + std::to_string(n.x) + "," + std::to_string(n.z) + ")";
+        }
+        if (!missing.empty()) return "not admitted: neighbour columns missing" + missing;
+        if (info->meshingVersion == info->version && info->version != 0) return "in flight (queued or compiling)";
+        const ::Render::ChunkRenderer* renderer = level->Renderer();
+        const bool inView = renderer && (renderer->IsMainViewSection(t.chunk, t.sectionY) ||
+                                         renderer->IsPortalViewSection(t.chunk, t.sectionY));
+        std::string why = info->dirty ? "dirty, not yet admitted" : "not dirty, never built";
+        why += inView ? " (in a view)" : " (in no view)";
+        if (info->isAllAir) why += " [all-air]";
+        if (!info->hasCpuData) why += " [no cpu data]";
+        return why;
     }
 
     void LevelLoadTracker::LogRouteCoverage() {
@@ -376,6 +473,12 @@ namespace Client {
         } else {
             Log::Warning("[LevelLoadTracker] portal views not all shown after %.2f s, not waiting longer:%s",
                          waited, perView.c_str());
+            for (const PortalViewTarget& t : m_portalTargets) {
+                if (IsTargetShown(t)) continue;
+                Log::Warning("[LevelLoadTracker]   portal #%u %s section (%d,%d,%d): %s", t.portalId,
+                             std::string(Game::DimensionName(t.dimension)).c_str(), t.chunk.x, t.sectionY,
+                             t.chunk.z, DescribeTargetWait(t).c_str());
+            }
         }
         return true;
     }
@@ -426,6 +529,7 @@ namespace Client {
         }
 
         m_stage = Stage::Ready;
+        m_loadedAt = std::chrono::steady_clock::now();
         // How far each portal route's far area got by now (its 5x5 around
         // where the view comes out): loaded, meshed.
         LogRouteCoverage();

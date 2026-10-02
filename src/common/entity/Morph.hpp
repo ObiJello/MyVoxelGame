@@ -55,6 +55,28 @@ namespace Game::Morph {
     constexpr uint32_t   WithBaby(uint32_t code, bool on) {
         return Encode(Kind::Mob, (IdOf(code) & ~kMobBabyBit) | (on ? kMobBabyBit : 0u));
     }
+    // Bits 18-23: the body's SIZE, for the types whose box and model scale
+    // with one (MC getDefaultDimensions). The raw 6 bits; MobSizeOf reads
+    // them per type:
+    //   slime, magma cube,  Slime.getSize, 1..63 (0 reads as 1)
+    //   maze slime
+    //   phantom             Phantom.getPhantomSize, 0..63
+    //   pufferfish          Pufferfish.getPuffState, 0..2
+    // The size rides the code so every reader of the body — the server's
+    // entity view, the client's physics, every renderer — agrees on it with
+    // no extra wire field.
+    constexpr uint32_t   kMobSizeShift = 18;
+    constexpr uint32_t   kMobSizeMax   = 63;
+    constexpr uint32_t   kMobSizeMask  = kMobSizeMax << kMobSizeShift;
+    constexpr uint32_t   MobSizeBitsOf(uint32_t code) { return (IdOf(code) & kMobSizeMask) >> kMobSizeShift; }
+    constexpr uint32_t   WithMobSize(uint32_t code, uint32_t size) {
+        return Encode(Kind::Mob, (IdOf(code) & ~kMobSizeMask) |
+                                 ((size > kMobSizeMax ? kMobSizeMax : size) << kMobSizeShift));
+    }
+    // Whether the type's body has a size the code carries (above).
+    bool HasMobSize(EntityTypeId type);
+    // The size in the type's own terms (above); 0 for a type without one.
+    int  MobSizeOf(uint32_t code);
 
     // A block morph's id is the BlockID in the low 16 bits and its yaw
     // (quarter turns, 0..3, Shift+Alt in game) in the two above: the same
@@ -77,9 +99,11 @@ namespace Game::Morph {
     // the morph on the server. Its meaning is the type's:
     //   tropical_fish   MC's packed variant int (TropicalFishVariant.hpp)
     //   salmon          Salmon.Variant id (small 0, medium 1, large 2)
+    //   parrot          Parrot.Variant id (red_blue 0 … gray 4)
     //   anything else   unused (0)
     // DefaultVariantOf is the look of a morph nobody rolled one for — MC's
-    // DEFAULT_VARIANT / Variant.DEFAULT (KOB white-on-white, medium).
+    // DEFAULT_VARIANT / Variant.DEFAULT (KOB white-on-white, medium,
+    // red_blue).
     int32_t DefaultVariantOf(uint32_t code);
 
     // A known kind with an id in range.
@@ -88,6 +112,13 @@ namespace Game::Morph {
     // A mob that lives in the air: a morph into one flies always — the
     // body is put in flight and kept there.
     bool IsFlier(uint32_t code);
+    // A flier's air speed against the player's flight (Abilities' 0.05):
+    // the mobs MC flies through FlyingMoveControl and LivingEntity's air
+    // travel accelerate at getFlyingSpeed() 0.02 × their FLYING_SPEED (the
+    // input's length) — a bee 0.6, a parrot 0.4 — where a flying player
+    // does 0.05 × 0.98. 1 for the fliers with their own flight code (bat,
+    // vex, ghasts, phantom, dragon, wither, blaze), which keep the player's.
+    float FlightSpeedFactorOf(uint32_t code);
     bool IsMob(uint32_t code, EntityTypeId type);
 
     // MC Creeper.maxSwell: ticks from calm to the bang. The morph's swell
@@ -100,6 +131,30 @@ namespace Game::Morph {
 
     // MC Spider.onClimbable: horizontal collision is a wall to climb.
     bool ClimbsWalls(uint32_t code);
+
+    // ── Water animals ─────────────────────────────────────────────────────
+    // A mob whose locomotion is water only (MC WaterBoundPathNavigation, or
+    // the squid's own impulses): the fish, the tadpole, the dolphin, the
+    // guardians, the squids, the nautili. Out of water such a body cannot
+    // walk — it flops (FlopOf) or lies where it is.
+    bool IsWaterBound(uint32_t code);
+    // MC AbstractFish / Dolphin / Guardian.aiStep: on the ground out of
+    // water the body hops — `up` blocks a tick up (the jump stands in for
+    // it) and up to `side` blocks a tick sideways (random in MC; the morph
+    // steers it with the movement keys). {0, 0} = no flop (a squid lies
+    // still).
+    struct Flop { float side; float up; };
+    Flop FlopOf(uint32_t code);
+    // A mob with no ground locomotion at all (MC Shulker: a box that only
+    // teleports): the morph does not walk.
+    bool IsStationary(uint32_t code);
+    // The mob's own stroke in water, as the acceleration (blocks per tick²
+    // at full input) MC's travelInWater gives it at its normal swimming
+    // pace, against a 0.9 drag on every axis and neutral buoyancy (each of
+    // these mobs' move control cancels the sink). The morph swims along its
+    // look, as these mobs do. 0 = the player's own swim (everything that is
+    // not a water animal — a drowned swims like a zombie until it hunts).
+    float SwimAccelOf(uint32_t code);
 
     struct Dims {
         float width;

@@ -6,10 +6,18 @@
 #include "../../entity/RemotePlayerManager.hpp"
 #include "client/sound/SoundManager.hpp"
 #include "client/world/ClientLevel.hpp"
+#include "common/inventory/SlotRanges.hpp"
 #include "common/entity/EntityNbtHints.hpp"
 #include "common/entity/GeneratedEntityTypes.hpp"
+#include "common/entity/ItemComponentHints.hpp"
+#include "common/world/loot/ContextNumberProviderNames.hpp"
+#include "common/data/DataComponentType.hpp"
+#include "common/data/DataComponents.hpp"
+#include "common/entity/Attributes.hpp"
+#include "common/entity/SelectableEntityTypes.hpp"
 #include "common/entity/Morph.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/entity/alchemy/Potions.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/SoundSource.hpp"
@@ -18,12 +26,16 @@
 #include "common/world/block/BlockState.hpp"
 #include "common/world/enchantment/Enchantment.hpp"
 #include "common/world/level/GameRules.hpp"
+#include "common/advancements/AdvancementLoader.hpp"
+#include "common/text/TextComponent.hpp"
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -195,6 +207,9 @@ namespace Render::CommandSuggestions {
                     all.emplace_back(Bare(std::string(info.slug)));
                     if (info.slug != "player") summon.emplace_back(Bare(std::string(info.slug)));
                 }
+                // A selector's `type=` also knows MC's ids outside the table
+                // (player, item, experience_orb, …).
+                for (const std::string_view id : Game::kSelectorOnlyEntityTypes) all.emplace_back(id);
                 SortUnique(all);
                 SortUnique(summon);
             }
@@ -256,6 +271,19 @@ namespace Render::CommandSuggestions {
             return ids;
         }
 
+        // /place feature: the configured features the server can run
+        // (the same list LiveFeatureLevel resolves).
+        const std::vector<std::string>& ConfiguredFeatureIds() {
+            static std::vector<std::string> ids;
+            if (ids.empty()) {
+#define CONFIGURED_FEATURE(id, cls, name) ids.push_back(Bare(id));
+#include "common/world/level/ConfiguredFeatureIds.inc"
+#undef CONFIGURED_FEATURE
+                SortUnique(ids);
+            }
+            return ids;
+        }
+
         const std::vector<std::string>& EnchantmentIds() {
             static std::vector<std::string> ids;
             if (ids.empty()) {
@@ -292,6 +320,44 @@ namespace Render::CommandSuggestions {
                 SortUnique(ids);
             }
             return ids;
+        }
+
+        // MC's attribute registry (BuiltInRegistries.ATTRIBUTE), bare ids.
+        const std::vector<std::string>& AttributeIds() {
+            static std::vector<std::string> ids;
+            if (ids.empty()) {
+                for (size_t i = 0; i < static_cast<size_t>(Game::Attribute::Count); ++i) {
+                    ids.emplace_back(Game::kAttributeTable[i].name);
+                }
+                SortUnique(ids);
+            }
+            return ids;
+        }
+
+        // SetOwnAttributes' rows.
+        std::vector<OwnAttribute> s_ownAttributes;
+
+        const OwnAttribute* OwnAttributeRow(const std::string& typedId) {
+            Game::Attribute attribute{};
+            if (!Game::AttributeFromName(Lower(typedId), attribute)) return nullptr;
+            const std::string_view name = Game::AttributeName(attribute);
+            for (const OwnAttribute& row : s_ownAttributes) {
+                if (row.id == name) return &row;
+            }
+            return nullptr;
+        }
+
+        // A double the way Java's Double.toString writes the common ones
+        // ("0.6", "20.0") — what a value suggestion offers.
+        std::string AttributeNumber(double v) {
+            char buf[64];
+            for (int precision = 1; precision <= 17; ++precision) {
+                std::snprintf(buf, sizeof(buf), "%.*g", precision, v);
+                if (std::strtod(buf, nullptr) == v) break;
+            }
+            std::string out = buf;
+            if (out.find_first_of(".eEn") == std::string::npos) out += ".0";
+            return out;
         }
 
         const std::vector<std::string>& GameRuleIds() {
@@ -464,8 +530,12 @@ namespace Render::CommandSuggestions {
                     continue;
                 }
                 if (cur.start < 0) cur.start = i;
+                // A quote opens a string inside brackets/braces or at a
+                // token's start (as the server's tokenizer reads it); inside
+                // a plain word ("don't") it is just a character.
+                const bool opensQuote = (c == '"' || c == '\'') && (depth > 0 || cur.text.empty());
                 cur.text += c;
-                if (c == '"' || c == '\'') quote = c;
+                if (opensQuote) quote = c;
                 else if (c == '[' || c == '{' || c == '(') ++depth;
                 else if ((c == ']' || c == '}' || c == ')') && depth > 0) --depth;
             }
@@ -505,7 +575,8 @@ namespace Render::CommandSuggestions {
         bool Accepts(Arg type, const std::vector<const Token*>& tokens) {
             switch (type) {
                 case Arg::Integer: return IsNumber(tokens[0]->text, true);
-                case Arg::Float:   return IsNumber(tokens[0]->text, false);
+                case Arg::Float:
+                case Arg::AttributeValue: return IsNumber(tokens[0]->text, false);
                 case Arg::Bool:    return tokens[0]->text == "true" || tokens[0]->text == "false";
                 case Arg::Vec3:
                 case Arg::Vec2:
@@ -558,6 +629,7 @@ namespace Render::CommandSuggestions {
             switch (node.type) {
                 case Arg::Integer:
                 case Arg::Float:
+                case Arg::AttributeValue:
                 case Arg::Vec3:
                 case Arg::Vec2:
                 case Arg::BlockPos:
@@ -613,7 +685,9 @@ namespace Render::CommandSuggestions {
                 if (kid.IsLiteral()) continue;
                 if (kid.type == Arg::Command) { w.subCommands.push_back(token.start); continue; }
                 const int arity = Game::Cmd::TokenArity(kid.type);
-                if (kid.type == Arg::Greedy) {
+                // The greedy kinds take the rest of the line: the cursor is
+                // always inside them.
+                if (kid.type == Arg::Greedy || kid.type == Arg::Message || kid.type == Arg::TextComponent) {
                     Candidate c;
                     c.node = &kid;
                     c.component = static_cast<int>(w.toks.size() - i);
@@ -687,10 +761,13 @@ namespace Render::CommandSuggestions {
         // Selector options this engine's EntitySelector parses.
         const std::vector<std::string>& SelectorKeys() {
             static const std::vector<std::string> keys = {
-                "distance=", "dx=", "dy=", "dz=", "gamemode=", "limit=", "name=",
-                "sort=", "type=", "x=", "x_rotation=", "y=", "y_rotation=", "z="};
+                "distance=", "dx=", "dy=", "dz=", "gamemode=", "limit=", "name=", "nbt=",
+                "sort=", "tag=", "type=", "x=", "x_rotation=", "y=", "y_rotation=", "z="};
             return keys;
         }
+
+        // Defined with the SNBT completion below.
+        bool SelectorNbtCompletion(const Token& partial, size_t bracket, Provided& out);
 
         // EntityArgument: player names and selectors, with `@e[key=value,...]`
         // completing inside the brackets.
@@ -714,6 +791,8 @@ namespace Render::CommandSuggestions {
                 out.items = FilterPrefix(all, word);
                 return out;
             }
+            // Inside an `nbt={...}` value: the compound's keys and values.
+            if (SelectorNbtCompletion(partial, bracket, out)) return out;
             // Inside the brackets: the slot is the run since the last '[',
             // ',' or '=' (spaces after a ',' skipped).
             size_t sub = bracket + 1;
@@ -743,7 +822,18 @@ namespace Render::CommandSuggestions {
                     ++out.anchor;
                 }
                 std::vector<std::string> values;
-                if (key == "type")          return Provided{out.anchor, FilterResources(EntitySlugs(false), slot)};
+                if (key == "type") {
+                    // Every entity type, then the entity_type tags (MC offers
+                    // both; a `#` shows the tags alone).
+                    const auto& tags = DataFileIds("tags/entity_type", "#");
+                    if (!slot.empty() && slot[0] == '#') return Provided{out.anchor, FilterNames(tags, slot)};
+                    std::vector<std::string> items = FilterResources(EntitySlugs(false), slot);
+                    if (slot.empty()) {
+                        const auto top = TopLevel(tags);
+                        items.insert(items.end(), top.begin(), top.end());
+                    }
+                    return Provided{out.anchor, std::move(items)};
+                }
                 else if (key == "sort")     values = {"arbitrary", "furthest", "nearest", "random"};
                 else if (key == "gamemode") values = {"adventure", "creative", "spectator", "survival"};
                 else if (key == "limit")    values = {"1", "10", "100"};
@@ -999,6 +1089,693 @@ namespace Render::CommandSuggestions {
             return out;
         }
 
+        // The keys every mob type shares — what `nbt=` offers before a
+        // `type=` narrows it.
+        const std::vector<NbtKey>& CommonNbtKeys() {
+            static std::vector<NbtKey> keys;
+            static bool built = false;
+            if (built) return keys;
+            built = true;
+            std::unordered_map<std::string, int> seen;
+            int types = 0;
+            for (int i = 0; i < Game::kEntityTypeCount; ++i) {
+                const auto type = static_cast<Game::EntityTypeId>(i);
+                if (Game::GetEntityTypeInfo(type).category == Game::MobCategory::Misc) continue;
+                ++types;
+                for (const Game::EntityNbtHints::Key& k : Game::EntityNbtHints::KeysFor(type)) {
+                    if (seen[k.name]++ == types - 1 && types == 1) keys.push_back({k.name, k.values});
+                }
+            }
+            keys.erase(std::remove_if(keys.begin(), keys.end(),
+                                      [&](const NbtKey& k) { return seen[k.name] < types; }),
+                       keys.end());
+            return keys;
+        }
+
+        // `@e[...,nbt={...` with the cursor inside the compound: its keys
+        // (the `type=` option's, when one is given) and values.
+        bool SelectorNbtCompletion(const Token& partial, size_t bracket, Provided& out) {
+            const std::string& word = partial.text;
+            // The option the cursor is in: the run since the last ',' or '['
+            // at nesting depth zero (a compound's own commas don't count).
+            size_t optionStart = bracket + 1;
+            int depth = 0;
+            char quote = 0;
+            std::string typeValue;
+            const auto noteOption = [&](size_t from, size_t to) {
+                const std::string option = word.substr(from, to - from);
+                const size_t eq = option.find('=');
+                if (eq == std::string::npos) return;
+                std::string key = option.substr(0, eq);
+                key.erase(0, key.find_first_not_of(' '));
+                if (Lower(key) == "type") typeValue = option.substr(eq + 1);
+            };
+            for (size_t i = bracket + 1; i < word.size(); ++i) {
+                const char c = word[i];
+                if (quote) {
+                    if (c == '\\') { ++i; continue; }
+                    if (c == quote) quote = 0;
+                    continue;
+                }
+                if (c == '"' || c == '\'') { quote = c; continue; }
+                if (c == '{' || c == '[') ++depth;
+                else if ((c == '}' || c == ']') && depth > 0) --depth;
+                else if (c == ',' && depth == 0) { noteOption(optionStart, i); optionStart = i + 1; }
+            }
+            std::string option = word.substr(optionStart);
+            const size_t lead = option.find_first_not_of(' ');
+            if (lead == std::string::npos) return false;
+            const size_t eq = option.find('=');
+            if (eq == std::string::npos || Lower(option.substr(lead, eq - lead)) != "nbt") return false;
+            size_t valueStart = optionStart + eq + 1;
+            if (valueStart < word.size() && word[valueStart] == '!') ++valueStart;
+            Token value;
+            value.start = partial.start + static_cast<int>(valueStart);
+            value.text = word.substr(valueStart);
+            std::vector<NbtKey> keys;
+            Game::EntityTypeId type{};
+            if (!typeValue.empty() && typeValue[0] != '!' && EntityTypeFromText(typeValue, type)) {
+                for (const Game::EntityNbtHints::Key& k : Game::EntityNbtHints::KeysFor(type)) keys.push_back({k.name, k.values});
+            } else {
+                keys = CommonNbtKeys();
+            }
+            out = CompoundCompletion(value, keys);
+            return true;
+        }
+
+        // ── Item component values ──────────────────────────────────────────
+        //
+        // Each settable component's value shape (ItemStackNbt ReadItemStack's
+        // codecs), with every leaf naming the registry its suggestions come
+        // from — the same lists the other argument types offer (sounds as
+        // /playsound, items as /give, enchantments, effects …), so nothing
+        // here is a hand-kept example list except plain numbers and enums.
+
+        enum class ValueKind : uint8_t {
+            Text,          // a text component: "…" or {text:"…",color:…}
+            Sound, Item, ItemOrTag, Effect, Potion, EntityType, Block, Enchantment,
+            Instrument, BannerPattern, Painting, DyeColor, DamageTypeTag, Axolotl,
+            Bool, Unit, Number, Enum, Compound, List,
+            EnchantmentMap,   // {<enchantment>:<level>, ...}
+            Attribute,        // the attribute registry
+            BlockOrTag,       // a block id or #block tag (HolderSet<Block>)
+            EntityTypeOrTag,  // an entity type or #entity_type tag
+            DataFile,         // data/<ns>/<values[0]>/*.json ids (values[1]: its tag dir)
+            Variant,          // an entity variant component's names (values[0]: the component)
+            ComponentName,    // an item component name (tooltip_display's hidden list)
+        };
+
+        struct ValueSpec {
+            ValueKind kind = ValueKind::Number;
+            std::vector<std::string> values;   // Number examples / Enum names
+            std::vector<std::pair<std::string, const ValueSpec*>> fields;   // Compound
+            const ValueSpec* element = nullptr;   // List
+        };
+
+        const ValueSpec* ComponentSpec(const std::string& component) {
+            static std::vector<std::unique_ptr<ValueSpec>> pool;
+            static std::unordered_map<std::string, const ValueSpec*> specs;
+            if (!specs.empty()) {
+                auto it = specs.find(component);
+                return it == specs.end() ? nullptr : it->second;
+            }
+            const auto make = [&](ValueKind kind, std::vector<std::string> values = {}) {
+                pool.push_back(std::make_unique<ValueSpec>());
+                pool.back()->kind = kind;
+                pool.back()->values = std::move(values);
+                return pool.back().get();
+            };
+            const auto compound = [&](std::vector<std::pair<std::string, const ValueSpec*>> fields) {
+                ValueSpec* spec = make(ValueKind::Compound);
+                spec->fields = std::move(fields);
+                return spec;
+            };
+            const auto list = [&](const ValueSpec* element) {
+                ValueSpec* spec = make(ValueKind::List);
+                spec->element = element;
+                return spec;
+            };
+            const ValueSpec* text    = make(ValueKind::Text);
+            const ValueSpec* boolean = make(ValueKind::Bool);
+            const ValueSpec* item    = make(ValueKind::Item);
+            const ValueSpec* dye     = make(ValueKind::DyeColor);
+            const ValueSpec* rgb     = make(ValueKind::Number, {"16711680", "65280", "255", "16777215"});
+            const ValueSpec* rgbList = make(ValueKind::Number, {"[I;16711680]", "[I;255,16776960]"});
+            const ValueSpec* effect  = make(ValueKind::Effect);
+            const ValueSpec* ticks   = make(ValueKind::Number, {"160", "600", "3600"});
+            const ValueSpec* count   = make(ValueKind::Number, {"1", "16", "64"});
+            const ValueSpec* stack   = compound({{"id", item}, {"count", count}});
+            const ValueSpec* firework = compound({
+                {"shape", make(ValueKind::Enum, {"small_ball", "large_ball", "star", "creeper", "burst"})},
+                {"colors", rgbList}, {"fade_colors", rgbList},
+                {"has_trail", boolean}, {"has_twinkle", boolean}});
+            const ValueSpec* mobEffect = compound({
+                {"id", effect}, {"amplifier", make(ValueKind::Number, {"0", "1", "4"})}, {"duration", ticks},
+                {"ambient", boolean}, {"show_particles", boolean}, {"show_icon", boolean}});
+            const ValueSpec* sound      = make(ValueKind::Sound);
+            const ValueSpec* unit01     = make(ValueKind::Number, {"0.0", "0.5", "1.0"});
+            const ValueSpec* reach      = make(ValueKind::Number, {"0.0", "3.0", "5.0"});
+            const ValueSpec* damageTag  = make(ValueKind::DamageTypeTag);
+            const ValueSpec* blockOrTag = make(ValueKind::BlockOrTag);
+            const ValueSpec* entityOrTag = make(ValueKind::EntityTypeOrTag);
+            const ValueSpec* equipmentGroup = make(ValueKind::Enum, {"any", "mainhand", "offhand", "hand", "feet", "legs",
+                                                                     "chest", "head", "armor", "body", "saddle"});
+            const ValueSpec* useAnimation = make(ValueKind::Enum, {"none", "eat", "drink", "block", "bow", "spear",
+                                                                   "crossbow", "spyglass", "toot_horn", "brush",
+                                                                   "bundle", "trident"});
+            const ValueSpec* consumeEffect = compound({
+                {"type", make(ValueKind::Enum, {"apply_effects", "remove_effects", "clear_all_effects",
+                                                "teleport_randomly", "play_sound"})},
+                {"effects", list(mobEffect)}, {"probability", unit01},
+                {"diameter", make(ValueKind::Number, {"16.0"})}, {"sound", sound}});
+            const ValueSpec* blockPredicate = compound({{"blocks", blockOrTag}, {"state", compound({})},
+                                                        {"nbt", compound({})}});
+            const ValueSpec* kineticCondition = compound({{"max_duration_ticks", make(ValueKind::Number, {"100"})},
+                                                          {"min_speed", make(ValueKind::Number, {"0.0"})},
+                                                          {"min_relative_speed", make(ValueKind::Number, {"0.0"})}});
+            const ValueSpec* swing = compound({{"type", make(ValueKind::Enum, {"none", "whack", "stab"})},
+                                               {"duration", make(ValueKind::Number, {"6", "10"})}});
+            const ValueSpec* signText = compound({{"messages", list(text)}, {"color", dye},
+                                                  {"has_glowing_text", boolean}});
+            specs = {
+                {"banner_patterns", list(compound({{"pattern", make(ValueKind::BannerPattern)}, {"color", dye}}))},
+                {"break_sound", make(ValueKind::Sound)},
+                {"bucket_entity_data", compound({
+                    {"NoAI", boolean}, {"Silent", boolean}, {"NoGravity", boolean}, {"Glowing", boolean},
+                    {"Invulnerable", boolean}, {"PersistenceRequired", boolean},
+                    {"Health", make(ValueKind::Number, {"10.0", "20.0"})}, {"Age", make(ValueKind::Number, {"0", "-24000"})},
+                    {"AgeLocked", boolean}, {"HuntingCooldown", make(ValueKind::Number, {"0", "2400"})}})},
+                {"charged_projectiles", list(stack)},
+                {"container", list(compound({{"slot", make(ValueKind::Number, {"0", "1", "26"})}, {"item", stack}}))},
+                {"custom_name", text},
+                {"damage", make(ValueKind::Number, {"0", "10", "100"})},
+                {"damage_resistant", compound({{"types", make(ValueKind::DamageTypeTag)}})},
+                {"dyed_color", rgb},
+                {"enchantable", compound({{"value", make(ValueKind::Number, {"1", "10", "15", "22"})}})},
+                {"enchantments", make(ValueKind::EnchantmentMap)},
+                {"firework_explosion", firework},
+                {"fireworks", compound({{"flight_duration", make(ValueKind::Number, {"1", "2", "3"})}, {"explosions", list(firework)}})},
+                {"instrument", make(ValueKind::Instrument)},
+                {"item_name", text},
+                {"map_color", rgb},
+                {"map_decorations", make(ValueKind::Unit)},
+                {"map_id", make(ValueKind::Number, {"0", "1"})},
+                {"max_damage", make(ValueKind::Number, {"59", "250", "1561", "2031"})},
+                {"ominous_bottle_amplifier", make(ValueKind::Number, {"0", "1", "2", "3", "4"})},
+                {"pot_decorations", list(item)},
+                {"potion_contents", compound({
+                    {"potion", make(ValueKind::Potion)}, {"custom_color", rgb},
+                    {"custom_effects", list(mobEffect)}, {"custom_name", make(ValueKind::Enum, {})}})},
+                {"potion_duration_scale", make(ValueKind::Number, {"1.0", "0.25", "2.0"})},
+                {"rarity", make(ValueKind::Enum, {"common", "uncommon", "rare", "epic"})},
+                {"repair_cost", make(ValueKind::Number, {"0", "1", "3", "39"})},
+                {"repairable", compound({{"items", make(ValueKind::ItemOrTag)}})},
+                {"stored_enchantments", make(ValueKind::EnchantmentMap)},
+                {"suspicious_stew_effects", list(compound({{"id", effect}, {"duration", ticks}}))},
+                {"unbreakable", make(ValueKind::Unit)},
+                {"weapon", compound({{"item_damage_per_attack", make(ValueKind::Number, {"0", "1", "2"})},
+                                     {"disable_blocking_for_seconds", make(ValueKind::Number, {"0.0", "5.0"})}})},
+                {"writable_book_content", compound({{"pages", list(make(ValueKind::Enum, {}))}})},
+                {"written_book_content", compound({
+                    {"title", make(ValueKind::Enum, {})}, {"author", make(ValueKind::Enum, {})},
+                    {"generation", make(ValueKind::Number, {"0", "1", "2", "3"})},
+                    {"pages", list(text)}, {"resolved", boolean}})},
+                {"axolotl/variant", make(ValueKind::Axolotl)},
+                {"painting/variant", make(ValueKind::Painting)},
+                {"salmon/size", make(ValueKind::Enum, {"small", "medium", "large"})},
+                {"tropical_fish/base_color", dye},
+                {"tropical_fish/pattern", make(ValueKind::Enum, {"kob", "sunstreak", "snooper", "dasher", "brinely", "spotty",
+                                                                 "flopper", "stripey", "glitter", "blockfish", "betty", "clayfish"})},
+                {"tropical_fish/pattern_color", dye},
+
+                // ── The rest of MC 26.3's persistent components ─────────────
+                {"custom_data", compound({})},
+                {"max_stack_size", make(ValueKind::Number, {"1", "16", "64", "99"})},
+                {"use_effects", compound({{"can_sprint", boolean}, {"interact_vibrations", boolean},
+                                          {"speed_multiplier", unit01}})},
+                {"minimum_attack_charge", unit01},
+                {"damage_type", make(ValueKind::DataFile, {"damage_type"})},
+                {"item_model", item},
+                {"lore", list(text)},
+                {"can_place_on", blockPredicate},
+                {"can_break", blockPredicate},
+                {"attribute_modifiers", list(compound({
+                    {"type", make(ValueKind::Attribute)},
+                    {"id", make(ValueKind::Enum, {})},
+                    {"amount", make(ValueKind::Number, {"1.0", "4.0", "0.5", "-0.25"})},
+                    {"operation", make(ValueKind::Enum, {"add_value", "add_multiplied_base", "add_multiplied_total"})},
+                    {"slot", equipmentGroup},
+                    {"display", compound({{"type", make(ValueKind::Enum, {"default", "hidden", "override"})},
+                                          {"value", text}})}}))},
+                {"custom_model_data", compound({{"floats", list(make(ValueKind::Number, {"1.0", "2.0"}))},
+                                                {"flags", list(boolean)}, {"strings", list(make(ValueKind::Enum, {}))},
+                                                {"colors", list(rgb)}})},
+                {"tooltip_display", compound({{"hide_tooltip", boolean},
+                                              {"hidden_components", list(make(ValueKind::ComponentName))}})},
+                {"enchantment_glint_override", boolean},
+                {"intangible_projectile", make(ValueKind::Unit)},
+                {"food", compound({{"nutrition", make(ValueKind::Number, {"1", "4", "8"})},
+                                   {"saturation", make(ValueKind::Number, {"0.6", "2.4", "12.8"})},
+                                   {"can_always_eat", boolean}})},
+                {"consumable", compound({{"consume_seconds", make(ValueKind::Number, {"1.6", "0.8", "3.2"})},
+                                         {"animation", useAnimation}, {"sound", sound},
+                                         {"has_consume_particles", boolean},
+                                         {"on_consume_effects", list(consumeEffect)}})},
+                {"use_remainder", stack},
+                {"use_cooldown", compound({{"seconds", make(ValueKind::Number, {"1.0", "5.0"})},
+                                           {"cooldown_group", make(ValueKind::Enum, {})}})},
+                {"tool", compound({{"rules", list(compound({{"blocks", blockOrTag},
+                                                            {"speed", make(ValueKind::Number, {"2.0", "8.0", "15.0"})},
+                                                            {"correct_for_drops", boolean}}))},
+                                   {"default_mining_speed", make(ValueKind::Number, {"1.0"})},
+                                   {"damage_per_block", make(ValueKind::Number, {"1", "2"})},
+                                   {"can_destroy_blocks_in_creative", boolean}})},
+                {"attack_range", compound({{"min_reach", reach}, {"max_reach", reach}, {"min_creative_reach", reach},
+                                           {"max_creative_reach", reach},
+                                           {"hitbox_margin", make(ValueKind::Number, {"0.3", "0.0"})},
+                                           {"mob_factor", unit01}})},
+                {"equippable", compound({
+                    {"slot", make(ValueKind::Enum, {"head", "chest", "legs", "feet", "body", "mainhand", "offhand", "saddle"})},
+                    {"equip_sound", sound},
+                    {"asset_id", make(ValueKind::Enum, {"leather", "chainmail", "iron", "gold", "diamond", "netherite",
+                                                        "copper", "turtle_scute", "armadillo_scute", "elytra"})},
+                    {"camera_overlay", make(ValueKind::Enum, {"misc/pumpkinblur"})},
+                    {"allowed_entities", entityOrTag},
+                    {"dispensable", boolean}, {"swappable", boolean}, {"damage_on_hurt", boolean},
+                    {"equip_on_interact", boolean}, {"can_be_sheared", boolean}, {"shearing_sound", sound}})},
+                {"glider", make(ValueKind::Unit)},
+                {"tooltip_style", make(ValueKind::Enum, {})},
+                {"death_protection", compound({{"death_effects", list(consumeEffect)}})},
+                {"blocks_attacks", compound({
+                    {"block_delay_seconds", make(ValueKind::Number, {"0.0", "0.25"})},
+                    {"disable_cooldown_scale", make(ValueKind::Number, {"1.0", "0.0"})},
+                    {"damage_reductions", list(compound({{"type", damageTag}, {"base", make(ValueKind::Number, {"0.0"})},
+                                                         {"factor", unit01},
+                                                         {"horizontal_blocking_angle", make(ValueKind::Number, {"90.0"})}}))},
+                    {"item_damage", compound({{"threshold", make(ValueKind::Number, {"3.0"})},
+                                              {"base", make(ValueKind::Number, {"1.0"})}, {"factor", unit01}})},
+                    {"bypassed_by", damageTag}, {"block_sound", sound}, {"disabled_sound", sound}})},
+                {"piercing_weapon", compound({{"deals_knockback", boolean}, {"dismounts", boolean},
+                                              {"sound", sound}, {"hit_sound", sound}})},
+                {"kinetic_weapon", compound({
+                    {"contact_cooldown_ticks", make(ValueKind::Number, {"10"})},
+                    {"delay_ticks", make(ValueKind::Number, {"0", "10"})},
+                    {"dismount_conditions", kineticCondition}, {"knockback_conditions", kineticCondition},
+                    {"damage_conditions", kineticCondition},
+                    {"forward_movement", make(ValueKind::Number, {"0.0", "0.38"})},
+                    {"damage_multiplier", make(ValueKind::Number, {"1.0"})},
+                    {"sound", sound}, {"hit_sound", sound}})},
+                {"attack_animation", swing},
+                {"interact_animation", swing},
+                {"block_transformer", make(ValueKind::Enum, {"axe", "hoe", "shovel"})},
+                {"villager_food", compound({{"nutrition", make(ValueKind::Number, {"1", "4"})}})},
+                {"dye", dye},
+                {"bundle_contents", list(stack)},
+                {"trim", compound({{"material", make(ValueKind::DataFile, {"trim_material"})},
+                                   {"pattern", make(ValueKind::DataFile, {"trim_pattern"})}})},
+                {"debug_stick_state", compound({})},
+                {"entity_data", compound({{"id", make(ValueKind::EntityType)}, {"NoAI", boolean}, {"Silent", boolean},
+                                          {"Invulnerable", boolean}, {"CustomName", text}})},
+                {"block_entity_data", compound({{"id", make(ValueKind::Enum, {"chest", "barrel", "furnace", "spawner",
+                                                                             "beehive", "sign", "command_block"})}})},
+                {"provides_trim_material", make(ValueKind::DataFile, {"trim_material"})},
+                {"jukebox_playable", make(ValueKind::DataFile, {"jukebox_song"})},
+                {"provides_banner_patterns", make(ValueKind::DataFile, {"banner_pattern", "tags/banner_pattern"})},
+                {"recipes", list(make(ValueKind::DataFile, {"recipe"}))},
+                {"lodestone_tracker", compound({{"target", compound({
+                                                    {"dimension", make(ValueKind::Enum, {"overworld", "the_nether", "the_end"})},
+                                                    {"pos", make(ValueKind::Number, {"[I;0,64,0]"})}})},
+                                                {"tracked", boolean}})},
+                {"profile", compound({{"name", make(ValueKind::Enum, {})},
+                                      {"id", make(ValueKind::Number, {"[I;0,0,0,0]"})},
+                                      {"properties", list(compound({{"name", make(ValueKind::Enum, {"textures"})},
+                                                                    {"value", make(ValueKind::Enum, {})},
+                                                                    {"signature", make(ValueKind::Enum, {})}}))}})},
+                {"note_block_sound", sound},
+                {"base_color", dye},
+                {"block_state", compound({})},
+                {"bees", list(compound({{"entity_data", compound({{"id", make(ValueKind::EntityType)}})},
+                                        {"ticks_in_hive", make(ValueKind::Number, {"0"})},
+                                        {"min_ticks_in_hive", make(ValueKind::Number, {"600", "2400"})}}))},
+                {"sulfur_cube_content", stack},
+                {"lock", compound({{"items", make(ValueKind::ItemOrTag)}, {"count", make(ValueKind::Number, {"1"})},
+                                   {"components", compound({})}, {"predicates", compound({})}})},
+                {"container_loot", compound({{"loot_table", make(ValueKind::DataFile, {"loot_table"})},
+                                             {"seed", make(ValueKind::Number, {"0"})}})},
+                {"compostable", compound({{"layers", make(ValueKind::Enum, {
+                    "compostable/low", "compostable/low_medium", "compostable/medium", "compostable/medium_high",
+                    "compostable/always_add_one"})}})},
+                {"cooking_fuel", compound({{"burn_time", make(ValueKind::Enum, {
+                                               "cooking/time_coal", "cooking/time_wood_blocks", "cooking/time_lava_bucket",
+                                               "cooking/time_blaze_rod", "cooking/time_coal_block", "cooking/time_dry_plants"})},
+                                           {"speed_multiplier", make(ValueKind::Enum, {
+                                               "cooking/speed_default", "cooking/normal_speed_multiplier",
+                                               "cooking/fast_speed_multiplier"})}})},
+                {"brewing_fuel", compound({{"uses", make(ValueKind::Enum, {"brewing/uses_default"})},
+                                           {"speed_multiplier", make(ValueKind::Enum, {"brewing/speed_default"})}})},
+                {"mob_visibility", compound({{"targeting_entity_types", entityOrTag},
+                                             {"visibility", unit01}})},
+                {"provides_pottery_pattern", make(ValueKind::Enum, {
+                    "angler", "archer", "arms_up", "blade", "brewer", "burn", "danger", "explorer", "flow", "friend",
+                    "guster", "heart", "heartbreak", "howl", "miner", "mourner", "plenty", "prize", "scrape", "sheaf",
+                    "shelter", "skull", "snort"})},
+                {"sign_text_front", signText},
+                {"sign_text_back", signText},
+                {"waxed", make(ValueKind::Unit)},
+            };
+            // The entity variant components: their own registries' names.
+            for (const char* name : {"villager/variant", "wolf/variant", "wolf/sound_variant", "wolf/collar",
+                                     "fox/variant", "parrot/variant", "mooshroom/variant", "rabbit/variant",
+                                     "pig/variant", "pig/sound_variant", "cow/variant", "cow/sound_variant",
+                                     "chicken/variant", "chicken/sound_variant", "zombie_nautilus/variant",
+                                     "frog/variant", "horse/variant", "llama/variant", "cat/variant",
+                                     "cat/sound_variant", "cat/collar", "sheep/color", "shulker/color",
+                                     "cushion/color"}) {
+                specs.emplace(name, make(ValueKind::Variant, {name}));
+            }
+            auto it = specs.find(component);
+            return it == specs.end() ? nullptr : it->second;
+        }
+
+        const std::vector<std::string>& DyeColorNames() {
+            static const std::vector<std::string> names = {
+                "black", "blue", "brown", "cyan", "gray", "green", "light_blue", "light_gray",
+                "lime", "magenta", "orange", "pink", "purple", "red", "white", "yellow"};
+            return names;
+        }
+
+        const std::vector<std::string>& PotionIds() {
+            static std::vector<std::string> ids;
+            if (ids.empty()) {
+                for (int i = 0; i < Game::kPotionCount; ++i) {
+                    if (const char* key = Game::GetPotionKey(static_cast<Game::PotionId>(i))) ids.push_back(Bare(key));
+                }
+                SortUnique(ids);
+            }
+            return ids;
+        }
+
+        // Quoted ids ("ashen" style), filtered MC's way on what was typed
+        // (with or without its opening quote).
+        std::vector<std::string> QuotedResources(const std::vector<std::string>& ids, const std::string& typed) {
+            const bool quoted = !typed.empty() && (typed[0] == '"' || typed[0] == '\'');
+            std::string body = quoted ? typed.substr(1) : typed;
+            if (!body.empty() && (body.back() == '"' || body.back() == '\'')) body.pop_back();
+            std::vector<std::string> out;
+            for (const std::string& id : FilterResources(ids, body)) out.push_back("\"" + id + "\"");
+            return out;
+        }
+
+        // The values for one spec at the position being typed.
+        std::vector<std::string> SpecValues(const ValueSpec& spec, const std::string& typed) {
+            switch (spec.kind) {
+                case ValueKind::Text: {
+                    std::vector<std::string> out = {"\"Name\"", "{text:\"Name\",color:\"gold\"}",
+                                                    "{text:\"Name\",italic:false}"};
+                    if (!typed.empty() && typed != "\"" && typed != "{") out.clear();
+                    return out;
+                }
+                case ValueKind::Sound:         return QuotedResources(SoundIds(), typed);
+                case ValueKind::Item:          return QuotedResources(ItemIds(), typed);
+                case ValueKind::ItemOrTag: {
+                    std::vector<std::string> out = QuotedResources(ItemIds(), typed);
+                    const auto tags = QuotedResources(DataFileIds("tags/item", "#"), typed);
+                    out.insert(out.end(), tags.begin(), tags.end());
+                    return out;
+                }
+                case ValueKind::Effect:        return QuotedResources(EffectIds(), typed);
+                case ValueKind::Potion:        return QuotedResources(PotionIds(), typed);
+                case ValueKind::EntityType:    return QuotedResources(EntitySlugs(false), typed);
+                case ValueKind::Block:         return QuotedResources(BlockIds(), typed);
+                case ValueKind::Enchantment:   return QuotedResources(EnchantmentIds(), typed);
+                case ValueKind::Instrument:    return QuotedResources(DataFileIds("instrument"), typed);
+                case ValueKind::BannerPattern: return QuotedResources(DataFileIds("banner_pattern"), typed);
+                case ValueKind::Painting:      return QuotedResources(DataFileIds("painting_variant"), typed);
+                case ValueKind::DyeColor:      return QuotedResources(DyeColorNames(), typed);
+                case ValueKind::DamageTypeTag: return QuotedResources(DataFileIds("tags/damage_type", "#"), typed);
+                case ValueKind::Axolotl:
+                    return QuotedResources({"blue", "cyan", "gold", "lucy", "wild"}, typed);
+                case ValueKind::Bool:          return FilterPrefix({"false", "true"}, typed);
+                case ValueKind::Unit:          return FilterPrefix({"{}"}, typed);
+                case ValueKind::Number:        return FilterPrefix(spec.values, typed);
+                case ValueKind::Enum:          return spec.values.empty() ? std::vector<std::string>{}
+                                                                          : QuotedResources(spec.values, typed);
+                case ValueKind::Attribute: {
+                    static std::vector<std::string> ids;
+                    if (ids.empty()) {
+                        for (int i = 0; i < static_cast<int>(Game::Attribute::Count); ++i) {
+                            ids.emplace_back(Game::AttributeName(static_cast<Game::Attribute>(i)));
+                        }
+                        SortUnique(ids);
+                    }
+                    return QuotedResources(ids, typed);
+                }
+                case ValueKind::BlockOrTag: {
+                    std::vector<std::string> out = QuotedResources(BlockIds(), typed);
+                    const auto tags = QuotedResources(DataFileIds("tags/block", "#"), typed);
+                    out.insert(out.end(), tags.begin(), tags.end());
+                    return out;
+                }
+                case ValueKind::EntityTypeOrTag: {
+                    std::vector<std::string> out = QuotedResources(EntitySlugs(false), typed);
+                    const auto tags = QuotedResources(DataFileIds("tags/entity_type", "#"), typed);
+                    out.insert(out.end(), tags.begin(), tags.end());
+                    return out;
+                }
+                case ValueKind::DataFile: {
+                    if (spec.values.empty()) return {};
+                    std::vector<std::string> out = QuotedResources(DataFileIds(spec.values[0]), typed);
+                    if (spec.values.size() > 1) {
+                        const auto tags = QuotedResources(DataFileIds(spec.values[1], "#"), typed);
+                        out.insert(out.end(), tags.begin(), tags.end());
+                    }
+                    return out;
+                }
+                case ValueKind::Variant: {
+                    if (spec.values.empty()) return {};
+                    const Game::DataComponentTypeBase* type = Game::DataComponents::ByName(spec.values[0]);
+                    const auto* info = type ? Game::EntityVariantComponents::Find(*type) : nullptr;
+                    if (!info) return {};
+                    if (info->kind == Game::EntityVariantComponents::Kind::Dye) return QuotedResources(DyeColorNames(), typed);
+                    std::vector<std::string> names;
+                    for (int i = 0; i < info->count; ++i) {
+                        if (info->names && info->names[i] && *info->names[i]) names.emplace_back(info->names[i]);
+                    }
+                    SortUnique(names);
+                    return QuotedResources(names, typed);
+                }
+                case ValueKind::ComponentName: {
+                    static std::vector<std::string> names;
+                    if (names.empty()) {
+                        for (const auto& c : Game::ItemComponentHints::kComponents) names.emplace_back(c.name);
+                        SortUnique(names);
+                    }
+                    return QuotedResources(names, typed);
+                }
+                case ValueKind::Compound:
+                case ValueKind::EnchantmentMap: return FilterPrefix({"{"}, typed);
+                case ValueKind::List:           return FilterPrefix({"["}, typed);
+            }
+            return {};
+        }
+
+        // Complete inside one component's SNBT value (`text` starts right
+        // after the `=`): walk the nesting to the innermost compound or list,
+        // follow the spec down the same path, and offer that position's keys
+        // or values. `offset` returns where the entries replace from.
+        std::vector<std::string> ComponentValueCompletion(const ValueSpec& root, const std::string& text, size_t& offset) {
+            struct Frame {
+                bool compound = true;
+                const ValueSpec* spec = nullptr;   // the container's own spec
+                bool inValue = false;              // compound: after the ':'
+                std::string key;
+                size_t slot = 0;                   // where the current key/value starts
+                bool enchantMap = false;
+            };
+            std::vector<Frame> frames;
+            char quote = 0;
+            const auto childSpec = [&](const Frame& f) -> const ValueSpec* {
+                if (!f.spec) return nullptr;
+                if (!f.compound) return f.spec->element;
+                if (f.enchantMap) return nullptr;
+                for (const auto& [name, spec] : f.spec->fields) if (name == f.key) return spec;
+                return nullptr;
+            };
+            const auto currentSpec = [&]() -> const ValueSpec* {
+                return frames.empty() ? &root : childSpec(frames.back());
+            };
+            for (size_t i = 0; i < text.size(); ++i) {
+                const char c = text[i];
+                if (quote) {
+                    if (c == '\\') { ++i; continue; }
+                    if (c == quote) quote = 0;
+                    continue;
+                }
+                if (c == '"' || c == '\'') { quote = c; continue; }
+                if (c == '{' || c == '[') {
+                    const ValueSpec* spec = currentSpec();
+                    Frame f;
+                    f.compound = c == '{';
+                    f.spec = spec;
+                    f.enchantMap = spec && spec->kind == ValueKind::EnchantmentMap;
+                    f.slot = i + 1;
+                    // A typed array ([I;…]) is a value, not a list of specs.
+                    if (!f.compound && i + 2 < text.size() && text[i + 2] == ';') f.spec = nullptr;
+                    frames.push_back(std::move(f));
+                    continue;
+                }
+                if (c == '}' || c == ']') {
+                    if (!frames.empty()) frames.pop_back();
+                    continue;
+                }
+                if (frames.empty()) continue;
+                Frame& f = frames.back();
+                if (f.compound && c == ':' && !f.inValue) {
+                    f.key = text.substr(f.slot, i - f.slot);
+                    f.key.erase(0, f.key.find_first_not_of(' '));
+                    if (!f.key.empty() && (f.key.front() == '"' || f.key.front() == '\'')) f.key = f.key.substr(1, f.key.size() - 2);
+                    f.inValue = true;
+                    f.slot = i + 1;
+                } else if (c == ',') {
+                    f.inValue = false;
+                    f.slot = i + 1;
+                }
+            }
+            if (frames.empty()) {
+                offset = 0;
+                return SpecValues(root, text);
+            }
+            Frame& f = frames.back();
+            size_t slot = f.slot;
+            while (slot < text.size() && text[slot] == ' ') ++slot;
+            offset = slot;
+            const std::string typed = text.substr(slot);
+            if (f.compound && !f.inValue) {
+                // Keys: the spec's fields, or (an enchantment map) every
+                // enchantment — each once.
+                std::vector<std::string> keys;
+                if (f.enchantMap) {
+                    for (const std::string& e : EnchantmentIds()) keys.push_back(e + ":");
+                } else if (f.spec) {
+                    for (const auto& [name, spec] : f.spec->fields) { (void)spec; keys.push_back(name + ":"); }
+                }
+                std::vector<std::string> out = FilterResources(keys, typed);
+                if (typed.empty()) out.push_back("}");
+                return out;
+            }
+            if (f.compound && f.enchantMap) {
+                // A level, 1 up to the enchantment's max.
+                std::vector<std::string> levels;
+                const auto id = Game::EnchantmentRegistry::ByName(Bare(f.key));
+                const int max = id ? Game::EnchantmentRegistry::Get(*id).maxLevel : 5;
+                for (int l = 1; l <= std::max(1, max); ++l) levels.push_back(std::to_string(l));
+                return FilterPrefix(levels, typed);
+            }
+            const ValueSpec* spec = childSpec(f);
+            if (!spec) return {};
+            std::vector<std::string> values = SpecValues(*spec, typed);
+            if (!f.compound && typed.empty()) values.push_back("]");
+            return values;
+        }
+
+        // ItemArgument: `id[component=value,...]` — ids, then (after `[`)
+        // the components this engine applies (ItemComponentHints) and their
+        // example values.
+        Provided ItemWithComponents(const Token& partial) {
+            Provided out;
+            out.anchor = partial.start;
+            const std::string& word = partial.text;
+            const size_t bracket = word.find('[');
+            if (bracket == std::string::npos) {
+                out.items = FilterResources(ItemIds(), word);
+                if (!word.empty() && std::binary_search(ItemIds().begin(), ItemIds().end(), Bare(Lower(word)))) {
+                    out.items.insert(out.items.begin() + std::min<size_t>(1, out.items.size()), word + "[");
+                }
+                return out;
+            }
+            // Where the cursor is inside the brackets: a key or a value.
+            int depth = 0;
+            char quote = 0;
+            bool inValue = false;
+            size_t slot = bracket + 1, keyStart = bracket + 1;
+            std::string key;
+            for (size_t i = bracket + 1; i < word.size(); ++i) {
+                const char c = word[i];
+                if (quote) {
+                    if (c == '\\') { ++i; continue; }
+                    if (c == quote) quote = 0;
+                    continue;
+                }
+                if (c == '"' || c == '\'') { quote = c; continue; }
+                if (c == '{' || c == '[') { ++depth; continue; }
+                if (c == '}' || c == ']') {
+                    if (depth == 0) return out;   // closed: nothing to add
+                    --depth;
+                    continue;
+                }
+                if (depth != 0) continue;
+                if (c == '=' && !inValue) {
+                    key = Lower(word.substr(keyStart, i - keyStart));
+                    key.erase(0, key.find_first_not_of(' '));
+                    if (key.rfind("minecraft:", 0) == 0) key.erase(0, 10);
+                    inValue = true;
+                    slot = i + 1;
+                } else if (c == ',') {
+                    inValue = false;
+                    slot = keyStart = i + 1;
+                }
+            }
+            while (slot < word.size() && word[slot] == ' ') ++slot;
+            const std::string typed = word.substr(slot);
+            out.anchor = partial.start + static_cast<int>(slot);
+            if (!inValue) {
+                // `name=` to set, `!name` to take a default away (any
+                // registered component the item may carry by default).
+                static const char* const kRemovable[] = {
+                    "food", "consumable", "tool", "equippable", "blocks_attacks", "use_remainder",
+                    "lore", "enchantment_glint_override", "bundle_contents", "painting_variant"};
+                const std::string inside = word.substr(bracket + 1);
+                const auto named = [&](const std::string& name) {
+                    return inside.find(name + "=") != std::string::npos || inside.find("!" + name) != std::string::npos;
+                };
+                std::vector<std::string> sets, removes;
+                for (const auto& c : Game::ItemComponentHints::kComponents) {
+                    const std::string name(c.name);
+                    if (named(name)) continue;
+                    sets.push_back(name + "=");
+                    if (Game::DataComponents::ByName(name)) removes.push_back("!" + name);
+                }
+                for (const char* name : kRemovable) {
+                    if (!named(name) && Game::DataComponents::ByName(name)) removes.push_back(std::string("!") + name);
+                }
+                std::sort(removes.begin(), removes.end());
+                // A whole `!name` typed: close or continue.
+                if (!typed.empty() && typed[0] == '!' && Game::DataComponents::ByName(typed.substr(1))) {
+                    out.items = {typed + ",", typed + "]"};
+                    return out;
+                }
+                out.items = FilterPrefix(sets, typed);
+                const auto rem = FilterPrefix(removes, typed);
+                out.items.insert(out.items.end(), rem.begin(), rem.end());
+                if (typed.empty()) out.items.push_back("]");
+                return out;
+            }
+            // The value: from the component's own registries (ComponentSpec).
+            const ValueSpec* spec = ComponentSpec(key);
+            if (!spec) return out;
+            size_t offset = 0;
+            std::vector<std::string> values = ComponentValueCompletion(*spec, typed, offset);
+            out.anchor = partial.start + static_cast<int>(slot + offset);
+            // A whole value typed at the top level: close or continue.
+            if (offset == 0 && !typed.empty()) {
+                for (const std::string& v : values) {
+                    if (v == typed) { values = {typed + ",", typed + "]"}; break; }
+                }
+            }
+            out.items = std::move(values);
+            return out;
+        }
+
         std::vector<std::string> Quoted(const std::vector<std::string>& ids) {
             std::vector<std::string> out;
             out.reserve(ids.size());
@@ -1125,6 +1902,177 @@ namespace Render::CommandSuggestions {
             return FilterPrefix(node.suggestions, typed);
         }
 
+        // `/data modify … compute … float|integer <provider>` (MC
+        // ResourceOrIdArgument over the context number providers): the
+        // built-in registry ids, or an inline `{type:"…", …}` whose keys and
+        // `type` values complete from the provider types' codecs.
+        Provided NumberProviderCompletion(const Token& partial, bool isInt) {
+            namespace N = Game::ContextNumberProviderNames;
+            Provided out;
+            out.anchor = partial.start;
+            const std::string& word = partial.text;
+            if (word.empty() || word[0] != '{') {
+                std::vector<std::string> ids;
+                if (isInt) for (const auto id : N::kIntIds) ids.emplace_back(id);
+                else       for (const auto id : N::kFloatIds) ids.emplace_back(id);
+                out.items = FilterResources(ids, word);
+                if (word.empty()) out.items.push_back("{type:");
+                return out;
+            }
+            // Which type the compound names (its top-level `type:` value).
+            std::string type;
+            const size_t t = word.find("type:");
+            if (t != std::string::npos) {
+                size_t v = t + 5;
+                while (v < word.size() && (word[v] == '"' || word[v] == '\'' || word[v] == ' ')) ++v;
+                size_t e = v;
+                while (e < word.size() && (std::isalnum(static_cast<unsigned char>(word[e])) || word[e] == '_' || word[e] == ':')) ++e;
+                type = Bare(word.substr(v, e - v));
+            }
+            std::vector<NbtKey> keys;
+            std::vector<std::string> typeNames;
+            const auto addType = [&](const N::TypeFields& tf) {
+                typeNames.push_back("\"" + std::string(tf.type) + "\"");
+                if (tf.type != type) return;
+                for (const auto field : tf.fields) {
+                    if (field.empty()) continue;
+                    std::vector<std::string> values;
+                    if (field == "condition") {
+                        values = {"\"block/fast_cooking\"", "{condition:\"random_chance\",chance:0.5}"};
+                    } else if (field == "storage") {
+                        values = {"\"minecraft:\""};
+                    } else if (field == "path") {
+                        values = {"\"\""};
+                    } else if (field == "inputs") {
+                        values = {"[1,2]"};
+                    } else if (field == "distribution") {
+                        values = {"[{data:1,weight:1}]"};
+                    } else if (field == "cases") {
+                        values = {"[{condition:\"block/fast_cooking\",value:1}]"};
+                    } else if (field == "amount") {
+                        values = {"1", "{type:\"linear\",base:1,per_level_above_first:1}"};
+                    } else if (field == "target") {
+                        values = {"\"this\""};
+                    } else if (field == "score") {
+                        values = {"\"\""};
+                    } else {
+                        values = {"0", "1", "{type:"};
+                    }
+                    keys.push_back({std::string(field), std::move(values)});
+                }
+            };
+            if (isInt) for (const auto& tf : N::kIntTypes) addType(tf);
+            else       for (const auto& tf : N::kFloatTypes) addType(tf);
+            keys.insert(keys.begin(), NbtKey{"type", typeNames});
+            return CompoundCompletion(partial, keys);
+        }
+
+        // /data's NBT paths: the top-level keys of the target (or source)
+        // kind — a player's file, a mob type's own keys (from a `type=`), the
+        // block-entity keys — so the first step completes. Deeper steps are
+        // typed (the server's live data is not on the client).
+        std::vector<std::string> NbtPathKeys(const Node& node, const std::vector<Step>& path, const std::string& typed) {
+            if (typed.find_first_of(".[{") != std::string::npos) return {};
+            const bool source = node.name.rfind("source", 0) == 0;
+            const char* who = source ? "source" : "target";
+            const std::string* entity = nullptr;
+            bool block = false;
+            for (auto it = path.rbegin(); it != path.rend(); ++it) {
+                if (!it->node || it->node->IsLiteral()) continue;
+                if (it->node->name == who) { entity = it->node->type == Arg::Entity ? &it->value : nullptr; break; }
+                if (it->node->name == std::string(who) + "Pos") { block = true; break; }
+            }
+            std::vector<std::string> keys;
+            if (block) {
+                keys = {"Book", "BurnTime", "CookTime", "CookTimeTotal", "CustomName", "Delay", "Items", "Lock",
+                        "LootTable", "LootTableSeed", "MaxNearbyEntities", "MaxSpawnDelay", "MinSpawnDelay",
+                        "Page", "RecordItem", "RequiredPlayerRange", "SpawnCount", "SpawnData", "SpawnPotentials",
+                        "SpawnRange", "back_text", "bees", "components", "flower_pos", "front_text", "id",
+                        "is_waxed", "item", "patterns", "sherds", "ticks_since_song_started", "x", "y", "z"};
+            } else if (entity) {
+                const std::string& sel = *entity;
+                const bool player = sel.empty() || sel[0] != '@' || sel.rfind("@s", 0) == 0 || sel.rfind("@p", 0) == 0 ||
+                                    sel.rfind("@a", 0) == 0 || sel.rfind("@r", 0) == 0;
+                keys = {"Air", "CustomName", "CustomNameVisible", "Fire", "Glowing", "Invulnerable", "Motion",
+                        "NoGravity", "OnGround", "PortalCooldown", "Pos", "Rotation", "Silent", "UUID", "fall_distance"};
+                Game::EntityTypeId type{};
+                const size_t typePos = sel.find("type=");
+                if (typePos != std::string::npos) {
+                    std::string slug = sel.substr(typePos + 5);
+                    slug = slug.substr(0, slug.find_first_of(",]"));
+                    if (EntityTypeFromText(slug, type)) {
+                        for (const auto& k : Game::EntityNbtHints::KeysFor(type)) keys.push_back(k.name);
+                    }
+                } else if (player) {
+                    for (const char* k : {"Health", "Inventory", "SelectedItem", "SelectedItem.components",
+                                          "SelectedItem.count", "SelectedItem.id", "SelectedItemSlot", "XpLevel",
+                                          "XpP", "XpTotal", "abilities", "active_effects", "equipment", "foodLevel",
+                                          "foodSaturationLevel", "playerGameType", "Dimension"}) {
+                        keys.emplace_back(k);
+                    }
+                } else {
+                    for (const char* k : {"Age", "Health", "NoAI", "PersistenceRequired", "active_effects",
+                                          "attributes", "equipment", "Item"}) {
+                        keys.emplace_back(k);
+                    }
+                }
+            }
+            SortUnique(keys);
+            return FilterPrefix(keys, typed);
+        }
+
+        // ComponentArgument (SNBT text components): how a component starts,
+        // then the component keys and their values inside a '{…}' (the
+        // ComponentSerialization codec's field names; colours by name).
+        Provided TextComponentCompletion(const Token& partial) {
+            const std::string& word = partial.text;
+            Provided out;
+            out.anchor = partial.start;
+            if (word.empty()) {
+                out.items = {"{text:\"", "\"", "[", "{translate:\"", "{selector:\"", "{keybind:\""};
+                return out;
+            }
+            if (word[0] != '{') return out;
+            std::vector<std::string> colors;
+            for (int i = 0; i < Game::Text::kFormattingColorCount; ++i) {
+                if (const char* name = Game::Text::FormattingName(i)) colors.emplace_back(name);
+            }
+            colors.emplace_back("\"#");
+            const std::vector<std::string> flags = {"true", "false"};
+            const std::vector<NbtKey> keys = {
+                {"text", {"\""}},
+                {"color", colors},
+                {"bold", flags},
+                {"italic", flags},
+                {"underlined", flags},
+                {"strikethrough", flags},
+                {"obfuscated", flags},
+                {"translate", {"\""}},
+                {"fallback", {"\""}},
+                {"with", {"["}},
+                {"selector", {"\"@p\"", "\"@a\"", "\"@s\"", "\"@e\""}},
+                {"separator", {"\"", "{"}},
+                {"keybind", {"\"key.jump\"", "\"key.attack\"", "\"key.use\"", "\"key.inventory\""}},
+                {"score", {"{name:"}},
+                {"nbt", {"\""}},
+                {"entity", {"\"@s\"", "\"@p\""}},
+                {"block", {"\"~ ~ ~\""}},
+                {"storage", {"\""}},
+                {"interpret", flags},
+                {"plain", flags},
+                {"extra", {"["}},
+                {"click_event", {"{action:"}},
+                {"hover_event", {"{action:show_text,value:"}},
+                {"insertion", {"\""}},
+                {"font", {"\"minecraft:default\"", "\"minecraft:uniform\"", "\"minecraft:alt\""}},
+                {"shadow_color", {"0"}},
+                {"action", {"run_command", "suggest_command", "copy_to_clipboard", "open_url", "show_text"}},
+                {"command", {"\"/"}},
+                {"value", {"\""}},
+            };
+            return CompoundCompletion(partial, keys);
+        }
+
         Provided Provide(const Candidate& c, const Token& partial) {
             const Node& node = *c.node;
             const std::string& typed = partial.text;
@@ -1137,7 +2085,8 @@ namespace Render::CommandSuggestions {
             // Fixed entries first (number examples, extra words) — for the
             // argument's first token only ("0 0 0" is a whole delta).
             std::vector<std::string> fixed;
-            if (c.component == 0 || node.type == Arg::Greedy) fixed = FilterPrefix(node.suggestions, typed);
+            const bool greedy = node.type == Arg::Greedy || node.type == Arg::Message || node.type == Arg::TextComponent;
+            if (c.component == 0 || greedy) fixed = FilterPrefix(node.suggestions, typed);
             switch (node.type) {
                 case Arg::Word:
                 case Arg::Integer:
@@ -1188,7 +2137,7 @@ namespace Render::CommandSuggestions {
                     });
                     break;
                 case Arg::Item:
-                    out.items = FilterResources(ItemIds(), typed);
+                    out = ItemWithComponents(partial);
                     break;
                 case Arg::ItemList:
                     out = ListElement(partial, [](const std::string& element, int& offset) {
@@ -1261,6 +2210,32 @@ namespace Render::CommandSuggestions {
                     break;
                 }
                 case Arg::LootTable:     out.items = FilterResources(DataFileIds("loot_table"), typed); break;
+                case Arg::Advancement: {
+                    // The advancements the server loads (the recipe-unlock
+                    // ones are skipped there, so not offered here either).
+                    static const std::vector<std::string> ids = [] {
+                        std::vector<std::string> v;
+                        for (const std::string& id : Game::Advancements::SuggestionRegistry().Ids()) v.push_back(Bare(id));
+                        SortUnique(v);
+                        return v;
+                    }();
+                    out.items = FilterResources(ids, typed);
+                    break;
+                }
+                case Arg::AdvancementCriterion: {
+                    // MC AdvancementCommands: the criteria of the advancement
+                    // named before it.
+                    const std::string* advancement = ValueOf(c.path, "advancement");
+                    const Game::Advancements::Definition* def =
+                        advancement ? Game::Advancements::SuggestionRegistry().Get(*advancement) : nullptr;
+                    if (def) {
+                        std::vector<std::string> names;
+                        for (const auto& criterion : def->criteria) names.push_back(criterion.name);
+                        SortUnique(names);
+                        out.items = FilterPrefix(names, typed);
+                    }
+                    break;
+                }
                 case Arg::GameMode: {
                     // The four names; a short form or number completes to its name.
                     static const std::vector<std::pair<const char*, const char*>> aliases = {
@@ -1289,6 +2264,86 @@ namespace Render::CommandSuggestions {
                     out.items = FilterPrefix(names, typed);
                     break;
                 }
+                case Arg::NbtPath:       out.items = NbtPathKeys(node, c.path, typed); break;
+                case Arg::NbtTag:        out.items = FilterPrefix({"{", "[", "\""}, typed); break;
+                case Arg::StorageId:     break;   // the server's storage ids are not sent
+                case Arg::FloatProvider: out = NumberProviderCompletion(partial, false); break;
+                case Arg::IntProvider:   out = NumberProviderCompletion(partial, true); break;
+                case Arg::Attribute:     out.items = FilterResources(AttributeIds(), typed); break;
+                case Arg::AttributeModifierId: {
+                    // MC suggests the TARGET's modifiers on the attribute
+                    // (getAttributeModifiers); the client knows its own —
+                    // the server's sync names them.
+                    const std::string* attribute = ValueOf(c.path, "attribute");
+                    std::vector<std::string> ids;
+                    if (const OwnAttribute* row = attribute ? OwnAttributeRow(*attribute) : nullptr) {
+                        for (const std::string& id : row->modifierIds) ids.push_back(Bare(id));
+                        SortUnique(ids);
+                    }
+                    out.items = FilterResources(ids, typed);
+                    break;
+                }
+                case Arg::AttributeValue: {
+                    // The attribute's default (a player's, then the registry
+                    // row's) and the local player's current base.
+                    const std::string* attribute = ValueOf(c.path, "attribute");
+                    Game::Attribute a{};
+                    std::vector<std::string> values;
+                    if (attribute && Game::AttributeFromName(Lower(*attribute), a)) {
+                        values.push_back(AttributeNumber(Game::PlayerBaseAttributeValue(a)));
+                        values.push_back(AttributeNumber(Game::GetAttributeDef(a).defaultValue));
+                        if (const OwnAttribute* row = OwnAttributeRow(*attribute)) values.push_back(AttributeNumber(row->base));
+                    }
+                    std::vector<std::string> unique;
+                    for (std::string& v : values) {
+                        if (std::find(unique.begin(), unique.end(), v) == unique.end()) unique.push_back(std::move(v));
+                    }
+                    out.items = FilterPrefix(unique, typed);
+                    break;
+                }
+                case Arg::ItemPredicate: {
+                    // ItemPredicateArgument: `*`, an item id or `#tag`, then
+                    // the `[...]` component tests (the item argument's own
+                    // key / value completion).
+                    const std::string& w = partial.text;
+                    if (w.find('[') != std::string::npos) { out = ItemWithComponents(partial); break; }
+                    const auto& tags = DataFileIds("tags/item", "#");
+                    if (!w.empty() && w[0] == '#') { out.items = FilterNames(tags, w); break; }
+                    out.items = FilterPrefix({"*"}, w);
+                    const std::vector<std::string> ids = FilterResources(ItemIds(), w);
+                    out.items.insert(out.items.end(), ids.begin(), ids.end());
+                    if (w.empty()) {
+                        const auto top = TopLevel(tags);
+                        out.items.insert(out.items.end(), top.begin(), top.end());
+                    }
+                    break;
+                }
+                case Arg::DamageType:    out.items = FilterResources(DataFileIds("damage_type"), typed); break;
+                case Arg::SlotRange: {
+                    // SlotSourceArgument.listSuggestions: SlotRanges.allNames.
+                    std::vector<std::string> names;
+                    for (const Game::SlotRanges::Range& r : Game::SlotRanges::All()) names.push_back(r.name);
+                    out.items = FilterPrefix(names, typed);
+                    break;
+                }
+                case Arg::ItemModifier: {
+                    // ResourceOrIdArgument<item_modifier>: the data pack's
+                    // ids, or an inline function compound.
+                    out.items = FilterResources(DataFileIds("item_modifier"), typed);
+                    if (typed.empty()) out.items.push_back("{function:\"");
+                    break;
+                }
+                case Arg::Message: {
+                    // MessageArgument: free text; a word starting with '@' is
+                    // an entity selector (EntitySelectorParser's
+                    // suggestions), any other word may be a player's name
+                    // (the chat's name completion).
+                    if (!typed.empty() && typed[0] == '@') out = Entities(Arg::Entities, partial);
+                    else if (!typed.empty()) out.items = FilterPrefix(PlayerNames(), typed);
+                    break;
+                }
+                case Arg::TextComponent: out = TextComponentCompletion(partial); break;
+                case Arg::ConfiguredFeature: out.items = FilterResources(ConfiguredFeatureIds(), typed); break;
                 case Arg::Literal:
                 case Arg::Command:
                 case Arg::Count:
@@ -1468,6 +2523,10 @@ namespace Render::CommandSuggestions {
 
     void SetKnownEntityNames(std::vector<std::string> names) {
         s_entityNames = std::move(names);
+    }
+
+    void SetOwnAttributes(std::vector<OwnAttribute> rows) {
+        s_ownAttributes = std::move(rows);
     }
 
     void SetDimensionWorldgenIds(const std::vector<std::string>& biomes,

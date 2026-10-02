@@ -278,6 +278,9 @@ namespace Render {
             // Operator utilities: the occlusion wand edits world state for
             // every player — a debug-stick-class tool.
             {"op_blocks", "debug_stick", "ao_wand"},
+            // The Sky Block (a window onto the sky): a world-editing block
+            // beside the barrier, shown only with the op-items tab like it.
+            {"op_blocks", "barrier", "sky_block"},
 
             // Twilight Forest: the engine's egg for the upper goblin knight
             // (TF gives it none) beside the lower knight's.
@@ -313,6 +316,13 @@ namespace Render {
             "hush_portal",
             "resonant_water",             // a fluid, like water
             "hanging_whisperfruit",       // placed form of whisperfruit
+            // The engine dimensions' potted plants: like every vanilla pot,
+            // made by using the plant on a flower pot, never an item.
+            "potted_resonance_bloom", "potted_whisperwood_sapling",
+            "potted_twilight_oak_sapling", "potted_canopy_sapling",
+            "potted_tf_mangrove_sapling", "potted_darkwood_sapling",
+            "potted_skyroot_sapling", "potted_golden_oak_sapling",
+            "potted_white_flower", "potted_purple_flower",
         };
 
         // Custom items outside the pure-item table: registry path -> id.

@@ -7,6 +7,7 @@
 #include "../../entity/Player.hpp"
 #include "../core/Vertex.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/spawn/MobCapReport.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_glfw.h"
@@ -186,6 +187,17 @@ namespace Debug {
         int sessionSimulationDistance = 0;
     };
 
+    // The Mob Caps panel's data: the integrated server's per-level
+    // MobCapReports (built on the server thread, copied out under its lock in
+    // PlatformMain) plus the dimension the local player is in. Empty reports
+    // and !serverAvailable when connected to a remote server — the caps live
+    // on whoever hosts.
+    struct MobCapSnapshot {
+        bool serverAvailable = false;
+        int  playerDimension = 0;          // Game::DimensionId value
+        std::vector<Game::MobCapReport> reports;
+    };
+
     struct NetworkMetricsSnapshot {
         bool connected = false;
         uint64_t bytesSent = 0;
@@ -362,6 +374,7 @@ namespace Debug {
         bool chunkPipeline = false;
         bool worldInfo = false;
         bool entities = false;
+        bool mobCaps = false;
     };
 
     // ========================================================================
@@ -397,6 +410,7 @@ namespace Debug {
         static void SetChunkPipelineSnapshot(const ChunkPipelineSnapshot& snap);
         static void SetWorldInfoSnapshot(const WorldInfoSnapshot& snap);
         static void SetEntitySnapshot(const EntitySnapshot& snap);
+        static void SetMobCapSnapshot(MobCapSnapshot snap);
         // Lets the producer skip building a snapshot nobody is looking at.
         static const PanelVisibility& GetPanelVisibility();
 
@@ -418,6 +432,7 @@ namespace Debug {
         static void DrawWorldInfoPanel();
         static void DrawServerNetworkPanel(const ServerMetricsSnapshot& serverSnap, const NetworkMetricsSnapshot& netSnap);
         static void DrawEntitiesPanel(const EntitySnapshot& snap);
+        static void DrawMobCapPanel(const MobCapSnapshot& snap);
         static void DrawClientSystemsPanel();
         static void DrawMemoryPanel(const PerformanceMetrics& metrics);
         static void DrawPlayerPanel(Game::ClientPlayer& player, Game::ClientPlayerController& playerController, const Render::Camera& camera);
@@ -440,6 +455,7 @@ namespace Debug {
         static LogBuffer s_logBuffer;
         static ServerMetricsSnapshot s_serverSnap;
         static EntitySnapshot s_entitySnap;
+        static MobCapSnapshot s_mobCapSnap;
         static NetworkMetricsSnapshot s_netSnap;
         static ChunkPipelineSnapshot s_pipelineSnap;
         static WorldInfoSnapshot s_worldInfoSnap;

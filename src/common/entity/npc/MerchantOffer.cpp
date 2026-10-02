@@ -34,7 +34,7 @@ namespace Game {
         const int basePrice = cost.count;
         const int demandDiff = std::max(0, static_cast<int>(std::floor(
             static_cast<float>(basePrice * m_demand) * m_priceMultiplier)));
-        const int maxStack = ItemRegistry::Get(cost.item).maxStackSize;
+        const int maxStack = GetMaxStackSize(cost.AsStack());   // costA.itemStack().getMaxStackSize()
         return std::clamp(basePrice + demandDiff + m_specialPriceDiff, 1, std::max(1, maxStack));
     }
 

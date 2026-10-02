@@ -16,9 +16,11 @@
 #include "../control/RemoteControlManager.hpp"
 #include "../world/ticketing/ChunkLevel.hpp"
 #include "common/world/block/RedstonePlus.hpp"
+#include "common/world/block/piston/PistonBlockEntities.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Assert.hpp"
 #include "common/core/Log.hpp"
+#include <cmath>
 #include <limits>
 #include "common/network/packets/HandshakeC2S.hpp"
 #include "common/network/packets/LoginStartC2S.hpp"
@@ -393,9 +395,12 @@ namespace Server {
 
         // Send spawn position
         Network::PacketBuffer spawnBuffer;
-        spawnBuffer.WriteInt(0); // X
-        spawnBuffer.WriteInt(67); // Y
-        spawnBuffer.WriteInt(0); // Z
+        // The overworld's spawn block (MC ClientboundSetDefaultSpawnPositionPacket).
+        const glm::vec3 worldSpawn = Server::g_integratedServer ? Server::g_integratedServer->GetWorldSpawn()
+                                                                : glm::vec3(0.5f, 67.0f, 0.5f);
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.x))); // X
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.y))); // Y
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.z))); // Z
         SendPacket(static_cast<uint8_t>(Network::PacketId::WorldSpawn), spawnBuffer.GetData());
     }
 
@@ -509,6 +514,9 @@ namespace Server {
         // Trailing field (wire compatibility): redstone_plus, so a client
         // offers the blue torch only where it is instant.
         buffer.WriteByte(Game::RedstonePlus::Enabled() ? 1 : 0);
+        // Trailing field: pistons_move_block_entities — the client mirrors
+        // every piston move, so it must push what the server pushes.
+        buffer.WriteByte(Game::PistonBlockEntities::Enabled() ? 1 : 0);
         SendPacket(static_cast<uint8_t>(Network::PacketId::WorldRulesS2C), buffer.GetData());
     }
 
@@ -726,9 +734,12 @@ namespace Server {
         
         // Send spawn position
         Network::PacketBuffer spawnBuffer;
-        spawnBuffer.WriteInt(0); // X
-        spawnBuffer.WriteInt(67); // Y
-        spawnBuffer.WriteInt(0); // Z
+        // The overworld's spawn block (MC ClientboundSetDefaultSpawnPositionPacket).
+        const glm::vec3 worldSpawn = Server::g_integratedServer ? Server::g_integratedServer->GetWorldSpawn()
+                                                                : glm::vec3(0.5f, 67.0f, 0.5f);
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.x))); // X
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.y))); // Y
+        spawnBuffer.WriteInt(static_cast<int32_t>(std::floor(worldSpawn.z))); // Z
         Log::Debug("[ServerConnection %u] Sending WorldSpawn packet", GetConnectionId());
         SendPacket(static_cast<uint8_t>(Network::PacketId::WorldSpawn), spawnBuffer.GetData());
         
@@ -747,6 +758,14 @@ namespace Server {
         // this method are now in DecodePacket, which only builds the packet in
         // PLAY with an authenticated connection.
         ASSERT_SERVER_THREAD();
+
+        // The engine's chat limit (ChatMessageC2SPacket.hpp: 32767, not MC's
+        // 256): refuse — not kick — a longer line, which only a modified
+        // client can send.
+        if (packet.message.size() > Network::kMaxChatMessageLength) {
+            SendChatMessage("Chat message too long", 1);
+            return;
+        }
 
         Log::Info("[Server#%u] RECEIVED ChatMessageC2S (ID: 0x%02X) - Message: %s (isCommand=%d)",
                   GetConnectionId(), static_cast<uint8_t>(Network::PacketId::ChatMessageC2S),
@@ -786,7 +805,17 @@ namespace Server {
                     const std::string sub = rest.substr(0, rest.find(' '));
                     morphAction = sub == "ability" || sub == "rotate" || sub == "lock" || sub == "unlock";
                 }
-                const bool allowed = optionsCommand || morphAction ||
+                // MC's permission-level-0 commands (no `requires` in their
+                // register): every player has them, cheats or not. Their
+                // privileged parts (selectors, /random's sequences and
+                // reset) check CommandText::HasGamemasterPermission
+                // themselves. /version is level 0 only on an integrated
+                // server (VersionCommand's checkPermissions).
+                const bool everyoneCommand =
+                    lower == "msg" || lower == "tell" || lower == "w" || lower == "me" ||
+                    lower == "list" || lower == "help" || lower == "random" ||
+                    (lower == "version" && Server::g_integratedServer->GetConfig().hasSingleplayerOwner);
+                const bool allowed = optionsCommand || morphAction || everyoneCommand ||
                     (Server::g_integratedServer->IsAllowCommands() &&
                      (IsSingleplayerOwner() || Server::g_integratedServer->GetGuestCommandAccess()));
                 if (!allowed) {
@@ -1273,6 +1302,12 @@ namespace Server {
                     return std::make_unique<Network::Packets::SignUpdateC2SPacketImpl>(std::move(data));
                 }
                 break;
+            case PacketId::SeenAdvancementsC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializeSeenAdvancementsC2S(payload);
+                    return std::make_unique<Network::Packets::SeenAdvancementsC2SPacketImpl>(std::move(data));
+                }
+                break;
             case PacketId::EditBookC2S:
                 if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
                     auto data = Network::Serialization::DeserializeEditBookC2S(payload);
@@ -1289,6 +1324,12 @@ namespace Server {
                 if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
                     auto data = Network::Serialization::DeserializeSelectTradeC2S(payload);
                     return std::make_unique<Network::Packets::SelectTradeC2SPacketImpl>(data);
+                }
+                break;
+            case PacketId::PlayerAppearanceC2S:
+                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                    auto data = Network::Serialization::DeserializePlayerAppearanceC2S(payload);
+                    return std::make_unique<Network::Packets::PlayerAppearanceC2SPacketImpl>(std::move(data));
                 }
                 break;
             case PacketId::RenameItemC2S:

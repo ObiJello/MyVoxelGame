@@ -258,8 +258,9 @@ namespace Game {
     }
 
     void TraderLlamaDefendWanderingTraderGoal::Start() {
+        // MC start(): setTarget only — targetMob stays unset, so a target
+        // cleared elsewhere is not re-applied by CanContinueToUse.
         m_mob->SetTarget(m_ownerLastHurtBy);
-        m_targetMob = m_ownerLastHurtBy;
         if (auto* owner = dynamic_cast<WanderingTrader*>(m_llama->GetLeashHolder())) {
             m_timestamp = owner->GetLastHurtByMobTimestamp();
         }

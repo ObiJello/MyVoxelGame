@@ -34,6 +34,7 @@
 namespace Game {
 
     ClientPlayer::ClientPlayer() {
+        Game::CreatePlayerAttributes(ownAttributes);
         Initialize();
     }
 
@@ -155,7 +156,9 @@ namespace Game {
             if (!touched && Client::g_remotePlayerManager) {
                 for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                     if (!rp.positionInitialized || !Client::IsRemotePlayerInBoundLevel(rp)) continue;
-                    const double w = 0.3 * rp.scale, h = 1.8 * rp.scale;
+                    // The body's box (a /morph body's own).
+                    const Game::Morph::Dims body = Game::Morph::DimsOf(rp.morph);
+                    const double w = 0.5 * body.width * rp.scale, h = body.height * rp.scale;
                     const Game::AABBd box = Game::AABBd::FromMinMax(rp.position - glm::dvec3(w, 0.0, w),
                                                                     rp.position + glm::dvec3(w, h, w));
                     if (box.Intersects(swept)) { touched = true; break; }
@@ -219,9 +222,14 @@ namespace Game {
         if (tickCount - lastKineticHitFeedbackTick <= Game::Spear::kHitFeedbackTicks) return;
         lastKineticHitFeedbackTick = tickCount;
         if (!usingItem) return;
-        const Game::Spear::SpearDefinition* def = Game::Spear::Find(useItemId);
-        if (def && def->kinetic.hitSound) {
-            Client::Sounds::PlayLocal(physics.position, def->kinetic.hitSound, Game::SoundSource::Players,
+        // The used stack's KINETIC_WEAPON (the hand's, while it still holds
+        // the item the use began on).
+        const int slot = usingHand == 0 ? Game::Inventory::HotbarToIndex(inventory.GetSelectedSlot())
+                                        : Game::Inventory::OFFHAND_BEGIN;
+        const Game::ItemStack& used = inventory.GetSlot(slot);
+        const auto kinetic = used.itemId == useItemId ? Game::Spear::Kinetic(used) : std::nullopt;
+        if (kinetic && !kinetic->hitSound.empty()) {
+            Client::Sounds::PlayLocal(physics.position, kinetic->hitSound, Game::SoundSource::Players,
                                       1.0f, 1.0f);
         }
     }
@@ -265,8 +273,81 @@ namespace Game {
     }
 
     float ClientPlayer::GetMaxHealth() const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::MaxHealth, 20.0, activeEffects));
+        // MAX_HEALTH: 20 through the worn items' modifiers and HEALTH_BOOST —
+        // the heart containers the HUD draws.
+        return static_cast<float>(PlayerAttribute(Game::Attribute::MaxHealth));
+    }
+
+    Game::AttributeInstance ClientPlayer::PlayerAttributeInstance(Game::Attribute attribute) const {
+        Game::AttributeInstance instance = Game::EnchantmentHelper::PlayerAttributeInstance(
+            attribute, &ownAttributes, inventory, activeEffects, &enchantmentLocationAttributes);
+        // MC ServerPlayer's creative reach modifiers (transient ADD_VALUE,
+        // +0.5 block / +2.0 entity), folded from the local game mode so a
+        // mode switch predicts at once — ServerPlayer::attributeInstance
+        // folds the same pair.
+        if (IsCreative()) {
+            if (attribute == Game::Attribute::BlockInteractionRange) {
+                static const uint32_t kId = static_cast<uint32_t>(
+                    Game::NamedModifierId(Game::kCreativeBlockRangeModifierName));
+                instance.AddModifier(Game::AttributeModifier{
+                    kId,
+                    Game::kCreativeBlockInteractionRangeBonus, Game::AttributeOperation::AddValue});
+            } else if (attribute == Game::Attribute::EntityInteractionRange) {
+                static const uint32_t kId = static_cast<uint32_t>(
+                    Game::NamedModifierId(Game::kCreativeEntityRangeModifierName));
+                instance.AddModifier(Game::AttributeModifier{
+                    kId,
+                    Game::kCreativeEntityInteractionRangeBonus, Game::AttributeOperation::AddValue});
+            }
+        }
+        return instance;
+    }
+
+    double ClientPlayer::PlayerAttribute(Game::Attribute attribute) const {
+        return PlayerAttributeInstance(attribute).GetValue();
+    }
+
+    void ClientPlayer::ApplyOwnAttributes(
+            const std::vector<std::pair<Game::Attribute, Game::AttributeInstance>>& rows) {
+        for (const auto& [attribute, synced] : rows) {
+            Game::AttributeInstance* mine = ownAttributes.Find(attribute);
+            if (!mine) {
+                ownAttributes.Register(attribute, Game::PlayerBaseAttributeValue(attribute));
+                mine = ownAttributes.Find(attribute);
+            }
+            mine->SetBaseValue(synced.GetBaseValue());
+            std::vector<uint32_t> stale;
+            for (const Game::AttributeModifier& mod : mine->Modifiers()) stale.push_back(mod.id);
+            for (const uint32_t id : stale) mine->RemoveModifier(static_cast<Game::ModifierId>(id));
+            for (const Game::AttributeModifier& mod : synced.Modifiers()) mine->AddModifier(mod);
+        }
+    }
+
+    double ClientPlayer::GetBlockInteractionRange() {
+        // Player.blockInteractionRange: BLOCK_INTERACTION_RANGE with the
+        // server's creative +0.5 (an ADD_VALUE modifier — base + 0.5 is the
+        // same fold position).
+        return PlayerAttribute(Game::Attribute::BlockInteractionRange);
+    }
+
+    double ClientPlayer::GetEntityInteractionRange() {
+        // Player.entityInteractionRange: ENTITY_INTERACTION_RANGE, +2.0 in
+        // creative.
+        return PlayerAttribute(Game::Attribute::EntityInteractionRange);
+    }
+
+    float ClientPlayer::GetDigSpeedMultiplier() {
+        // Player.getDestroySpeed multiplies the effect factor, then
+        // BLOCK_BREAK_SPEED — one product, so they fold into one factor.
+        return GetEffectDigSpeedMultiplier() *
+               static_cast<float>(PlayerAttribute(Game::Attribute::BlockBreakSpeed));
+    }
+
+    float ClientPlayer::GetAttributeScale() {
+        // LivingEntity.getScale → sanitizeScale (the attribute's own range
+        // already clamps it to 0.0625..16).
+        const float scale = static_cast<float>(PlayerAttribute(Game::Attribute::Scale));
+        return (scale > 0.0f && scale == scale) ? scale : 1.0f;
     }
 
     double ClientPlayer::EnchantedAttributeValue(Game::Attribute attribute, double base) {
@@ -275,11 +356,11 @@ namespace Game {
     }
 
     float ClientPlayer::GetMiningEfficiency() {
-        return static_cast<float>(EnchantedAttributeValue(Game::Attribute::MiningEfficiency, 0.0));
+        return static_cast<float>(PlayerAttribute(Game::Attribute::MiningEfficiency));
     }
 
     float ClientPlayer::GetSubmergedMiningSpeed() {
-        return static_cast<float>(EnchantedAttributeValue(Game::Attribute::SubmergedMiningSpeed, 0.2));
+        return static_cast<float>(PlayerAttribute(Game::Attribute::SubmergedMiningSpeed));
     }
 
     void ClientPlayer::UpdateEnchantmentLocationEffects(IBlockAccess* blockAccess) {
@@ -336,14 +417,32 @@ namespace Game {
         // player's base 0.1 with the effect templates and Soul Speed's
         // location bonus, relative to that base (the walk constants already
         // are the 0.1).
+        // (The player's own base — /attribute … movement_speed base set —
+        // moves it the same way: the factor is relative to the default 0.1.)
         physics.effectSpeedFactor = static_cast<float>(
-            EnchantedAttributeValue(Game::Attribute::MovementSpeed, 0.1) / 0.1);
-        physics.sneakingSpeed = static_cast<float>(
-            EnchantedAttributeValue(Game::Attribute::SneakingSpeed, Game::PlayerPhysics::SNEAKING_SPEED));
+            PlayerAttribute(Game::Attribute::MovementSpeed) /
+            Game::PlayerBaseAttributeValue(Game::Attribute::MovementSpeed));
+        physics.sneakingSpeed = static_cast<float>(PlayerAttribute(Game::Attribute::SneakingSpeed));
         physics.waterMovementEfficiency = static_cast<float>(
-            EnchantedAttributeValue(Game::Attribute::WaterMovementEfficiency, 0.0));
-        physics.movementEfficiency = static_cast<float>(
-            EnchantedAttributeValue(Game::Attribute::MovementEfficiency, 0.0));
+            PlayerAttribute(Game::Attribute::WaterMovementEfficiency));
+        physics.movementEfficiency = static_cast<float>(PlayerAttribute(Game::Attribute::MovementEfficiency));
+        // MC LocalPlayer.modifyInput / isSlowDueToUsingItem: an item in use
+        // (not riding) scales the input by its USE_EFFECTS speed_multiplier
+        // and, unless can_sprint, stops the sprint.
+        physics.itemUseSpeedMultiplier = 1.0f;
+        if (usingItem && vehicleId == 0) {
+            const int slot = usingHand == 0 ? Game::Inventory::HotbarToIndex(inventory.GetSelectedSlot())
+                                            : Game::Inventory::OFFHAND_BEGIN;
+            const Game::UseEffects effects = Game::GetUseEffects(inventory.GetSlot(slot));
+            physics.itemUseSpeedMultiplier = effects.speedMultiplier;
+            if (!effects.canSprint) physics.isSprinting = false;
+        }
+        // The body attributes (GRAVITY, JUMP_STRENGTH, STEP_HEIGHT, SCALE).
+        physics.gravityAttribute = static_cast<float>(PlayerAttribute(Game::Attribute::Gravity));
+        physics.jumpStrength     = static_cast<float>(PlayerAttribute(Game::Attribute::JumpStrength));
+        physics.stepHeight       = static_cast<float>(PlayerAttribute(Game::Attribute::StepHeight));
+        physics.frictionModifier = static_cast<float>(PlayerAttribute(Game::Attribute::FrictionModifier));
+        physics.attributeScale   = GetAttributeScale();
         const Game::MobEffectInstance* jump = GetEffect(Game::MobEffectId::JumpBoost);
         physics.effectJumpBoost = jump ? 0.1f * static_cast<float>(jump->amplifier + 1) : 0.0f;
         const Game::MobEffectInstance* levitation = GetEffect(Game::MobEffectId::Levitation);
@@ -353,14 +452,12 @@ namespace Game {
     }
 
     float ClientPlayer::GetCurrentItemAttackStrengthDelay() const {
-        float itemDamage = 0.0f, itemSpeed = 0.0f;
-        Game::GetItemAttackAttributes(
-            static_cast<uint32_t>(inventory.GetSelectedItem()), itemDamage, itemSpeed);
-        // ATTACK_SPEED with HASTE / MINING_FATIGUE — the same fold the
-        // server's ServerPlayer does, so the bar and the damage agree.
-        const float attackSpeed = static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::AttackSpeed,
-            static_cast<double>(Game::kPlayerBaseAttackSpeed + itemSpeed), activeEffects));
+        // MC Player.getCurrentItemAttackStrengthDelay: 20 / ATTACK_SPEED —
+        // the base 4.0 through the held stack's ATTRIBUTE_MODIFIERS (and the
+        // rest of the worn items'), HASTE / MINING_FATIGUE: the same fold
+        // the server's ServerPlayer does, so the indicator and the damage
+        // agree.
+        const float attackSpeed = static_cast<float>(PlayerAttribute(Game::Attribute::AttackSpeed));
         // A pathological modifier could zero this; a NaN delay would make every
         // swing read as fully charged. Mirrors ServerPlayer's guard.
         if (attackSpeed <= 0.0f) return 1.0e6f;
@@ -402,16 +499,27 @@ namespace Game {
                 // of the hip, at hand height — where the third-person held
                 // item sits. MC's facing convention: forward (−sin, 0, cos),
                 // so the right side is (−cos, 0, −sin).
+                //
+                // The holder as drawn THIS frame — their position and body
+                // yaw lerped at the frame's partial tick, the same value the
+                // world pass draws them with (heldFramePartial) — like an MC
+                // passenger, whose position comes from its vehicle's
+                // interpolated one every frame. Their tick values alone moved
+                // the view in 20 Hz steps.
                 const Client::RemotePlayer& holder = it->second;
-                const float yaw = glm::radians(holder.bodyYaw);
+                const float pt = std::clamp(heldFramePartial, 0.0f, 1.0f);
+                const glm::dvec3 holderPos = glm::mix(holder.renderPrevPosition, holder.position,
+                                                      static_cast<double>(pt));
+                const float yaw = glm::radians(Game::Mth::RotLerp(pt, holder.renderPrevBodyYaw, holder.bodyYaw));
                 const glm::dvec3 forward(-std::sin(yaw), 0.0, std::cos(yaw));
                 const glm::dvec3 right(-std::cos(yaw), 0.0, -std::sin(yaw));
                 const double sc = holder.scale;
-                physics.position = holder.position + right * (0.4 * sc) + forward * (0.25 * sc) +
+                physics.position = holderPos + right * (0.4 * sc) + forward * (0.25 * sc) +
                                    glm::dvec3(0.0, 0.85 * sc, 0.0);
             }
             physics.velocity    = glm::vec3(0.0f);
             physics.pushVelocity = glm::vec3(0.0f);
+            physics.stepVisualOffset = 0.0f;
             physics.isOnGround  = true;
             physics.isSneaking  = false;
             physics.isSprinting = false;
@@ -503,6 +611,29 @@ namespace Game {
             jumpHeld      = false;
             sprintPressed = false;
         }
+        if (IsMorphed() && !physics.isInWater && !physics.isFlying && !physics.noclip &&
+            (Game::Morph::IsWaterBound(morph) || Game::Morph::IsStationary(morph))) {
+            // A water animal out of water (MC: its WaterBoundPathNavigation
+            // finds no path on land) and a shulker never walk. The fish, the
+            // dolphin and the guardians flop instead (AbstractFish / Dolphin
+            // / Guardian.aiStep): on the ground they hop — the jump stands in
+            // for MC's 0.4-0.5 — and the movement keys steer the sideways
+            // kick MC rolls at random.
+            const glm::vec3 wish(movementInput.x, 0.0f, movementInput.z);
+            movementInput = glm::vec3(0.0f);
+            jumpPressed   = false;
+            jumpHeld      = false;
+            sprintPressed = false;
+            const Game::Morph::Flop flop = Game::Morph::FlopOf(morph);
+            if (flop.up > 0.0f && physics.isOnGround) {
+                jumpPressed = true;
+                if (glm::dot(wish, wish) > 1.0e-6f) {
+                    const glm::vec3 kick = glm::normalize(wish) * (flop.side * 20.0f * physics.scale);
+                    physics.pushVelocity.x += kick.x;
+                    physics.pushVelocity.z += kick.z;
+                }
+            }
+        }
         if (morphGridLock) {
             // Held on the grid: nothing moves it, not input, not gravity,
             // not a nudge — a placed block.
@@ -525,6 +656,10 @@ namespace Game {
         // moves in spectator.
         physics.noPhysics   = IsSpectator();
         physics.flyingSpeed = flyingSpeed;
+        // A flier's morph flies at the mob's air speed (Morph::FlightSpeedFactorOf).
+        if (IsMorphed() && Game::Morph::IsFlier(morph)) {
+            physics.flyingSpeed *= Game::Morph::FlightSpeedFactorOf(morph);
+        }
         if (IsSpectator() && physics.mayFly) physics.isFlying = true;
         // MC LocalPlayer.serverAiStep: the movement input only drives the
         // body while it is the camera — looking through another entity, the
@@ -712,7 +847,7 @@ namespace Game {
         // creative modifier), scaled with the body. The server allows one
         // block of slack on top of this for a break, never less — so a
         // block this ray reaches is one the server lets us break.
-        const float kReach = (IsCreative() ? 5.0f : 4.5f) * physics.scale;
+        const float kReach = static_cast<float>(GetBlockInteractionRange()) * physics.scale;
         lastBlockHit = Raycast::CastRay(camera.position, front, kReach);
         lastBlockHitDimension = Client::ClientLevels::HasSession()
             ? Client::ClientLevels::ActiveDimension() : Game::DimensionId::Overworld;
@@ -830,6 +965,7 @@ namespace Game {
         morph = code;
         physics.SetMorph(dims.width, dims.height, dims.eyeHeight, walkSpeed);
         physics.morphClimbsWalls = Game::Morph::ClimbsWalls(code);
+        physics.morphSwimAccel   = Game::Morph::SwimAccelOf(code);
         morphPrevPos = physics.position;
         morphBodyYaw = morphBodyYawOld = yaw;
     }
@@ -950,11 +1086,9 @@ namespace Game {
     }
 
     bool ClientPlayer::HasUsableGlider() const {
-        const Game::ItemStack& chest =
-            inventory.GetSlot(Game::InventoryIndexFor(Game::EquipmentSlot::CHEST));
-        if (chest.IsEmpty() || chest.itemId != Game::Items::Elytra) return false;
-        auto equippable = chest.get(Game::DataComponents::EQUIPPABLE);
-        return equippable && equippable->slot == Game::EquipmentSlot::CHEST && !Game::NextDamageWillBreak(chest);
+        // LivingEntity.canGlide's slot scan: a GLIDER item worn in its
+        // EQUIPPABLE slot with wear to spare.
+        return !Game::InventoryGliderSlots(inventory).empty();
     }
 
     bool ClientPlayer::TryToStartFallFlying() {
@@ -1045,8 +1179,9 @@ namespace Client {
         for (const auto& [id, rp] : g_remotePlayerManager->GetPlayers()) {
             if (!rp.positionInitialized || rp.effects.particles.empty()) continue;
             if (!IsRemotePlayerInBoundLevel(rp)) continue;
+            const Game::Morph::Dims body = Game::Morph::DimsOf(rp.morph);   // a /morph body's own
             Game::SpawnEffectParticles(level, rp.effects, rp.position,
-                                       0.6f * rp.scale, 1.8f * rp.scale);
+                                       body.width * rp.scale, body.height * rp.scale);
         }
     }
 

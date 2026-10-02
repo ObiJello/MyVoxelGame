@@ -90,9 +90,12 @@ namespace Render {
         // MC GameRenderer.bobHurt, verbatim. `hurtTime`/`deathTime` are the
         // tick counters; partialTick is the render fraction between ticks, and
         // MC SUBTRACTS it from hurtTime (the flash decays) while ADDING it to
-        // deathTime (the spin accumulates).
+        // deathTime (the spin accumulates). `tiltStrength` is the
+        // accessibility option Options.damageTiltStrength (0..1, 1 = vanilla
+        // default); it scales the damage roll only, never the death spin.
         static glm::mat4 MakeViewTilt(int hurtTime, int hurtDuration, float hurtDirDeg,
-                                      bool dying, int deathTime, float partialTick) {
+                                      bool dying, int deathTime, float partialTick,
+                                      float tiltStrength = 1.0f) {
             glm::mat4 m{1.0f};
 
             if (dying) {
@@ -115,7 +118,9 @@ namespace Render {
             // Conjugating the roll by the damage bearing is what aims it: a hit
             // from the front rolls the screen, a hit from the side pitches it.
             m = glm::rotate(m, glm::radians(-hurtDirDeg), glm::vec3(0.0f, 1.0f, 0.0f));
-            m = glm::rotate(m, glm::radians(-hurt * 14.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+            const float tiltAmount = static_cast<float>(static_cast<double>(-hurt) * 14.0 *
+                                                        static_cast<double>(tiltStrength));
+            m = glm::rotate(m, glm::radians(tiltAmount), glm::vec3(0.0f, 0.0f, 1.0f));
             m = glm::rotate(m, glm::radians(hurtDirDeg),  glm::vec3(0.0f, 1.0f, 0.0f));
             return m;
         }

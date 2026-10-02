@@ -726,19 +726,21 @@ void main() {
 
     void PortalParticleSystem::EmitProjectile(const glm::dvec3& start,
                                               const glm::dvec3& end,
-                                              bool isOrange) {
-        EmitProjectileIn(Client::ClientLevels::ActiveDimension(), start, end, isOrange);
+                                              bool isOrange, float speed) {
+        EmitProjectileIn(Client::ClientLevels::ActiveDimension(), start, end, isOrange, speed);
     }
 
     void PortalParticleSystem::EmitProjectileIn(Game::DimensionId dimension,
                                                 const glm::dvec3& start,
                                                 const glm::dvec3& end,
-                                                bool isOrange) {
+                                                bool isOrange, float speed) {
         if (m_shader == INVALID_SHADER) return;
 
         // Portal exact constants from weapon_portalgun.cpp.
         constexpr float kBlastSpeed_HU_per_s = 3000.0f;   // weapon_portalgun.cpp:28
-        constexpr float kBlastSpeed_m_per_s  = kBlastSpeed_HU_per_s * 0.01905f; // 57.15 m/s
+        constexpr float kGunBlastSpeed_m_per_s = kBlastSpeed_HU_per_s * 0.01905f; // 57.15 m/s
+        // The shot's own speed (the shooter's motion added) when given.
+        const float kBlastSpeed_m_per_s = speed > 0.0f ? speed : kGunBlastSpeed_m_per_s;
         // NOTE: Source's `sv_portal_projectile_delay` (0.5s) is the
         // max server-side delay before the placement packet fires —
         // it does NOT cap the visible bolt's lifetime. Capping the

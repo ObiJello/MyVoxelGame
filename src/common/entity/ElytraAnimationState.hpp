@@ -10,6 +10,7 @@
 
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/Item.hpp"
+#include "common/data/DataComponents.hpp"
 
 #include <glm/glm.hpp>
 #include <cmath>
@@ -70,7 +71,7 @@ namespace Game {
     constexpr uint8_t kElytraWorn  = 0x01;
     constexpr uint8_t kElytraGlint = 0x02;
     inline uint8_t ElytraLayerFlags(const ItemStack& chest) {
-        if (chest.IsEmpty() || chest.itemId != Items::Elytra) return 0;
+        if (chest.IsEmpty() || !EquipmentAssetHasWings(EquipmentAssetPath(chest))) return 0;
         return static_cast<uint8_t>(kElytraWorn | (chest.HasFoil() ? kElytraGlint : 0));
     }
 

@@ -157,14 +157,12 @@ namespace Render {
         m_hoveredCreativeStack = Game::ItemStack{};
         m_hoveredCreativeIndex = -1;
         m_items.clear();
-        m_locked.clear();
         switch (tab.type) {
             case CreativeModeTab::Type::Search:    RefreshSearchResults(); break;
             case CreativeModeTab::Type::Hotbar:    FillHotbarTab(); break;
             case CreativeModeTab::Type::Category:  m_items = tab.displayItems; break;
             case CreativeModeTab::Type::Inventory: break;
         }
-        m_locked.resize(m_items.size(), 0);
         m_scrollOffs = GetScrollForRowIndex(oldRow);
     }
 
@@ -176,13 +174,11 @@ namespace Render {
         m_hoveredCreativeIndex = -1;
         const CreativeModeTab& tab = SelectedTab();
         m_items.clear();
-        m_locked.clear();
         if (tab.type == CreativeModeTab::Type::Hotbar) {
             FillHotbarTab();
         } else if (tab.type == CreativeModeTab::Type::Category) {
             m_items = tab.displayItems;
         }
-        m_locked.resize(m_items.size(), 0);
 
         if (tab.type == CreativeModeTab::Type::Search) {
             // setCanLoseFocus(false) + setFocused(true); a different tab
@@ -210,13 +206,14 @@ namespace Render {
     // locked paper in its own column naming the keys that save it.
     void CreativeModeInventoryScreen::FillHotbarTab() {
         m_items.clear();
-        m_locked.clear();
         auto keyName = [](const Input::KeyMapping* m) { return m ? m->key.DisplayName() : std::string("?"); };
         for (int i = 0; i < CreativeHotbars::kHotbarCount; ++i) {
             if (CreativeHotbars::IsEmpty(i)) {
                 for (int y = 0; y < CreativeHotbars::kSlots; ++y) {
                     if (y == i) {
+                        // placeholder.set(CREATIVE_SLOT_LOCK, Unit.INSTANCE).
                         Game::ItemStack placeholder(Game::Items::Paper, 1);
+                        placeholder.components.set(Game::DataComponents::CREATIVE_SLOT_LOCK, true);
                         placeholder.components.set(
                             Game::DataComponents::ITEM_NAME,
                             Game::Text::GetString(Game::Text::Component::Translatable(
@@ -224,16 +221,13 @@ namespace Render {
                                 {Game::Text::Component::Literal(keyName(Input::Binds::SaveToolbarActivator)),
                                  Game::Text::Component::Literal(keyName(Input::Binds::Hotbar[i]))})));
                         m_items.push_back(std::move(placeholder));
-                        m_locked.push_back(1);
                     } else {
                         m_items.emplace_back();
-                        m_locked.push_back(0);
                     }
                 }
             } else {
                 for (const Game::ItemStack& stack : CreativeHotbars::Get(i)) {
                     m_items.push_back(stack);
-                    m_locked.push_back(0);
                 }
             }
         }
@@ -315,7 +309,6 @@ namespace Render {
         m_hoveredCreativeStack = Game::ItemStack{};
         m_hoveredCreativeIndex = -1;
         m_items.clear();
-        m_locked.clear();
         m_visibleTags.clear();
         const auto& stacks = CreativeModeTabs::SearchTab().displayItems;
         if (m_searchText.empty()) {
@@ -369,7 +362,6 @@ namespace Render {
                 if (match) m_items.push_back(stacks[i]);
             }
         }
-        m_locked.assign(m_items.size(), 0);
         m_scrollOffs = 0.0f;
     }
 
@@ -544,8 +536,9 @@ namespace Render {
             // letter replaces it.
             if (SelectedType() == CreativeModeTab::Type::Search) SearchSelectAll();
             const int idx = m_hoveredCreativeIndex < static_cast<int>(m_items.size()) ? m_hoveredCreativeIndex : -1;
-            // CustomCreativeSlot.mayPickup: a locked placeholder does nothing.
-            if (idx >= 0 && idx < static_cast<int>(m_locked.size()) && m_locked[idx]) return true;
+            // CustomCreativeSlot.mayPickup: a stack carrying CREATIVE_SLOT_LOCK
+            // (the saved-toolbar placeholder) cannot be taken.
+            if (idx >= 0 && m_items[static_cast<size_t>(idx)].has(Game::DataComponents::CREATIVE_SLOT_LOCK)) return true;
 
             const Game::ItemStack& carried = Carried();
             const Game::ItemStack  clicked = idx >= 0 ? m_items[idx] : Game::ItemStack{};
@@ -571,7 +564,7 @@ namespace Render {
             //   CREATIVE_DELETE_CARRIED 0/1 = clear the cursor / one fewer.
             if (!carried.IsEmpty() && !clicked.IsEmpty() && Game::IsSameItemSameComponents(carried, clicked)) {
                 if (button == 0) {
-                    const int maxStack = Game::ItemRegistry::Get(carried.itemId).maxStackSize;
+                    const int maxStack = Game::GetMaxStackSize(carried);
                     if (shift) pick(0);
                     else if (carried.count < maxStack) pick(1);
                 } else {
@@ -595,8 +588,13 @@ namespace Render {
         //     (`menu.setCarried(ItemStack.EMPTY)` — no drop, either button).
         if (hit == HIT_TRASH) {
             if (shift) {
+                // ENGINE DEVIATION (not MC): with a stack on the cursor,
+                // shift-click voids it and every slot of the same item
+                // (button 1); with an empty cursor it clears the whole
+                // inventory exactly as MC does (button 0). The server applies
+                // either from its own state (HandleCreativeDestroyAll).
                 QueueClick(Network::ContainerInput::CREATIVE_DESTROY_ALL,
-                           Network::InventorySlotSentinel::OUTSIDE, 0);
+                           Network::InventorySlotSentinel::OUTSIDE, Carried().IsEmpty() ? 0 : 1);
             } else if (!Carried().IsEmpty()) {
                 QueueClick(Network::ContainerInput::CREATIVE_DELETE_CARRIED,
                            Network::InventorySlotSentinel::OUTSIDE,
@@ -674,7 +672,7 @@ namespace Render {
                 if (m_hoveredCreativeIndex < 0 || m_hoveredCreativeIndex >= static_cast<int>(m_items.size())) {
                     return false;
                 }
-                if (!m_locked[static_cast<size_t>(m_hoveredCreativeIndex)]) {
+                if (!m_items[static_cast<size_t>(m_hoveredCreativeIndex)].has(Game::DataComponents::CREATIVE_SLOT_LOCK)) {
                     const Game::ItemStack cell = m_items[static_cast<size_t>(m_hoveredCreativeIndex)];
                     QueueClick(Network::ContainerInput::CREATIVE_FILL_SLOT,
                                static_cast<int16_t>(Game::Inventory::HotbarToIndex(hotbar)), 0,
@@ -832,6 +830,7 @@ namespace Render {
         pose.headPitchDeg = player->visualPitch;
         pose.isCrouching  = false;
         pose.isSitting    = player->IsPassenger();
+        pose.player       = player;   // a skin look draws MC's model as the player is
         RenderStickFigureInInventory(
             g,
             leftPos + 73, topPos + 6, leftPos + 105, topPos + 49,

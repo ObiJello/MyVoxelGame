@@ -8,6 +8,8 @@
 #include "common/entity/ai/goals/SlimeGoals.hpp"
 #include "common/entity/ai/Goal.hpp"
 #include "common/entity/Animal.hpp"
+#include "common/entity/Bucketable.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/projectile/Projectile.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -315,26 +317,38 @@ namespace Game {
     // ── Bucket ─────────────────────────────────────────────────────────────
 
     void SulfurCube::SaveToBucket(ItemStack& bucket) const {
-        SulfurCubeBucketData data;
-        // A swallowed block is always a block item, so its registry slug is
-        // the block's (ItemName's block branch).
-        if (HasBodyItem()) data.bodyItem = std::string(BlockRegistry::Get(GetBodyBlock()).registrySlug);
-        data.age       = m_age;
-        data.ageLocked = m_ageLocked;
-        data.noAi      = IsNoAi();
-        bucket.components.set(DataComponents::SULFUR_CUBE_BUCKET, data);
+        // MC SulfurCube.saveToBucketTag: Bucketable.saveDefaultDataToBucketTag
+        // (custom name, NoAI / Silent / … flags, Health), the swallowed block
+        // as SULFUR_CUBE_CONTENT, then "age" / "age_locked" into the
+        // bucket_entity_data compound.
+        Bucketable::SaveDefaultDataToBucketTag(*this, bucket);
+        if (HasBodyItem()) {
+            bucket.components.set(DataComponents::SULFUR_CUBE_CONTENT, SulfurCubeContent{ItemStack(m_bodyItem, 1)});
+        }
+        BucketEntityData data = bucket.components.get(DataComponents::BUCKET_ENTITY_DATA).value_or(BucketEntityData{});
+        auto extra = data.extra.Copy();
+        extra->value["age"] = std::make_shared<::World::NBTTagInt>(m_age);
+        extra->value["age_locked"] = std::make_shared<::World::NBTTagByte>(static_cast<int8_t>(m_ageLocked ? 1 : 0));
+        data.extra = NbtCompoundValue(std::move(extra));
+        bucket.components.set(DataComponents::BUCKET_ENTITY_DATA, std::move(data));
     }
 
-    void SulfurCube::LoadFromBucket(const SulfurCubeBucketData& data) {
-        if (data.noAi) SetNoAi(true);
-        SetAge(data.age);
-        SetAgeLocked(data.ageLocked);
+    void SulfurCube::LoadFromBucket(const ItemStack& bucket) {
+        // MC MobBucketItem.spawn: applyComponentsFromItemStack (the swallowed
+        // block — SULFUR_CUBE_CONTENT is one of the cube's implicit
+        // components), then loadFromBucketTag(bucket_entity_data).
+        const BucketEntityData data = bucket.get(DataComponents::BUCKET_ENTITY_DATA).value_or(BucketEntityData{});
+        Bucketable::LoadDefaultDataFromBucketTag(*this, data);
+        const ::World::NBTTagCompound& extra = data.extra.Tag();
+        SetAge(extra.GetValue<int32_t>("age", 0));
+        SetAgeLocked(extra.GetValue<int8_t>("age_locked", 0) != 0);
         // The age decides the size (setSpawnSize ran on create); a grown
         // cube in the bucket comes out size 2, a baby size 1.
         SetSize(IsBaby() ? kMinSize : kMaxSize, true);
-        if (!data.bodyItem.empty()) {
-            const ItemID item = RecipeManager::ItemFromSlug(data.bodyItem);
-            if (item != Items::Air && !IsBaby()) SetBodyItem(item);
+        if (auto content = bucket.get(DataComponents::SULFUR_CUBE_CONTENT)) {
+            if (!content->absorbed.IsEmpty() && ItemRegistry::IsBlockItem(content->absorbed.itemId) && !IsBaby()) {
+                SetBodyItem(content->absorbed.itemId);
+            }
         }
         SetFromBucket(true);
     }

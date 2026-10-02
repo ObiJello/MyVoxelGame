@@ -136,6 +136,7 @@ namespace Platform {
         SetInt("biomeBlendRadius", 2);
         SetBool("enableVsync", true);
         SetFloat("entityDistanceScaling", 1.0f);
+        SetInt("renderScale", 100);
         SetBool("entityShadows", false);
         SetBool("forceUnicodeFont", false);
         SetBool("japaneseGlyphVariants", false);
@@ -451,6 +452,7 @@ namespace Platform {
     //   cloudRange (blocks)     64            128            256
     //   weatherRadius           5             10             10
     //   improvedTransparency    off           off            ON
+    //   renderScale (engine)    100           100            100
     //
     // Fabulous is the only thing in the engine that turns Improved
     // Transparency on besides the option itself: only when picked.
@@ -473,6 +475,9 @@ namespace Platform {
         SetCloudRange(fabulous ? 256 : (fancy ? 128 : 64));
         SetWeatherRadius(fancy ? 10 : 5);
         SetImprovedTransparency(fabulous);
+        // Engine row: every preset draws the world at the window's own
+        // resolution (Render Resolution is a per-machine tuning knob).
+        SetRenderScalePercent(100);
         SetString("graphicsPreset", GraphicsPresetName(preset));
         m_applyingGraphicsPreset = false;
 

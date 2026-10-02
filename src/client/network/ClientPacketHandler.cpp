@@ -1,4 +1,5 @@
 // File: src/client/network/ClientPacketHandler.cpp
+#include "client/entity/PlayerSkins.hpp"
 #include "common/entity/projectile/FireworkRocket.hpp"
 #include "common/entity/SpearItem.hpp"
 #include "client/entity/ClientFishing.hpp"
@@ -36,6 +37,8 @@
 #include "ClientConnection.hpp"
 #include "common/core/Log.hpp"
 #include "../renderer/gui/BossBarState.hpp"
+#include "../renderer/viewmodel/HeldItemRenderer.hpp"   // /swing on the local player
+#include "../renderer/gui/TitleOverlay.hpp"
 #include "../renderer/gui/ChatScreen.hpp"   // SetServerCommandNames
 #include "../renderer/gui/CommandSuggestions.hpp"
 #include "../world/LevelLoadTracker.hpp"    // dimension change re-enters the load wait
@@ -89,11 +92,13 @@ namespace Render {
 }
 #include "../renderer/gui/screens/SignEditScreen.hpp"   // Render::SignEditorOpen / ShowSignEditScreen
 #include "../renderer/gui/screens/BookScreens.hpp"      // Render::OpenBookFromHand
+#include "../advancements/ClientAdvancements.hpp"
+#include "../renderer/gui/toasts/ToastManager.hpp"
 
 namespace Client {
 
-    // The one client boss bar (see BossBarState.hpp).
-    BossBarState g_bossBarState;
+    // The client's boss bars (see BossBarState.hpp).
+    BossBarOverlay g_bossBars;
 
     // Global client systems (defined elsewhere)
     extern NetworkClient* g_networkClient;
@@ -286,8 +291,11 @@ namespace Client {
 
     void ClientPacketHandler::handlePlayerUpdate(const Network::PlayerUpdateS2CPacket& packet) {
         if (g_remotePlayerManager) {
-            // Scale first: the update's teleport test scales with it.
-            g_remotePlayerManager->SetScale(packet.playerId, packet.scale);
+            // Scale first: the update's teleport test scales with it. The
+            // body is the portal size times the SCALE attribute (worn items'
+            // modifiers).
+            g_remotePlayerManager->SetScale(packet.playerId, packet.scale * packet.attributeScale);
+            g_remotePlayerManager->SetNameTagDistance(packet.playerId, packet.nameTagDistance);
             g_remotePlayerManager->SetInvisible(packet.playerId, packet.invisible);
             {
                 // MC DATA_EFFECT_PARTICLES + the glowing flag of that player.
@@ -762,7 +770,14 @@ namespace Client {
 
     void ClientPacketHandler::onPlayerSwingS2C(const Network::PlayerSwingS2CPacket& packet) {
         // MC handleAnimate SWING_MAIN_HAND / SWING_OFF_HAND: entity.swing(hand).
-        if (g_remotePlayerManager) g_remotePlayerManager->StartSwing(packet.playerId, packet.hand);
+        // On this client's own id (the server's /swing) the first-person
+        // arm swings.
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (packet.playerId == localId && m_player) {
+            ::Render::g_heldItemRenderer.RequestSwing();
+        } else if (g_remotePlayerManager) {
+            g_remotePlayerManager->StartSwing(packet.playerId, packet.hand);
+        }
         m_stats.packetsProcessed++;
     }
 
@@ -796,6 +811,21 @@ namespace Client {
     void ClientPacketHandler::onShoulderParrotsS2C(const Network::ShoulderParrotsS2CPacket& packet) {
         ShoulderParrots::Set(packet.playerId, packet.left, packet.right);
         m_stats.packetsProcessed++;
+    }
+
+    // Another player's look — their stick figure's paint, or their skin,
+    // model and cape (MC: the profile's textures in PlayerInfoUpdate).
+    // Validated again here: a server is not trusted to have done it. The
+    // textures upload when the body is first drawn (PlayerSkins).
+    void ClientPacketHandler::onPlayerAppearanceS2C(const Network::PlayerAppearanceS2CPacket& packet) {
+        m_stats.packetsProcessed++;
+        Game::PlayerAppearance appearance = packet.appearance;
+        std::vector<std::string> dropped;
+        appearance.Sanitize(&dropped);
+        for (const std::string& line : dropped) {
+            Log::Warning("[ClientPacketHandler] player %u's look: %s", packet.playerId, line.c_str());
+        }
+        PlayerSkins::Get().SetRemote(packet.playerId, appearance);
     }
 
     // MC ClientPacketListener.handleSoundEvent: level.playSeededSound(player,
@@ -905,6 +935,18 @@ namespace Client {
         m_stats.packetsProcessed++;
     }
 
+    void ClientPacketHandler::onUpdateAdvancementsS2C(const Network::UpdateAdvancementsS2CPacket& packet) {
+        // MC handleUpdateAdvancementsPacket → ClientAdvancements.update.
+        m_stats.packetsProcessed++;
+        ClientAdvancements::Get().Update(packet);
+    }
+
+    void ClientPacketHandler::onSelectAdvancementsTabS2C(const Network::SelectAdvancementsTabS2CPacket& packet) {
+        // MC handleSelectAdvancementsTab → setSelectedTab(tab, false).
+        m_stats.packetsProcessed++;
+        ClientAdvancements::Get().OnSelectTab(packet);
+    }
+
     void ClientPacketHandler::onSetCameraS2C(const Network::SetCameraS2CPacket& packet) {
         // MC handleSetCamera: `Entity entity = packet.getEntity(level); if
         // (entity != null) minecraft.setCameraEntity(entity)`. Our own id (or
@@ -951,38 +993,64 @@ namespace Client {
     }
 
     void ClientPacketHandler::handleHurtAnimation(const Network::HurtAnimationS2CPacket& packet) {
-        // MC ClientPacketListener.handleHurtAnimation -> entity.animateHurt(yaw),
-        // which for a Player also stores the direction (Player.animateHurt).
         // The server only sends this to the entity's own client, so there is
         // nothing to look up: it is always us.
         if (m_player) {
-            m_player->hurtDuration = 10;
-            m_player->hurtTime     = m_player->hurtDuration;
-            m_player->hurtDir      = packet.yaw;
-            // MC LivingEntity.hurt sets invulnerableTime = 20 on the hit;
-            // the client's copy is what the HUD's heart blink reads.
-            m_player->damageCooldownTime = 20;
+            if (packet.damageEvent) {
+                // MC ClientPacketListener.handleDamageEvent ->
+                // LivingEntity.handleDamageEvent: the cooldown the HUD's heart
+                // blink reads, and the hurt flash / camera tilt — along the
+                // hurtDir the last hurt animation left. (The hurt sound comes
+                // from the server; the walk-animation kick has no client
+                // walk animation to land on for the local player.)
+                m_player->damageCooldownTime = 20;
+                m_player->hurtDuration       = 10;
+                m_player->hurtTime           = m_player->hurtDuration;
+            } else {
+                // MC ClientPacketListener.handleHurtAnimation ->
+                // entity.animateHurt(yaw); Player.animateHurt also stores the
+                // direction.
+                m_player->hurtDuration = 10;
+                m_player->hurtTime     = m_player->hurtDuration;
+                m_player->hurtDir      = packet.yaw;
+            }
         }
         m_stats.packetsProcessed++;
     }
 
     void ClientPacketHandler::handleBossEvent(const Network::BossEventS2CPacket& packet) {
-        // MC ClientPacketListener.handleBossUpdate → the Gui's events map;
-        // one bar here (see BossBarState.hpp).
+        // MC ClientPacketListener.handleBossUpdate → BossHealthOverlay.update:
+        // the events map, keyed by the bar id.
         switch (packet.op) {
-            case Network::BossEventS2CPacket::Op::Add:
-                g_bossBarState.visible  = true;
-                g_bossBarState.progress = packet.progress;
-                g_bossBarState.color    = static_cast<uint8_t>(packet.color);
-                g_bossBarState.notches  = packet.notches;
-                g_bossBarState.name     = packet.name;
+            case Network::BossEventS2CPacket::Op::Add: {
+                BossBarState bar;
+                bar.progress       = packet.progress;
+                bar.color          = static_cast<uint8_t>(packet.color);
+                bar.notches        = packet.notches;
+                bar.name           = packet.name;
+                bar.darkenScreen   = (packet.properties & Network::BossEventS2CPacket::kDarkenScreen) != 0;
+                bar.playBossMusic  = (packet.properties & Network::BossEventS2CPacket::kPlayBossMusic) != 0;
+                bar.createWorldFog = (packet.properties & Network::BossEventS2CPacket::kCreateWorldFog) != 0;
+                g_bossBars.Add(packet.barId, std::move(bar));
                 break;
+            }
             case Network::BossEventS2CPacket::Op::Remove:
-                g_bossBarState.visible = false;
+                g_bossBars.Remove(packet.barId);
                 break;
             case Network::BossEventS2CPacket::Op::UpdateProgress:
-                g_bossBarState.progress = packet.progress;
+                if (BossBarState* bar = g_bossBars.Find(packet.barId)) bar->progress = packet.progress;
                 break;
+            case Network::BossEventS2CPacket::Op::UpdateName:
+                if (BossBarState* bar = g_bossBars.Find(packet.barId)) bar->name = packet.name;
+                break;
+        }
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::handleWitherHeadTargets(const Network::WitherHeadTargetsS2CPacket& packet) {
+        // MC WitherBoss DATA_TARGET_B / _C → the client copy's side heads.
+        if (g_clientMobManager) {
+            g_clientMobManager->SetWitherHeadTargets(packet.entityId, packet.targets[0], packet.targets[1]);
         }
         m_stats.packetsProcessed++;
     }
@@ -1025,6 +1093,37 @@ namespace Client {
         // base value and modifier stack replace the client copy's (an
         // attribute the copy never registered is added — MC warns and skips
         // an unknown one; every attribute here is known).
+        // The modifiers' Identifiers ride along — named here so /attribute's
+        // completion can offer them.
+        for (const auto& [id, name] : packet.modifierNames) Game::RecordModifierIdName(id, name);
+        // The local player's own attributes (ServerPlayer::
+        // syncAttributesToClient): what its prediction folds onto.
+        const uint32_t localId = m_connection ? m_connection->GetPlayerId() : 0;
+        if (m_player && static_cast<uint32_t>(packet.entityId) == localId) {
+            std::vector<std::pair<Game::Attribute, Game::AttributeInstance>> rows;
+            rows.reserve(packet.attributes.size());
+            for (const auto& synced : packet.attributes) {
+                Game::AttributeInstance row(synced.attribute, synced.base);
+                for (const Game::AttributeModifier& mod : synced.modifiers) row.AddModifier(mod);
+                rows.emplace_back(synced.attribute, std::move(row));
+            }
+            m_player->ApplyOwnAttributes(rows);
+            // …and /attribute's completion learns the rows and their names.
+            std::vector<::Render::CommandSuggestions::OwnAttribute> own;
+            for (const Game::AttributeInstance& row : m_player->ownAttributes.All()) {
+                ::Render::CommandSuggestions::OwnAttribute entry;
+                entry.id = std::string(Game::AttributeName(row.GetAttribute()));
+                entry.base = row.GetBaseValue();
+                for (const Game::AttributeModifier& mod : row.Modifiers()) {
+                    std::string name = Game::ModifierIdName(mod.id);
+                    if (!name.empty()) entry.modifierIds.push_back(std::move(name));
+                }
+                own.push_back(std::move(entry));
+            }
+            ::Render::CommandSuggestions::SetOwnAttributes(std::move(own));
+            m_stats.packetsProcessed++;
+            return;
+        }
         if (g_clientMobManager) {
             if (const ClientMob* entry = g_clientMobManager->GetMob(packet.entityId); entry && entry->mob) {
                 Game::AttributeMap& attributes = entry->mob->Attributes();
@@ -1037,6 +1136,8 @@ namespace Client {
                     for (uint32_t id : stale) inst->RemoveModifier(static_cast<Game::ModifierId>(id));
                     for (const Game::AttributeModifier& mod : synced.modifiers) inst->AddModifier(mod);
                 }
+                // MC onAttributeUpdated(SCALE) → refreshDimensions.
+                entry->mob->RefreshAttributeScale();
             }
         }
         m_stats.packetsProcessed++;
@@ -1057,6 +1158,23 @@ namespace Client {
             }
         }
         Client::Fireworks::OnRocketData(packet.entityId, packet.attachedToId, packet.lifetime, found);
+        m_stats.packetsProcessed++;
+    }
+
+    void ClientPacketHandler::onTitlesS2C(const Network::TitlesS2CPacket& packet) {
+        // MC ClientPacketListener.setTitleText / setSubtitleText /
+        // setTitlesAnimation / handleTitlesClear → the Hud's title fields
+        // (TitleOverlay).
+        ::Render::TitleOverlay& overlay = ::Render::GetTitleOverlay();
+        switch (packet.action) {
+            case Network::TitlesS2CPacket::Action::Title:    overlay.SetTitle(packet.text); break;
+            case Network::TitlesS2CPacket::Action::Subtitle: overlay.SetSubtitle(packet.text); break;
+            case Network::TitlesS2CPacket::Action::Times:
+                overlay.SetTimes(packet.fadeIn, packet.stay, packet.fadeOut);
+                break;
+            case Network::TitlesS2CPacket::Action::Clear:    overlay.Clear(/*resetTimes=*/false); break;
+            case Network::TitlesS2CPacket::Action::Reset:    overlay.Clear(/*resetTimes=*/true); break;
+        }
         m_stats.packetsProcessed++;
     }
 
@@ -1119,8 +1237,8 @@ namespace Client {
                 if (eq && it != players.end() && it->second.usingItem) {
                     const Game::ItemStack& held = (*eq)[static_cast<size_t>(
                         it->second.useItemHand ? Game::EquipmentSlot::OFFHAND : Game::EquipmentSlot::MAINHAND)];
-                    if (const Game::Spear::KineticWeapon* kinetic = Game::Spear::Kinetic(held);
-                        kinetic && kinetic->hitSound) {
+                    if (const auto kinetic = Game::Spear::Kinetic(held);
+                        kinetic && !kinetic->hitSound.empty()) {
                         Sounds::PlayLocal(it->second.position, kinetic->hitSound, Game::SoundSource::Players,
                                           1.0f, 1.0f);
                     }
@@ -1177,6 +1295,14 @@ namespace Client {
     void ClientPacketHandler::handleLoginSuccess(uint32_t playerId, const std::string& playerName) {
         m_stats.packetsProcessed++;
         Log::Info("[ClientPacketHandler] Login success: player=%s, id=%u", playerName.c_str(), playerId);
+        // MC builds a fresh ClientAdvancements per connection: nothing of a
+        // previous world's tree or toasts carries over (a player with no
+        // visible advancement gets no reset packet to clear it).
+        ClientAdvancements::Get().Clear();
+        ::Render::GetToastManager().Clear();
+        // A fresh LocalPlayer per connection: the first health is taken as
+        // is (LocalPlayer.flashOnSetHealth).
+        if (m_player) m_player->flashOnSetHealth = false;
     }
 
     void ClientPacketHandler::handleDisconnect(const std::string& reason) {
@@ -1185,12 +1311,20 @@ namespace Client {
 
         // A boss bar from the departed server must not survive into the next
         // session (MC clears the Gui's events map with the level).
-        g_bossBarState.visible = false;
+        g_bossBars.Clear();
+        // Nor the advancement tree and its toasts.
+        ClientAdvancements::Get().Clear();
+        ::Render::GetToastManager().Clear();
+        // Nor a title (MC Hud.onDisconnected: clearTitles + resetTitleTimes).
+        ::Render::GetTitleOverlay().Clear(/*resetTimes=*/true);
 
         // Clean up every level (the one the player stood in and any seen
         // through a portal). The session teardown destroys them; this just
         // empties them for the disconnect screen.
         ClientLevels::ClearAll();
+        // Every other player's look goes with the server (the local one
+        // stays: it is the launcher's).
+        PlayerSkins::Get().ClearRemote();
 #if ENABLE_PORTAL_GUN
         // Drop any portals carried over from this server. The next server's
         // SyncToClient will repopulate from authoritative state.
@@ -1372,15 +1506,21 @@ namespace Client {
         // (ServerWeather::SyncPlayers, keyed on the dimension changing). A
         // resync into the level the player is already in keeps its weather,
         // since the server sends nothing for it.
-        if (dimension != ClientLevels::ActiveDimension() || !ClientLevels::HasSession()) {
+        const bool levelChanged = dimension != ClientLevels::ActiveDimension() || !ClientLevels::HasSession();
+        if (levelChanged) {
             ClientWeather::Reset();
         }
         ClientLevels::SetActive(dimension, packet.KeepPrevious());
         ClientLevels::SetPacketDimension(dimension);
 
-        // The boss bar belongs to the dimension being left (the fight's
-        // player scan re-adds it on re-entry before the first progress tick).
-        g_bossBarState.visible = false;
+        // The boss bars belong to the dimension being left (MC resets the
+        // overlay with the level; the fight's player scan and the withers'
+        // trackers re-add theirs on re-entry). A resync into the level the
+        // player is already in keeps them — its bosses' servers never
+        // re-send an Add to a player who never left their watch.
+        if (levelChanged) g_bossBars.Clear();
+        // handleRespawn's new LocalPlayer: its first health does not flash.
+        if (m_player) m_player->flashOnSetHealth = false;
 
         // Remote players are global (one list, each tagged with a
         // dimension); their positions are re-sent within a tick.
@@ -1605,11 +1745,31 @@ namespace Client {
         // authoritative stat triple onto the local player; the HUD reads it
         // each frame (PlatformMain's RenderHUD hookup).
         if (!m_player) return;
+        // MC LocalPlayer.hurtTo: a fresh player takes its first health as
+        // is; after that every drop starts the hurt flash and camera tilt
+        // (along the last hurtDir) and the 20-tick damage cooldown, and a
+        // heal a 10-tick one — the HUD's heart blink reads both. A respawn
+        // is a fresh LocalPlayer in MC: the dead-to-alive refresh does not
+        // blink.
+        if (m_player->healthExact <= 0.0f && packet.health > 0.0f) m_player->flashOnSetHealth = false;
+        if (m_player->flashOnSetHealth) {
+            const float dmg = m_player->healthExact - packet.health;
+            if (dmg <= 0.0f) {
+                if (dmg < 0.0f) m_player->damageCooldownTime = 10;
+            } else {
+                m_player->damageCooldownTime = 20;
+                m_player->hurtDuration       = 10;
+                m_player->hurtTime           = m_player->hurtDuration;
+            }
+        } else {
+            m_player->flashOnSetHealth = true;
+        }
         // ceil, not floor — MC's Gui renders Mth.ceil(health). Regen heals in
         // fractional steps (saturated regen heals saturation/6 per burst), so
         // health is often non-integer; flooring made 0.8 health display as
         // ZERO hearts while the server still (correctly) considered the
         // player alive — "empty hearts but no death screen".
+        m_player->healthExact = packet.health;
         m_player->health     = static_cast<int>(std::ceil(packet.health));
         m_player->food       = static_cast<int>(packet.food);
         m_player->saturation = packet.saturation;

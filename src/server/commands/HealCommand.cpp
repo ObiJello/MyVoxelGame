@@ -63,10 +63,10 @@ namespace Server {
             connection.SendChatMessage("Nothing to heal", 1);
         } else if (healed == 1 && !targets.empty() && targets.front().kind == SelectedEntity::Kind::Player &&
                    targets.front().player == source.sender) {
-            connection.SendChatMessage("Healed", 1);
+            source.SendSuccess(connection, "Healed", true);
         } else {
-            connection.SendChatMessage("Healed " + std::to_string(healed) + " " +
-                                       (healed == 1 ? "entity" : "entities"), 1);
+            source.SendSuccess(connection, "Healed " + std::to_string(healed) + " " +
+                                       (healed == 1 ? "entity" : "entities"), true);
         }
     }
 

@@ -29,6 +29,7 @@
 #pragma once
 
 #include "BlockEntity.hpp"
+#include "common/data/NbtCompoundValue.hpp"
 #include "common/inventory/Container.hpp"
 #include "common/network/ItemStackSerialization.hpp"
 #include "common/network/PacketRegistry.hpp"
@@ -139,6 +140,16 @@ namespace Game {
         const std::string& GetCustomName() const { return m_customName; }
         void SetCustomName(std::string name) { m_customName = std::move(name); }
 
+        // MC BaseContainerBlockEntity.lockKey (LockCode, the LOCK component /
+        // the saved "lock" ItemPredicate): the container opens only for a
+        // player holding a matching item (canUnlock). Empty = unlocked.
+        const NbtCompoundValue& GetLock() const { return m_lock; }
+        void SetLock(NbtCompoundValue lock) { m_lock = std::move(lock); SetChanged(); }
+        bool IsLocked() const { return !m_lock.IsEmpty(); }
+        // BaseContainerBlockEntity.canUnlock's test: no lock, or the held
+        // stack matches it.
+        bool CanUnlockWith(const ItemStack& held) const;
+
         // ── Persistence / sync ────────────────────────────────────────────
         // Subclasses with extra state call these first, then write their own —
         // and must Load in the same order.
@@ -165,6 +176,7 @@ namespace Game {
         std::vector<ItemStack> m_items;
         std::string m_lootTable;          // "" = none (MC's null)
         int64_t     m_lootTableSeed = 0;  // 0 = use the level's random
+        NbtCompoundValue m_lock;          // LockCode's ItemPredicate (empty = none)
         std::string m_customName;         // CUSTOM_NAME from a named item ("" = none)
     };
 

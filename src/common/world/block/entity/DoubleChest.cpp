@@ -1,7 +1,9 @@
 // File: src/common/world/block/entity/DoubleChest.cpp
 #include "DoubleChest.hpp"
 #include "../BlockRegistry.hpp"
+#include "PistonMovingBlockEntity.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/ILevelWrite.hpp"
 #include <string_view>
 
 namespace Game {
@@ -184,6 +186,105 @@ namespace Game {
         const BlockID least = CopperChestWeatherState(self) <= CopperChestWeatherState(other)
                                   ? updated : connectedPredicted;
         return ChestWithPropertiesOf(least, state);
+    }
+
+    bool ChestUpdateShape(const IBlockAccess& level, const glm::ivec3& pos, BlockState state,
+                          Direction toNeighbour, BlockID neighbourId, BlockState& outState,
+                          ScheduledTickAccess* /*ticks*/) {
+        const glm::ivec3 neighbourPos(pos.x + StepX(toNeighbour), pos.y + StepY(toNeighbour),
+                                      pos.z + StepZ(toNeighbour));
+        const bool horizontal = toNeighbour != Direction::Up && toNeighbour != Direction::Down;
+        if (ChestCanConnectTo(state.Block(), neighbourId) && horizontal) {
+            const BlockState neighbourState = level.GetBlockState(neighbourPos.x, neighbourPos.y, neighbourPos.z);
+            if (neighbourState.Block() != neighbourId) return false;
+            const std::string_view neighbourType = neighbourState.GetValueByName("type");
+            if (state.GetValueByName("type") == "single" && neighbourType != "single" &&
+                state.GetValueByName("facing") == neighbourState.GetValueByName("facing")) {
+                // getConnectedDirection(neighbourState) == directionToNeighbour.getOpposite()
+                const auto back = ChestConnectedCell(neighbourState, neighbourPos);
+                if (back && *back == pos) {
+                    outState = state.SetName(PropertyId::CHEST_TYPE, neighbourType == "left" ? "right" : "left");
+                    return true;
+                }
+            }
+            return false;
+        }
+        // getConnectedDirection(state) == directionToNeighbour → SINGLE.
+        const auto connected = ChestConnectedCell(state, pos);
+        if (connected && *connected == neighbourPos) {
+            outState = state.SetName(PropertyId::CHEST_TYPE, "single");
+            return true;
+        }
+        return false;
+    }
+
+    namespace {
+        // The partner half of `movedState` (landing at `pos`) is in flight
+        // with it: the connected cell is a moving piston whose block is a
+        // chest this one connects to, same facing, pointing back at `pos`.
+        // A double chest pushed whole has both halves in the same move.
+        bool PartnerMovesWith(ILevelWrite& level, const glm::ivec3& pos, BlockState movedState,
+                              const glm::ivec3& partnerPos) {
+            if (level.GetBlock(partnerPos.x, partnerPos.y, partnerPos.z) != BlockID::MovingPiston) return false;
+            const auto* moving = dynamic_cast<const PistonMovingBlockEntity*>(level.GetBlockEntity(partnerPos));
+            if (!moving) return false;
+            const BlockState partner = moving->GetMovedState();
+            if (!ChestCanConnectTo(movedState.Block(), partner.Block())) return false;
+            if (partner.GetValueByName("facing") != movedState.GetValueByName("facing")) return false;
+            const auto back = ChestConnectedCell(partner, partnerPos);
+            return back && *back == pos;
+        }
+
+        // MC ChestBlock.candidatePartnerFacing, reduced to the yes/no
+        // getChestType asks: a SINGLE chest `self` can connect to, facing
+        // `facing`.
+        bool LoneChestFacing(const IBlockAccess& level, BlockID self, const glm::ivec3& at,
+                             std::string_view facing) {
+            const BlockState st = level.GetBlockState(at.x, at.y, at.z);
+            if (!ChestCanConnectTo(self, st.Block())) return false;
+            return st.GetValueByName("type") == "single" && st.GetValueByName("facing") == facing;
+        }
+    } // namespace
+
+    BlockState ChestLandingState(ILevelWrite& level, const glm::ivec3& pos, BlockState movedState,
+                                 BlockState landingState) {
+        if (!IsChestBlock(landingState.Block()) || !IsChestBlock(movedState.Block())) return landingState;
+
+        // A half that came with its partner keeps the pair: the partner is
+        // still in flight (it lands this tick or next and finds this half
+        // pointing at it), or it landed first and kept pointing here.
+        if (const auto partnerPos = ChestConnectedCell(movedState, pos)) {
+            bool keep = PartnerMovesWith(level, pos, movedState, *partnerPos);
+            if (!keep) {
+                const BlockState partner = level.GetBlockState(partnerPos->x, partnerPos->y, partnerPos->z);
+                const auto back = ChestConnectedCell(partner, *partnerPos);
+                keep = ChestCanConnectTo(movedState.Block(), partner.Block()) &&
+                       partner.GetValueByName("facing") == movedState.GetValueByName("facing") &&
+                       back && *back == pos;
+            }
+            if (keep) {
+                return landingState.SetName(PropertyId::CHEST_TYPE, movedState.GetValueByName("type"));
+            }
+        }
+
+        // Otherwise it lands alone and pairs the way a placed chest does
+        // (getChestType; there is no clicked face): LEFT when a lone chest
+        // with its facing sits clockwise of it, else RIGHT for one
+        // counter-clockwise, else SINGLE.
+        BlockState state = landingState.SetName(PropertyId::CHEST_TYPE, "single");
+        const Horizontal facing = ParseFacing(state.GetValueByName("facing"));
+        if (facing == Horizontal::Invalid) return state;
+        const std::string_view facingName = state.GetValueByName("facing");
+        const BlockID self = state.Block();
+        if (LoneChestFacing(level, self, pos + Offset(ClockWise(facing)), facingName)) {
+            state = state.SetName(PropertyId::CHEST_TYPE, "left");
+        } else if (LoneChestFacing(level, self, pos + Offset(CounterClockWise(facing)), facingName)) {
+            state = state.SetName(PropertyId::CHEST_TYPE, "right");
+        }
+        // MC CopperChestBlock.getStateForPlacement: a copper chest that pairs
+        // becomes the least oxidized of the two.
+        if (IsCopperChestBlock(self)) state = CopperChestLeastOxidizedState(level, pos, state);
+        return state;
     }
 
 } // namespace Game

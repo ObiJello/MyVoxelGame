@@ -24,6 +24,7 @@
 #include "SkyRenderer.hpp"   // the Hush's fog and sky constants (kHushFog / kHushSky)
 #include "HushAtmosphere.hpp" // the Hush's auroras, cavern fog and stillness
 #include "MobEffectEnvironment.hpp" // the local player's effect fog / night vision / darkness
+#include "client/renderer/gui/BossBarState.hpp" // the boss overlay world darkening
 #include "client/world/ClientChunkManager.hpp"   // biomes around the camera (Twilight Forest)
 #include "client/world/ClientWeather.hpp"        // the rain / thunder levels (SetWeather)
 #include "client/world/ClientBlockAccess.hpp"    // the camera cell's sky light and biome (rain fog)
@@ -931,6 +932,16 @@ namespace Render {
         // them — are left alone. Before the mob effects, which outrank it.
         if (m_cameraResonant && m_cameraFluid == kFluidWater) {
             m_frame.fogColor = kResonantWaterFogColor;
+        }
+
+        // MC GameRenderer's bossOverlayWorldDarkening (a wither's
+        // darken-screen bar): the lightmap reads it from the frame, and
+        // FogRenderer.computeFogColor pulls the fog toward (0.7, 0.6, 0.6)
+        // of itself, after the colour source and before the water vision.
+        m_frame.bossOverlayWorldDarkening = Client::g_bossBars.WorldDarkening(partialTick);
+        if (m_frame.bossOverlayWorldDarkening > 0.0f) {
+            m_frame.fogColor = glm::mix(m_frame.fogColor, m_frame.fogColor * glm::vec3(0.7f, 0.6f, 0.6f),
+                                        m_frame.bossOverlayWorldDarkening);
         }
 
         // MC ClientLevel's SKY_LIGHT_FACTOR layer while a lightning bolt

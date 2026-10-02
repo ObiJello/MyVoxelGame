@@ -377,7 +377,7 @@ namespace Game {
         void SplitAndAppend(std::vector<ItemStack>& out, std::vector<ItemStack>&& rolled) {
             for (ItemStack& stack : rolled) {
                 if (stack.count <= 0) continue;
-                const int max = std::max(1, ItemRegistry::Get(stack.itemId).maxStackSize);
+                const int max = std::max(1, Game::GetMaxStackSize(stack));
                 if (stack.count <= max) {
                     out.push_back(std::move(stack));
                     continue;

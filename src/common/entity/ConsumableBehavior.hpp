@@ -9,6 +9,9 @@
 // — same common→server include precedent as PortalGunBehavior.cpp.
 #pragma once
 
+#include <functional>
+#include <glm/glm.hpp>
+
 #include "Item.hpp"
 #include "../data/DataComponents.hpp"
 
@@ -60,5 +63,16 @@ namespace Game::ConsumableBehavior {
     // handleExtraItemsCreatedOnUse is a no-op, so only a fully-used stack
     // becomes its remainder). SERVER ONLY. Returns what the hand holds.
     ItemStack FinishUsingForLiving(LivingEntity& user, ItemStack& handStack);
+
+    // MC ConsumeEffect.apply(level, stack, user) for every type:
+    // apply_effects (the whole list, unless the probability roll fails),
+    // remove_effects (every effect in the holder set), clear_all_effects,
+    // teleport_randomly (TeleportRandomlyConsumeEffect: 16 tries of
+    // LivingEntity.randomTeleport inside `diameter`) and play_sound. Server
+    // side. `moveUser` moves the user when it is a player (the ServerPlayer
+    // owns the position its client follows); null for a mob. Returns MC's
+    // apply result (whether anything happened).
+    bool ApplyConsumeEffect(LivingEntity& user, const ConsumeEffect& effect,
+                            const std::function<void(const glm::dvec3&)>& moveUser = {});
 
 } // namespace Game::ConsumableBehavior

@@ -68,6 +68,19 @@ namespace Game {
         const CraftingInput input = BuildInput(left, top);
         if (input.IsEmpty()) return;
 
+        // ResultSlot.checkTakeAchievements → awardUsedRecipes: the recipe
+        // this grid made and its ingredients (CraftingContainer.getItems,
+        // the non-empty cells), before the cells are spent below.
+        if (const CraftingRecipe* recipe = RecipeManager::Find(input); recipe && recipe->id && *recipe->id) {
+            ContainerClickResult::CraftedRecipe crafted;
+            crafted.recipeId = recipe->id;
+            for (int i = 0; i < GridSize(); ++i) {
+                const ItemStack& cell = m_craftContainer->GetItem(m_craftBase + i);
+                if (!cell.IsEmpty()) crafted.ingredients.push_back(cell);
+            }
+            result.craftedRecipes.push_back(std::move(crafted));
+        }
+
         const std::vector<ItemStack> remaining = RecipeManager::GetRemainingItems(input);
         bool spilledToInventory = false;
 

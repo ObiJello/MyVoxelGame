@@ -55,18 +55,6 @@ namespace Game {
             return body.DistanceToSqr(other) > body.DistanceToSqr(*current) + howMuch * howMuch;
         }
 
-        // MC Sensor.isEntityAttackable: the combat test at the follow range,
-        // line of sight waived for the current attack target.
-        bool IsEntityAttackable(Mob& body, LivingEntity& target) {
-            const Brain* brain = body.GetBrain();
-            TargetingConditions conditions = TargetingConditions::ForCombat().Range(
-                body.GetAttributeValue(Attribute::FollowRange));
-            if (brain && brain->IsMemoryValue(MemoryModule::AttackTarget, &target)) {
-                conditions.IgnoreLineOfSight().IgnoreInvisibility();
-            }
-            return conditions.Test(&body, target);
-        }
-
         std::vector<Hoglin*> VisibleAdultHoglins(const Hoglin& body) {
             std::vector<Hoglin*> out;
             const Brain* brain = body.GetBrain();
@@ -381,7 +369,7 @@ namespace Game {
         if (brain->IsActive(Activity::Avoid) && attacker.GetType() == EntityTypeId::Piglin) return;
         if (attacker.GetType() == EntityTypeId::Hoglin) return;
         if (IsOtherTargetMuchFurtherAway(hoglin, attacker, 4.0)) return;
-        if (!IsEntityAttackable(hoglin, attacker)) return;
+        if (!SensorTargeting::IsEntityAttackable(hoglin, attacker)) return;
         SetAttackTarget(hoglin, attacker);
         BroadcastAttackTarget(hoglin, attacker);
     }

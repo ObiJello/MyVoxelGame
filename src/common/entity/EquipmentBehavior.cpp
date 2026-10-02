@@ -175,7 +175,10 @@ namespace Game {
         if (auto it = pureItems.find(Items::Elytra); it != pureItems.end()) {
             Equippable elytra = *it->second.defaultComponents.get(EQUIPPABLE);
             elytra.damageOnHurt = false;
+            elytra.assetId = "minecraft:elytra";   // EquipmentAssets.ELYTRA
             it->second.defaultComponents.set(EQUIPPABLE, elytra);
+            // Items.java ELYTRA .component(DataComponents.GLIDER, Unit.INSTANCE).
+            it->second.defaultComponents.set(DataComponents::GLIDER, true);
         }
 
         // The Hush's cloak of silence (docs/the-hush.md) — a CHEST wearable
@@ -203,6 +206,7 @@ namespace Game {
             blocks.disableCooldownScale = 1.0f;
             blocks.damageReductions     = {BlocksAttacks::DamageReduction{90.0f, 0.0f, 1.0f}};
             blocks.itemDamage           = BlocksAttacks::ItemDamageFunction{3.0f, 1.0f, 1.0f};
+            blocks.bypassedBy           = {"#minecraft:bypasses_shield"};
             blocks.blockSound           = "item.shield.block";
             blocks.disableSound         = "item.shield.break";
             it->second.defaultComponents.set(BLOCKS_ATTACKS, blocks);
@@ -363,6 +367,27 @@ namespace Game {
             swag.canBeSheared    = true;
             swag.shearingSound   = SoundEvents::LLAMA_CARPET_UNEQUIP;
             blockItems[index].defaultComponents.set(DataComponents::EQUIPPABLE, swag);
+        }
+
+        // Items.java: CARVED_PUMPKIN's Equippable.builder(HEAD).setSwappable
+        // (false).setCameraOverlay("misc/pumpkinblur"), and the heads'
+        // `.equippableUnswappable(HEAD)` (skull, wither skull, player,
+        // zombie, creeper, dragon, piglin): worn only through the armour
+        // slot / a dispenser, never swapped on by a right-click.
+        const auto head = [&blockItems](BlockID block, const char* overlay) {
+            const size_t index = static_cast<size_t>(block);
+            if (index >= blockItems.size()) return;
+            Equippable e;
+            e.slot          = EquipmentSlot::HEAD;
+            e.equipSound    = SoundEvents::ARMOR_EQUIP_GENERIC;
+            e.swappable     = false;
+            if (overlay) e.cameraOverlay = overlay;
+            blockItems[index].defaultComponents.set(DataComponents::EQUIPPABLE, e);
+        };
+        head(BlockID::CarvedPumpkin, "minecraft:misc/pumpkinblur");
+        for (const BlockID b : { BlockID::SkeletonSkull, BlockID::WitherSkeletonSkull, BlockID::PlayerHead,
+                                 BlockID::ZombieHead, BlockID::CreeperHead, BlockID::DragonHead, BlockID::PiglinHead }) {
+            head(b, nullptr);
         }
     }
 

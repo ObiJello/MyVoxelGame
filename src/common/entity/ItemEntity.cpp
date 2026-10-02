@@ -12,7 +12,7 @@ namespace Game {
         // refusal, not a clamp — MC does not top one stack up and leave the
         // remainder behind.
         if (a.IsEmpty() || b.IsEmpty()) return false;
-        const int maxStack = ItemRegistry::Get(b.itemId).maxStackSize;
+        const int maxStack = GetMaxStackSize(b);
         if (a.count + b.count > maxStack) return false;
         // Components must match too, or an enchanted pickaxe would silently
         // fuse with a plain one.
@@ -22,7 +22,7 @@ namespace Game {
     bool ItemEntity::IsMergable() const {
         if (stack.IsEmpty()) return false;
         if (age >= kLifetimeTicks) return false;
-        return stack.count < ItemRegistry::Get(stack.itemId).maxStackSize;
+        return stack.count < GetMaxStackSize(stack);
     }
 
     void ItemEntity::TickMovement(const PhysicsContext& context,

@@ -14,18 +14,17 @@
 
 namespace Game {
 
-    // Tool-speed lookup: returns the held item's miningSpeed against the
-    // target block. Matches MC `Item.getDestroySpeed(stack, state)`:
-    //   • Item has TOOL component AND tool's type matches the block's
-    //     preferredTool → return tool.miningSpeed.
-    //   • Otherwise (wrong tool or no tool) → 1.0.
-    // Air / empty hand → 1.0 (bare-hand baseline).
+    // MC `Item.getDestroySpeed(stack, state)`: the stack's TOOL component
+    // (Tool.getMiningSpeed over its rules — ToolComponents.hpp), 1.0 for an
+    // empty hand or a stack without one. Stack-based, so a component
+    // patch's TOOL counts; the ItemID overload reads the prototype.
+    float GetItemDestroySpeed(const ItemStack& held, const Block& target);
     float GetItemDestroySpeed(ItemID held, const Block& target);
 
-    // MC `Player.hasCorrectToolForDrops(state)`:
-    //   • Block doesn't require a correct tool → always true.
-    //   • Block requires a correct tool → held item must be the right
-    //     ToolType AND meet the block's minTier.
+    // MC `Player.hasCorrectToolForDrops(state)`: the block doesn't require a
+    // correct tool, or the held stack's TOOL rules say it is correct for
+    // drops (Tool.isCorrectForDrops).
+    bool HasCorrectToolForDrops(const ItemStack& held, const Block& target);
     bool HasCorrectToolForDrops(ItemID held, const Block& target);
 
     // MC `Player.getDestroySpeed(state)`:
@@ -41,7 +40,7 @@ namespace Game {
     // haste cancels most of the underwater x0.2. The two attribute values
     // are the player's (ClientPlayer::GetMiningEfficiency /
     // GetSubmergedMiningSpeed — its worn enchantments).
-    float GetPlayerDestroySpeed(ItemID held, const Block& target, bool onGround,
+    float GetPlayerDestroySpeed(const ItemStack& held, const Block& target, bool onGround,
                                 float effectMultiplier = 1.0f, bool eyeInWater = false,
                                 float miningEfficiency = 0.0f, float submergedMiningSpeed = 0.2f);
 
@@ -50,7 +49,7 @@ namespace Game {
     //   modifier = hasCorrectToolForDrops ? 30 : 100
     //   return playerDestroySpeed / destroyTime / modifier
     // Returned value is the per-tick progress increment; sum >= 1.0 → broken.
-    float GetDestroyProgressPerTick(ItemID held, const Block& target, bool onGround,
+    float GetDestroyProgressPerTick(const ItemStack& held, const Block& target, bool onGround,
                                     float effectMultiplier = 1.0f, bool eyeInWater = false,
                                     float miningEfficiency = 0.0f, float submergedMiningSpeed = 0.2f);
 

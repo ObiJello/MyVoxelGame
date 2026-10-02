@@ -124,8 +124,9 @@ namespace Game {
         // saveToBucketTag: the swallowed block (SULFUR_CUBE_CONTENT), age and
         // age lock (bucket_entity_data), plus NoAI from the default tag.
         void SaveToBucket(ItemStack& bucket) const;
-        // loadFromBucketTag on a cube a MobBucketItem just spawned.
-        void LoadFromBucket(const SulfurCubeBucketData& data);
+        // MobBucketItem.spawn on a cube a bucket just released: its
+        // SULFUR_CUBE_CONTENT, then loadFromBucketTag(bucket_entity_data).
+        void LoadFromBucket(const ItemStack& bucket);
 
         // ── The swallowed block (MC: the BODY equipment slot) ─────────────
         ItemID  GetBodyItem()  const { return m_bodyItem; }

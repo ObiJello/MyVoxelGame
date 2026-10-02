@@ -9,6 +9,7 @@
 #include "common/entity/Inventory.hpp"  // brings in InventorySlot alias + Inventory class
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include <glm/glm.hpp>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -45,6 +46,9 @@ namespace Render {
         void SetAir(int air, int maxAir, bool eyesUnderWater) {
             m_air = air; m_maxAir = maxAir; m_isUnderWater = eyesUnderWater;
         }
+        // Where the local player stands — the air bar's pop sound is MC
+        // LocalPlayer.playSound (playLocalSound at the player's position).
+        void SetPlayerPosition(const glm::dvec3& pos) { m_playerPosition = pos; }
         // MC Gui.tick: the HUD's own 20 Hz clock. The heart blink, the
         // low-health jitter, the regeneration bob, the hunger shake and the
         // empty-bubble wobble all count in ticks, not frames.
@@ -79,7 +83,7 @@ namespace Render {
 
         // MAX_HEALTH with HEALTH_BOOST (ClientPlayer::GetMaxHealth) — the
         // heart containers MC's Hud draws from player.getMaxHealth().
-        void SetMaxHealth(int maxHealth)   { m_maxHealth = maxHealth; }
+        void SetMaxHealth(float maxHealth) { m_maxHealth = maxHealth; }
 
         // ── Status effect icons (MC Hud.extractEffects) ───────────────────
         // The local player's effects (a copy of ClientPlayer::activeEffects,
@@ -135,7 +139,7 @@ namespace Render {
         void RenderAttackIndicator(GuiGraphics& graphics);
 
         // MC BossHealthOverlay.render — the bar(s) across the top of the
-        // screen. State arrives via BossEventS2C into Client::g_bossBarState.
+        // screen. State arrives via BossEventS2C into Client::g_bossBars.
         void RenderBossBar(GuiGraphics& graphics);
 
     private:
@@ -199,12 +203,16 @@ namespace Render {
         // the setters above; the rest stay placeholders until their systems
         // exist (air, XP).
         int m_health = 20;        // Half-hearts (20 = full)
-        int m_maxHealth = 20;
+        float m_maxHealth = 20.0f; // MAX_HEALTH attribute value (unrounded, as MC reads it)
         int m_food = 20;          // Half-shanks (20 = full)
-        float m_saturation = 5.0f;// Drives MC's saturation heart-jitter (unused yet)
+        float m_saturation = 5.0f;// <= 0 starts the food row's shake (Hud.extractFood)
         int m_armor = 0;          // Armor points (0-20)
         int m_air = 300;          // Air supply (300 = full, ticks)
         int m_maxAir = 300;
+        // MC Hud.lastBubblePopSoundPlayed: the bubble whose pop already
+        // sounded (0 = none — reset whenever the eyes leave the water).
+        int m_lastBubblePopSoundPlayed = 0;
+        glm::dvec3 m_playerPosition{0.0};
         float   m_absorption = 0.0f;
         uint8_t m_hudFlags = 0;   // SetHealthS2CPacket::kFlag*
         int     m_damageCooldownTime = 0;
@@ -234,6 +242,19 @@ namespace Render {
         float m_waterOverlayU = 0.0f;
         float m_waterOverlayV = 0.0f;
         void RenderWaterOverlay(GuiGraphics& graphics);
+
+    public:
+        // ── Camera overlays (MC Gui.extractCameraOverlays' equipment half) ─
+        // In first person, each worn piece whose EQUIPPABLE names a
+        // camera_overlay draws that texture over the whole screen
+        // (renderTextureOverlay, alpha 1) — the carved pumpkin's blur, or
+        // anything a component patch gives one. Texture asset paths
+        // (Game::CameraOverlayTexturePath), set every frame.
+        void SetCameraOverlays(std::vector<std::string> texturePaths) { m_cameraOverlays = std::move(texturePaths); }
+
+    private:
+        std::vector<std::string> m_cameraOverlays;
+        void RenderCameraOverlays(GuiGraphics& graphics);
     };
 
 } // namespace Render

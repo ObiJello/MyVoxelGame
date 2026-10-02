@@ -24,11 +24,13 @@
 #include <vector>
 
 namespace Game {
+    class AttributeMap;
     class Mob;
     struct MobEffectInstance;
     struct EntityLevel;
     struct ItemEntity;
     struct ExperienceOrb;
+    class EntityTags;
     enum class EntityTypeId : uint16_t;
 }
 
@@ -71,5 +73,24 @@ namespace Game::Anvil {
     // effect ids.
     void WriteActiveEffects(Nbt::Writer& w, const std::vector<MobEffectInstance>& effects);
     std::vector<MobEffectInstance> ReadActiveEffects(const ::World::NBTTagCompound& tag);
+
+    // MC Entity.saveWithoutId / load's "Tags": the scoreboard tags `/tag`
+    // sets, a list of strings written only when there are any. Shared by
+    // every entity writer here and the player file.
+    void WriteEntityTags(Nbt::Writer& w, const EntityTags& tags);
+    void ReadEntityTags(const ::World::NBTTagCompound& tag, EntityTags& out);
+
+    // MC AttributeMap.save / load — the "attributes" list ({id, base,
+    // modifiers?: [{id, amount, operation}]}): every row's base, plus the
+    // modifiers that persist — the engine's fixed permanent ones (spawn
+    // rolls, zombie leader bonuses) and every `permanent` one by its
+    // Identifier (/attribute … modifier add). Shared by the mob writer and
+    // the player file. Read applies only to rows `map` has when
+    // `onlyRegistered` (a mob: MC's apply() skips what the type lacks) and
+    // sets `*customized` when a client-syncable row's saved value differs
+    // from what `map` held, or a named permanent modifier came back.
+    void WriteAttributeList(Nbt::Writer& w, const AttributeMap& map);
+    void ReadAttributeList(const ::World::NBTTagCompound& tag, AttributeMap& map, bool onlyRegistered,
+                           bool* customized = nullptr);
 
 } // namespace Game::Anvil

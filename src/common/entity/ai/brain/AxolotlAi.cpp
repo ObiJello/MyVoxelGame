@@ -111,43 +111,6 @@ namespace Game {
             }
         };
 
-        // MC's StopAttackingIfTargetInvalid.create(Axolotl::onStopAttacking) —
-        // the port's shared class has no stop callback, so this is its body
-        // plus the axolotl's kill-reward hook.
-        class AxolotlStopAttacking : public Behavior {
-        public:
-            AxolotlStopAttacking()
-                : Behavior({ MemoryCondition{ MemoryModule::AttackTarget,
-                                              MemoryStatus::ValuePresent },
-                             MemoryCondition{ MemoryModule::CantReachWalkTargetSince,
-                                              MemoryStatus::Registered } },
-                           1) {}
-            const char* DebugString() const override { return "AxolotlStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
-                auto* axolotl = dynamic_cast<Axolotl*>(&body);
-                Brain* brain = body.GetBrain();
-                if (!axolotl || !brain) return false;
-
-                Entity* target = brain->GetEntity(MemoryModule::AttackTarget);
-                auto* living = dynamic_cast<LivingEntity*>(target);
-
-                bool tired = false;
-                if (const std::optional<int64_t> since =
-                        brain->GetLong(MemoryModule::CantReachWalkTargetSince)) {
-                    tired = (level.GetGameTime() - *since) > 200;
-                }
-
-                if (!living || !living->IsAlive()
-                    || !axolotl->CanAttack(*living) || tired) {
-                    if (living) Axolotl::OnStopAttacking(level, *axolotl, *living);
-                    brain->EraseMemory(MemoryModule::AttackTarget);
-                }
-                return true;
-            }
-        };
-
     } // namespace
 
     void AxolotlAi::InitBrain(Axolotl& axolotl, Brain& brain) {
@@ -204,9 +167,8 @@ namespace Game {
                 const Brain* b = axolotl.GetBrain();
                 const bool onCooldown =
                     b && b->HasMemoryValue(MemoryModule::HasHuntingCooldown);
-                // Sensor.isEntityAttackable's reachable half.
-                if (!axolotl.CanAttack(e)) return false;
-                return hostile || (hunt && !onCooldown);
+                if (!hostile && !(hunt && !onCooldown)) return false;
+                return SensorTargeting::IsEntityAttackable(axolotl, e);
             }));
         // MC FOOD_TEMPTATIONS — ItemTags.AXOLOTL_FOOD is the tropical fish
         // bucket.
@@ -260,7 +222,14 @@ namespace Game {
 
         // ── FIGHT (MC initFightActivity) ───────────────────────────────────
         std::vector<BehaviorPtr> fight;
-        fight.push_back(std::make_unique<AxolotlStopAttacking>());
+        // MC StopAttackingIfTargetInvalid.create(Axolotl::onStopAttacking).
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(
+            StopAttackingIfTargetInvalid::StopAttackCondition{},
+            [](EntityLevel& level, Mob& body, LivingEntity& target) {
+                if (auto* axolotl = dynamic_cast<Axolotl*>(&body)) {
+                    Axolotl::OnStopAttacking(level, *axolotl, target);
+                }
+            }));
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(
             SpeedFn(&SpeedChase)));
         fight.push_back(std::make_unique<MeleeAttack>(20));

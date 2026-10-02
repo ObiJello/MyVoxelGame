@@ -33,8 +33,8 @@ namespace Server {
                                     PlayerSessionManager& /*sessionManager*/) {
         if (!g_integratedServer) return;
         if (args.empty()) {
-            connection.SendChatMessage(std::string("The difficulty is ") +
-                                       kNames[g_integratedServer->GetDifficulty()], 1);
+            source.SendSuccess(connection, std::string("The difficulty is ") +
+                                           kNames[g_integratedServer->GetDifficulty()], false);
             return;
         }
         const auto wanted = Parse(args[0]);
@@ -47,7 +47,7 @@ namespace Server {
             return;
         }
         g_integratedServer->SetDifficulty(*wanted);
-        connection.SendChatMessage(std::string("The difficulty has been set to ") + kNames[*wanted], 1);
+        source.SendSuccess(connection, std::string("The difficulty has been set to ") + kNames[*wanted], true);
         Log::Info("[Difficulty] set to %s", kNames[*wanted]);
     }
 

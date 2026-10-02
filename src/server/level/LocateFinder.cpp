@@ -34,6 +34,7 @@
 #include <mutex>
 #include <queue>
 #include <set>
+#include <tuple>
 
 namespace Server {
 
@@ -120,6 +121,36 @@ namespace Server {
         double DistSqr(const glm::ivec3& a, const glm::ivec3& b) {
             const double dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
             return dx * dx + dy * dy + dz * dz;
+        }
+
+        // FindStructureStartAt's memo: the piece boxes of one structure's
+        // start at one chunk (empty = no start there). Keyed by generator and
+        // seed so a reopened world never reads another world's layout.
+        struct StructureCacheKey {
+            const void* generator = nullptr;
+            int64_t     seed = 0;
+            std::string structure;
+            int32_t     cx = 0;
+            int32_t     cz = 0;
+            bool operator<(const StructureCacheKey& o) const {
+                return std::tie(generator, seed, structure, cx, cz) <
+                       std::tie(o.generator, o.seed, o.structure, o.cx, o.cz);
+            }
+        };
+        constexpr size_t kStructureCacheLimit = 4096;
+        std::mutex g_structureCacheMutex;
+        std::map<StructureCacheKey, std::shared_ptr<const std::vector<mls::BoundingBox>>> g_structureCache;
+
+        std::shared_ptr<const std::vector<mls::BoundingBox>> CachedPieceBoxes(const StructureCacheKey& key) {
+            std::lock_guard<std::mutex> lock(g_structureCacheMutex);
+            auto it = g_structureCache.find(key);
+            return it == g_structureCache.end() ? nullptr : it->second;
+        }
+
+        void StorePieceBoxes(const StructureCacheKey& key, std::shared_ptr<const std::vector<mls::BoundingBox>> boxes) {
+            std::lock_guard<std::mutex> lock(g_structureCacheMutex);
+            if (g_structureCache.size() >= kStructureCacheLimit) g_structureCache.clear();
+            g_structureCache[key] = std::move(boxes);
         }
     }
 
@@ -521,14 +552,6 @@ namespace Server {
         constexpr int32_t kReach = 12;
         const int32_t pcx = static_cast<int32_t>(std::floor(pos.x / 16.0));
         const int32_t pcz = static_cast<int32_t>(std::floor(pos.z / 16.0));
-        auto containsPos = [&pos](const mls::StructureStartData& start) {
-            for (const auto& piece : start.pieces) {
-                const auto& b = piece.boundingBox;
-                if (pos.x >= b.minX && pos.x <= b.maxX && pos.y >= b.minY && pos.y <= b.maxY &&
-                    pos.z >= b.minZ && pos.z <= b.maxZ) return true;
-            }
-            return false;
-        };
         for (const mls::StructureSet* set : state->possibleStructureSets()) {
             std::vector<const mls::StructureInfo*> wanted;
             for (const auto& entry : set->structures) {
@@ -565,10 +588,27 @@ namespace Server {
             for (const auto& [cx, cz] : candidates) {
                 if (!placement->isStructureChunk(*state, cx, cz)) continue;
                 for (const mls::StructureInfo* info : wanted) {
-                    mls::StructureStartData start;
-                    if (StructureGeneratesAt(*generator, *state, *placement, *info, cx, cz, &start) &&
-                        containsPos(start)) {
-                        return StructureStartKey{info->name, cx, cz};
+                    // A start's layout is a pure function of (seed, structure,
+                    // chunk), and laying one out (a bastion's jigsaw) costs
+                    // milliseconds, while the location advancements ask every
+                    // second for every player — so the piece boxes are kept.
+                    const StructureCacheKey key{generator, state->getLevelSeed(), info->name, cx, cz};
+                    std::shared_ptr<const std::vector<mls::BoundingBox>> boxes = CachedPieceBoxes(key);
+                    if (!boxes) {
+                        auto computed = std::make_shared<std::vector<mls::BoundingBox>>();
+                        mls::StructureStartData start;
+                        if (StructureGeneratesAt(*generator, *state, *placement, *info, cx, cz, &start)) {
+                            computed->reserve(start.pieces.size());
+                            for (const auto& piece : start.pieces) computed->push_back(piece.boundingBox);
+                        }
+                        boxes = computed;
+                        StorePieceBoxes(key, boxes);
+                    }
+                    for (const mls::BoundingBox& b : *boxes) {
+                        if (pos.x >= b.minX && pos.x <= b.maxX && pos.y >= b.minY && pos.y <= b.maxY &&
+                            pos.z >= b.minZ && pos.z <= b.maxZ) {
+                            return StructureStartKey{info->name, cx, cz};
+                        }
                     }
                 }
             }

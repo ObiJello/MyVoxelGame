@@ -63,7 +63,14 @@ namespace Game {
     //   Firework — MC "minecraft:firework" (client/color/item/Firework): the
     //            stack's FIREWORK_EXPLOSION colours — one made opaque, several
     //            averaged per channel — else the default (a firework star).
-    enum class ItemTintKind : uint8_t { Fixed = 0, Potion = 1, Dye = 2, MapColor = 3, Firework = 4 };
+    //   CustomModelData — MC "minecraft:custom_model_data"
+    //            (CustomModelDataSource): the stack's CUSTOM_MODEL_DATA
+    //            colors[index] made opaque, else the default. The index is
+    //            the entry's layerTintIndices value.
+    enum class ItemTintKind : uint8_t { Fixed = 0, Potion = 1, Dye = 2, MapColor = 3, Firework = 4,
+                                        CustomModelData = 5 };
+
+    struct ItemStack;
 
     struct ClientItemDesc {
         ClientItemKind kind = ClientItemKind::Missing;
@@ -96,6 +103,12 @@ namespace Game {
         std::vector<uint32_t> layerTints;
         // Parallel to layerTints: which tint source each entry came from.
         std::vector<ItemTintKind> layerTintKinds;
+        // Parallel to layerTints: the source's `index` (custom_model_data).
+        std::vector<uint8_t> layerTintIndices;
+        // The definition reads the stack's CUSTOM_MODEL_DATA anywhere in its
+        // tree (a custom_model_data property or tint source) — such an item
+        // is drawn per stack (GetRenderStack), not from this flat summary.
+        bool readsCustomModelData = false;
         // For kind == Composite: the children, in order (the first supplies
         // the display transforms, as MC's CompositeModel takes them).
         std::vector<CompositeChild> compositeChildren;
@@ -106,6 +119,26 @@ namespace Game {
         // Load + describe `assets/items/{slug}.json`. Returns kind=Missing if the file
         // is absent or unparseable; otherwise kind matches the resolved rest model.
         static ClientItemDesc Load(const std::string& slug);
+
+        // ── Per-stack evaluation (MC ItemModel.update) ───────────────────
+        // `modelId` is an item model definition id ("minecraft:stick";
+        // resource packs override assets/minecraft/items). Definitions are
+        // parsed once and cached.
+
+        // The definition file exists.
+        static bool DefinitionExists(const std::string& modelId);
+        // The definition reads CUSTOM_MODEL_DATA (see readsCustomModelData).
+        static bool ReadsCustomModelData(const std::string& modelId);
+        // Walks the definition for `stack`: condition / select /
+        // range_dispatch nodes whose property the stack answers
+        // (custom_model_data, has_component, damaged, broken, damage, count)
+        // take the branch MC would; the node reached is then summarised
+        // like Load (default branches for world-state properties, its
+        // range_dispatch as animation frames). `leafKey` names that node
+        // (stable for the process) so callers can cache what they build
+        // from it. kind == Missing when the definition does not exist.
+        static ClientItemDesc Evaluate(const std::string& modelId, const ItemStack& stack,
+                                       std::string& leafKey);
     };
 
 } // namespace Game

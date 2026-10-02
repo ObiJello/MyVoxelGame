@@ -68,10 +68,21 @@ namespace Game {
         // variant at random. The partner is only known here, so it is noted
         // for the CreateBaby that follows.
         void SpawnChildFromBreeding(Animal& partner) override;
+        // MC <Mob>SoundVariants (FarmSoundVariants.hpp): the sound set,
+        // picked at random in FinalizeSpawn, saved as "sound_variant" and set
+        // by the item's <mob>/sound_variant. Classic answers the type's own
+        // sounds (EntitySounds).
+        uint8_t GetSoundVariant() const { return m_soundVariant; }
+        void SetSoundVariant(uint8_t v) { m_soundVariant = v; }
+        const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
 
     protected:
         TemperatureVariant m_variant = TemperatureVariant::Temperate;
         int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
+        uint8_t m_soundVariant = 0;         // FarmSoundVariants, 0 = classic
         void RegisterGoals() override;
     };
 
@@ -95,9 +106,10 @@ namespace Game {
         // MC MushroomCow.readyForShearing: alive and not a calf.
         bool ReadyForShearing() const { return IsAlive() && !IsBaby(); }
 
-        // MC MushroomCow.shear — convert to Cow, drop 5 mushrooms (of the
-        // variant's colour).
-        void Shear();
+        // MC MushroomCow.shear(level, soundSource, tool) — convert to Cow,
+        // drop 5 mushrooms (of the variant's colour); the sound in
+        // `soundSource` (PLAYERS from a player, BLOCKS from a dispenser).
+        void Shear(SoundSource soundSource = SoundSource::Players);
 
         // MC MushroomCow.Variant — RED (0, the default) / BROWN (1). Saved
         // as "Type" ("red" / "brown"), synced through the variant byte
@@ -205,10 +217,21 @@ namespace Game {
         // variant at random. The partner is only known here, so it is noted
         // for the CreateBaby that follows.
         void SpawnChildFromBreeding(Animal& partner) override;
+        // MC <Mob>SoundVariants (FarmSoundVariants.hpp): the sound set,
+        // picked at random in FinalizeSpawn, saved as "sound_variant" and set
+        // by the item's <mob>/sound_variant. Classic answers the type's own
+        // sounds (EntitySounds).
+        uint8_t GetSoundVariant() const { return m_soundVariant; }
+        void SetSoundVariant(uint8_t v) { m_soundVariant = v; }
+        const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
+        void PlayEatingSound() override;
 
     protected:
         TemperatureVariant m_variant = TemperatureVariant::Temperate;
         int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
+        uint8_t m_soundVariant = 0;         // FarmSoundVariants, 0 = classic
         ItemBasedSteering m_steering;        // MC Pig.steering
         void RegisterGoals() override;
     };
@@ -271,8 +294,10 @@ namespace Game {
         // MC Sheep.readyForShearing: alive, unsheared, and NOT A LAMB.
         bool ReadyForShearing() const;
 
-        // MC Sheep.shear — drop the wool and set the sheared flag.
-        void Shear();
+        // MC Sheep.shear(level, soundSource, tool) — drop the wool and set the
+        // sheared flag; the sound in `soundSource` (PLAYERS from a player,
+        // BLOCKS from a dispenser).
+        void Shear(SoundSource soundSource = SoundSource::Players);
 
         // The wool item matching a DyeColor ordinal. Static because the death
         // drop needs it from the server's loot path as well as the shear does.
@@ -313,10 +338,20 @@ namespace Game {
         // variant at random. The partner is only known here, so it is noted
         // for the CreateBaby that follows.
         void SpawnChildFromBreeding(Animal& partner) override;
+        // MC <Mob>SoundVariants (FarmSoundVariants.hpp): the sound set,
+        // picked at random in FinalizeSpawn, saved as "sound_variant" and set
+        // by the item's <mob>/sound_variant. Classic answers the type's own
+        // sounds (EntitySounds).
+        uint8_t GetSoundVariant() const { return m_soundVariant; }
+        void SetSoundVariant(uint8_t v) { m_soundVariant = v; }
+        const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
 
     protected:
         TemperatureVariant m_variant = TemperatureVariant::Temperate;
         int8_t m_breedPartnerVariant = -1;   // -1 = no partner known
+        uint8_t m_soundVariant = 0;         // FarmSoundVariants, 0 = classic
     public:
 
         // MC Chicken.aiStep — the wing flap, which is both the animation and
@@ -538,6 +573,26 @@ namespace Game {
     public:
         explicit Rabbit(EntityLevel* level);
 
+        // MC Rabbit.Variant (ids as the save and the wire carry them).
+        enum class Variant : uint8_t {
+            Brown = 0, White = 1, Black = 2, WhiteSplotched = 3, Gold = 4, Salt = 5, Evil = 99,
+        };
+        static bool IsValidVariant(int id) { return (id >= 0 && id <= 5) || id == 99; }
+        static const char* VariantName(Variant v);
+        Variant GetVariant() const { return m_variant; }
+        // MC Rabbit.setVariant: the killer bunny (EVIL) gains its armour,
+        // attack goals, +5 attack damage and its name.
+        void SetVariant(Variant v);
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override {
+            m_variant = IsValidVariant(v) ? static_cast<Variant>(v) : Variant::Brown;
+        }
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+        void SpawnChildFromBreeding(Animal& partner) override;
+        SoundSource GetSoundSource() const override;
+        bool DoHurtTarget(Entity& target) override;
+
         static void CreateAttributes(AttributeMap& out);
 
         // MC ItemTags.RABBIT_FOOD: carrot, golden carrot, dandelion.
@@ -603,6 +658,9 @@ namespace Game {
         int  m_jumpDelayTicks = 0;
         int  m_moreCarrotTicks = 0;   // MC Rabbit.moreCarrotTicks
         int  m_idleAnimationTimeout = 0;   // MC 26.1 Rabbit.idleAnimationTimeout (client)
+        Variant m_variant = Variant::Brown;
+        int     m_breedPartnerVariant = -1;
+        bool    m_evilGoalsAdded = false;
     };
 
     // MC animal/polarbear/PolarBear. MAX_HEALTH 30, FOLLOW_RANGE 20,
@@ -875,6 +933,14 @@ namespace Game {
         // MC Wolf.cancelShake.
         void CancelShake();
 
+        // Engine repair (not in MC), the first server steps after the wolf
+        // exists: a TAMED wolf whose saved grudge or target is one of the
+        // wild hunt's prey (sheep, rabbit, fox, turtle — what only
+        // NonTameRandomTargetGoal hunts) drops it. Worlds saved while
+        // NonTameRandomTargetGoal / the owner goals resurrected cleared
+        // targets carry tamed wolves angry at sheep; this clears them on load.
+        void HealLoadedTameAnger();
+
         // MC Wolf.canArmorAbsorb: wearing wolf armor, and the source is not
         // in #bypasses_wolf_armor.
         bool CanArmorAbsorb(MobDamageSource source) const;
@@ -904,6 +970,11 @@ namespace Game {
 
         ItemStack m_bodyArmor;
         bool      m_bodyArmorDirty = false;
+        // The stack whose attribute modifiers are on m_attributes right now
+        // (collectEquipmentChanges' lastBodyItemStack): the BODY armour as it
+        // was when last applied, so an in-place change can take the old
+        // modifiers off.
+        ItemStack m_bodyArmorModifiersFrom;
         // Client: the last armour the server showed, so entity event 65
         // (the break) still knows its sound when the emptied slot's update
         // lands first.
@@ -911,6 +982,13 @@ namespace Game {
 
         // Set for the duration of SpawnChildFromBreeding.
         const Wolf* m_breedPartner = nullptr;
+
+        // HealLoadedTameAnger's state: pending until the grudge the wolf
+        // started with resolves (or ends); the uuid is that grudge, so a NEW
+        // one the owner starts meanwhile is never touched.
+        bool m_healLoadedAnger = true;
+        bool m_healAngerUuidTaken = false;
+        Uuid m_healAngerUuid{};
     };
 
     // MC Wolf.WolfPackData — the coat the first member of a natural pack
@@ -1781,10 +1859,15 @@ namespace Game {
         // Mob::IsTamedPet — a tamed one never despawns (IsDespawnPersistent).
         bool IsTamedPet() const override { return IsTame(); }
 
-        // MC Cat.getAmbientSound / playEatingSound / hiss, classic sound set.
+        // MC Cat.getAmbientSound / playEatingSound / hiss / hurt / death off
+        // its CatSoundVariant (classic or royal; babies share one set).
         const char* GetAmbientSound() const override;
+        const char* GetHurtSound(MobDamageSource source) const override;
+        const char* GetDeathSound() const override;
         void PlayEatingSound() override;
         void Hiss();
+        uint8_t GetSoundVariant() const { return m_soundVariant; }
+        void SetSoundVariant(uint8_t v) { m_soundVariant = v; }
 
         static constexpr int kVariantCount = 11;
 
@@ -1907,6 +1990,7 @@ namespace Game {
         // MC Cat.tryToTame — the 1/3 fish roll.
         void TryToTame(LivingEntity& player);
 
+        uint8_t m_soundVariant = 0;   // CatSoundVariants: classic, royal
         uint8_t m_variant = 0;
         uint8_t m_collarColor = kDyeColorRed;   // MC DEFAULT_COLLAR_COLOR
         const Cat* m_breedPartner = nullptr;     // set during SpawnChildFromBreeding

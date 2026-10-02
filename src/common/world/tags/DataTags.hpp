@@ -20,7 +20,7 @@ namespace Game::DataTags {
     // DamageType is MC's damage_type registry (data/<ns>/tags/damage_type) —
     // the #is_fire / #bypasses_armor / #is_projectile sets the enchantment
     // effects' damage_source_properties conditions test.
-    enum class Registry { Block, Fluid, EntityType, Item, DamageType, GameEvent };
+    enum class Registry { Block, Fluid, EntityType, Item, DamageType, GameEvent, MobEffect };
 
     // Tags carried by `id` ("minecraft:stone" or plain "stone"), each as
     // "#minecraft:mineable/pickaxe", sorted. Empty when the id has none or

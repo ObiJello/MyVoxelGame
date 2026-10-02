@@ -97,6 +97,17 @@ namespace Render {
         void DestroyRenderTarget(RenderTargetHandle rt) override;
         void BindRenderTarget(RenderTargetHandle rt) override;
         bool CopyFramebufferToRenderTarget(RenderTargetHandle dst) override;
+        // Scaled scene (Render Resolution) — see RenderBackend.hpp and the
+        // note at m_sceneSlots below.
+        void RequestScaledScene(int width, int height) override;
+        bool ScaledSceneActive() const override { return m_sceneActive; }
+        void GetScaledSceneSize(int& width, int& height) const override {
+            if (m_sceneActive) {
+                width  = static_cast<int>(m_sceneExtent.width);
+                height = static_cast<int>(m_sceneExtent.height);
+            }
+        }
+        void ResolveScaledScene() override;
         TextureHandle GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
         void ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
         // Improved Transparency: MC 26.3 OIT (see RenderBackend.hpp and the
@@ -270,11 +281,16 @@ namespace Render {
         VkRenderPass m_renderPassLoadKeepDepth = VK_NULL_HANDLE;   // LOAD,  depth STORED
         void ApplyFrameDepthPreserved();
         void DestroyKeepDepthPasses();
+        // "The frame" is the swapchain image, or this frame's scaled scene
+        // (m_sceneActive) until ResolveScaledScene — every pass, copy and
+        // barrier that names the frame goes through these.
         VkRenderPass FrameBeginPass() const {
+            if (m_sceneActive) return m_frameDepthPreserved ? m_scenePassKeepDepth : m_scenePass;
             return (m_frameDepthPreserved && m_renderPassKeepDepth != VK_NULL_HANDLE)
                        ? m_renderPassKeepDepth : m_renderPass;
         }
         VkRenderPass FrameResumePass() const {
+            if (m_sceneActive) return m_frameDepthPreserved ? m_scenePassLoadKeepDepth : m_scenePassLoad;
             return (m_frameDepthPreserved && m_renderPassLoadKeepDepth != VK_NULL_HANDLE)
                        ? m_renderPassLoadKeepDepth : m_renderPassLoad;
         }
@@ -283,11 +299,15 @@ namespace Render {
         // m_depthImages). Index slot * imageCount + image — FrameFramebuffer().
         std::vector<VkFramebuffer> m_framebuffers;
         VkFramebuffer FrameFramebuffer() const {
+            if (m_sceneActive) return m_sceneSlots[static_cast<size_t>(m_currentFrame)].framebuffer;
             return m_framebuffers[static_cast<size_t>(m_currentFrame) * m_swapchainImageViews.size() + m_currentImageIndex];
         }
         // Whether the swapchain images were created with TRANSFER_SRC (the
         // surface has to allow it); without it the read-back is refused.
         bool m_swapchainTransferSrc = false;
+        // ...and TRANSFER_DST: the scaled scene is blitted onto the image
+        // (ResolveScaledScene); without it Render Resolution stays at 100 %.
+        bool m_swapchainTransferDst = false;
         bool m_anisotropySupported = false;   // samplerAnisotropy feature enabled on the device
 
         // Read-backs in flight, oldest first (RequestBackbufferReadback /
@@ -1033,6 +1053,74 @@ namespace Render {
         // Ends the pass recording now, leaving its colour image ready to be
         // sampled (a target) or re-entered (the frame).
         void SuspendActivePass(VkCommandBuffer cmd);
+
+        // ── Scaled scene (RequestScaledScene) ──────────────────────────
+        // MC's mainTarget, only when Render Resolution is not 100 %: the
+        // frame's level is drawn into a w×h colour + depth image of its
+        // frame slot, then ResolveScaledScene blits it (VK_FILTER_LINEAR)
+        // over the acquired swapchain image and opens the swapchain pass
+        // (m_renderPassAfterScene*: colour LOADED from the blit, depth
+        // cleared) for the GUI. One set per frame slot, like the frame's
+        // depth images: consecutive frames never write the same image
+        // (see "Frame overlap on MoltenVK"). The scene passes are the frame
+        // passes' attachments, subpass and dependency with the colour
+        // ending in COLOR_ATTACHMENT_OPTIMAL instead of PRESENT_SRC — the
+        // same compatibility class, so every pipeline draws into them
+        // unchanged. A size change (slider, window resize) rebuilds every
+        // slot after a device idle; at 100 % nothing here exists.
+        struct SceneSlot {
+            VkImage        colorImage  = VK_NULL_HANDLE;   // swapchain format
+            VkDeviceMemory colorMemory = VK_NULL_HANDLE;
+            VkImageView    colorView   = VK_NULL_HANDLE;
+            VkImage        depthImage  = VK_NULL_HANDLE;   // m_depthFormat
+            VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+            VkImageView    depthView   = VK_NULL_HANDLE;
+            VkImageView    depthSampleView = VK_NULL_HANDLE;   // only while the frame depth is preserved
+            VkFramebuffer  framebuffer = VK_NULL_HANDLE;
+        };
+        std::array<SceneSlot, MAX_FRAMES_IN_FLIGHT> m_sceneSlots{};
+        VkExtent2D m_sceneExtent{0, 0};              // the slots' size; 0 = none built
+        bool       m_sceneBuiltPreserved = false;    // depth SAMPLED / keep-depth when built
+        VkExtent2D m_sceneRequest{0, 0};             // RequestScaledScene, for the next BeginFrame
+        bool       m_sceneActive = false;            // this frame draws its level into the scene
+        bool       m_sceneUnsupportedLogged = false;
+        int        m_sceneMaxDim = 0;                         // device image/framebuffer limit; 0 = not asked yet
+        VkFilter   m_sceneBlitFilter = VK_FILTER_LINEAR;      // NEAREST if the format cannot filter
+        VkRenderPass m_scenePass              = VK_NULL_HANDLE;   // CLEAR,  depth discarded
+        VkRenderPass m_scenePassLoad          = VK_NULL_HANDLE;   // LOAD,   depth discarded
+        VkRenderPass m_scenePassKeepDepth     = VK_NULL_HANDLE;   // CLEAR,  depth stored
+        VkRenderPass m_scenePassLoadKeepDepth = VK_NULL_HANDLE;   // LOAD,   depth stored
+        VkRenderPass m_renderPassAfterScene          = VK_NULL_HANDLE;   // swapchain: colour LOAD, depth CLEAR
+        VkRenderPass m_renderPassAfterSceneKeepDepth = VK_NULL_HANDLE;   // ...depth stored
+        // One frame-shaped pass: colour load op / initial / final layout,
+        // depth loaded (from DEPTH_STENCIL_ATTACHMENT_OPTIMAL) or cleared
+        // (from UNDEFINED), depth stored or discarded.
+        bool CreateFrameShapedPass(VkRenderPass& out, VkAttachmentLoadOp colorLoad,
+                                   VkImageLayout colorInitial, VkImageLayout colorFinal,
+                                   bool loadDepth, bool keepDepth);
+        bool CreateScenePasses();
+        void DestroyScenePasses();
+        bool EnsureSceneTargets(VkExtent2D extent);
+        void DestroySceneTargets();
+        // The frame's extent / colour image / colour layout at the end of its
+        // pass / depth image and views of a slot: the scene's while one is
+        // active, else the swapchain's and the slot's frame depth.
+        VkExtent2D    FrameExtent() const { return m_sceneActive ? m_sceneExtent : m_swapchainExtent; }
+        VkImage       FrameColorImage() const {
+            return m_sceneActive ? m_sceneSlots[static_cast<size_t>(m_currentFrame)].colorImage
+                                 : m_swapchainImages[m_currentImageIndex];
+        }
+        VkImageLayout FrameFinalLayout() const {
+            return m_sceneActive ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        }
+        VkImage     FrameDepthImage(size_t slot) const { return m_sceneActive ? m_sceneSlots[slot].depthImage : m_depthImages[slot]; }
+        VkImageView FrameDepthView(size_t slot) const  { return m_sceneActive ? m_sceneSlots[slot].depthView : m_depthImageViews[slot]; }
+        VkImageView FrameDepthSampleView(size_t slot) const {
+            return m_sceneActive ? m_sceneSlots[slot].depthSampleView : m_depthSampleViews[slot];
+        }
+        // Improved Transparency's framebuffers attach the frame depth: which
+        // one they were built on (the scene's or the slot's own).
+        bool m_oitOnScene = false;
 
         // Memory tracking
         GPUMemoryStats m_memStats;

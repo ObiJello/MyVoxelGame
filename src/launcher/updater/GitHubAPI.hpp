@@ -23,8 +23,16 @@ namespace Launcher {
         // Selected asset for this platform
         ReleaseAsset platformAsset;
         bool hasPlatformAsset = false;
+
+        // Binary patches from the previous release's files (*.obpatch,
+        // BinaryPatch). Named without a platform tag on purpose: launchers before
+        // delta updates match assets by tag substring and must never pick it.
+        ReleaseAsset patchAsset;
+        bool hasPatchAsset = false;
     };
 
+    // One instance answers both the launcher and the game check from a single
+    // fetch of the release list (the first call fetches, the second reuses it).
     class GitHubAPI {
     public:
         GitHubAPI(const std::string& owner, const std::string& repo);
@@ -39,25 +47,17 @@ namespace Launcher {
         std::string m_owner;
         std::string m_repo;
 
-        // Perform a GET request and return the response body
-        bool HttpGet(const std::string& url, std::string& outResponse);
-
-        // Same as HttpGet, but also captures the GitHub `Link: ...; rel="next"`
-        // header for pagination. Returns the next-page URL in `outNextUrl` (empty
-        // string if this is the last page). Used by FetchAllReleases.
-        bool HttpGetWithLink(const std::string& url,
-                             std::string& outBody,
-                             std::string& outNextUrl);
-
-        // Walk every page of /releases via Link-header pagination and append
-        // each release's JSON object to `outReleases`. Stops at MAX_PAGES as a
-        // safety cap. Returns true if any HTTP page succeeded; even partial
-        // results are usable since we semver-pick the best match downstream.
+        // Every release, newest pages first: page 1, then pages 2..last (from its
+        // Link header) side by side on the same connection. Cached after the
+        // first call. MAX_PAGES caps it at 1000 releases. True if any page came
+        // back; the callers semver-pick across whatever was fetched.
         bool FetchAllReleases(std::vector<nlohmann::json>& outReleases);
+        std::vector<nlohmann::json> m_releases;
+        bool m_releasesFetched = false;
+        bool m_releasesOk = false;
 
-        // Parse the value of a Link response header to extract the URL marked
-        // rel="next". Returns "" if no next link is present.
-        static std::string ParseLinkNext(const std::string& headerBlock);
+        // The page number in the Link header's rel="last" URL; 1 when there is none.
+        static int ParseLastPage(const std::string& headerBlock);
 
         // Parse a single release JSON object into ReleaseInfo
         bool ParseRelease(const nlohmann::json& json, ReleaseInfo& outInfo);

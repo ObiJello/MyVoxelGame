@@ -29,6 +29,47 @@ namespace Core {
         }
         uint64_t U64(const uint8_t* p) { return static_cast<uint64_t>(U32(p)) | (static_cast<uint64_t>(U32(p + 4)) << 32); }
 
+        // The end-of-central-directory record sits in the last 22 bytes plus up
+        // to a 65,535-byte archive comment: scan back for its signature.
+        size_t FindEndRecord(const uint8_t* tail, size_t tailSize) {
+            if (tailSize < kEndSize) return std::string::npos;
+            for (size_t i = tailSize - kEndSize + 1; i-- > 0;) {
+                if (U32(tail + i) == kEndSig && i + kEndSize + U16(tail + i + 20) <= tailSize) return i;
+            }
+            return std::string::npos;
+        }
+
+        // Zip64 extra field (id 1): the 64-bit value of each 32-bit field that
+        // holds 0xFFFFFFFF, in the order size, compressed size, header offset.
+        void ApplyZip64Extra(const uint8_t* x, const uint8_t* end, uint64_t& size, uint64_t& compressedSize,
+                             uint64_t* localHeaderOffset) {
+            while (x + 4 <= end) {
+                const uint16_t id  = U16(x);
+                const uint16_t len = U16(x + 2);
+                const uint8_t* v   = x + 4;
+                if (v + len > end) break;
+                if (id == 0x0001) {
+                    const uint8_t* q = v;
+                    const uint8_t* qEnd = v + len;
+                    if (size == 0xFFFFFFFFu && q + 8 <= qEnd)           { size = U64(q); q += 8; }
+                    if (compressedSize == 0xFFFFFFFFu && q + 8 <= qEnd) { compressedSize = U64(q); q += 8; }
+                    if (localHeaderOffset && *localHeaderOffset == 0xFFFFFFFFu && q + 8 <= qEnd) {
+                        *localHeaderOffset = U64(q);
+                    }
+                }
+                x = v + len;
+            }
+        }
+
+        bool CheckDirectory(const ZipArchive::DirectoryInfo& d, uint64_t fileSize, std::string& error) {
+            if (d.offset > fileSize || d.size > fileSize - d.offset || d.size > kMaxDirectoryBytes ||
+                d.entryCount > d.size / kCentralSize) {
+                error = "damaged central directory";
+                return false;
+            }
+            return true;
+        }
+
     } // namespace
 
     bool ZipArchive::Fail(std::string why) {
@@ -47,6 +88,7 @@ namespace Core {
     void ZipArchive::Close() {
         if (m_file.is_open()) m_file.close();
         m_fileSize = 0;
+        m_directoryBytes = 0;
         m_entries.clear();
     }
 
@@ -59,23 +101,20 @@ namespace Core {
         m_fileSize = static_cast<uint64_t>(m_file.tellg());
         if (m_fileSize < kEndSize) { Close(); return Fail("not a zip (too short)"); }
 
-        // The end-of-central-directory record sits in the last 22 bytes plus
-        // up to a 65,535-byte archive comment: scan back for its signature.
         const uint64_t tailSize = std::min<uint64_t>(m_fileSize, kEndSize + 0xFFFF + kZip64LocatorSize);
         std::vector<uint8_t> tail(static_cast<size_t>(tailSize));
         const uint64_t tailStart = m_fileSize - tailSize;
         if (!ReadAt(tailStart, tail.data(), tail.size())) { Close(); return Fail("cannot read the archive's end"); }
-        size_t eocd = std::string::npos;
-        for (size_t i = tail.size() - kEndSize + 1; i-- > 0;) {
-            if (U32(&tail[i]) == kEndSig && i + kEndSize + U16(&tail[i + 20]) <= tail.size()) { eocd = i; break; }
-        }
+        const size_t eocd = FindEndRecord(tail.data(), tail.size());
         if (eocd == std::string::npos) { Close(); return Fail("not a zip (no end-of-directory record)"); }
 
-        uint64_t entryCount = U16(&tail[eocd + 10]);
-        uint64_t dirSize    = U32(&tail[eocd + 12]);
-        uint64_t dirOffset  = U32(&tail[eocd + 16]);
+        DirectoryInfo dir;
+        dir.entryCount = U16(&tail[eocd + 10]);
+        dir.size       = U32(&tail[eocd + 12]);
+        dir.offset     = U32(&tail[eocd + 16]);
 
-        // Zip64: a locator right before the record points at the 64-bit one.
+        // Zip64: a locator right before the record points at the 64-bit one,
+        // which may sit anywhere in the file.
         if (eocd >= kZip64LocatorSize && U32(&tail[eocd - kZip64LocatorSize]) == kZip64LocatorSig) {
             const uint64_t z64Offset = U64(&tail[eocd - kZip64LocatorSize + 8]);
             uint8_t z64[kZip64EndSize];
@@ -83,27 +122,61 @@ namespace Core {
                 Close();
                 return Fail("damaged Zip64 end-of-directory record");
             }
-            entryCount = U64(z64 + 32);
-            dirSize    = U64(z64 + 40);
-            dirOffset  = U64(z64 + 48);
+            dir.entryCount = U64(z64 + 32);
+            dir.size       = U64(z64 + 40);
+            dir.offset     = U64(z64 + 48);
         }
-        if (dirOffset > m_fileSize || dirSize > m_fileSize - dirOffset || dirSize > kMaxDirectoryBytes ||
-            entryCount > dirSize / kCentralSize) {
-            Close();
-            return Fail("damaged central directory");
-        }
+        std::string error;
+        if (!CheckDirectory(dir, m_fileSize, error)) { Close(); return Fail(error); }
 
-        std::vector<uint8_t> dir(static_cast<size_t>(dirSize));
-        if (!ReadAt(dirOffset, dir.data(), dir.size())) { Close(); return Fail("cannot read the central directory"); }
-        m_entries.reserve(static_cast<size_t>(entryCount));
+        std::vector<uint8_t> bytes(static_cast<size_t>(dir.size));
+        if (!ReadAt(dir.offset, bytes.data(), bytes.size())) { Close(); return Fail("cannot read the central directory"); }
+        if (!ParseDirectory(bytes.data(), bytes.size(), dir.entryCount, m_entries, error)) {
+            Close();
+            return Fail(error);
+        }
+        m_directoryBytes = dir.size;
+        return true;
+    }
+
+    bool ZipArchive::LocateDirectory(const uint8_t* tail, size_t tailSize, uint64_t tailOffset, uint64_t fileSize,
+                                     DirectoryInfo& out, std::string& error) {
+        const size_t eocd = FindEndRecord(tail, tailSize);
+        if (eocd == std::string::npos) {
+            error = "not a zip (no end-of-directory record)";
+            return false;
+        }
+        out.entryCount = U16(tail + eocd + 10);
+        out.size       = U32(tail + eocd + 12);
+        out.offset     = U32(tail + eocd + 16);
+        if (eocd >= kZip64LocatorSize && U32(tail + eocd - kZip64LocatorSize) == kZip64LocatorSig) {
+            const uint64_t z64Offset = U64(tail + eocd - kZip64LocatorSize + 8);
+            if (z64Offset < tailOffset || z64Offset - tailOffset + kZip64EndSize > tailSize ||
+                U32(tail + (z64Offset - tailOffset)) != kZip64EndSig) {
+                error = "Zip64 end-of-directory record outside the bytes given";
+                return false;
+            }
+            const uint8_t* z64 = tail + (z64Offset - tailOffset);
+            out.entryCount = U64(z64 + 32);
+            out.size       = U64(z64 + 40);
+            out.offset     = U64(z64 + 48);
+        }
+        return CheckDirectory(out, fileSize, error);
+    }
+
+    bool ZipArchive::ParseDirectory(const uint8_t* dir, size_t size, uint64_t entryCount,
+                                    std::vector<Entry>& out, std::string& error) {
+        out.clear();
+        out.reserve(static_cast<size_t>(std::min<uint64_t>(entryCount, size / kCentralSize)));
         size_t p = 0;
         for (uint64_t i = 0; i < entryCount; ++i) {
-            if (p + kCentralSize > dir.size() || U32(&dir[p]) != kCentralHeaderSig) {
-                Close();
-                return Fail("damaged central directory entry");
+            if (p + kCentralSize > size || U32(dir + p) != kCentralHeaderSig) {
+                error = "damaged central directory entry";
+                return false;
             }
-            const uint8_t* h = &dir[p];
+            const uint8_t* h = dir + p;
             Entry e;
+            e.versionMadeBy = U16(h + 4);
             e.flags  = U16(h + 8);
             e.method = U16(h + 10);
             e.crc32  = U32(h + 16);
@@ -112,33 +185,71 @@ namespace Core {
             const size_t nameLen    = U16(h + 28);
             const size_t extraLen   = U16(h + 30);
             const size_t commentLen = U16(h + 32);
-            e.localHeaderOffset = U32(h + 42);
-            if (p + kCentralSize + nameLen + extraLen + commentLen > dir.size()) {
-                Close();
-                return Fail("damaged central directory entry");
+            e.externalAttributes = U32(h + 38);
+            e.localHeaderOffset  = U32(h + 42);
+            if (p + kCentralSize + nameLen + extraLen + commentLen > size) {
+                error = "damaged central directory entry";
+                return false;
             }
             e.name.assign(reinterpret_cast<const char*>(h + kCentralSize), nameLen);
-
-            // Zip64 extra field (id 1): the 64-bit value of each 32-bit field
-            // that holds 0xFFFFFFFF, in this order.
-            const uint8_t* x   = h + kCentralSize + nameLen;
-            const uint8_t* end = x + extraLen;
-            while (x + 4 <= end) {
-                const uint16_t id  = U16(x);
-                const uint16_t len = U16(x + 2);
-                const uint8_t* v   = x + 4;
-                if (v + len > end) break;
-                if (id == 0x0001) {
-                    const uint8_t* q = v;
-                    const uint8_t* qEnd = v + len;
-                    if (e.size == 0xFFFFFFFFu && q + 8 <= qEnd)              { e.size = U64(q); q += 8; }
-                    if (e.compressedSize == 0xFFFFFFFFu && q + 8 <= qEnd)    { e.compressedSize = U64(q); q += 8; }
-                    if (e.localHeaderOffset == 0xFFFFFFFFu && q + 8 <= qEnd) { e.localHeaderOffset = U64(q); }
-                }
-                x = v + len;
-            }
-            m_entries.push_back(std::move(e));
+            const uint8_t* x = h + kCentralSize + nameLen;
+            ApplyZip64Extra(x, x + extraLen, e.size, e.compressedSize, &e.localHeaderOffset);
+            out.push_back(std::move(e));
             p += kCentralSize + nameLen + extraLen + commentLen;
+        }
+        return true;
+    }
+
+    ZipArchive::HeaderResult ZipArchive::ParseLocalHeader(const uint8_t* p, size_t available, LocalHeader& out) {
+        if (available < 4) return HeaderResult::NeedMore;
+        if (U32(p) != kLocalHeaderSig) return HeaderResult::NotAHeader;
+        if (available < kLocalSize) return HeaderResult::NeedMore;
+        const size_t nameLen  = U16(p + 26);
+        const size_t extraLen = U16(p + 28);
+        if (available < kLocalSize + nameLen + extraLen) return HeaderResult::NeedMore;
+        out.flags          = U16(p + 6);
+        out.method         = U16(p + 8);
+        out.crc32          = U32(p + 14);
+        out.compressedSize = U32(p + 18);
+        out.size           = U32(p + 22);
+        out.name.assign(reinterpret_cast<const char*>(p + kLocalSize), nameLen);
+        const uint8_t* x = p + kLocalSize + nameLen;
+        ApplyZip64Extra(x, x + extraLen, out.size, out.compressedSize, nullptr);
+        out.headerSize = kLocalSize + nameLen + extraLen;
+        return HeaderResult::Ok;
+    }
+
+    bool ZipArchive::Decode(const std::string& name, uint16_t method, uint32_t crc32, uint64_t size,
+                            const uint8_t* compressed, size_t compressedSize,
+                            std::vector<uint8_t>& out, std::string& error) {
+        if (method != 0 && method != 8) {
+            error = name + ": compression method " + std::to_string(method) + " is not supported";
+            return false;
+        }
+        if (size > kMaxEntryBytes) {
+            error = name + ": entry too large";
+            return false;
+        }
+        if (method == 0) {
+            if (compressedSize != size) {
+                error = name + ": stored size mismatch";
+                return false;
+            }
+            out.assign(compressed, compressed + compressedSize);
+        } else if (size == 0) {
+            out.clear();   // an empty file: nothing to inflate (its CRC is 0)
+        } else {
+            out.resize(static_cast<size_t>(size));
+            if (!Deflate::DecompressExact(compressed, compressedSize, out.data(), out.size(), Deflate::Format::Raw)) {
+                out.clear();
+                error = name + ": damaged deflate data";
+                return false;
+            }
+        }
+        if (Deflate::Crc32(out.data(), out.size()) != crc32) {
+            out.clear();
+            error = name + ": CRC mismatch";
+            return false;
         }
         return true;
     }
@@ -150,7 +261,7 @@ namespace Core {
         return nullptr;
     }
 
-    bool ZipArchive::EntryData(const Entry& entry, std::vector<uint8_t>& compressed) {
+    bool ZipArchive::ReadCompressed(const Entry& entry, std::vector<uint8_t>& compressed) {
         if (!IsOpen()) return Fail("archive not open");
         if (entry.flags & 0x0001) return Fail(entry.name + ": encrypted entries are not supported");
         if (entry.method != 0 && entry.method != 8) {
@@ -173,23 +284,18 @@ namespace Core {
 
     bool ZipArchive::Read(const Entry& entry, std::vector<uint8_t>& out) {
         std::vector<uint8_t> compressed;
-        if (!EntryData(entry, compressed)) return false;
+        if (!ReadCompressed(entry, compressed)) return false;
         if (entry.method == 0) {
             if (compressed.size() != entry.size) return Fail(entry.name + ": stored size mismatch");
-            out = std::move(compressed);
-        } else if (entry.size == 0) {
-            out.clear();   // an empty file: nothing to inflate (its CRC is 0)
-        } else {
-            out.resize(static_cast<size_t>(entry.size));
-            if (!Deflate::DecompressExact(compressed.data(), compressed.size(), out.data(), out.size(),
-                                          Deflate::Format::Raw)) {
-                out.clear();
-                return Fail(entry.name + ": damaged deflate data");
+            if (Deflate::Crc32(compressed.data(), compressed.size()) != entry.crc32) {
+                return Fail(entry.name + ": CRC mismatch");
             }
+            out = std::move(compressed);   // no copy for a stored entry
+            return true;
         }
-        if (Deflate::Crc32(out.data(), out.size()) != entry.crc32) {
-            out.clear();
-            return Fail(entry.name + ": CRC mismatch");
+        std::string error;
+        if (!Decode(entry.name, entry.method, entry.crc32, entry.size, compressed.data(), compressed.size(), out, error)) {
+            return Fail(error);
         }
         return true;
     }

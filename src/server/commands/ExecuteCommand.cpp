@@ -228,6 +228,7 @@ namespace Server {
                 case SelectedEntity::Kind::Mob:
                     return source.entity->mob;
                 case SelectedEntity::Kind::Item:
+                case SelectedEntity::Kind::Orb:
                     return nullptr;
             }
             return nullptr;
@@ -439,13 +440,16 @@ namespace Server {
             const bool terminal = c.i >= c.args.size();
             if (terminal) {
                 // MC addConditional.executes / createNumericConditionalHandler
-                // / checkIfRegions: one message per source.
-                for (const Verdict& v : verdicts) {
+                // / checkIfRegions: one message per source — a pass is that
+                // source's sendSuccess(..., false), a miss its failure.
+                for (size_t k = 0; k < verdicts.size(); ++k) {
+                    const Verdict& v = verdicts[k];
+                    const CommandSourceStack& from = sources[k];
                     if (expected) {
-                        if (v.pass) c.connection.SendChatMessage(v.counted ? "Test passed. Count: " + std::to_string(v.count) : "Test passed", 1);
+                        if (v.pass) from.SendSuccess(c.connection, v.counted ? "Test passed. Count: " + std::to_string(v.count) : "Test passed", false);
                         else        c.connection.SendChatMessage("Test failed", 1);
                     } else {
-                        if (!v.pass) c.connection.SendChatMessage("Test passed", 1);
+                        if (!v.pass) from.SendSuccess(c.connection, "Test passed", false);
                         else         c.connection.SendChatMessage(v.counted ? "Test failed. Count: " + std::to_string(v.count) : "Test failed", 1);
                     }
                 }
@@ -469,6 +473,12 @@ namespace Server {
 
         while (c.Has(1)) {
             const std::string word = Lower(c.Next());
+            // MC BuildContexts: every redirect-modifier stage costs one of the
+            // max_command_sequence_length budget (`run` is not a stage; the
+            // command it runs is charged by the dispatcher).
+            if (word != "run" && g_integratedServer) {
+                g_integratedServer->GetCommandDispatcher().IncrementCommandCost();
+            }
 
             // ── run <command> ───────────────────────────────────────────────
             if (word == "run") {

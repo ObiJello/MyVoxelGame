@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include "common/entity/WardenSpawnTracker.hpp"
+#include "common/entity/EntityTags.hpp"
 #include "common/world/block/Blocks.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/entity/Inventory.hpp"
@@ -21,6 +22,7 @@
 #include "common/entity/IUsePlayer.hpp"
 #include "common/world/portal/PortalState.hpp"
 #include "common/entity/effect/MobEffects.hpp"
+#include "common/entity/Attributes.hpp"
 #include "common/entity/ImpulseContext.hpp"
 #include "common/entity/ItemCooldowns.hpp"
 #include "FoodData.hpp"
@@ -98,6 +100,14 @@ namespace Server {
         SPEAR,
         // MC DamageTypes.TRIDENT — a thrown trident.
         TRIDENT,
+        // The contact-damage blocks: MC DamageTypes.CACTUS, SWEET_BERRY_BUSH,
+        // HOT_FLOOR (a magma block underfoot) and CAMPFIRE (message id
+        // inFire). Armour applies to all four; HOT_FLOOR and CAMPFIRE are
+        // #is_fire.
+        CACTUS,
+        SWEET_BERRY_BUSH,
+        HOT_FLOOR,
+        CAMPFIRE,
     };
 
     // MC CombatTracker.getDeathMessage + DamageSource.getLocalizedDeathMessage,
@@ -185,6 +195,29 @@ namespace Server {
                     return victim + " was impaled by " + attackerName;
                 }
                 return victim + " died";
+            // MC death.attack.cactus / sweetBerryBush / hotFloor / inFire
+            // and their ".player" forms (a recent attacker to escape).
+            case DS::CACTUS:
+                if (!attackerName.empty()) {
+                    return victim + " walked into a cactus while trying to escape " + attackerName;
+                }
+                return victim + " was pricked to death";
+            case DS::SWEET_BERRY_BUSH:
+                if (!attackerName.empty()) {
+                    return victim + " was poked to death by a sweet berry bush while trying to escape " +
+                           attackerName;
+                }
+                return victim + " was poked to death by a sweet berry bush";
+            case DS::HOT_FLOOR:
+                if (!attackerName.empty()) {
+                    return victim + " walked into the danger zone due to " + attackerName;
+                }
+                return victim + " discovered the floor was lava";
+            case DS::CAMPFIRE:
+                if (!attackerName.empty()) {
+                    return victim + " walked into fire while fighting " + attackerName;
+                }
+                return victim + " went up in flames";
             case DS::GENERIC:
             default:               return victim + " died";
         }
@@ -480,8 +513,41 @@ namespace Server {
         // MC onAttributeUpdated for MAX_HEALTH / MAX_ABSORPTION: clamp health
         // and absorption after an effect that raised them ends.
         void clampToEffectMaxima();
-        // MC Attributes.SAFE_FALL_DISTANCE: 3 + JUMP_BOOST's +1 per level.
+        // MC Attributes.SAFE_FALL_DISTANCE: 3 + JUMP_BOOST's +1 per level
+        // (and whatever the worn items add).
         float getSafeFallDistance() const;
+        // MC Attributes.FALL_DAMAGE_MULTIPLIER (calculateFallDamage).
+        float getFallDamageMultiplier() const;
+        // Any player attribute: Player.createAttributes' base
+        // (PlayerBaseAttributeValue) through the worn items'
+        // ATTRIBUTE_MODIFIERS and enchantment modifiers and the effect
+        // templates — EnchantmentHelper::PlayerAttributeValue, the fold the
+        // client runs for its own prediction.
+        double getAttributeValue(Game::Attribute attribute) const;
+
+        // ── The player's own attributes (MC Player.getAttributes) ─────────
+        // Player.createAttributes' rows: each base value (what /attribute …
+        // base set writes; saved as playerdata "attributes") and the
+        // player's OWN modifiers — /attribute's permanent ones (saved too)
+        // and the step-height rule's transient one. The worn items' and the
+        // effects' modifiers are not stored here: every read folds them on
+        // top (attributeInstance), as the client does for its prediction.
+        Game::AttributeMap&       attributes()       { return m_attributes; }
+        const Game::AttributeMap& attributes() const { return m_attributes; }
+        // The whole AttributeInstance MC would hold for `attribute`: the own
+        // row, the creative reach modifiers (MC ServerPlayer
+        // CREATIVE_*_INTERACTION_RANGE_MODIFIER), the worn items' and the
+        // status effects' modifiers. What /attribute reads.
+        Game::AttributeInstance attributeInstance(Game::Attribute attribute) const;
+        // MC sendDirtyEntityData's attribute half, to this player's own
+        // client: the own map's syncable rows (UpdateAttributesS2C under the
+        // player's id) whenever they changed since the last send. `force`
+        // resends regardless (join, respawn, a level change).
+        void syncAttributesToClient(bool force = false);
+        // /gamerule player_step_height (tenths of a block; 6 = vanilla's
+        // 0.6): a transient ADD_VALUE "obeycraft:player_step_height" of
+        // (value / 10 - 0.6) on STEP_HEIGHT, absent at the default.
+        void applyStepHeightRule(int tenths);
         // MC LivingEntity.checkTotemDeathProtection — a totem of undying in
         // either hand (main first) is spent to survive a killing blow that
         // is not #bypasses_invulnerability. Called by damage() at 0 health.
@@ -489,9 +555,10 @@ namespace Server {
         // MC Player.getLuck — the LUCK attribute: base 0, LUCK +1 and UNLUCK
         // -1 per level. Read by container loot (LootParams.withLuck).
         float getLuck() const;
-        // MC Attributes.ATTACK_DAMAGE: the base 1.0 plus the held weapon's
-        // modifier, then STRENGTH (+3/level) and WEAKNESS (-4/level).
-        float getAttackDamage(float itemDamage) const;
+        // MC Attributes.ATTACK_DAMAGE: the base 1.0 plus the held stack's
+        // ATTRIBUTE_MODIFIERS (and every other worn item's), then STRENGTH
+        // (+3/level) and WEAKNESS (-4/level).
+        float getAttackDamage() const;
         // MC Player.isMobilityRestricted — BLINDNESS (no sprint, no crits).
         bool isMobilityRestricted() const { return hasEffect(Game::MobEffectId::Blindness); }
 
@@ -527,13 +594,15 @@ namespace Server {
         void sendAllEffects() const;
 
         // ── Armor (MC LivingEntity.getArmorValue / the ARMOR attribute) ──
-        // Summed from the four armor slots' pieces (GeneratedItemAttributes'
-        // ArmorMaterial rows). Read by damage() for the sources armor
-        // applies to; the HUD reads the same sum off the client's inventory.
+        // The ARMOR / ARMOR_TOUGHNESS attributes through the worn items'
+        // ATTRIBUTE_MODIFIERS. Read by damage() for the sources armor
+        // applies to; the HUD reads the same value off the client's inventory.
         float getArmorValue() const;
         float getArmorToughness() const;
         // MC DamageTypeTags.BYPASSES_ARMOR, on this port's sources.
         static bool bypassesArmor(DamageSource source);
+        // MC DamageTypeTags.IS_FIRE, on this port's sources.
+        static bool isFireSource(DamageSource source);
 
         // /gamerule shared_vitals: this player takes the pool's values. A
         // drop in health is a hit (the hurt flash and cooldown, as damage()
@@ -586,9 +655,10 @@ namespace Server {
         // attribute — 4.5 by default, +0.5 in creative (ServerPlayer's
         // CREATIVE_BLOCK_INTERACTION_RANGE_MODIFIER). For callers that
         // measure from a different eye (a portal's image of it).
-        float getReachDistance() const {
-            return m_reachDistance + (m_gameMode == GameMode::CREATIVE ? 0.5f : 0.0f);
-        }
+        float getReachDistance() const;
+        // MC Player.entityInteractionRange: ENTITY_INTERACTION_RANGE (3.0),
+        // +2.0 in creative (CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER).
+        double entityInteractionRange() const;
         // MC Player.isWithinBlockInteractionRange(pos, buffer): the distance
         // from `eye` to the nearest point ON the block's box, against reach
         // plus `buffer`. The break handler passes 1.0 — that slack is what
@@ -703,6 +773,11 @@ namespace Server {
         // the furnace payout, the anvil's level cost and the enchanting table.
         PlayerExperience&       getExperience()       { return m_experience; }
         const PlayerExperience& getExperience() const { return m_experience; }
+
+        // MC Entity.tags on the player — `/tag`'s scoreboard tags, tested by
+        // `@a[tag=…]`, saved as "Tags" in the player file.
+        Game::EntityTags&       getTags()       { return m_tags; }
+        const Game::EntityTags& getTags() const { return m_tags; }
 
         // MC Player.enchantmentSeed — what the enchanting table seeds its
         // offers with, so the same item on the same table shows the same three
@@ -931,6 +1006,13 @@ namespace Server {
         int  getSleepTimer() const { return m_sleepCounter; }
         void setSleepTimer(int ticks) { m_sleepCounter = ticks; }
         bool isSleepingLongEnough() const { return isSleeping() && m_sleepCounter >= 100; }
+        // MC Stats.TIME_SINCE_REST (minecraft:custom/minecraft:time_since_rest):
+        // +1 every tick out of bed, reset when sleep starts and on death. What
+        // the PhantomSpawner rolls against. Saved in stats/<uuid>.json, as MC
+        // keeps it (PlayerDataStore).
+        int  getTimeSinceRest() const { return m_timeSinceRest; }
+        void setTimeSinceRest(int ticks) { m_timeSinceRest = ticks < 0 ? 0 : ticks; }
+        void resetTimeSinceRest() { m_timeSinceRest = 0; }
 
         // ── Riding (MC Entity.vehicle, for a player) ──
         //
@@ -1094,6 +1176,7 @@ namespace Server {
         bool    m_shoulderRemovalRequested = false;
         bool    m_shoulderSawSpectator = false;
         int m_sleepCounter = 0;
+        int m_timeSinceRest = 0;   // MC Stats.TIME_SINCE_REST
         // Where death sends this player back to (MC ServerPlayer.respawnConfig).
         std::optional<RespawnConfig> m_respawnConfig;
         std::optional<HushGateMark> m_lastHushGate;
@@ -1116,12 +1199,17 @@ namespace Server {
         // XP — MC Player's experienceLevel / experienceProgress /
         // totalExperience, with the level-curve arithmetic (PlayerExperience.hpp).
         PlayerExperience m_experience;
+        // MC Entity.tags (getTags).
+        Game::EntityTags m_tags;
         int m_enchantmentSeed = 0;   // set from the sound random in the constructor
         // MC LivingEntity.activeEffects — see activeEffects() above.
         std::vector<Game::MobEffectInstance> m_activeEffects;
         // MC Player DATA_PLAYER_ABSORPTION_ID.
         float m_absorptionAmount = 0.0f;
-        float m_stepHeight = 0.6f;
+        // MC Player.getAttributes — see attributes().
+        Game::AttributeMap m_attributes;
+        uint64_t m_sentAttributesSignature = 0;
+        bool     m_attributesSent = false;
         float m_fallDistance = 0.0f;
         Game::ImpulseContext m_impulseContext;
         ServerItemCooldowns  m_itemCooldowns{*this};
@@ -1143,7 +1231,6 @@ namespace Server {
         bool m_flying = false;
         bool m_noclip = false;
         bool m_instabuild = false; // creative instant break
-        float m_reachDistance = 4.5f;   // MC Player.DEFAULT_BLOCK_INTERACTION_RANGE
         bool  m_invisible = false;
         float m_scale = 1.0f;
         uint32_t m_morph      = Game::Morph::kNone;

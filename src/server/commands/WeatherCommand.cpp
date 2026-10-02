@@ -23,7 +23,7 @@ namespace Server {
                     .Then(Cmd::Argument("duration", Cmd::Arg::Time).Executes())));
     }
 
-    void WeatherCommand::Execute(const CommandSourceStack& /*source*/,
+    void WeatherCommand::Execute(const CommandSourceStack& source,
                                  const std::vector<std::string>& args,
                                  ServerConnection& connection,
                                  PlayerSessionManager& /*sessionManager*/) {
@@ -56,17 +56,17 @@ namespace Server {
             // setClear: setWeatherParameters(getDuration(RAIN_DELAY), 0, false, false).
             weather->SetWeatherParameters(duration == -1 ? weather->SampleRainDelay() : duration, 0,
                                           false, false);
-            connection.SendChatMessage("Set the weather to clear", 1);
+            source.SendSuccess(connection, "Set the weather to clear", true);
         } else if (kind == "rain") {
             // setRain: setWeatherParameters(0, getDuration(RAIN_DURATION), true, false).
             weather->SetWeatherParameters(0, duration == -1 ? weather->SampleRainDuration() : duration,
                                           true, false);
-            connection.SendChatMessage("Set the weather to rain", 1);
+            source.SendSuccess(connection, "Set the weather to rain", true);
         } else {
             // setThunder: setWeatherParameters(0, getDuration(THUNDER_DURATION), true, true).
             weather->SetWeatherParameters(0, duration == -1 ? weather->SampleThunderDuration() : duration,
                                           true, true);
-            connection.SendChatMessage("Set the weather to rain & thunder", 1);
+            source.SendSuccess(connection, "Set the weather to rain & thunder", true);
         }
         Log::Info("[Weather] /weather %s%s%s", kind.c_str(), args.size() == 2 ? " " : "",
                   args.size() == 2 ? args[1].c_str() : "");

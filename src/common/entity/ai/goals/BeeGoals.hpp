@@ -24,10 +24,22 @@
 //                              1-in-30 ticks age-up a BEE_GROWABLES crop
 //                              below, at most 10 per pollination.
 //
-// The hive goals stay unported, each needing beehive BLOCK ENTITIES:
-// BeeEnterHiveGoal, BeeLocateHiveGoal, BeeGoToHiveGoal, ValidateHiveGoal —
-// and with them BeeGoToKnownFlowerGoal (its trigger is the tiredness clock
-// only the hive deposit cycle can restart).
+// The hive set (BeehiveBlockEntity):
+//
+//   BeeEnterHiveGoal           within 2 of a hive with room that it wants to
+//                              enter: go in (BeehiveBlockEntity.addOccupant).
+//   ValidateHiveGoal           every 20..40 ticks, drop a loaded hive that is
+//                              gone.
+//   BeeLocateHiveGoal          the nearest #bee_home POI within 20 with room,
+//                              skipping the blacklisted ones.
+//   BeeGoToHiveGoal            fly there (random hops beyond 16), giving up
+//                              after 2400 ticks, a path that cannot reach or
+//                              60 ticks stuck (blacklisting the last 3).
+//
+//   BeeGoToKnownFlowerGoal     600 ticks out of the hive without nectar,
+//                              head back to the remembered flower (random
+//                              hops), forgetting it after 2400 ticks or 48+
+//                              blocks away.
 //
 // The Bee CLASS (AnimatedMobs.hpp) is owned elsewhere this wave, so the
 // per-bee state MC keeps on the mob (savedFlowerPos, hasNectar, the flower
@@ -39,9 +51,12 @@
 #include "common/entity/ai/goals/TargetGoals.hpp"
 #include "common/world/block/BlockState.hpp"
 
+#include "common/world/pathfinder/Path.hpp"
+
 #include <memory>
 #include <optional>
 #include <unordered_map>
+#include <vector>
 
 namespace Game {
 
@@ -248,6 +263,99 @@ namespace Game {
     protected:
         bool CanBeeUse() override;
         bool CanBeeContinueToUse() override { return CanBeeUse(); }
+    };
+
+    // MC Bee.BeeGoToKnownFlowerGoal.
+    class BeeGoToKnownFlowerGoal : public BaseBeeGoal {
+    public:
+        static constexpr int kMaxTravellingTicks = 2400;
+
+        BeeGoToKnownFlowerGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state);
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
+        const char* Name() const override { return "BeeGoToKnownFlowerGoal"; }
+
+    protected:
+        bool CanBeeUse() override;
+        bool CanBeeContinueToUse() override { return CanBeeUse(); }
+
+    private:
+        int m_travellingTicks = 0;
+    };
+
+    // MC Bee.BeeEnterHiveGoal.
+    class BeeEnterHiveGoal : public BaseBeeGoal {
+    public:
+        BeeEnterHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state);
+        void Start() override;
+        const char* Name() const override { return "BeeEnterHiveGoal"; }
+
+    protected:
+        bool CanBeeUse() override;
+        bool CanBeeContinueToUse() override { return false; }
+    };
+
+    // MC Bee.ValidateHiveGoal.
+    class ValidateHiveGoal : public BaseBeeGoal {
+    public:
+        ValidateHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state);
+        void Start() override;
+        const char* Name() const override { return "ValidateHiveGoal"; }
+
+    protected:
+        bool CanBeeUse() override;
+        bool CanBeeContinueToUse() override { return false; }
+
+    private:
+        int     m_validateHiveCooldown;
+        int64_t m_lastValidateTick = -1;
+    };
+
+    // MC Bee.BeeLocateHiveGoal.
+    class BeeLocateHiveGoal : public BaseBeeGoal {
+    public:
+        BeeLocateHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state);
+        void Start() override;
+        const char* Name() const override { return "BeeLocateHiveGoal"; }
+
+    protected:
+        bool CanBeeUse() override;
+        bool CanBeeContinueToUse() override { return false; }
+
+    private:
+        std::vector<glm::ivec3> FindNearbyHivesWithSpace() const;
+    };
+
+    // MC Bee.BeeGoToHiveGoal.
+    class BeeGoToHiveGoal : public BaseBeeGoal {
+    public:
+        static constexpr int kMaxTravellingTicks = 2400;
+
+        BeeGoToHiveGoal(Bee* bee, std::shared_ptr<BeeFlowerState> state);
+        void Start() override;
+        void Stop() override;
+        void Tick() override;
+        const char* Name() const override { return "BeeGoToHiveGoal"; }
+
+        bool IsTargetBlacklisted(const glm::ivec3& pos) const;
+        void ClearBlacklist() { m_blacklistedTargets.clear(); }
+        int  TravellingTicks() const { return m_travellingTicks; }
+
+    protected:
+        bool CanBeeUse() override;
+        bool CanBeeContinueToUse() override { return CanBeeUse(); }
+
+    private:
+        bool PathfindDirectlyTowards(const glm::ivec3& target);
+        void BlacklistTarget(const glm::ivec3& pos);
+        void DropAndBlacklistHive();
+        bool HasReachedTarget(const glm::ivec3& target) const;
+
+        int m_travellingTicks = 0;
+        int m_ticksStuck = 0;
+        std::vector<glm::ivec3> m_blacklistedTargets;
+        std::optional<Path>     m_lastPath;
     };
 
 } // namespace Game

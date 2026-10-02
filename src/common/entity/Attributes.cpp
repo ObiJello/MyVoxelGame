@@ -2,6 +2,8 @@
 #include "common/entity/Attributes.hpp"
 
 #include <algorithm>
+#include <mutex>
+#include <unordered_map>
 
 namespace Game {
 
@@ -30,6 +32,13 @@ namespace Game {
             m_modifiers.erase(it, m_modifiers.end());
             m_dirty = true;
         }
+    }
+
+    const AttributeModifier* AttributeInstance::FindModifier(uint32_t id) const {
+        for (const AttributeModifier& m : m_modifiers) {
+            if (m.id == id) return &m;
+        }
+        return nullptr;
     }
 
     bool AttributeInstance::HasModifier(ModifierId id) const {
@@ -68,8 +77,12 @@ namespace Game {
     // ── AttributeMap ───────────────────────────────────────────────────────
 
     void AttributeMap::Register(Attribute attr, double base) {
+        // A later layer of the supplier chain (createMobAttributes over
+        // createLivingAttributes, a mob's own createAttributes) overrides
+        // the row: base AND the default /attribute … base reset returns to.
         if (AttributeInstance* existing = Find(attr)) {
             existing->SetBaseValue(base);
+            existing->SetDefaultValue(base);
             return;
         }
         m_instances.emplace_back(attr, base);
@@ -106,7 +119,10 @@ namespace Game {
 
     void AttributeMap::SetBaseValue(Attribute attr, double v) {
         if (AttributeInstance* inst = Find(attr)) { inst->SetBaseValue(v); return; }
+        // Materialised by a base write: the type never supplied it, so its
+        // reset default is the registry's.
         m_instances.emplace_back(attr, v);
+        m_instances.back().SetDefaultValue(kAttributeTable[static_cast<size_t>(attr)].defaultValue);
     }
 
     void AttributeMap::AddModifier(Attribute attr, const AttributeModifier& mod) {
@@ -126,6 +142,129 @@ namespace Game {
         return inst && inst->HasModifier(id);
     }
 
+    // ── Registry ───────────────────────────────────────────────────────────
+
+    bool AttributeFromName(std::string_view name, Attribute& out) {
+        if (name.rfind("minecraft:", 0) == 0) name.remove_prefix(10);
+        // 1.20.5–1.21.1 ids ("generic.attack_damage", "player.block_
+        // interaction_range"), renamed by MC's datafixer.
+        if (name.rfind("generic.", 0) == 0) name.remove_prefix(8);
+        else if (name.rfind("player.", 0) == 0) name.remove_prefix(7);
+        else if (name.rfind("zombie.", 0) == 0) name.remove_prefix(7);
+        if (name == "spawn_reinforcements_chance") name = "spawn_reinforcements";
+        for (size_t i = 0; i < static_cast<size_t>(Attribute::Count); ++i) {
+            if (kAttributeTable[i].name == name) {
+                out = static_cast<Attribute>(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // ── Named modifiers ────────────────────────────────────────────────────
+
+    namespace {
+        struct ModifierNameTable {
+            std::mutex                                mutex;
+            std::unordered_map<uint32_t, std::string> names;
+        };
+        ModifierNameTable& ModifierNames() {
+            static ModifierNameTable table;
+            return table;
+        }
+
+        // MC's Identifier for the engine's fixed ModifierId values — the ids
+        // the modifiers carry in MC (Zombie.SPEED_MODIFIER_BABY_ID,
+        // MobEffects' "effect.<name>" templates …). Only what MC names.
+        const char* WellKnownModifierName(uint32_t id) {
+            switch (static_cast<ModifierId>(id)) {
+                case ModifierId::BabySpeedBoost:          return "minecraft:baby";
+                case ModifierId::RandomSpawnBonus:        return "minecraft:random_spawn_bonus";
+                case ModifierId::ZombieLeaderHealth:      return "minecraft:leader_zombie_bonus";
+                case ModifierId::ZombieLeaderReinf:       return "minecraft:leader_zombie_bonus";
+                case ModifierId::ZombieSpawnReinf:        return "minecraft:reinforcement_caller_charge";
+                case ModifierId::ZombieRandomKnockback:   return "minecraft:zombie_random_spawn_bonus";
+                case ModifierId::ZombieReinfCalleeCharge: return "minecraft:reinforcement_callee_charge";
+                case ModifierId::EffectSpeed:             return "minecraft:effect.speed";
+                case ModifierId::EffectSlowness:          return "minecraft:effect.slowness";
+                case ModifierId::EffectHaste:             return "minecraft:effect.haste";
+                case ModifierId::EffectMiningFatigue:     return "minecraft:effect.mining_fatigue";
+                case ModifierId::EffectStrength:          return "minecraft:effect.strength";
+                case ModifierId::EffectWeakness:          return "minecraft:effect.weakness";
+                case ModifierId::EffectJumpBoost:         return "minecraft:effect.jump_boost";
+                case ModifierId::EffectHealthBoost:       return "minecraft:effect.health_boost";
+                case ModifierId::EffectAbsorption:        return "minecraft:effect.absorption";
+                case ModifierId::EffectLuck:              return "minecraft:effect.luck";
+                case ModifierId::EffectUnluck:            return "minecraft:effect.unluck";
+                case ModifierId::WitchDrinkingSlowdown:   return "minecraft:drinking";
+                case ModifierId::PiglinAttackingSpeed:    return "minecraft:attacking";
+                case ModifierId::EndermanAttackingSpeed:  return "minecraft:attacking";
+                case ModifierId::RabbitEvilAttackPower:   return "minecraft:evil";
+                case ModifierId::BodyArmorEquipment:      return "minecraft:armor.body";
+                default:                                  return nullptr;
+            }
+        }
+
+        bool IsValidNamespaceChar(char c) {
+            return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        }
+    } // namespace
+
+    std::string NormalizeIdentifier(std::string_view id) {
+        if (id.find(':') == std::string_view::npos) return "minecraft:" + std::string(id);
+        // MC Identifier.parse: ":foo" is minecraft:foo.
+        if (!id.empty() && id.front() == ':') return "minecraft" + std::string(id);
+        return std::string(id);
+    }
+
+    bool IsValidIdentifier(std::string_view id) {
+        const size_t colon = id.find(':');
+        std::string_view ns = colon == std::string_view::npos ? std::string_view{} : id.substr(0, colon);
+        std::string_view path = colon == std::string_view::npos ? id : id.substr(colon + 1);
+        if (path.empty() || path.find(':') != std::string_view::npos) return false;
+        for (const char c : ns) if (!IsValidNamespaceChar(c)) return false;
+        for (const char c : path) if (!IsValidNamespaceChar(c) && c != '/') return false;
+        return true;
+    }
+
+    ModifierId NamedModifierId(std::string_view id) {
+        const std::string name = NormalizeIdentifier(id);
+        const ModifierId out = ItemModifierId(name);
+        RecordModifierIdName(static_cast<uint32_t>(out), name);
+        return out;
+    }
+
+    void RecordModifierIdName(uint32_t id, std::string_view name) {
+        if (name.empty()) return;
+        ModifierNameTable& table = ModifierNames();
+        std::lock_guard<std::mutex> lock(table.mutex);
+        table.names[id] = std::string(name);
+    }
+
+    std::string ModifierIdName(uint32_t id) {
+        {
+            ModifierNameTable& table = ModifierNames();
+            std::lock_guard<std::mutex> lock(table.mutex);
+            if (const auto it = table.names.find(id); it != table.names.end()) return it->second;
+        }
+        if (const char* known = WellKnownModifierName(id)) return known;
+        return {};
+    }
+
+    std::string AttributeDescriptionId(Attribute attribute) {
+        return "attribute.name." + std::string(AttributeName(attribute));
+    }
+
+    double PlayerBaseAttributeValue(Attribute attribute) {
+        switch (attribute) {
+            case Attribute::AttackDamage:          return 1.0;
+            case Attribute::MovementSpeed:         return 0.10000000149011612;
+            case Attribute::WaypointTransmitRange: return 6.0e7;
+            case Attribute::WaypointReceiveRange:  return 6.0e7;
+            default:                               return GetAttributeDef(attribute).defaultValue;
+        }
+    }
+
     // ── Suppliers ──────────────────────────────────────────────────────────
 
     void CreateLivingAttributes(AttributeMap& out) {
@@ -142,8 +281,22 @@ namespace Game {
         out.Register(Attribute::Gravity,              0.08);
         out.Register(Attribute::SafeFallDistance,     3.0);
         out.Register(Attribute::FallDamageMultiplier, 1.0);
-        out.Register(Attribute::JumpStrength,         0.42);
+        out.Register(Attribute::JumpStrength,         0.41999998688697815);
         out.Register(Attribute::AttackKnockback,      0.0);
+        // The rest of createLivingAttributes' rows (registry defaults).
+        out.Register(Attribute::EntityInteractionRange,       3.0);
+        out.Register(Attribute::OxygenBonus,                  0.0);
+        out.Register(Attribute::BurningTime,                  1.0);
+        out.Register(Attribute::ExplosionKnockbackResistance, 0.0);
+        out.Register(Attribute::WaterMovementEfficiency,      0.0);
+        out.Register(Attribute::MovementEfficiency,           0.0);
+        out.Register(Attribute::CameraDistance,               4.0);
+        out.Register(Attribute::WaypointTransmitRange,        0.0);
+        out.Register(Attribute::Bounciness,                   0.0);
+        out.Register(Attribute::AirDragModifier,              1.0);
+        out.Register(Attribute::FrictionModifier,             1.0);
+        out.Register(Attribute::NameTagDistance,             64.0);
+        out.Register(Attribute::BelowNameDistance,           10.0);
     }
 
     void CreateMobAttributes(AttributeMap& out) {
@@ -161,6 +314,23 @@ namespace Game {
     void CreateAnimalAttributes(AttributeMap& out) {
         CreateMobAttributes(out);
         out.Register(Attribute::TemptRange, 10.0);
+    }
+
+    void CreatePlayerAttributes(AttributeMap& out) {
+        // Player.createAttributes: createLivingAttributes().add(ATTACK_DAMAGE,
+        // 1.0).add(MOVEMENT_SPEED, 0.1).add(ATTACK_SPEED).add(LUCK)
+        // .add(BLOCK_INTERACTION_RANGE).add(BLOCK_BREAK_SPEED)
+        // .add(SUBMERGED_MINING_SPEED).add(SNEAKING_SPEED)
+        // .add(MINING_EFFICIENCY).add(SWEEPING_DAMAGE_RATIO)
+        // .add(WAYPOINT_TRANSMIT_RANGE, 6e7).add(WAYPOINT_RECEIVE_RANGE, 6e7).
+        CreateLivingAttributes(out);
+        for (const Attribute a : { Attribute::AttackDamage, Attribute::MovementSpeed, Attribute::AttackSpeed,
+                                   Attribute::Luck, Attribute::BlockInteractionRange, Attribute::BlockBreakSpeed,
+                                   Attribute::SubmergedMiningSpeed, Attribute::SneakingSpeed,
+                                   Attribute::MiningEfficiency, Attribute::SweepingDamageRatio,
+                                   Attribute::WaypointTransmitRange, Attribute::WaypointReceiveRange }) {
+            out.Register(a, PlayerBaseAttributeValue(a));
+        }
     }
 
 } // namespace Game

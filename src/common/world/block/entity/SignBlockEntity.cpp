@@ -1,5 +1,6 @@
 // File: src/common/world/block/entity/SignBlockEntity.cpp
 #include "SignBlockEntity.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/network/PacketRegistry.hpp"
 #include "common/core/Mth.hpp"
@@ -98,6 +99,19 @@ namespace Game {
         const float playerYRot = static_cast<float>(std::atan2(zd, xd) * 57.2957763671875) - 90.0f;
         const float diff = std::abs(Mth::WrapDegrees(signYawDeg - playerYRot));
         return diff <= 90.0f ? SignTextSlot::Front : SignTextSlot::Back;
+    }
+
+    void SignBlockEntity::ApplyItemComponents(const DataComponentMap& components) {
+        const auto apply = [this](const SignTextComponent& from, SignTextSlot slot) {
+            SignText text;
+            text.lines = BlockData::SignLines(from);
+            text.color = static_cast<DyeColor>(from.color & 15);
+            text.glowing = from.glowing;
+            SetText(slot, text);
+        };
+        if (auto front = components.get(DataComponents::SIGN_TEXT_FRONT)) apply(*front, SignTextSlot::Front);
+        if (auto back = components.get(DataComponents::SIGN_TEXT_BACK)) apply(*back, SignTextSlot::Back);
+        if (components.get(DataComponents::WAXED)) SetWaxed(true);
     }
 
 } // namespace Game

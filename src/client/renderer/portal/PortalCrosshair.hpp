@@ -39,18 +39,16 @@ namespace Render {
         // centre. `dt` advances the pulse fade. Caller is responsible
         // for only calling this when the player is actually holding
         // the portal gun.
+        //
+        // `heldGunId` is the held gun's PORTAL_GUN_INSTANCE_ID (0 = never
+        // fired). Each bracket is filled while THAT gun's portal of its
+        // colour is open, read every frame from the client's copy of the
+        // server's pairs (ClientPortalManager) — never from a flag set by
+        // whichever portal last landed, which lit the brackets for other
+        // players' guns and outlived pairs closed while away.
         void Render(int windowWidth, int windowHeight,
                     int framebufferWidth, int framebufferHeight,
-                    float dt);
-
-        // Called when a portal lands. `color`: 0 = blue, 1 = orange.
-        // Swaps that side's bracket from outline (invalid sprite) to
-        // filled (valid sprite).
-        static void NotifyPortalPlaced(uint8_t color);
-        // Called when a portal is cleared. `color`: 0 = blue, 1 = orange,
-        // 2 = whole pair. Reverts the corresponding side(s) back to
-        // the outline state.
-        static void NotifyPortalRemoved(uint8_t color);
+                    float dt, uint64_t heldGunId = 0);
 
     private:
         bool          m_initialized = false;

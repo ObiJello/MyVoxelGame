@@ -36,6 +36,11 @@
 #include "common/entity/OminousItemSpawner.hpp"
 #include "client/renderer/environment/EnvironmentState.hpp"
 #include "client/world/ClientWeather.hpp"
+#include "client/entity/Player.hpp"
+#include "client/world/ClientBlockAccess.hpp"
+#include "client/network/ClientConnection.hpp"
+#include "client/network/NetworkClient.hpp"
+#include "client/entity/RemotePlayerManager.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/entity/mobs/Slime.hpp"
 #include "common/entity/mobs/SulfurCube.hpp"
@@ -49,7 +54,8 @@
 #include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "client/world/ClientLevelEvents.hpp"
-#include "client/renderer/particle/BlockParticleTint.hpp"
+#include "client/renderer/mesh/BlockTint.hpp"
+#include "client/renderer/mesh/Mesher.hpp"
 #include "common/world/biome/Biomes.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/lighting/ChunkLight.hpp"
@@ -71,12 +77,46 @@ namespace Client {
         if (g_clientMobManager) g_clientMobManager->SetVehicle(passengerId, vehicleId);
     }
 
+    bool ClientLevelBridge::ResolveEntityEye(int32_t id, glm::dvec3& feet, double& eyeY) const {
+        // A mob this client tracks.
+        if (m_mobManager) {
+            if (const ClientMob* entry = m_mobManager->GetMob(id); entry && entry->mob && !entry->mob->IsRemoved()) {
+                feet = entry->mob->position;
+                eyeY = entry->mob->GetEyeY();
+                return true;
+            }
+        }
+        // The local player answers to its connection id.
+        if (g_networkClient && g_clientBlockAccess) {
+            if (auto connection = g_networkClient->GetConnection();
+                connection && static_cast<int32_t>(connection->GetPlayerId()) == id) {
+                if (const Game::ClientPlayer* player = g_clientBlockAccess->GetLocalPlayer()) {
+                    feet = player->physics.position;
+                    eyeY = feet.y + static_cast<double>(player->physics.GetEyeHeight());
+                    return true;
+                }
+            }
+        }
+        // Another player.
+        if (g_remotePlayerManager && id >= 0) {
+            const auto& players = g_remotePlayerManager->GetPlayers();
+            if (const auto it = players.find(static_cast<uint32_t>(id)); it != players.end()) {
+                feet = it->second.position;
+                eyeY = feet.y + static_cast<double>(it->second.isCrouching
+                                                        ? Game::PlayerPhysics::EYE_HEIGHT_SNEAKING
+                                                        : Game::PlayerPhysics::EYE_HEIGHT_STANDING);
+                return true;
+            }
+        }
+        return false;
+    }
+
     void ClientLevelBridge::SetSkyFlashTime(int ticks) {
         // MC ClientLevel.getSkyFlashTime answers 0 while the accessibility
         // option "Hide Lightning Flashes" is on; refusing the write is the
         // same thing for a counter that only ever lives two ticks.
         if (Platform::g_gameSettings.GetHideLightningFlashes()) return;
-        Render::EnvironmentState::Get().SetSkyFlashTime(ticks);
+        ::Render::EnvironmentState::Get().SetSkyFlashTime(ticks);
     }
 
     // MC ClientLevel.playSeededSound: `if (except == minecraft.player)`. The
@@ -159,10 +199,14 @@ namespace Client {
     }
 
     int ClientLevelBridge::GetClientLeafTintColor(const glm::ivec3& pos) const {
+        // MC: tintSource != null ? tintSource.colorInWorld(state, this, pos) : -1
+        // — BlockTint's table, the one the section mesher tints the leaves with.
         if (!m_blocks) return -1;
-        const int64_t tint = Render::BlockTintColor(m_blocks->GetBlockState(pos.x, pos.y, pos.z), m_blocks, pos,
-                                                    /*asTerrainParticle=*/false);
-        return static_cast<int>(tint);
+        const std::optional<uint32_t> tint = ::Render::BlockTint::Layer0Color(
+            m_blocks->GetBlockState(pos.x, pos.y, pos.z), pos.x, pos.y, pos.z,
+            ::Render::Mesher::GetMeshOptions().biomeBlendRadius, /*asTerrainParticle=*/false,
+            [this](int x, int y, int z) { return m_blocks->GetBiome(x, y, z); });
+        return tint ? static_cast<int>(*tint) : -1;
     }
 
     void ClientLevelBridge::PlayLevelEvent(const Game::SoundExcept& except, int type, const glm::ivec3& pos,
@@ -901,6 +945,14 @@ namespace Client {
                                 xa, ya + 0.2, za);
         }
         return ++emitter.life < emitter.lifeTime;
+    }
+
+    void ClientMobManager::SetWitherHeadTargets(int32_t id, int32_t rightHeadTarget, int32_t leftHeadTarget) {
+        ClientMob* entry = Find(id);
+        if (!entry || !entry->mob) return;
+        if (entry->mob->GetType() == Game::EntityTypeId::Wither) {
+            static_cast<Game::Wither&>(*entry->mob).SetClientHeadTargets(rightHeadTarget, leftHeadTarget);
+        }
     }
 
     void ClientMobManager::SetEndCrystalBeam(int32_t id, bool hasTarget,

@@ -19,6 +19,9 @@
 // disagree about what is on the cursor.
 #pragma once
 
+#include <optional>
+#include "common/text/TextComponent.hpp"
+
 #include "common/entity/Inventory.hpp"
 #include "common/inventory/InventoryMenu.hpp"
 #include "common/inventory/MenuType.hpp"
@@ -229,7 +232,14 @@ namespace Render {
         void RenderTooltip(GuiGraphics& g, const Game::ItemStack& stack, int mx, int my);
 
         // One tooltip line: text and ARGB colour.
-        struct TooltipLine { std::string text; uint32_t color; };
+        // `rich`, when set, is drawn instead of `text` with its own styles
+        // (a styled custom name, a lore line, an attribute override); `text`
+        // stays its plain string (width, search).
+        struct TooltipLine {
+            std::string                          text;
+            uint32_t                             color = 0xFFFFFFFFu;
+            std::optional<Game::Text::Component> rich;
+        };
         // MC ItemStack.getTooltipLines (TooltipFlag.ADVANCED when `advanced`):
         // the name line, then every component's lines. RenderTooltip draws
         // these; empty for an empty stack.

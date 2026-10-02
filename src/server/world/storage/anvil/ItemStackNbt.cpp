@@ -4,6 +4,7 @@
 #include <iterator>
 #include <optional>
 #include "server/world/storage/anvil/ItemStackNbt.hpp"
+#include "server/world/storage/anvil/ComponentNbt.hpp"
 
 #include "common/core/Log.hpp"
 #include "common/data/DataComponents.hpp"
@@ -471,6 +472,10 @@ namespace Game::Anvil {
         w.EndCompound();
     }
 
+    void WriteTextComponentBody(Nbt::Writer& w, const Text::Component& component) {
+        WriteComponentBody(w, component);
+    }
+
     std::string ItemName(ItemID id) {
 #if ENABLE_PORTAL_GUN
         if (id == Items::PortalGun && id != Items::Air) return std::string(kOwnNamespace) + "portal_gun";
@@ -509,6 +514,8 @@ namespace Game::Anvil {
         w.Int("count", std::clamp(stack.count, 1, 99));
 
         const auto customName = stack.components.get(DataComponents::CUSTOM_NAME);
+        // Defaults this stack takes away (`[!max_damage]`).
+        const std::vector<const DataComponentTypeBase*> removedDefaults = stack.components.removedTypes();
         const auto stored     = stack.components.get(DataComponents::STORED_ENCHANTMENTS);
         const bool hasEnchants = stored.has_value() && !stored->entries.empty();
         // Durability / enchanting (the stack's patch over its item: MC saves
@@ -516,16 +523,15 @@ namespace Game::Anvil {
         // what stack.components holds).
         const auto enchantments   = stack.components.get(DataComponents::ENCHANTMENTS);
         const bool hasItemEnchants = enchantments.has_value() && !enchantments->IsEmpty();
-        const auto damage         = stack.components.get(DataComponents::DAMAGE);
-        const auto maxDamage      = stack.components.get(DataComponents::MAX_DAMAGE);
-        const bool unbreakable    = stack.components.get(DataComponents::UNBREAKABLE).has_value();
+        // (DAMAGE / MAX_DAMAGE / UNBREAKABLE / MAX_STACK_SIZE / CUSTOM_DATA
+        // are registered codecs — components/StackNbt.cpp.)
         const auto repairCost     = stack.components.get(DataComponents::REPAIR_COST);
         const auto repairable     = stack.components.get(DataComponents::REPAIRABLE);
         const auto enchantable    = stack.components.get(DataComponents::ENCHANTABLE);
         const auto weapon         = stack.components.get(DataComponents::WEAPON);
         const auto breakSound     = stack.components.get(DataComponents::BREAK_SOUND);
         const auto resistant      = stack.components.get(DataComponents::DAMAGE_RESISTANT);
-        const bool hasDurabilityData = hasItemEnchants || damage || maxDamage || unbreakable ||
+        const bool hasDurabilityData = hasItemEnchants ||
                                        repairCost || repairable || enchantable || weapon ||
                                        breakSound || resistant;
 #if ENABLE_PORTAL_GUN
@@ -536,10 +542,8 @@ namespace Game::Anvil {
         const std::optional<uint64_t> gunInstance;
 #endif
 
-        const auto sulfurBucket = stack.components.get(DataComponents::SULFUR_CUBE_BUCKET);
-        // MC minecraft:bucket_entity_data (CustomData) and
-        // minecraft:axolotl/variant — a fish / axolotl / tadpole bucket.
-        const auto bucketEntity   = stack.components.get(DataComponents::BUCKET_ENTITY_DATA);
+        // MC minecraft:axolotl/variant — the axolotl bucket. (bucket_entity_
+        // data and sulfur_cube_content are registered codecs — EntityDataNbt.)
         const auto axolotlVariant = stack.components.get(DataComponents::AXOLOTL_VARIANT);
         // MC minecraft:salmon/size and minecraft:tropical_fish/{pattern,
         // base_color, pattern_color} — the salmon and tropical fish buckets.
@@ -600,18 +604,29 @@ namespace Game::Anvil {
         const auto rarity            = stack.components.get(DataComponents::RARITY);
         const bool hasBannerData     = (bannerPatterns.has_value() && !bannerPatterns->IsEmpty()) ||
                                        itemName.has_value() || rarity.has_value();
+        // Every component written through the ComponentNbt registry (each
+        // codec lives beside its component's own code).
+        bool hasRegisteredComponent = false;
+        for (const ComponentNbt::Codec& codec : ComponentNbt::All()) {
+            if (codec.write && stack.components.has(*codec.type)) { hasRegisteredComponent = true; break; }
+        }
 
         if (!customName.has_value() && !hasEnchants && !gunInstance.has_value() && !hasBannerData &&
-            !sulfurBucket.has_value() && !bucketEntity.has_value() && !axolotlVariant.has_value() &&
+            !axolotlVariant.has_value() &&
             !hasFishData &&
             !potion.has_value() && !durationScale.has_value() &&
             !stew.has_value() && !writtenBook.has_value() && !writableBook.has_value() &&
             !dyedColor.has_value() && !hasDurabilityData && !paintingVariant.has_value() &&
             !hasMapData && !hasFireworkData && !ominousAmplifier.has_value() &&
             !instrument.has_value() && !potDecorations.has_value() &&
-            !containerContents.has_value()) return;
+            !containerContents.has_value() && removedDefaults.empty() && !hasRegisteredComponent) return;
 
         w.BeginCompound("components");
+        // DataComponentPatch.CODEC: a removed default is `"!minecraft:<id>": {}`.
+        for (const DataComponentTypeBase* type : removedDefaults) {
+            w.BeginCompound("!" + std::string(kNamespace) + type->name);
+            w.EndCompound();
+        }
         if (potion.has_value()) {
             // PotionContents.CODEC's FULL form — the compound, even for a
             // plain potion (vanilla encodes with the primary codec).
@@ -672,18 +687,8 @@ namespace Game::Anvil {
             }
             w.EndList(list);
         }
-        if (itemName.has_value()) {
-            // ITEM_NAME is a text Component in MC; the engine keeps display
-            // text. The ominous banner's is MC's translatable name — written
-            // as such, so a vanilla reader still sees Raid's exact banner
-            // (ItemStack.matches decides captaincy); any other is literal.
-            if (IsSameItemSameComponents(stack, Raid::GetOminousBannerInstance())) {
-                WriteTextComponent(w, "minecraft:item_name",
-                                   Text::Component::Translatable(Raid::kOminousBannerNameKey));
-            } else {
-                w.String("minecraft:item_name", *itemName);
-            }
-        }
+        // ITEM_NAME / CUSTOM_NAME / LORE: written as text components by
+        // their ComponentNbt codecs (components/PresentationNbt.cpp).
         if (rarity.has_value()) {
             static constexpr const char* kRarityNames[] = { "common", "uncommon", "rare", "epic" };
             const auto index = static_cast<size_t>(*rarity);
@@ -794,33 +799,6 @@ namespace Game::Anvil {
             }
             w.EndCompound();
         }
-        if (sulfurBucket.has_value()) {
-            // MC: minecraft:sulfur_cube_content (item template) beside
-            // minecraft:bucket_entity_data {age, age_locked, NoAI}. One
-            // compound here, under this engine's namespace.
-            w.BeginCompound(std::string(kOwnNamespace) + "sulfur_cube_bucket");
-            if (!sulfurBucket->bodyItem.empty()) w.String("content", sulfurBucket->bodyItem);
-            w.Int("age", sulfurBucket->age);
-            w.Bool("age_locked", sulfurBucket->ageLocked);
-            w.Bool("NoAI", sulfurBucket->noAi);
-            w.EndCompound();
-        }
-        if (bucketEntity.has_value()) {
-            // CustomData: the compound as Bucketable / the mob wrote it —
-            // booleans only when true (MC's `if (…) putBoolean`).
-            w.BeginCompound("minecraft:bucket_entity_data");
-            if (bucketEntity->noAi)                w.Bool("NoAI", true);
-            if (bucketEntity->silent)              w.Bool("Silent", true);
-            if (bucketEntity->noGravity)           w.Bool("NoGravity", true);
-            if (bucketEntity->glowing)             w.Bool("Glowing", true);
-            if (bucketEntity->invulnerable)        w.Bool("Invulnerable", true);
-            if (bucketEntity->persistenceRequired) w.Bool("PersistenceRequired", true);
-            if (bucketEntity->health)              w.Float("Health", *bucketEntity->health);
-            if (bucketEntity->age)                 w.Int("Age", *bucketEntity->age);
-            if (bucketEntity->ageLocked)           w.Bool("AgeLocked", *bucketEntity->ageLocked);
-            if (bucketEntity->huntingCooldown)     w.Long("HuntingCooldown", *bucketEntity->huntingCooldown);
-            w.EndCompound();
-        }
         if (axolotlVariant.has_value()) {
             // Axolotl.Variant.CODEC — the StringRepresentable name.
             static constexpr const char* kAxolotlVariants[] = {"lucy", "wild", "gold", "cyan", "blue"};
@@ -852,22 +830,9 @@ namespace Game::Anvil {
             w.Long(std::string(kOwnNamespace) + "portal_gun_instance_id",
                    static_cast<int64_t>(*gunInstance));
         }
-        if (customName.has_value()) {
-            // The custom_name component is a text Component. Its NBT codec
-            // accepts a bare string and reads it as literal text, which is
-            // exactly what we store.
-            w.String("minecraft:custom_name", *customName);
-        }
         if (hasEnchants) WriteEnchantments(w, "minecraft:stored_enchantments", *stored);
         if (hasItemEnchants) WriteEnchantments(w, "minecraft:enchantments", *enchantments);
-        // DAMAGE / MAX_DAMAGE / REPAIR_COST: bare ints (NON_NEGATIVE_INT /
-        // POSITIVE_INT codecs). UNBREAKABLE: Unit.CODEC, an empty compound.
-        if (damage) w.Int("minecraft:damage", std::max(0, *damage));
-        if (maxDamage && *maxDamage > 0) w.Int("minecraft:max_damage", *maxDamage);
-        if (unbreakable) {
-            w.BeginCompound("minecraft:unbreakable");
-            w.EndCompound();
-        }
+        // REPAIR_COST: a bare int (NON_NEGATIVE_INT).
         if (repairCost) w.Int("minecraft:repair_cost", std::max(0, *repairCost));
         if (repairable && !repairable->items.empty()) {
             // Repairable.CODEC: {items: HolderSet<Item>}.
@@ -902,10 +867,16 @@ namespace Game::Anvil {
             w.String("types", *resistant);
             w.EndCompound();
         }
+        if (hasRegisteredComponent) {
+            for (const ComponentNbt::Codec& codec : ComponentNbt::All()) {
+                if (!codec.write || !stack.components.has(*codec.type)) continue;
+                codec.write(w, std::string(kNamespace) + codec.type->name, stack);
+            }
+        }
         w.EndCompound();
     }
 
-    ItemStack ReadItemStack(const ::World::NBTTagCompound& tag) {
+    ItemStack ReadItemStack(const ::World::NBTTagCompound& tag, std::string* error) {
         ItemStack stack;
 
         const std::string id = tag.GetValue<std::string>("id");
@@ -915,10 +886,25 @@ namespace Game::Anvil {
 
         stack.count = tag.GetValue<int32_t>("count", 1);
         if (stack.count <= 0) return ItemStack{};
-        stack.count = std::min(stack.count, ItemRegistry::Get(stack.itemId).maxStackSize);
+        // ItemStack.CODEC's count range (1..99); the stack's own limit is
+        // applied once its components (a max_stack_size patch) are read.
+        stack.count = std::min(stack.count, DataComponents::kMaxStackSizeLimit);
 
         auto components = std::dynamic_pointer_cast<::World::NBTTagCompound>(tag.GetTag("components"));
-        if (!components) return stack;
+        if (!components) {
+            stack.count = std::min(stack.count, GetMaxStackSize(stack));
+            return stack;
+        }
+
+        // DataComponentPatch.CODEC's removals: `"!minecraft:<id>": {}` takes
+        // the item's default away. Unknown ids are dropped, as vanilla does.
+        for (const auto& [key, value] : components->value) {
+            (void)value;
+            if (key.empty() || key[0] != '!') continue;
+            std::string name = key.substr(1);
+            if (name.rfind(kNamespace, 0) == 0) name.erase(0, std::string_view(kNamespace).size());
+            if (const DataComponentTypeBase* type = DataComponents::ByName(name)) stack.components.setRemoved(*type);
+        }
 
 #if ENABLE_PORTAL_GUN
         if (auto gun = std::dynamic_pointer_cast<::World::NBTTagLong>(
@@ -927,20 +913,8 @@ namespace Game::Anvil {
         }
 #endif
 
-        if (auto name = std::dynamic_pointer_cast<::World::NBTTagString>(
-                components->GetTag("minecraft:custom_name"))) {
-            stack.components.set(DataComponents::CUSTOM_NAME, name->value);
-        }
-
-        // ITEM_NAME: a text Component (a bare string is literal text, a
-        // compound may be translatable — the ominous banner's is), kept as
-        // its plain text.
-        if (auto nameTag = components->GetTag("minecraft:item_name")) {
-            if (auto component = ReadTextComponent(*nameTag)) {
-                const std::string text = Text::GetString(*component);
-                if (!text.empty()) stack.components.set(DataComponents::ITEM_NAME, text);
-            }
-        }
+        // custom_name / item_name / lore: the ComponentNbt codecs
+        // (components/PresentationNbt.cpp) read them as text components.
         // RARITY: Rarity's serialized (lower-case) name.
         if (auto rarityTag = std::dynamic_pointer_cast<::World::NBTTagString>(
                 components->GetTag("minecraft:rarity"))) {
@@ -982,30 +956,25 @@ namespace Game::Anvil {
             }
         }
 
+        // The engine's pre-26.3 "obeycraft:sulfur_cube_bucket" compound
+        // {content, age, age_locked, NoAI}: converted to MC's
+        // sulfur_cube_content + bucket_entity_data {NoAI, age, age_locked}.
+        // (A save that has minecraft:bucket_entity_data too is read by its
+        // registered codec below, which then wins.)
         if (auto sb = std::dynamic_pointer_cast<::World::NBTTagCompound>(
                 components->GetTag(std::string(kOwnNamespace) + "sulfur_cube_bucket"))) {
-            SulfurCubeBucketData data;
-            data.bodyItem  = sb->GetValue<std::string>("content", "");
-            data.age       = sb->GetValue<int32_t>("age", 0);
-            data.ageLocked = sb->GetValue<int8_t>("age_locked", 0) != 0;
-            data.noAi      = sb->GetValue<int8_t>("NoAI", 0) != 0;
-            stack.components.set(DataComponents::SULFUR_CUBE_BUCKET, data);
-        }
-
-        if (auto be = std::dynamic_pointer_cast<::World::NBTTagCompound>(
-                components->GetTag("minecraft:bucket_entity_data"))) {
+            const ItemID content = ItemFromName(sb->GetValue<std::string>("content", ""));
+            if (content != Items::Air) {
+                stack.components.set(DataComponents::SULFUR_CUBE_CONTENT, SulfurCubeContent{ItemStack(content, 1)});
+            }
             BucketEntityData data;
-            data.noAi                = be->GetValue<int8_t>("NoAI", 0) != 0;
-            data.silent              = be->GetValue<int8_t>("Silent", 0) != 0;
-            data.noGravity           = be->GetValue<int8_t>("NoGravity", 0) != 0;
-            data.glowing             = be->GetValue<int8_t>("Glowing", 0) != 0;
-            data.invulnerable        = be->GetValue<int8_t>("Invulnerable", 0) != 0;
-            data.persistenceRequired = be->GetValue<int8_t>("PersistenceRequired", 0) != 0;
-            if (be->HasTag("Health"))          data.health = be->GetValue<float>("Health", 0.0f);
-            if (be->HasTag("Age"))             data.age = be->GetValue<int32_t>("Age", 0);
-            if (be->HasTag("AgeLocked"))       data.ageLocked = be->GetValue<int8_t>("AgeLocked", 0) != 0;
-            if (be->HasTag("HuntingCooldown")) data.huntingCooldown = be->GetValue<int64_t>("HuntingCooldown", 0);
-            stack.components.set(DataComponents::BUCKET_ENTITY_DATA, data);
+            data.noAi = sb->GetValue<int8_t>("NoAI", 0) != 0;
+            auto extra = std::make_shared<::World::NBTTagCompound>();
+            extra->value["age"] = std::make_shared<::World::NBTTagInt>(sb->GetValue<int32_t>("age", 0));
+            extra->value["age_locked"] = std::make_shared<::World::NBTTagByte>(
+                static_cast<int8_t>(sb->GetValue<int8_t>("age_locked", 0) != 0 ? 1 : 0));
+            data.extra = NbtCompoundValue(std::move(extra));
+            stack.components.set(DataComponents::BUCKET_ENTITY_DATA, std::move(data));
         }
         if (auto av = components->GetTag("minecraft:axolotl/variant")) {
             // The name (MC's codec); an int id is accepted too.
@@ -1264,21 +1233,8 @@ namespace Game::Anvil {
             if (!out.IsEmpty()) stack.components.set(DataComponents::ENCHANTMENTS, std::move(out));
         }
 
-        // Durability. MAX_DAMAGE first: SetDamageValue-style clamping reads
-        // it, and a save may override both.
-        if (auto maxDamage = IntComponent(*components, "minecraft:max_damage"); maxDamage && *maxDamage > 0) {
-            stack.components.set(DataComponents::MAX_DAMAGE, *maxDamage);
-        }
-        if (auto damage = IntComponent(*components, "minecraft:damage")) {
-            // A value equal to the item's own default is no patch (MC never
-            // writes one); keeping it would stop the stack matching a fresh one.
-            const int32_t value = std::max(0, *damage);
-            const auto prototype = ItemRegistry::Get(stack.itemId).defaultComponents.get(DataComponents::DAMAGE);
-            if (!prototype || *prototype != value) stack.components.set(DataComponents::DAMAGE, value);
-        }
-        if (components->GetTag("minecraft:unbreakable")) {
-            stack.components.set(DataComponents::UNBREAKABLE, true);
-        }
+        // (Durability — MAX_DAMAGE / DAMAGE / UNBREAKABLE — is read by the
+        // registered codecs below: components/StackNbt.cpp.)
         if (auto repairCost = IntComponent(*components, "minecraft:repair_cost")) {
             stack.components.set(DataComponents::REPAIR_COST, std::max(0, *repairCost));
         }
@@ -1313,6 +1269,32 @@ namespace Game::Anvil {
                 stack.components.set(DataComponents::DAMAGE_RESISTANT, types->value);
             }
         }
+        // The registered codecs (ComponentNbt.hpp). A rejected value drops
+        // that component only; its reason goes to the caller (the item
+        // argument prints it).
+        {
+            ComponentNbt::ReadContext ctx;
+            std::string reason;
+            ctx.error = &reason;
+            for (const ComponentNbt::Codec& codec : ComponentNbt::All()) {
+                if (!codec.read) continue;
+                auto value = components->GetTag(std::string(kNamespace) + codec.type->name);
+                if (!value) continue;
+                reason.clear();
+                if (!codec.read(*value, stack, ctx) && error && error->empty()) {
+                    *error = "Malformed 'minecraft:" + codec.type->name + "' component: '" +
+                             (reason.empty() ? std::string("invalid value") : reason) + "'";
+                }
+            }
+        }
+        // ItemStack.validateStrict — reported to a caller that asks (the item
+        // argument: arguments.item.malformed); a saved stack is kept, its
+        // count brought within its limit, rather than lost.
+        if (error && error->empty()) {
+            const std::string invalid = ValidateItemStack(stack);
+            if (!invalid.empty()) *error = "Malformed item: '" + invalid + "'";
+        }
+        stack.count = std::min(stack.count, std::max(1, GetMaxStackSize(stack)));
         return stack;
     }
 

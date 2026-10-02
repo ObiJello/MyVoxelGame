@@ -2,7 +2,7 @@
 //
 // Blocking HTTP/JSON client for the ObeyCraft friends service (accounts,
 // name availability, rename). One POST /api per call — the request pattern
-// mirrors GitHubAPI::HttpGet with POSTFIELDS added.
+// is a plain curl easy POST with the JSON body in POSTFIELDS.
 //
 // IMPORTANT: every method blocks on network I/O. Call ONLY from detached
 // worker threads (the launcher's established background pattern), never

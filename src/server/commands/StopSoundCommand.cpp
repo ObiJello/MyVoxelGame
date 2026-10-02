@@ -76,13 +76,13 @@ namespace Server {
 
         if (soundSource) {
             const std::string name(Game::SoundSourceName(*soundSource));
-            connection.SendChatMessage(sound.empty()
+            source.SendSuccess(connection, sound.empty()
                 ? "Stopped all '" + name + "' sounds"                                // .source.any
-                : "Stopped sound '" + sound + "' on source '" + name + "'", 1);     // .source.sound
+                : "Stopped sound '" + sound + "' on source '" + name + "'", true);     // .source.sound
         } else {
-            connection.SendChatMessage(sound.empty()
+            source.SendSuccess(connection, sound.empty()
                 ? std::string("Stopped all sounds")                                  // .sourceless.any
-                : "Stopped sound '" + sound + "'", 1);                               // .sourceless.sound
+                : "Stopped sound '" + sound + "'", true);                               // .sourceless.sound
         }
     }
 

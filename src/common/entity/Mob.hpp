@@ -268,7 +268,17 @@ namespace Game {
         void OnStartedRiding(Entity& vehicle) override;
 
         // ── Target ─────────────────────────────────────────────────────────
-        LivingEntity* GetTarget() const { return m_target; }
+        // MC Mob.getTarget: the stored target through asValidTarget, so a
+        // target that turned creative/spectator, or that the mob may no
+        // longer attack (Peaceful, a player-built golem's builder), reads as
+        // none without anything having to clear it. The brain mobs MC
+        // overrides it for (AbstractPiglin, Hoglin, Zoglin, Warden, Breeze,
+        // Creaking, Axolotl, Frog) return GetTargetFromBrain() instead: their
+        // behaviours never write m_target, they write ATTACK_TARGET.
+        virtual LivingEntity* GetTarget() const { return AsValidTarget(m_target); }
+        // MC Mob.getTargetUnchecked — the raw field, no validation and no
+        // brain. Only NeutralMob.updatePersistentAnger reads it in MC.
+        LivingEntity* GetTargetUnchecked() const { return m_target; }
         virtual void  SetTarget(LivingEntity* target) {
             // Never an entity of another level. The reference-clearing
             // sweeps that keep m_target from dangling (a mob dying, a
@@ -279,13 +289,35 @@ namespace Game {
             // freed object in the next goal tick. Chasing across a portal
             // is EntityPortalTravel's, by id.
             if (target && m_level && target->Level() && target->Level() != m_level) return;
+            // MC Mob.setTarget: this.target = asValidTarget(target) — a target
+            // the mob may not attack is stored as NO target, never kept.
+            target = AsValidTarget(target);
             if (target) MarkHoldsEntityRefs();   // see Entity::HoldsEntityRefs
             m_target = target;
         }
 
-        // MC Mob.canAttack — overridden by Creeper (ignores goats) and by the
-        // player adapter (never attackable in creative/spectator).
+        // MC Mob.canAttack: never a ghast, then LivingEntity.canAttack (no
+        // player on Peaceful; target.canBeSeenAsEnemy). Overridden per mob as
+        // in MC (tame animals spare the owner, iron golems creepers, ...).
         virtual bool CanAttack(const LivingEntity& target) const;
+
+    protected:
+        // MC Mob.asValidTarget: a creative/spectator player, or anything the
+        // mob cannot attack, is no target at all. Applied on SetTarget (the
+        // field never holds an invalid target) and on every GetTarget (one
+        // that turned invalid after it was set reads as none).
+        LivingEntity* AsValidTarget(LivingEntity* target) const {
+            if (target == nullptr) return nullptr;
+            if (target->IsPlayer() && (target->IsCreative() || target->IsSpectator())) return nullptr;
+            return CanAttack(*target) ? target : nullptr;
+        }
+
+        // MC Mob.getTargetFromBrain: asValidTarget(brain ATTACK_TARGET). The
+        // GetTarget override of every brain mob MC gives one. An array index
+        // into the brain plus a variant read — no search.
+        LivingEntity* GetTargetFromBrain() const;
+
+    public:
 
         // ── Aggression / state flags (MC DATA_MOB_FLAGS_ID) ───────────────
         bool IsAggressive() const { return m_aggressive; }
@@ -851,6 +883,11 @@ namespace Game {
         // client copy needs them opt in — the mounts whose rolled speed,
         // jump and health the steering client simulates and shows.
         virtual bool SyncsAttributesToClient() const { return false; }
+        // …or any mob whose attributes were made to differ from its type's
+        // (LivingEntity::AttributesCustomized — /attribute, a save carrying
+        // such values): its client copy needs the SCALE, GRAVITY, STEP_HEIGHT
+        // … the server now uses. What the tracker actually asks.
+        bool ShouldSyncAttributes() const { return SyncsAttributesToClient() || AttributesCustomized(); }
         // True when the client advances this byte itself from the value it
         // was given at spawn, so the tracker must NOT treat every tick's
         // change as dirty data. Primed TNT's fuse is the case: MC's client

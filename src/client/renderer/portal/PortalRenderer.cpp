@@ -11,6 +11,7 @@
 #include "../backend/vulkan/VKBackend.hpp"
 #endif
 #include "../mesh/ChunkRenderer.hpp"     // RenderChunksAll for the see-through scene re-render
+#include "../core/WorldFramebuffer.hpp"
 #include "client/world/ClientChunkManager.hpp"   // section info for the occlusion gate
 #include "common/core/Config.hpp"
 #include <algorithm>
@@ -1378,7 +1379,7 @@ void main() {
             // `if (m_refractionShader != INVALID_SHADER)`.
             if (false) {
                 int fbW = 0, fbH = 0;
-                glfwGetFramebufferSize(g_renderBackend->GetWindow(), &fbW, &fbH);
+                if (!WorldFramebuffer::Get(fbW, fbH)) glfwGetFramebufferSize(g_renderBackend->GetWindow(), &fbW, &fbH);
                 if (fbW > 0 && fbH > 0) {
                     // Lazy resize of the snapshot texture to match the
                     // framebuffer. Recreate when window size changes.

@@ -1,5 +1,6 @@
 // File: src/server/entity/PlayerRiding.cpp
 #include "server/entity/PlayerRiding.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "server/IntegratedServer.hpp"
 #include "server/entity/MobManager.hpp"
@@ -440,6 +441,9 @@ namespace Server::PlayerRiding {
         if (Game::ILevelWrite* world = level.World()) {
             world->GameEvent(view, Game::GameEventId::EntityMount, vehicle.position);
         }
+        // ServerPlayer.startRiding: CriteriaTriggers.START_RIDING_TRIGGER (the
+        // player predicate reads the new vehicle).
+        CriteriaTriggers::StartedRiding(*player);
         return true;
     }
 

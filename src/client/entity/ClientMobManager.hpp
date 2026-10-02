@@ -112,6 +112,11 @@ namespace Client {
             return nullptr;
         }
         void GetPlayers(std::vector<Game::LivingEntity*>&) const override {}
+        // MC ClientLevel.getEntity(id) for a looker (a wither's side heads):
+        // a mob of this client, the local player or a remote one (players
+        // are not Entities here — their eyes are the standing / crouching
+        // eye heights).
+        bool ResolveEntityEye(int32_t id, glm::dvec3& feet, double& eyeY) const override;
         void BroadcastEntityEvent(const Game::Entity&, uint8_t) override {}
 
         // MC ClientLevel's sound half (common/sound/LevelSound.hpp). A mob's
@@ -162,6 +167,12 @@ namespace Client {
             float power = 1.0f;
             float scale = 1.0f;
             Game::ParticleOptions options;
+            // MC TerrainParticle's explicit `pos` (its 9-argument
+            // constructor, which ClientLevel.addDestroyBlockEffect and
+            // addBreakingBlockEffect use): the block whose tint colours the
+            // particle. Unset, the particle's own containing(x, y, z).
+            bool hasBlockPos = false;
+            glm::ivec3 blockPos{0};
         };
 
         // ── The queue cap ──────────────────────────────────────────────
@@ -428,6 +439,9 @@ namespace Client {
         // MC DATA_BEAM_TARGET, arriving as EndCrystalBeamS2C — see
         // DragonPackets.hpp. No-op for anything that is not an End crystal.
         void SetEndCrystalBeam(int32_t id, bool hasTarget, const glm::ivec3& target);
+        // MC WitherBoss DATA_TARGET_B / _C, arriving as WitherHeadTargetsS2C.
+        // No-op for anything that is not a wither.
+        void SetWitherHeadTargets(int32_t id, int32_t rightHeadTarget, int32_t leftHeadTarget);
         void SetData(int32_t id, float health, uint8_t flags, uint8_t variantData,
                      uint8_t hurtTime, uint8_t deathTime, uint8_t swellDir, uint8_t swell,
                      uint8_t pose, uint8_t animState, uint32_t blockStateRaw = 0);

@@ -109,10 +109,9 @@ namespace Render {
         // Fully-formed stacks (with DataComponents), so per-stack variants —
         // e.g. enchanted_book at every (enchantment, level) — each get their
         // own grid cell, tooltip and foil state.
+        // A cell whose stack carries CREATIVE_SLOT_LOCK (the Saved Hotbars
+        // tab's "Save hotbar with…" placeholder) is shown but never picked up.
         std::vector<Game::ItemStack> m_items;
-        // MC DataComponents.CREATIVE_SLOT_LOCK: the Saved Hotbars tab's
-        // "Save hotbar with…" placeholders, shown but never picked up.
-        std::vector<uint8_t>         m_locked;
         void FillHotbarTab();
 
         // ── Search ───────────────────────────────────────────────────────

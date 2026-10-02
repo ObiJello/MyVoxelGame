@@ -3,6 +3,8 @@
 // MC net.minecraft.world.entity.LightningBolt — see the header for the
 // timeline and what is not modelled.
 #include "common/entity/LightningBolt.hpp"
+#include <algorithm>
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/entity/decoration/HangingEntity.hpp"
 #include "common/entity/decoration/BlockAttachedEntity.hpp"
@@ -129,8 +131,34 @@ namespace Game {
         --m_life;
         if (m_life < 0) {
             if (m_flashes == 0) {
-                // MC fires the LIGHTNING_STRIKE advancement trigger for every
-                // player within 256 blocks here — no advancements.
+                // MC: every live entity within 15 blocks the strike did NOT
+                // hit is a bystander; every player within 256 blocks gets
+                // CriteriaTriggers.LIGHTNING_STRIKE with them.
+                if (!clientSide) {
+                    const AABB around = AABB::FromMinMax(
+                        glm::vec3(static_cast<float>(position.x - kDetectionRadius),
+                                  static_cast<float>(position.y - kDetectionRadius),
+                                  static_cast<float>(position.z - kDetectionRadius)),
+                        glm::vec3(static_cast<float>(position.x + kDetectionRadius),
+                                  static_cast<float>(position.y + 6.0 + kDetectionRadius),
+                                  static_cast<float>(position.z + kDetectionRadius)));
+                    std::vector<Entity*> nearby;
+                    m_level->GetEntitiesInBox(around, this, nearby);
+                    std::vector<Entity*> bystanders;
+                    for (Entity* e : nearby) {
+                        if (!e || !e->IsAlive()) continue;
+                        if (std::find(m_hitEntityIds.begin(), m_hitEntityIds.end(), e->GetId()) != m_hitEntityIds.end()) continue;
+                        bystanders.push_back(e);
+                    }
+                    std::vector<LivingEntity*> players;
+                    m_level->GetPlayers(players);
+                    for (LivingEntity* p : players) {
+                        if (!p || DistanceTo(*p) >= 256.0) continue;
+                        if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(p)) {
+                            Server::CriteriaTriggers::LightningStrike(*player, *this, bystanders);
+                        }
+                    }
+                }
                 Discard();
             } else if (m_life < -m_random.NextInt(10)) {
                 --m_flashes;
@@ -156,11 +184,21 @@ namespace Game {
                               static_cast<float>(position.z + kDamageRadius)));
                 std::vector<Entity*> entities;
                 m_level->GetEntitiesInBox(box, this, entities);
+                std::vector<Entity*> struck;
                 for (Entity* entity : entities) {
-                    if (entity && entity->IsAlive()) entity->ThunderHit(this);
+                    if (entity && entity->IsAlive()) {
+                        entity->ThunderHit(this);
+                        struck.push_back(entity);
+                    }
                 }
-                // MC hitEntities.addAll + CHANNELED_LIGHTNING for `cause`:
-                // advancement-only, not modelled.
+                // MC hitEntities.addAll(entities), then CHANNELED_LIGHTNING
+                // for the channeling player.
+                for (Entity* e : struck) m_hitEntityIds.push_back(e->GetId());
+                if (m_causeId != 0) {
+                    if (Server::ServerPlayer* cause = Server::CriteriaTriggers::PlayerOf(m_level->ResolveEntityById(m_causeId))) {
+                        Server::CriteriaTriggers::ChanneledLightning(*cause, struck);
+                    }
+                }
             }
         }
     }

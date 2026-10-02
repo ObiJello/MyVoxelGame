@@ -448,37 +448,6 @@ namespace Game {
             }
         };
 
-        // ── StopAttackingIfTargetInvalid, warden flavour ───────────────────
-        // MC's create(pred, onStop, false): the target is invalid once the
-        // warden is no longer ANGRY or the entity stopped being targetable;
-        // dropping it clears its anger and re-arms the dig cooldown.
-        class WardenStopAttacking : public Behavior {
-        public:
-            WardenStopAttacking()
-                : Behavior({ { MemoryModule::AttackTarget, MemoryStatus::ValuePresent } },
-                           1) {}
-            const char* DebugString() const override { return "WardenStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel&, LivingEntity& body) override {
-                auto* warden = dynamic_cast<Warden*>(&body);
-                Brain* brain = body.GetBrain();
-                if (!warden || !brain) return false;
-                auto* target = dynamic_cast<LivingEntity*>(
-                    brain->GetEntity(MemoryModule::AttackTarget));
-                const bool invalid = !target || !target->IsAlive()
-                    || !warden->IsAngry() || !warden->CanTargetEntity(target);
-                if (invalid) {
-                    if (target && !warden->CanTargetEntity(target)) {
-                        warden->ClearAnger(target);
-                    }
-                    WardenAi::SetDigCooldown(*warden);
-                    brain->EraseMemory(MemoryModule::AttackTarget);
-                }
-                return true;
-            }
-        };
-
         // ── SetEntityLookTarget, warden flavour ────────────────────────────
         // MC passes `isTarget(body, entity)` — during FIGHT the warden only
         // ever look-locks its own attack target.
@@ -652,7 +621,22 @@ namespace Game {
         // ── FIGHT ──────────────────────────────────────────────────────────
         std::vector<BehaviorPtr> fight;
         fight.push_back(std::make_unique<DigCooldownSetter>());
-        fight.push_back(std::make_unique<WardenStopAttacking>());
+        // MC StopAttackingIfTargetInvalid.create(!angry || !canTargetEntity,
+        // WardenAi::onTargetInvalid, false) — the warden never grows tired of
+        // trying to reach its target.
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(
+            [](EntityLevel&, Mob& body, LivingEntity& target) {
+                auto* warden = dynamic_cast<Warden*>(&body);
+                return !warden || !warden->IsAngry() || !warden->CanTargetEntity(&target);
+            },
+            [](EntityLevel&, Mob& body, LivingEntity& target) {
+                // MC WardenAi.onTargetInvalid.
+                auto* warden = dynamic_cast<Warden*>(&body);
+                if (!warden) return;
+                if (!warden->CanTargetEntity(&target)) warden->ClearAnger(&target);
+                WardenAi::SetDigCooldown(*warden);
+            },
+            /*canGrowTiredOfTryingToReachTarget=*/false));
         fight.push_back(std::make_unique<LookAtAttackTarget>());
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(1.2f));
         fight.push_back(std::make_unique<SonicBoom>());

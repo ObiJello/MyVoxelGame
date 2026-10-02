@@ -103,33 +103,31 @@ namespace Server {
 
         // MC TickCommand.tickQuery. Emits the status line, the rate line, then
         // the percentile line — three separate messages, in that order.
-        void TickQuery(ServerConnection& connection, ServerTickRateManager& manager,
+        void TickQuery(const CommandSourceStack& source, ServerConnection& connection,
+                       ServerTickRateManager& manager,
                        IntegratedServer& server) {
             const std::string tickRateString = Format1f(manager.tickrate());
             const int64_t averageNanos = manager.averageTickTimeNanos();
             const std::string busyTime = NanosToMillisString(averageNanos);
 
             if (manager.isSprinting()) {
-                connection.SendChatMessage("The game is sprinting", 1);
-                connection.SendChatMessage(
-                    "Target tick rate: " + tickRateString +
+                source.SendSuccess(connection, "The game is sprinting", false);
+                source.SendSuccess(connection, "Target tick rate: " + tickRateString +
                     " per second (ignored, reference only).\n"
-                    "Average time per tick: " + busyTime + "ms", 1);
+                    "Average time per tick: " + busyTime + "ms", false);
             } else {
                 if (manager.isFrozen()) {
-                    connection.SendChatMessage("The game is frozen", 1);
+                    source.SendSuccess(connection, "The game is frozen", false);
                 } else if (manager.nanosecondsPerTick() < averageNanos) {
                     // MC's exact test: the budget is smaller than what a tick
                     // actually costs, i.e. we cannot keep up.
-                    connection.SendChatMessage(
-                        "The game is running, but can't keep up with the target tick rate", 1);
+                    source.SendSuccess(connection, "The game is running, but can't keep up with the target tick rate", false);
                 } else {
-                    connection.SendChatMessage("The game is running normally", 1);
+                    source.SendSuccess(connection, "The game is running normally", false);
                 }
-                connection.SendChatMessage(
-                    "Target tick rate: " + tickRateString + " per second.\n"
+                source.SendSuccess(connection, "Target tick rate: " + tickRateString + " per second.\n"
                     "Average time per tick: " + busyTime + "ms (Target: " +
-                    Format1f(manager.millisecondsPerTick()) + "ms)", 1);
+                    Format1f(manager.millisecondsPerTick()) + "ms)", false);
             }
 
             // MC sorts a COPY of the sample ring and indexes it with
@@ -143,9 +141,8 @@ namespace Server {
             const std::string p50 = NanosToMillisString(samples[len / 2]);
             const std::string p95 = NanosToMillisString(samples[static_cast<int>(len * 0.95)]);
             const std::string p99 = NanosToMillisString(samples[static_cast<int>(len * 0.99)]);
-            connection.SendChatMessage(
-                "Percentiles: P50: " + p50 + "ms P95: " + p95 + "ms P99: " + p99 +
-                "ms, sample: " + std::to_string(len), 1);
+            source.SendSuccess(connection, "Percentiles: P50: " + p50 + "ms P95: " + p95 + "ms P99: " + p99 +
+                "ms, sample: " + std::to_string(len), false);
 
             (void)server;
         }
@@ -176,7 +173,7 @@ namespace Server {
 
         // ── /tick query ─────────────────────────────────────────────────────
         if (sub == "query") {
-            TickQuery(connection, manager, *server);
+            TickQuery(source, connection, manager, *server);
             return;
         }
 
@@ -202,8 +199,7 @@ namespace Server {
             }
             manager.setTickRate(*rate);
             server->PersistTickState();
-            connection.SendChatMessage(
-                "Set the target tick rate to " + Format1f(*rate) + " per second", 1);
+            source.SendSuccess(connection, "Set the target tick rate to " + Format1f(*rate) + " per second", true);
             return;
         }
 
@@ -228,17 +224,15 @@ namespace Server {
             // Kept across sessions (a deliberate departure from vanilla, whose
             // tick state is not saved) — see WorldSidecar::tickFrozen.
             server->PersistTickState();
-            connection.SendChatMessage(
-                freeze ? "The game is frozen" : "The game is running normally", 1);
+            source.SendSuccess(connection, freeze ? "The game is frozen" : "The game is running normally", true);
             return;
         }
 
         // ── /tick step [<time>|stop] ────────────────────────────────────────
         if (sub == "step") {
             if (args.size() >= 2 && ToLower(args[1]) == "stop") {
-                connection.SendChatMessage(
-                    manager.stopStepping() ? "Interrupted the current tick step"
-                                           : "No tick step in progress", 1);
+                if (manager.stopStepping()) source.SendSuccess(connection, "Interrupted the current tick step", true);
+                else connection.SendChatMessage("No tick step in progress", 1);
                 return;
             }
             // Bare `/tick step` is one tick (MC: `step(source, 1)`).
@@ -253,7 +247,7 @@ namespace Server {
                 ticks = *parsed;
             }
             if (manager.stepGameIfPaused(ticks)) {
-                connection.SendChatMessage("Stepping " + std::to_string(ticks) + " tick(s)", 1);
+                source.SendSuccess(connection, "Stepping " + std::to_string(ticks) + " tick(s)", true);
             } else {
                 connection.SendChatMessage(
                     "Unable to step the game - the game must be frozen first", 1);
@@ -268,9 +262,8 @@ namespace Server {
                 return;
             }
             if (ToLower(args[1]) == "stop") {
-                connection.SendChatMessage(
-                    manager.stopSprinting() ? "Interrupted the current tick sprint"
-                                            : "No tick sprint in progress", 1);
+                if (manager.stopSprinting()) source.SendSuccess(connection, "Interrupted the current tick sprint", true);
+                else connection.SendChatMessage("No tick sprint in progress", 1);
                 return;
             }
             auto parsed = ParseTime(args[1], 1);
@@ -282,9 +275,9 @@ namespace Server {
             // MC reports the interruption of a previous sprint BEFORE
             // announcing the new one.
             if (manager.requestGameToSprint(*parsed)) {
-                connection.SendChatMessage("Interrupted the current tick sprint", 1);
+                source.SendSuccess(connection, "Interrupted the current tick sprint", true);
             }
-            connection.SendChatMessage("The game is sprinting", 1);
+            source.SendSuccess(connection, "The game is sprinting", true);
             return;
         }
 

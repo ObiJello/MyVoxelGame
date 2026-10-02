@@ -43,6 +43,7 @@
 #if ENABLE_PORTAL_GUN
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <unordered_map>
 #include "common/world/level/DimensionId.hpp"
@@ -166,9 +167,15 @@ namespace Game::Portal {
         //   ceiling click → same as floor (axes derived relative to player)
         // Returns Placed or Fizzled. The caller (PortalGunBehavior::OnGunUseOn)
         // maps Fizzled → UseResult::Fail.
+        //
+        // `facingYaw`: the yaw a floor or ceiling portal takes its facing
+        // from — the shot's heading in the hit block's own space (it differs
+        // from the player's yaw when the shot went through a portal). NaN
+        // means the player's own yaw.
         PlaceResult PlacePortal(uint64_t gunId, Game::World* world,
                                 const BlockHitResult& hit, PortalColor color,
-                                Server::ServerPlayer* player);
+                                Server::ServerPlayer* player,
+                                float facingYaw = std::numeric_limits<float>::quiet_NaN());
 
         // Wipe both portals belonging to a gun. Also how the gun tracker
         // (PortalGunTracker.hpp) and /portalgun close a lost gun's pair.
@@ -193,6 +200,20 @@ namespace Game::Portal {
         // The one-time orphan sweep (PortalGunTracker.cpp) — persisted in
         // portal_gun.json so a world is swept once, not on every load.
         bool OrphanSweepDone() const { return m_orphanSweepDone; }
+
+        // Player names by playerdata UUID ("xxxxxxxx-xxxx-..."), learned as
+        // players join (PortalGunTracker) and saved in portal_gun.json, so
+        // a gun found in an OFFLINE player's saved inventory (the file is
+        // named by UUID only; vanilla keeps no name in it) shows their name.
+        void NotePlayerName(const std::string& name);
+        // The same from a saved player file: its UUID (the file name) and
+        // the name recorded in it.
+        void NotePlayerName(const std::string& uuid, const std::string& name) {
+            if (!uuid.empty() && !name.empty()) m_playerNames[uuid] = name;
+        }
+        // The name for a UUID string, or the UUID itself when never seen
+        // (never "unknown" when there is an id); a non-UUID is returned as is.
+        std::string PlayerNameFor(const std::string& uuidOrName) const;
         void SetOrphanSweepDone(bool done) { m_orphanSweepDone = done; }
 
         // Per-tick: detect player crossings + dispatch teleports. Walks every
@@ -246,6 +267,7 @@ namespace Game::Portal {
         uint64_t m_nextId = 1;
         std::unordered_map<uint64_t, PortalPair> m_pairs;
         bool     m_orphanSweepDone = false;
+        std::unordered_map<std::string, std::string> m_playerNames;   // uuid -> name
 
         // For each player, the player's center-of-body position (waist) on
         // the previous tick, per portal we're tracking against. Used to

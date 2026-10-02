@@ -8,9 +8,31 @@ namespace Game {
 
     bool DataComponentMap::has(const DataComponentTypeBase& key) const {
         for (const auto& e : entries) {
-            if (e.type == &key) return true;
+            if (e.type == &key) return e.value != nullptr;
         }
         return false;
+    }
+
+    void DataComponentMap::setRemoved(const DataComponentTypeBase& key) {
+        for (auto& e : entries) {
+            if (e.type == &key) { e.value.reset(); return; }
+        }
+        entries.push_back({&key, nullptr});
+    }
+
+    bool DataComponentMap::isRemoved(const DataComponentTypeBase& key) const {
+        for (const auto& e : entries) {
+            if (e.type == &key) return e.value == nullptr;
+        }
+        return false;
+    }
+
+    std::vector<const DataComponentTypeBase*> DataComponentMap::removedTypes() const {
+        std::vector<const DataComponentTypeBase*> out;
+        for (const auto& e : entries) {
+            if (!e.value) out.push_back(e.type);
+        }
+        return out;
     }
 
     bool DataComponentMap::CopyNamed(const DataComponentMap& src, std::string_view name) {
@@ -43,6 +65,13 @@ namespace Game {
             for (const auto& o : target.entries) {
                 if (o.type == e.type) { match = &o; break; }
             }
+            if (!e.value) {
+                // A removal in the predicate: the target must not have it.
+                if (match) { if (match->value) return false; continue; }
+                if (targetDefaults && targetDefaults->has(*e.type)) return false;
+                continue;
+            }
+            if (match && !match->value) return false;   // the target removed it
             if (!match && targetDefaults) {
                 for (const auto& o : targetDefaults->entries) {
                     if (o.type == e.type) { match = &o; break; }
@@ -84,7 +113,9 @@ namespace Game {
             // fresh value and nothing mutates one in place, so a stack and
             // its copy (the per-tick diff's remote model) compare without
             // serializing — which matters once a component is a 100-page book.
+            // (Two removals are both null.)
             if (e.value.get() == match->value.get()) continue;
+            if (!e.value || !match->value) return false;   // removed vs set
 
             if (!e.type->HasNetworkCodec()) {
                 // No codec means no way to inspect the value. Fall back to
@@ -107,16 +138,21 @@ namespace Game {
 
     // Mirrors DataComponentPatch.STREAM_CODEC.encode (DataComponentPatch.java:57-100).
     void DataComponentMap::Serialize(Network::PacketBuffer& buffer) const {
-        uint32_t added = 0;
-        for (const auto& e : entries) {
-            if (e.type->HasNetworkCodec()) ++added;
-        }
-        buffer.WriteVarInt(added);
-        buffer.WriteVarInt(0);  // removedCount — always 0 (flat map, no removals)
+        uint32_t added = 0, removed = 0;
         for (const auto& e : entries) {
             if (!e.type->HasNetworkCodec()) continue;
+            if (e.value) ++added; else ++removed;
+        }
+        buffer.WriteVarInt(added);
+        buffer.WriteVarInt(removed);
+        for (const auto& e : entries) {
+            if (!e.type->HasNetworkCodec() || !e.value) continue;
             buffer.WriteVarInt(e.type->networkId);
             e.type->SerializeErased(buffer, e.value.get());
+        }
+        for (const auto& e : entries) {
+            if (!e.type->HasNetworkCodec() || e.value) continue;
+            buffer.WriteVarInt(e.type->networkId);
         }
     }
 
@@ -125,12 +161,10 @@ namespace Game {
         DataComponentMap map;
         const uint32_t added   = reader.ReadVarInt();
         const uint32_t removed = reader.ReadVarInt();
-        if (removed != 0) {
-            throw std::runtime_error(
-                "DataComponentMap: non-zero removedCount " + std::to_string(removed) +
-                " — our writer never emits removals");
+        if (added > 4096 || removed > 4096) {
+            throw std::runtime_error("DataComponentMap: absurd component counts");
         }
-        map.entries.reserve(added);
+        map.entries.reserve(added + removed);
         for (uint32_t i = 0; i < added; ++i) {
             const uint32_t netId = reader.ReadVarInt();
             const DataComponentTypeBase* type = DataComponents::ById(netId);
@@ -144,6 +178,15 @@ namespace Game {
                     "DataComponentMap: component '" + type->name + "' has no deserializer");
             }
             map.entries.push_back({type, std::move(value)});
+        }
+        for (uint32_t i = 0; i < removed; ++i) {
+            const uint32_t netId = reader.ReadVarInt();
+            const DataComponentTypeBase* type = DataComponents::ById(netId);
+            if (!type) {
+                throw std::runtime_error(
+                    "DataComponentMap: unknown removed component networkId " + std::to_string(netId));
+            }
+            map.setRemoved(*type);
         }
         return map;
     }

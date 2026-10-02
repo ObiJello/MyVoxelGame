@@ -41,6 +41,14 @@ namespace Game {
     };
     inline constexpr int kDimensionCount = 6;
 
+    // MC DimensionType.cardinalLightType() == NETHER (the_nether.json's
+    // `cardinal_light`): the up and down faces of block models and fluids
+    // shade at 0.9 instead of 1.0 / 0.5 (CardinalLighting.NETHER). Every
+    // other dimension, vanilla and ours, is DEFAULT.
+    inline constexpr bool UsesNetherCardinalLight(DimensionId d) {
+        return d == DimensionId::Nether;
+    }
+
     // Dense 0..3 index, for arrays. NOT the wire or save id — use the enum
     // value for those.
     inline constexpr int DimensionSlot(DimensionId d) {

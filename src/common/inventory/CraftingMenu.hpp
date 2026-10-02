@@ -16,12 +16,20 @@
 // player-inventory index stop being the same number. Everything that speaks
 // menu indices — the wire protocol, PlayerSession's remote-slot diff, the
 // screen's hit test — goes through Slot, so nothing else has to care.
+//
+// Under the shared_crafting_tables rule the server builds the menu over the
+// table's block entity instead (CraftingTableBlockEntity): grid and output
+// square are the table's, shared by every player who has it open, and closing
+// leaves the grid where it is. The client always builds the plain menu — its
+// grid is a scratch copy the server's slot sync fills either way.
 #pragma once
 
 #include "AbstractCraftingMenu.hpp"
 #include "SimpleContainer.hpp"
 
 namespace Game {
+
+    class CraftingTableBlockEntity;
 
     class CraftingMenu : public AbstractCraftingMenu {
     public:
@@ -34,7 +42,31 @@ namespace Game {
         static constexpr int HOTBAR_SIZE   = 9;
         static constexpr int SLOT_COUNT    = 46;
 
+        // Vanilla (and every client): the menu owns its grid and output, and
+        // closing hands the grid back (AbstractCraftingMenu::Removed).
         explicit CraftingMenu(Inventory* playerInventory);
+
+        // SERVER, shared_crafting_tables: borrow the table's grid and output
+        // square. The table must outlive the menu — PlayerSession closes the
+        // menu when the table's entity goes (CloseMenuIfBlockGone), as it
+        // does a chest's.
+        CraftingMenu(Inventory* playerInventory, CraftingTableBlockEntity* table);
+
+        // The table this menu shares, or null for a private grid. The
+        // session's validity check only compares it with the entity at the
+        // table's cell — it may already be gone when that check runs.
+        CraftingTableBlockEntity* SharedTable() const { return m_sharedTable; }
+        bool IsShared() const { return m_sharedTable != nullptr; }
+
+        // Shared: the base's recipe lookup over the table's grid, writing the
+        // table's output square (so every viewer's diff sees it), then the
+        // table is marked changed for saving.
+        void SlotsChanged(ContainerClickResult& result) override;
+
+        // Shared: MC CraftingMenu.removed WITHOUT clearContainer — the grid
+        // stays in the table, and so does the output other viewers may be
+        // looking at. Private: the vanilla hand-back.
+        void Removed(ContainerClickResult& result) override;
 
         // Verbatim port of CraftingMenu.quickMoveStack (CraftingMenu.java:101-140).
         void QuickMoveStack(int slotIndex, ContainerClickResult& result) override;
@@ -48,6 +80,10 @@ namespace Game {
         ContainerClickResult HandleCreativeQuickMove(const ItemStack& source) override;
 
     private:
+        void BuildSlots(Inventory* playerInventory, IContainer* craftSlots, IContainer* resultSlots);
+
+        CraftingTableBlockEntity* m_sharedTable = nullptr;
+
         // Declared BEFORE anything that binds to them, and populated through
         // Configure() in the constructor body: base-class construction runs
         // before these exist, so they cannot be passed up the initializer list.

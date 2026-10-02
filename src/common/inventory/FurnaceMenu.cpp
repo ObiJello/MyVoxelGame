@@ -1,4 +1,5 @@
 // File: src/common/inventory/FurnaceMenu.cpp
+#include "common/data/DataComponents.hpp"
 #include "FurnaceMenu.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // Items::Bucket
 #include "common/world/block/entity/FurnaceBlockEntity.hpp"
@@ -17,8 +18,7 @@ namespace Game {
         public:
             using Slot::Slot;
             bool MayPlace(const ItemStack& stack) const override {
-                return RecipeManager::GetFuelBurnTime(stack) > 0 ||
-                       stack.itemId == Items::Bucket;
+                return IsCookingFuel(stack) || stack.itemId == Items::Bucket;
             }
         };
     }
@@ -141,7 +141,7 @@ namespace Game {
             // between the main rows and the hotbar.
             if (RecipeManager::FindCooking(m_kind, stack)) {
                 moved = MoveItemStackTo(stack, SLOT_INPUT, SLOT_INPUT + 1, false, result);
-            } else if (RecipeManager::GetFuelBurnTime(stack) > 0) {
+            } else if (IsCookingFuel(stack)) {
                 moved = MoveItemStackTo(stack, SLOT_FUEL, SLOT_FUEL + 1, false, result);
             } else if (slotIndex < HOTBAR_BEGIN) {
                 moved = MoveItemStackTo(stack, HOTBAR_BEGIN, SLOT_COUNT, false, result);

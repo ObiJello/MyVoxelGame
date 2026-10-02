@@ -67,6 +67,11 @@ namespace Game {
         // spawner minecart's BaseSpawner — follows its carrier's cell.
         void                   MoveCarriedTo(const glm::ivec3& pos) { m_worldPos = pos; }
         BlockID                GetBlockId() const { return m_blockId; }
+        // MC BlockEntity.setBlockState: the block under a KEPT entity changed
+        // (a copper chest oxidizing; on the client, an entity whose data
+        // arrived before its block, or one a piston carried and set down)
+        // and the entity follows it. Only for a block the type is valid for.
+        void                   RebindBlock(BlockID blockId) { m_blockId = blockId; }
 
         // Dirty bit: set by mutators (subclass logic), drained by the per-tick
         // delta broadcaster after the change has been queued for network send.

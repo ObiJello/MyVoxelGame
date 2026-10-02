@@ -58,15 +58,10 @@ namespace Render {
         }
 
         std::string SideStem(Game::ItemID item) {
-            if (item != Game::Items::Air) {
-                const std::string_view slug = Game::ItemRegistry::Slug(item);
-                constexpr std::string_view kSuffix = "_pottery_sherd";
-                if (slug.size() > kSuffix.size() &&
-                    slug.compare(slug.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
-                    return std::string(slug.substr(0, slug.size() - kSuffix.size())) + "_pottery_pattern";
-                }
-            }
-            return "decorated_pot_side";
+            // DecoratedPotRenderer.getSideMaterial: the item's
+            // PROVIDES_POTTERY_PATTERN, else the blank side.
+            std::string stem = Game::PotteryPatternStem(item);
+            return stem.empty() ? std::string("decorated_pot_side") : stem;
         }
 
         // display.gui: rotation [30, 45, 0], scale 0.6, then ItemTransform's

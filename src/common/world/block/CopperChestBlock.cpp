@@ -17,21 +17,25 @@ namespace Game {
 
     namespace {
 
-        // CopperChestBlock.updateShape: a copper chest whose connected
-        // neighbour is a copper chest becomes that neighbour's block with its
-        // own properties (`neighbourState.getBlock().withPropertiesOf(state)`)
-        // — the second half of a pair follows the first through every
-        // oxidation, waxing and scraping.
-        bool CopperChestUpdateShape(const IBlockAccess& /*level*/, const glm::ivec3& pos, BlockState state,
+        // CopperChestBlock.updateShape: `super.updateShape` (ChestBlock's
+        // pairing, ChestUpdateShape) first; then a copper chest whose
+        // connected neighbour is a copper chest becomes that neighbour's
+        // block with its own properties (`neighbourState.getBlock()
+        // .withPropertiesOf(state)`) — the second half of a pair follows the
+        // first through every oxidation, waxing and scraping.
+        bool CopperChestUpdateShape(const IBlockAccess& level, const glm::ivec3& pos, BlockState state,
                                     Direction toNeighbour, BlockID neighbourId, BlockState& outState,
-                                    ScheduledTickAccess* /*ticks*/) {
-            if (!IsCopperChestBlock(neighbourId) || neighbourId == state.Block()) return false;
-            const auto connected = ChestConnectedCell(state, pos);
-            if (!connected) return false;   // TYPE SINGLE
+                                    ScheduledTickAccess* ticks) {
+            BlockState chestState = state;
+            const bool paired = ChestUpdateShape(level, pos, state, toNeighbour, neighbourId, chestState, ticks);
+            outState = chestState;
+            if (!IsCopperChestBlock(neighbourId) || neighbourId == chestState.Block()) return paired;
+            const auto connected = ChestConnectedCell(chestState, pos);
+            if (!connected) return paired;   // TYPE SINGLE
             const glm::ivec3 neighbour(pos.x + StepX(toNeighbour), pos.y + StepY(toNeighbour),
                                        pos.z + StepZ(toNeighbour));
-            if (*connected != neighbour) return false;
-            outState = ChestWithPropertiesOf(neighbourId, state);
+            if (*connected != neighbour) return paired;
+            outState = ChestWithPropertiesOf(neighbourId, chestState);
             return true;
         }
 
@@ -93,6 +97,10 @@ namespace Game {
     } // namespace
 
     void RegisterCopperChestBehaviors(std::array<Block, BlockRegistry::Size>& blocks) {
+        // ChestBlock.updateShape for the chest and the trapped chest (the
+        // copper ones run it from their own hook below).
+        blocks[static_cast<size_t>(BlockID::Chest)].updateShape        = &ChestUpdateShape;
+        blocks[static_cast<size_t>(BlockID::TrappedChest)].updateShape = &ChestUpdateShape;
         for (int waxed = 0; waxed < 2; ++waxed) {
             for (int stage = 0; stage < 4; ++stage) {
                 Block& b = blocks[static_cast<size_t>(CopperChestOf(stage, waxed != 0))];

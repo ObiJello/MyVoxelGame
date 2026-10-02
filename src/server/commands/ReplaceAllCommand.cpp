@@ -181,7 +181,7 @@ namespace Server {
             return;
         }
         // commands.fill.success
-        connection.SendChatMessage("Successfully filled " + std::to_string(replaced) + " block(s)", 1);
+        source.SendSuccess(connection, "Successfully filled " + std::to_string(replaced) + " block(s)", true);
     }
 
 } // namespace Server

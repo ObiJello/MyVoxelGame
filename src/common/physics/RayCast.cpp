@@ -231,6 +231,7 @@ namespace Game {
                     hit.cursorPos = glm::vec3(hit.hitPoint - glm::dvec3(currentBlock));
                     hit.cursorPos = glm::clamp(hit.cursorPos, glm::vec3(0.0f), glm::vec3(0.999f));
                     hit.insideBlock = insideShape;
+                    hit.rayDirection = glm::vec3(dir);
 
                     // Face from the slab axis we entered through.
                     if (insideShape || nearAxis < 0) {

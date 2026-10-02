@@ -1,5 +1,6 @@
 // File: src/common/inventory/CraftingMenu.cpp
 #include "CraftingMenu.hpp"
+#include "common/world/block/entity/CraftingTableBlockEntity.hpp"
 #include "common/world/map/MapItem.hpp"
 #include <memory>
 
@@ -11,19 +12,32 @@ namespace Game {
 
     CraftingMenu::CraftingMenu(Inventory* playerInventory)
         : AbstractCraftingMenu(playerInventory, 3, 3) {
+        BuildSlots(playerInventory, &m_craftSlots, &m_resultSlots);
+    }
 
-        Configure(&m_craftSlots, 0, &m_resultSlots, 0,
+    CraftingMenu::CraftingMenu(Inventory* playerInventory, CraftingTableBlockEntity* table)
+        : AbstractCraftingMenu(playerInventory, 3, 3), m_sharedTable(table) {
+        // The menu's own m_craftSlots / m_resultSlots go unused: every viewer's
+        // slots point at the table's one grid and output, so a write through
+        // any of them is the write every other viewer's diff reads.
+        if (table) BuildSlots(playerInventory, &table->Grid(), &table->Result());
+        else       BuildSlots(playerInventory, &m_craftSlots, &m_resultSlots);
+    }
+
+    void CraftingMenu::BuildSlots(Inventory* playerInventory, IContainer* craftSlots,
+                                  IContainer* resultSlots) {
+        Configure(craftSlots, 0, resultSlots, 0,
                   /*gridMenuBegin=*/GRID_BEGIN, /*resultMenuIndex=*/RESULT_SLOT);
 
         // GUI coordinates are MC's, panel-relative to the 176x166
         // textures/gui/container/crafting_table.png.
 
         // 0 — result (CraftingMenu.java:43 → addResultSlot(player, 124, 35)).
-        AddSlot(std::make_unique<CraftingResultSlot>(this, &m_resultSlots, 0, 124, 35));
+        AddSlot(std::make_unique<CraftingResultSlot>(this, resultSlots, 0, 124, 35));
 
         // 1..9 — the 3x3 grid (CraftingMenu.java:44 → addCraftingGridSlots(30, 17)).
         for (int i = 0; i < GRID_SIZE; ++i) {
-            AddSlot(std::make_unique<Slot>(&m_craftSlots, i,
+            AddSlot(std::make_unique<Slot>(craftSlots, i,
                                            30 + (i % 3) * SLOT_STEP,
                                            17 + (i / 3) * SLOT_STEP));
         }
@@ -39,6 +53,22 @@ namespace Game {
             AddSlot(std::make_unique<Slot>(playerInventory, Inventory::HOTBAR_BEGIN + i,
                                            8 + i * SLOT_STEP, 84 + 58));
         }
+    }
+
+    void CraftingMenu::SlotsChanged(ContainerClickResult& result) {
+        AbstractCraftingMenu::SlotsChanged(result);
+        // Slot writes already mark the table through its container; this
+        // catches the in-place edits (a stack's count changed through the
+        // slot's reference) that reach no SetItem.
+        if (m_sharedTable) m_sharedTable->MarkDirty();
+    }
+
+    void CraftingMenu::Removed(ContainerClickResult& result) {
+        // MC CraftingMenu.removed → clearContainer(player, craftSlots), which
+        // the shared table skips: what is in the grid is the table's, and
+        // other players may still be crafting with it.
+        if (m_sharedTable) return;
+        AbstractCraftingMenu::Removed(result);
     }
 
     int CraftingMenu::MenuIndexForInventorySlot(int inventoryIndex) const {
@@ -94,7 +124,7 @@ namespace Game {
         if (source.itemId == Items::Air) return result;
 
         ItemStack stack = source;
-        stack.count = ItemRegistry::Get(source.itemId).maxStackSize;
+        stack.count = Game::GetMaxStackSize(source);
 
         // Hotbar first, then the main rows — same intent as InventoryMenu's
         // override: a creative shift-click means "give me this in hand".

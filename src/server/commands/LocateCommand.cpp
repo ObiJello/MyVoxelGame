@@ -45,7 +45,8 @@ namespace Server {
         // click lands on the ground — a POI keeps "~", its position being a
         // real block. MC's click SUGGESTS "/tp @s x y z" into the chat box;
         // here it RUNS it, which is what the click reads as.
-        void SendLocateResult(ServerConnection& connection, const std::string& foundName,
+        void SendLocateResult(const CommandSourceStack& source, ServerConnection& connection,
+                              const std::string& foundName,
                               const glm::ivec3& pos, bool includeY, int distance) {
             const std::string y = includeY ? std::to_string(pos.y) : std::string("~");
             const std::string coords = std::to_string(pos.x) + ", " + y + ", " + std::to_string(pos.z);
@@ -59,7 +60,7 @@ namespace Server {
             packet.segments.push_back(Network::ChatSegmentData{"[" + coords + "]", 0xFF55FF55,   // ChatFormatting.GREEN
                                                                Network::ChatClickAction::RunCommand, tp, "Click to teleport"});
             packet.segments.push_back(Network::ChatSegmentData{" (" + std::to_string(distance) + " blocks away)", 0xFFFFFFFF, Network::ChatClickAction::None, "", ""});
-            connection.SendChatMessage(packet);
+            source.SendSuccess(connection, packet, false);
         }
         int Distance(const glm::ivec3& from, const glm::ivec3& to, bool includeY) {
             const double dx = to.x - from.x, dy = includeY ? (to.y - from.y) : 0.0, dz = to.z - from.z;
@@ -174,7 +175,7 @@ namespace Server {
             // The finder's Y is the placement's locate offset (0); the
             // distance stays horizontal as MC's is.
             const glm::ivec3 pos(found->pos.x, LocateSurfaceY(*level, found->pos.x, found->pos.z, from.y), found->pos.z);
-            SendLocateResult(connection, name, pos, true, Distance(from, pos, false));
+            SendLocateResult(source, connection, name, pos, true, Distance(from, pos, false));
             Log::Info("Locating element %s took %lld ms", name.c_str(), static_cast<long long>(ms));
             return;
         }
@@ -204,7 +205,7 @@ namespace Server {
                 return;
             }
             const std::string name = FoundName(id, isTag, found->id);
-            SendLocateResult(connection, name, found->pos, true, Distance(from, found->pos, true));
+            SendLocateResult(source, connection, name, found->pos, true, Distance(from, found->pos, true));
             Log::Info("Locating element %s took %lld ms", name.c_str(), static_cast<long long>(ms));
             return;
         }
@@ -230,7 +231,7 @@ namespace Server {
                     connection.SendChatMessage("Could not find a point of interest of type " + Quoted(asked) + " within reasonable distance", 1);
                     return;
                 }
-                SendLocateResult(connection, name, *portal, false, Distance(from, *portal, false));
+                SendLocateResult(source, connection, name, *portal, false, Distance(from, *portal, false));
                 Log::Info("Locating element %s took %lld ms", name.c_str(), static_cast<long long>(ms));
                 return;
             }

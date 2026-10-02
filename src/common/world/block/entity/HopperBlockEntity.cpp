@@ -1,4 +1,5 @@
 // File: src/common/world/block/entity/HopperBlockEntity.cpp
+#include "common/data/DataComponents.hpp"
 #include "common/world/block/entity/HopperBlockEntity.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/vehicle/VehicleContainer.hpp"
@@ -24,7 +25,7 @@ namespace Game {
 
         // MC ItemStack.isSameItemSameComponents(a, b) && a.count <= max.
         bool CanMergeItems(const ItemStack& a, const ItemStack& b) {
-            return a.count <= ItemRegistry::Get(a.itemId).maxStackSize && IsSameItemSameComponents(a, b);
+            return a.count <= Game::GetMaxStackSize(a) && IsSameItemSameComponents(a, b);
         }
 
         // MC HopperBlockEntity.getSlots(container, direction).
@@ -54,7 +55,7 @@ namespace Game {
                 // has a max stack of 0, so an empty slot must be answered
                 // explicitly or it reads as full and the hopper never ejects.
                 if (stack.IsEmpty()) return false;
-                if (stack.count < ItemRegistry::Get(stack.itemId).maxStackSize) return false;
+                if (stack.count < Game::GetMaxStackSize(stack)) return false;
             }
             return true;
         }
@@ -92,7 +93,7 @@ namespace Game {
                 stack = ItemStack{};
                 success = true;
             } else if (CanMergeItems(current, stack)) {
-                const int space = ItemRegistry::Get(stack.itemId).maxStackSize - current.count;
+                const int space = Game::GetMaxStackSize(stack) - current.count;
                 const int count = std::min(stack.count, space);
                 stack.count -= count;
                 if (stack.count <= 0) stack.Clear();
@@ -142,6 +143,12 @@ namespace Game {
     // shut). Entity containers (chest minecarts) do not exist here.
     IContainer* HopperBlockEntity::GetContainerAt(ILevelWrite& level, const glm::ivec3& pos,
                                                   std::unique_ptr<IContainer>& owned) {
+        // MC getBlockContainer: a WorldlyContainerHolder block first — the
+        // composter's input / output / empty container.
+        if (level.GetBlock(pos.x, pos.y, pos.z) == BlockID::Composter) {
+            owned = Composter::GetContainer(level, pos, level.GetBlockState(pos.x, pos.y, pos.z));
+            return owned.get();
+        }
         BlockEntity* be = level.GetBlockEntity(pos);
         auto* container = dynamic_cast<IContainer*>(be);
         if (!container) {
@@ -190,7 +197,7 @@ namespace Game {
     bool HopperBlockEntity::InventoryFull() const {
         for (int i = 0; i < GetContainerSize(); ++i) {
             const ItemStack& stack = GetItem(i);
-            if (stack.IsEmpty() || stack.count != ItemRegistry::Get(stack.itemId).maxStackSize) return false;
+            if (stack.IsEmpty() || stack.count != Game::GetMaxStackSize(stack)) return false;
         }
         return true;
     }

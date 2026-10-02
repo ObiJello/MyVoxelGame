@@ -266,8 +266,41 @@ namespace Game {
         //                           speed factor is lifted back to 1.
         // (Soul Speed's MOVEMENT_SPEED bonus rides effectSpeedFactor.)
         float sneakingSpeed           = SNEAKING_SPEED;
+        // MC LocalPlayer.modifyInput's item-use scale: while an item is in use
+        // (and not riding) the input is scaled by its USE_EFFECTS
+        // speed_multiplier (0.2 by default, 1.0 for a spear); 1 otherwise.
+        // Set by the client each frame (ClientPlayer::ApplyEffectPhysics).
+        float itemUseSpeedMultiplier  = 1.0f;
         float waterMovementEfficiency = 0.0f;
         float movementEfficiency      = 0.0f;
+        // The body attributes, written by ClientPlayer before each step from
+        // the player's attribute values (worn items' ATTRIBUTE_MODIFIERS,
+        // enchantments, effects):
+        //   gravityAttribute  Attributes.GRAVITY (0.08 a tick): every
+        //                     gravity term scales by it (getGravity /
+        //                     getEffectiveGravity) — 0 floats, < 0 rises.
+        //   jumpStrength      Attributes.JUMP_STRENGTH (0.42): the jump
+        //                     power before JUMP_BOOST (getJumpPower).
+        //   stepHeight        Attributes.STEP_HEIGHT (0.6): maxUpStep.
+        //   attributeScale    Attributes.SCALE: the body's dimensions and
+        //                     eye height only (Entity.getDimensions ×
+        //                     getScale) — unlike `scale` below, which is the
+        //                     portal size that scales the motion too.
+        float gravityAttribute = 0.08f;
+        float jumpStrength     = 0.42f;
+        float stepHeight       = 0.6f;
+        float attributeScale   = 1.0f;
+        // Attributes.FRICTION_MODIFIER (MC 26.3 computeModifiedFriction):
+        // scales how far the block under the feet is from frictionless —
+        // 1 is the block's own slipperiness.
+        float frictionModifier = 1.0f;
+        // MC getEffectiveGravity per tick: SLOW_FALLING caps a falling body's
+        // gravity at 0.01 (Math.min(getGravity(), 0.01)).
+        float EffectiveGravity(bool falling) const {
+            return (effectSlowFalling && falling) ? std::min(gravityAttribute, 0.01f) : gravityAttribute;
+        }
+        // The size the body's box and eye use: the portal scale times SCALE.
+        float BodyScale() const { return scale * attributeScale; }
         
         // Mutable flight speeds for noclip mode
         float noclipHorizontalSpeed = NOCLIP_HORIZONTAL_SPEED;
@@ -306,6 +339,11 @@ namespace Game {
         // A spider morph: MC Spider.onClimbable is horizontalCollision, so a
         // wall walked into is climbed like a ladder.
         bool  morphClimbsWalls = false;
+        // A water animal's morph (Morph::SwimAccelOf): in water it swims with
+        // the mob's own stroke — this acceleration in blocks per tick² at
+        // full input, MC's 0.9 drag on every axis, neutral buoyancy — along
+        // its look, instead of the player's swim. 0 = the player's swim.
+        float morphSwimAccel = 0.0f;
         void SetMorph(float width, float height, float eyeHeight, float movementSpeed) {
             morphed        = true;
             morphWidth     = width;
@@ -323,13 +361,14 @@ namespace Game {
             morphWidth = WIDTH; morphHeight = HEIGHT_STANDING; morphEyeHeight = EYE_HEIGHT_STANDING;
             morphWalkFactor = 1.0f;
             morphClimbsWalls = false;
+            morphSwimAccel = 0.0f;
         }
 
-        float GetWidth() const { return (morphed ? morphWidth : WIDTH) * scale; }
+        float GetWidth() const { return (morphed ? morphWidth : WIDTH) * BodyScale(); }
         float GetEyeHeight() const {
-            if (morphed) return morphEyeHeight * scale;
-            if (isFallFlying || isAutoSpinAttack) return EYE_HEIGHT_FALL_FLYING * scale;
-            return (isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING) * scale;
+            if (morphed) return morphEyeHeight * BodyScale();
+            if (isFallFlying || isAutoSpinAttack) return EYE_HEIGHT_FALL_FLYING * BodyScale();
+            return (isSneaking ? EYE_HEIGHT_SNEAKING : EYE_HEIGHT_STANDING) * BodyScale();
         }
 
         glm::dvec3 GetEyePosition() const {
@@ -348,9 +387,9 @@ namespace Game {
 
         // Get current height
         float GetCurrentHeight() const {
-            if (morphed) return morphHeight * scale;
-            if (isFallFlying || isAutoSpinAttack) return HEIGHT_FALL_FLYING * scale;
-            return (isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING) * scale;
+            if (morphed) return morphHeight * BodyScale();
+            if (isFallFlying || isAutoSpinAttack) return HEIGHT_FALL_FLYING * BodyScale();
+            return (isSneaking ? HEIGHT_SNEAKING : HEIGHT_STANDING) * BodyScale();
         }
 
         // Get player's AABB

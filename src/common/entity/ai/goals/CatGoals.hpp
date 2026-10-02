@@ -116,6 +116,10 @@ namespace Game {
                                 int targetTypeCount, bool mustSee,
                                 bool babyOnLandOnly);
         bool CanUse() override;
+        // MC canContinueToUse: the goal's own candidate re-tested against the
+        // target conditions — never TargetGoal's, which would hand a target
+        // the mob let go (taming, the sit order) straight back.
+        bool CanContinueToUse() override;
         void Start() override;
         void ClearReferenceTo(const Entity* entity) override;
         const char* Name() const override { return "NonTameRandomTargetGoal"; }

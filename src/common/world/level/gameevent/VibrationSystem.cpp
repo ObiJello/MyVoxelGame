@@ -1,5 +1,6 @@
 // File: src/common/world/level/gameevent/VibrationSystem.cpp
 #include "VibrationSystem.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/entity/Entity.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -163,12 +164,17 @@ namespace Game {
         if (const Entity* source = context.sourceEntity) {
             if (source->IsSpectator()) return false;
             // MC Entity.isSteppingCarefully (isShiftKeyDown): a sneaking
-            // entity makes no #ignore_vibrations_sneaking event heard. (The
-            // AVOID_VIBRATION advancement trigger has no advancement system
-            // to reach.)
+            // entity makes no #ignore_vibrations_sneaking event heard — and a
+            // sneaking server player that a sculk sensor would have heard
+            // gets CriteriaTriggers.AVOID_VIBRATION.
             const LivingEntity* living = source->AsLiving();
             if (living && living->IsDiscrete() &&
                 GameEvents::Is(event, GameEvents::Tag::IgnoreVibrationsSneaking)) {
+                if (CanTriggerAvoidVibration()) {
+                    if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(source)) {
+                        Server::CriteriaTriggers::AvoidVibration(*player);
+                    }
+                }
                 return false;
             }
             if (source->DampensVibrations()) return false;

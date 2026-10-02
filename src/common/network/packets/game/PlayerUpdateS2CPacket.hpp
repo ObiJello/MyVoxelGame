@@ -89,6 +89,16 @@ namespace Network {
         // size). Trailing; absent = the type's default.
         int32_t   morphVariant = 0;
         bool      hasMorphVariant = false;   // read side: the field was on the wire
+        // MC Attributes.SCALE (LivingEntity.getScale) — the body's size from
+        // the player's attribute (worn items' modifiers), apart from `scale`
+        // (the portal size that also scales the motion the receiver
+        // extrapolates). The receiver draws / boxes the body at
+        // scale × attributeScale. Trailing; absent = 1.
+        float     attributeScale = 1.0f;
+        // MC Attributes.NAME_TAG_DISTANCE: how far away this player's name
+        // tag still shows (LivingEntityRenderer.extractNameTags). Trailing;
+        // absent = 64.
+        float     nameTagDistance = 64.0f;
     };
 
     namespace Serialization {
@@ -121,6 +131,8 @@ namespace Network {
             buffer.WriteByte(packet.maxCrossbowCharge);
             buffer.WriteByte(packet.autoSpinAttack ? 1 : 0);
             buffer.WriteVarInt(static_cast<uint32_t>(packet.morphVariant));
+            buffer.WriteFloat(packet.attributeScale);
+            buffer.WriteFloat(packet.nameTagDistance);
             return buffer.GetData();
         }
 
@@ -159,6 +171,8 @@ namespace Network {
             packet.hasMorphVariant = reader.HasMore();
             packet.morphVariant = packet.hasMorphVariant
                 ? static_cast<int32_t>(reader.ReadVarInt()) : 0;
+            packet.attributeScale  = reader.HasMore() ? reader.ReadFloat() : 1.0f;
+            packet.nameTagDistance = reader.HasMore() ? reader.ReadFloat() : 64.0f;
             return packet;
         }
 

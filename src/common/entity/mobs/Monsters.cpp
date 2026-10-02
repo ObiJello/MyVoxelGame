@@ -20,6 +20,9 @@
 #include "common/entity/ai/goals/DoorGoals.hpp"
 #include "common/entity/ai/goals/RaiderGoals.hpp"
 #include "common/entity/ai/goals/WitherGoals.hpp"
+#include "common/entity/ai/goals/GolemGoals.hpp"
+#include "common/world/level/DimensionId.hpp"
+#include "common/world/biome/BiomeAttributes.hpp"
 #include "common/entity/ai/goals/StriderGoals.hpp"
 #include "common/entity/ai/goals/AnimalGoals.hpp"
 #include "common/entity/ai/navigation/FlyingPathNavigation.hpp"
@@ -34,7 +37,9 @@
 #include "common/entity/ai/goals/SpearGoals.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/HorseTaming.hpp"            // IsSecondaryUseActive (Strider mounting)
-#include "common/entity/vehicle/VehicleEntity.hpp"   // DismountHelper (Strider dismount)
+#include "common/entity/vehicle/VehicleEntity.hpp"   // DismountHelper (Strider dismount), IsVehicleEntityType
+#include "common/entity/decoration/BlockAttachedEntity.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/SnowLayerBlock.hpp"
@@ -732,14 +737,19 @@ namespace Game {
         if (!Monster::Hurt(source, amount, attacker)) return false;
         if (!m_level || m_level->IsClientSide()) return true;
 
-        // MC Zombie.hurtServer's reinforcement call, HARD only.
+        // MC Zombie.hurtServer's reinforcement call: a target (the current
+        // one, else a living attacker), HARD, the SPAWN_REINFORCEMENTS_CHANCE
+        // roll, then level.isSpawningMonsters() (spawn_mobs AND
+        // spawn_monsters) — in that order, so the roll is drawn only on
+        // Hard with a target.
         LivingEntity* target = GetTarget();
         if (!target) target = dynamic_cast<LivingEntity*>(attacker);
         if (!target) return true;
         if (m_level->GetDifficulty() != Difficulty::Hard) return true;
 
         JavaRandom& rng = m_level->Random();
-        if (rng.NextFloat() >= GetAttributeValue(Attribute::SpawnReinforcements)) return true;
+        if (!(static_cast<double>(rng.NextFloat()) < GetAttributeValue(Attribute::SpawnReinforcements))) return true;
+        if (!m_level->DoMobSpawning() || !Rules::GetBool(Rules::Id::SpawnMonsters)) return true;
 
         const int x = static_cast<int>(std::floor(position.x));
         const int y = static_cast<int>(std::floor(position.y));
@@ -748,8 +758,9 @@ namespace Game {
         if (!blocks) return true;
 
         // MC: `EntityType<? extends Zombie> type = this.getType()` — a husk
-        // calls husks, a drowned calls drowned. (ZombifiedPiglin never gets
-        // here: its reinforcements chance is pinned to 0, MC's own gate.)
+        // calls husks, a drowned calls drowned. (A zombified piglin's chance
+        // is pinned to 0 by randomizeReinforcementsChance, so it never rolls
+        // here — the case is for completeness.)
         std::unique_ptr<Zombie> reinforcement;
         switch (GetType()) {
             case EntityTypeId::Husk:
@@ -758,9 +769,20 @@ namespace Game {
                 reinforcement = std::make_unique<Drowned>(m_level); break;
             case EntityTypeId::ZombieVillager:
                 reinforcement = std::make_unique<ZombieVillager>(m_level); break;
+            case EntityTypeId::ZombifiedPiglin:
+                reinforcement = std::make_unique<ZombifiedPiglin>(m_level); break;
             default:
                 reinforcement = std::make_unique<Zombie>(m_level); break;
         }
+
+        // SpawnPlacements.checkSpawnRules(type, …, REINFORCEMENT, pos,
+        // level.random): the type's own rule — the husk's sky test, the
+        // drowned's water test (biome-aware) — not just the monster one.
+        const std::function<std::string_view(int, int, int)> biomeAt =
+            [blocks](int bx, int by, int bz) -> std::string_view {
+                return BiomeRegistry::Get(blocks->GetBiome(bx, by, bz)).name;
+            };
+        SpawnRuleContext ruleCtx{ *m_level, *blocks, rng, SpawnReason::Reinforcement, &biomeAt };
 
         // MC: 50 attempts at nextInt(7,40) * nextInt(-1,1) offsets per axis.
         for (int i = 0; i < 50; ++i) {
@@ -769,23 +791,23 @@ namespace Game {
             const int zt = z + rng.NextInt(7, 40) * rng.NextInt(-1, 1);
 
             // SpawnPlacements.isSpawnPositionOk + checkSpawnRules for THIS
-            // zombie's type — which is ON_GROUND + checkMonsterSpawnRules.
+            // zombie's type.
             if (!IsSpawnPositionOk(GetType(), *blocks, xt, yt, zt)) continue;
-            if (!CheckMonsterSpawnRules(*m_level, SpawnReason::Reinforcement,
-                                        glm::ivec3(xt, yt, zt), rng)) {
-                continue;
-            }
+            if (!Game::CheckSpawnRules(GetType(), ruleCtx, glm::ivec3(xt, yt, zt))) continue;
 
             reinforcement->position = glm::dvec3(xt, yt, zt);
             // hasNearbyAlivePlayer(7) must be FALSE — reinforcements arrive
             // out of sight, not on top of the player.
             if (m_level->GetNearestPlayer(xt, yt, zt, 7.0)) continue;
-            if (!reinforcement->CheckSpawnObstruction(*m_level)) continue;
+            // isUnobstructed, noCollision (the block half), and
+            // canSpawnInLiquids() || !containsAnyLiquid — the drowned's
+            // CheckSpawnObstruction override is exactly its canSpawnInLiquids.
+            if (!reinforcement->IsUnobstructed(*m_level)) continue;
             {
-                // level.noCollision(reinforcement) — the block half.
                 PhysicsContext phys = m_level->Physics();
                 if (Game::CollidesAt(reinforcement->GetAABB(), phys)) continue;
             }
+            if (!reinforcement->CheckSpawnObstruction(*m_level)) continue;
 
             reinforcement->SetTarget(target);
             reinforcement->FinalizeSpawn(SpawnReason::Reinforcement, nullptr);
@@ -1994,10 +2016,12 @@ namespace Game {
         const IBlockAccess* blocks = level.Blocks();
         if (!blocks) return false;
         const glm::ivec3 pos = BlockPosition();
-        // below.entityCanStandOn: the collision shape's top face is full.
+        // below.entityCanStandOn: the COLLISION shape's top face is full
+        // (Block.isFaceFull(getCollisionShape, UP)) — soul sand and mud,
+        // 14 px tall to walk on, do not carry a golem.
         const BlockState below = blocks->GetBlockState(pos.x, pos.y - 1, pos.z);
         if (!BlockRegistry::HasCollision(below.Block()) ||
-            !BlockRegistry::GetBlockShapeSet(below).IsFaceSturdyUp()) {
+            !BlockRegistry::GetBlockCollisionShapeSet(below).IsFaceSturdyUp()) {
             return false;
         }
         // pos.above(1) and above(2): isValidEmptySpawnBlock with their own
@@ -2027,27 +2051,16 @@ namespace Game {
     }
 
     void IronGolem::RegisterGoals() {
-        // MC IronGolem.registerGoals:
-        //   2 MoveTowardsTargetGoal(0.9, 32.0F) — SKIPPED: the goal class is
-        //     not implemented (only the iron golem uses it in MC). Its job —
-        //     drift toward a target beyond melee range — is mostly covered by
-        //     MeleeAttackGoal's pursuit.
-        //   2 MoveBackToVillageGoal(0.6, false),
-        //   4 GolemRandomStrollInVillageGoal(0.6),
-        //   5 OfferFlowerGoal — SKIPPED: all three need the village system
-        //     (POI sections, village boundaries, a villager to offer the poppy
-        //     to). The offer-flower ANIMATION events (11/34) are handled below
-        //     so a server that ever sends them renders correctly.
-        //     GolemRandomStrollInVillageGoal is the golem's only wander, so a
-        //     WaterAvoidingRandomStrollGoal at MC's 0.6 speed stands in for it
-        //     until villages exist — without it a promoted golem would stand
-        //     frozen forever.
+        // MC IronGolem.registerGoals, priority for priority.
         m_goalSelector.AddGoal(1, std::make_unique<MeleeAttackGoal>(this, 1.0, true));
-        m_goalSelector.AddGoal(4, std::make_unique<WaterAvoidingRandomStrollGoal>(this, 0.6));
+        m_goalSelector.AddGoal(2, std::make_unique<MoveTowardsTargetGoal>(this, 0.9, 32.0f));
+        m_goalSelector.AddGoal(2, std::make_unique<MoveBackToVillageGoal>(this, 0.6, false));
+        m_goalSelector.AddGoal(4, std::make_unique<GolemRandomStrollInVillageGoal>(this, 0.6));
+        m_goalSelector.AddGoal(5, std::make_unique<OfferFlowerGoal>(this));
         m_goalSelector.AddGoal(7, std::make_unique<LookAtPlayerGoal>(this, 6.0f));
         m_goalSelector.AddGoal(8, std::make_unique<RandomLookAroundGoal>(this));
-        // MC targets:
-        //   1 DefendVillageTargetGoal — SKIPPED with the village system.
+
+        m_targetSelector.AddGoal(1, std::make_unique<DefendVillageTargetGoal>(this));
         m_targetSelector.AddGoal(2, std::make_unique<HurtByTargetGoal>(this));
         // MC 3: NearestAttackableTargetGoal(Player, 10, true, false,
         // this::isAngryAt) — a golem only hunts players it is ANGRY at, and
@@ -2069,10 +2082,87 @@ namespace Game {
                                         this, /*alertOthersOfSameType=*/false));
     }
 
+    void IronGolem::OfferFlower(bool offer) {
+        // MC IronGolem.offerFlower.
+        m_offerFlowerTick = offer ? 400 : 0;
+        if (m_level) m_level->BroadcastEntityEvent(*this, offer ? 11 : 34);
+    }
+
+    bool IronGolem::IsBrightOutside() const {
+        // MC Level.isBrightOutside: !dimensionType().hasFixedTime() &&
+        // skyDarken < 4.
+        if (!m_level) return false;
+        const DimensionId dimension = m_level->Dimension();
+        if (dimension == DimensionId::Nether || dimension == DimensionId::End ||
+            DimensionFixedTime(dimension).has_value()) {
+            return false;
+        }
+        return m_level->GetSkyDarken() < 4;
+    }
+
+    void IronGolem::DoPush(Entity& other) {
+        // MC IronGolem.doPush: `entity instanceof Enemy && !(entity instanceof
+        // Creeper) && random.nextInt(20) == 0` — setTarget — then super.
+        if (m_level && !m_level->IsClientSide() && !other.IsPlayer() && other.GetType() != EntityTypeId::Creeper &&
+            IsMonsterCategory(other.TypeInfo().category) && m_level->Random().NextInt(20) == 0) {
+            if (LivingEntity* living = other.AsLiving()) SetTarget(living);
+        }
+        PathfinderMob::DoPush(other);
+    }
+
+    int IronGolem::GetCrackiness() const {
+        // Crackiness.GOLEM = new Crackiness(0.75F, 0.5F, 0.25F).byFraction.
+        const float maxHealth = GetMaxHealth();
+        const float fraction = maxHealth > 0.0f ? GetHealth() / maxHealth : 1.0f;
+        if (fraction < 0.25f) return 3;
+        if (fraction < 0.5f) return 2;
+        if (fraction < 0.75f) return 1;
+        return 0;
+    }
+
+    bool IronGolem::Hurt(MobDamageSource source, float amount, Entity* attacker) {
+        // MC IronGolem.hurtServer.
+        const int previousCrackiness = GetCrackiness();
+        const bool wasHurt = PathfinderMob::Hurt(source, amount, attacker);
+        if (wasHurt && GetCrackiness() != previousCrackiness) {
+            PlaySound(SoundEvents::IRON_GOLEM_DAMAGE, 1.0f, 1.0f);
+        }
+        return wasHurt;
+    }
+
+    UseResult IronGolem::MobInteract(LivingEntity& player, ItemStack& held) {
+        // MC IronGolem.mobInteract: only an iron ingot, and only when it
+        // heals something (IRON_INGOT_HEAL_AMOUNT 25).
+        if (held.IsEmpty() || held.itemId != Items::IronIngot) return UseResult::Pass;
+        const float healthBefore = GetHealth();
+        Heal(25.0f);
+        if (GetHealth() == healthBefore) return UseResult::Pass;
+        if (m_level) {
+            JavaRandom& random = m_level->Random();
+            const float pitch = 1.0f + (random.NextFloat() - random.NextFloat()) * 0.2f;
+            PlaySound(SoundEvents::IRON_GOLEM_REPAIR, 1.0f, pitch);
+        }
+        // itemStack.consume(1, player) — creative keeps its stack (the
+        // interact dispatch restores it, as for every usePlayerItem).
+        (void)player;
+        Animal::UsePlayerItem(held);
+        return UseResult::Success;
+    }
+
+    bool IronGolem::CanSpawnSprintParticle() const {
+        // MC IronGolem.canSpawnSprintParticle: horizontal motion above
+        // 2.5e-7 and random.nextInt(5) == 0.
+        const double horizontalSq = velocity.x * velocity.x + velocity.z * velocity.z;
+        return horizontalSq > 2.500000277905201E-7 && m_level && m_level->Random().NextInt(5) == 0;
+    }
+
     bool IronGolem::CanAttack(const LivingEntity& target) const {
-        // MC IronGolem.canAttack: creepers are never valid — attacking one
-        // would blow up the village it defends. (The playerCreated exemption
-        // needs the pumpkin-construction system.)
+        // MC IronGolem.canAttack: a golem a player built never turns on ANY
+        // player — not its builder, not one who hits it (HurtByTargetGoal and
+        // the isAngryAt player hunt both test canAttack, and asValidTarget
+        // refuses it on every set and get) — and no golem fights a creeper,
+        // which would blow up the village it defends.
+        if (IsPlayerCreated() && target.IsPlayer()) return false;
         if (target.GetType() == EntityTypeId::Creeper) return false;
         return PathfinderMob::CanAttack(target);
     }
@@ -2109,18 +2199,19 @@ namespace Game {
                          static_cast<int>(attackDamage)));
         }
 
+        // target.hurtServer(mobAttack(this)) — every hurtable target here is
+        // a LivingEntity; MC's override does NOT setLastHurtMob (that is
+        // Mob.doHurtTarget's, which this replaces).
         LivingEntity* living = dynamic_cast<LivingEntity*>(&target);
-        if (!living) return false;
-
-        const bool hurt = living->Hurt(MobDamageSource::MobAttack, damage, this);
+        const bool hurt = living && living->Hurt(MobDamageSource::MobAttack, damage, this);
         if (hurt) {
             const double knockbackResistance =
                 living->GetAttributeValue(Attribute::KnockbackResistance);
             const double scale = std::max(0.0, 1.0 - knockbackResistance);
-            living->velocity.y += 0.4 * scale;
+            living->velocity.y += 0.4000000059604645 * scale;   // (double)0.4F
             living->hurtMarked = true;
-            // MC: EnchantmentHelper.doPostAttackEffects — no enchantments.
-            SetLastHurtMob(&target);
+            // MC: EnchantmentHelper.doPostAttackEffects — a golem wields
+            // nothing to carry an effect.
         }
         PlaySound(SoundEvents::IRON_GOLEM_ATTACK, 1.0f, 1.0f);
         return hurt;
@@ -2128,8 +2219,8 @@ namespace Game {
 
     void IronGolem::HandleEntityEvent(uint8_t id) {
         // MC IronGolem.handleEntityEvent, verbatim (its client-side attack
-        // sound at 4 is MC's silent null-except playSound; the offer-flower BEHAVIOUR needs
-        // villagers, but the animation clock is the client's half and works).
+        // sound at 4 is MC's silent null-except playSound — the server's
+        // DoHurtTarget plays it for everyone).
         if (id == 4) {
             m_attackAnimationTick = 10;
         } else if (id == 11) {
@@ -2485,16 +2576,16 @@ namespace Game {
         m_goalSelector.AddGoal(5, std::make_unique<RandomFloatAroundGoal>(this));
         m_goalSelector.AddGoal(7, std::make_unique<GhastLookGoal>(this));
         m_goalSelector.AddGoal(7, std::make_unique<GhastShootFireballGoal>(this));
-        // MC: NearestAttackableTargetGoal(Player, 10, true, false, |dy| <= 4)
-        // — the Y filter lives in CanAttack (see the header note).
-        m_targetSelector.AddGoal(1, std::make_unique<NearestAttackableTargetGoal>(
-                                        this, /*mustSee=*/true, /*mustReach=*/false,
-                                        /*randomInterval=*/10));
-    }
-
-    bool Ghast::CanAttack(const LivingEntity& target) const {
-        return Mob::CanAttack(target) &&
-               std::abs(target.position.y - position.y) <= 4.0;
+        // MC: NearestAttackableTargetGoal(Player, 10, true, false,
+        // |target.y - ghast.y| <= 4) — the Y filter is the goal's SELECTOR,
+        // tested only when a target is picked. A held target that climbs or
+        // drops away is kept (TargetGoal.canContinueToUse never re-tests it).
+        auto goal = std::make_unique<NearestAttackableTargetGoal>(
+            this, /*mustSee=*/true, /*mustReach=*/false, /*randomInterval=*/10);
+        goal->SetSelector([](Mob& mob, const LivingEntity& target) {
+            return std::abs(target.position.y - mob.position.y) <= 4.0;
+        });
+        m_targetSelector.AddGoal(1, std::move(goal));
     }
 
     void Ghast::Travel(const glm::dvec3& input) {
@@ -2569,16 +2660,17 @@ namespace Game {
         RegisterGoals();
     }
 
-    void SnowGolem::Shear() {
+    void SnowGolem::Shear(SoundSource soundSource) {
         if (!m_level) return;
-        // MC: level.playSound(null, this, SNOW_GOLEM_SHEAR, source, 1, 1).
-        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SNOW_GOLEM_SHEAR, SoundSource::Players, 1.0f, 1.0f);
+        // MC: level.playSound(null, this, SNOW_GOLEM_SHEAR, soundSource, 1, 1).
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SNOW_GOLEM_SHEAR, soundSource, 1.0f, 1.0f);
         SetPumpkin(false);
         // MC dropFromShearingLootTable(SHEAR_SNOW_GOLEM): loot_table/shearing/
         // snow_golem.json is one pool, one carved pumpkin; spawnAtLocation at
         // getEyeHeight(), so it pops off the head rather than the feet.
         const glm::dvec3 dropPos = position + glm::dvec3(0.0, GetEyeHeight(), 0.0);
-        m_level->SpawnItemDrop(dropPos, ItemRegistry::FromBlock(BlockID::CarvedPumpkin), 1);
+        m_level->SpawnAtLocation(dropPos, ItemStack(ItemRegistry::FromBlock(BlockID::CarvedPumpkin), 1),
+                                 /*extendedLifetime=*/false);
     }
 
     UseResult SnowGolem::MobInteract(LivingEntity& player, ItemStack& held) {
@@ -2589,7 +2681,7 @@ namespace Game {
             return PathfinderMob::MobInteract(player, held);
         }
         if (m_level && m_level->IsClientSide()) return UseResult::Success;
-        Shear();
+        Shear(SoundSource::Players);
         GameEvent(GameEventId::Shear, &player);   // MC: gameEvent(SHEAR, player)
         // MC itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot()).
         HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
@@ -2622,9 +2714,9 @@ namespace Game {
         // MC SnowGolem.performRangedAttack — note yd is the target's ABSOLUTE
         // eye height minus 1.1; the shoot call subtracts the snowball's own Y.
         const double xd = target.position.x - position.x;
-        const double yd = target.GetEyeY() - 1.1;
+        const double yd = target.GetEyeY() - 1.100000023841858;   // (double)1.1F
         const double zd = target.position.z - position.z;
-        const double yo = std::sqrt(xd * xd + zd * zd) * 0.2;
+        const double yo = std::sqrt(xd * xd + zd * zd) * 0.20000000298023224;   // (double)0.2F
 
         snowball->Shoot(xd, yd + yo - snowball->position.y, zd, 1.6f, 12.0f);
         PlaySound(SoundEvents::SNOW_GOLEM_SHOOT, 1.0f, 0.4f / (m_level->Random().NextFloat() * 0.4f + 0.8f));
@@ -2635,11 +2727,13 @@ namespace Game {
         PathfinderMob::AiStep();
         if (!m_level || m_level->IsClientSide() || !IsAlive()) return;
 
-        // MC SNOW_GOLEM_MELTS — biome base temperature above 1.0 melts the
-        // golem at 1 fire damage per tick. (The water half of MC's
-        // isSensitiveToWater damage runs in Mob::AiStep.)
+        // MC environmentAttributes().getValue(SNOW_GOLEM_MELTS, position())
+        // melts the golem at 1 onFire damage per tick. (The water half of
+        // MC's isSensitiveToWater damage runs in Mob::AiStep.)
         const glm::ivec3 p = BlockPosition();
-        if (m_level->GetBiomeTemperature(p.x, p.y, p.z) > 1.0f) {
+        const IBlockAccess* biomes = m_level->Blocks();
+        const BiomeId biome = biomes ? static_cast<BiomeId>(biomes->GetBiome(p.x, p.y, p.z)) : kFallbackBiomeId;
+        if (BiomeAttributes::SnowGolemMelts(m_level->Dimension(), biome)) {
             Hurt(MobDamageSource::Fire, 1.0f, nullptr);
         }
 
@@ -3520,10 +3614,13 @@ namespace Game {
         m_health = GetMaxHealth();
         // MC's constructor: FlyingMoveControl(10, false), the flying
         // navigation (canOpenDoors false / canFloat true have no analogue on
-        // this port's flying navigation), xpReward 50 (type table), and the
-        // boss bar — SKIPPED: no boss bar UI exists.
+        // this port's flying navigation), xpReward 50 (type table). The boss
+        // bar is the level's WitherBossEvents, which follows every wither.
         SetMoveControl(std::make_unique<FlyingMoveControl>(this, 10, false));
         SetNavigation(std::make_unique<FlyingPathNavigation>(this, level));
+        // MC TARGETING_CONDITIONS = forCombat().range(20).selector(
+        // LIVING_ENTITY_SELECTOR) — the selector is applied at the pick.
+        m_headTargeting = TargetingConditions::ForCombat().Range(20.0);
         RegisterGoals();
     }
 
@@ -3543,32 +3640,33 @@ namespace Game {
 
     void Wither::MakeInvulnerable() {
         // MC makeInvulnerable — the soul-sand ritual's call, and only that
-        // (CheckWitherSpawn): 220 ticks of the blue armoured charge-up, the
-        // spawn explosion and heal at its end.
+        // (WitherSkullCheckSpawn): 220 ticks of the blue armoured charge-up,
+        // the spawn explosion and heal at its end. (bossEvent.setProgress(0)
+        // is WitherBossEvents' reading of the 220.) A /summon'd or
+        // egg-spawned wither arrives at full health, already fighting.
         SetInvulnerableTicks(220);
         SetHealth(GetMaxHealth() / 3.0f);
     }
 
-    std::shared_ptr<SpawnGroupData>
-    Wither::FinalizeSpawn(SpawnReason reason,
-                              std::shared_ptr<SpawnGroupData> groupData) {
-        groupData = Monster::FinalizeSpawn(reason, std::move(groupData));
-        // No charge-up here: MC's makeInvulnerable() is the soul-sand
-        // ritual's (WitherSkullBlock.checkSpawn → IntegratedServer::
-        // CheckWitherSpawn), and a /summon'd or egg-spawned wither arrives at
-        // full health, already fighting, exactly as in vanilla.
-        return groupData;
+    void Wither::SetHeadTarget(int sideHead, LivingEntity* target) {
+        m_headTargets[sideHead] = target;
+        const int32_t id = target ? target->GetId() : 0;
+        if (m_headTargetIds[sideHead] != id) {
+            m_headTargetIds[sideHead] = id;
+            m_headTargetsDirty = true;
+        }
     }
 
     void Wither::AiStep() {
         // MC Wither.aiStep head, transcribed: damp vertical motion to
         // 60%, then chase the PRIMARY target (alternativeTarget(0), which
-        // customServerAiStep keeps equal to getTarget()) — climb while below
-        // it (or, unpowered, below its head + 5) and drift horizontally
-        // toward it beyond 3 blocks.
+        // customServerAiStep sets to getTarget() only AFTER the spawn
+        // charge — a charging wither stays put even with a target) — climb
+        // while below it (or, unpowered, below its head + 5) and drift
+        // horizontally toward it beyond 3 blocks.
         glm::dvec3 dm(velocity.x, velocity.y * 0.6, velocity.z);
-        if (m_level && !m_level->IsClientSide() && GetTarget() != nullptr) {
-            const Entity* entity = GetTarget();
+        if (m_level && !m_level->IsClientSide() && m_primaryTarget != nullptr) {
+            const Entity* entity = m_primaryTarget;
             double yd = dm.y;
             if (position.y < entity->position.y ||
                 (!IsPowered() && position.y < entity->position.y + 5.0)) {
@@ -3594,10 +3692,42 @@ namespace Game {
 
         Monster::AiStep();
 
-        // MC's tail: the side-head visual aim (xRotHeads/yRotHeads lerped at
-        // the per-head targets) — SKIPPED: the model renders the small heads
-        // forward (their yaws are unported model state, and syncing two
-        // extra rotation pairs is not worth it before the model reads them).
+        // MC's tail: the side heads turn toward their alternative targets —
+        // pitch up to 40° a tick, yaw 10° — and with no target the yaw
+        // relaxes back to the body. Only the client draws them (the server's
+        // copy has no reader), so only the client runs it.
+        if (m_level && m_level->IsClientSide()) {
+            for (int i = 0; i < 2; ++i) {
+                m_yRotOHeads[i] = m_yRotHeads[i];
+                m_xRotOHeads[i] = m_xRotHeads[i];
+            }
+            const auto rotlerp = [](float a, float b, float max) {
+                float diff = Mth::WrapDegrees(b - a);
+                if (diff > max) diff = max;
+                if (diff < -max) diff = -max;
+                return a + diff;
+            };
+            for (int i = 0; i < 2; ++i) {
+                const int32_t id = m_headTargetIds[i];
+                glm::dvec3 targetFeet(0.0);
+                double targetEyeY = 0.0;
+                if (id > 0 && m_level->ResolveEntityEye(id, targetFeet, targetEyeY)) {
+                    const double hx = GetHeadX(i + 1);
+                    const double hy = GetHeadY(i + 1);
+                    const double hz = GetHeadZ(i + 1);
+                    const double xd = targetFeet.x - hx;
+                    const double yd = targetEyeY - hy;
+                    const double zd = targetFeet.z - hz;
+                    const double sd = std::sqrt(xd * xd + zd * zd);
+                    const float yRotD = static_cast<float>(std::atan2(zd, xd) * 57.2957763671875) - 90.0f;
+                    const float xRotD = static_cast<float>(-(std::atan2(yd, sd) * 57.2957763671875));
+                    m_xRotHeads[i] = rotlerp(m_xRotHeads[i], xRotD, 40.0f);
+                    m_yRotHeads[i] = rotlerp(m_yRotHeads[i], yRotD, 10.0f);
+                } else {
+                    m_yRotHeads[i] = rotlerp(m_yRotHeads[i], yBodyRot, 10.0f);
+                }
+            }
+        }
 
         // MC Wither.aiStep's particle tail, verbatim. MC runs it on both
         // sides (addParticle no-ops on the server); gated client-side here
@@ -3626,6 +3756,11 @@ namespace Game {
                                               0.7f, 0.7f, 0.5f, 1.0f);
                 }
             }
+            // The client's charge count steps down a tick at a time between
+            // the wire's 5-tick quanta (Wither::SetAnimStateByte).
+            if (m_clientInvulnerable && m_clientInvulnerableTicks > m_clientInvulnerableQuantum * 5) {
+                --m_clientInvulnerableTicks;
+            }
             // The spawn charge-up column (getInvulnerableTicks() > 0 — the
             // synced bit here).
             if (m_clientInvulnerable) {
@@ -3651,12 +3786,13 @@ namespace Game {
         if (m_invulnerableTicks > 0) {
             // ── The 220-tick spawn charge ─────────────────────────────────
             const int newCount = m_invulnerableTicks - 1;
-            // MC drives the boss bar progress here — no boss bar UI.
+            // MC bossEvent.setProgress(1 - newCount / 220) — WitherBossEvents
+            // reads it off the count.
             if (newCount <= 0) {
                 // MC: level.explode(this, x, eyeY, z, 7.0F, false, MOB) —
-                // entity-damage-only here per project policy (creeper
-                // precedent: no explosion system, terrain untouched), then
-                // global level event 1023, the world-wide spawn scream.
+                // terrain too, under mobGriefing (Explosion.cpp's MOB
+                // interaction) — then global level event 1023, the
+                // world-wide spawn scream.
                 SpawnBurstExplosion();
                 if (m_level && !IsSilent()) {
                     PlayGlobalLevelEventSound(*m_level, LevelEvent::SOUND_WITHER_BOSS_SPAWN, BlockPosition());
@@ -3695,26 +3831,39 @@ namespace Game {
 
             LivingEntity* headTarget = m_headTargets[i - 1];
             if (headTarget != nullptr) {
-                if (headTarget->IsAlive() && CanAttack(*headTarget) &&
-                    DistanceToSqr(*headTarget) <= 900.0 &&
+                // `current != null && canAttack(current) && distanceToSqr <=
+                // 900 && hasLineOfSight(current)` (canAttack's
+                // canBeSeenAsEnemy includes being alive).
+                if (headTarget->IsAlive() && CanAttack(*headTarget) && DistanceToSqr(*headTarget) <= 900.0 &&
                     GetSensing().HasLineOfSight(*headTarget)) {
                     PerformRangedAttack(i + 1, *headTarget);
                     m_nextHeadUpdate[i - 1] = tickCount + 40 + rng.NextInt(20);
                     m_idleHeadUpdates[i - 1] = 0;
                 } else {
-                    m_headTargets[i - 1] = nullptr;
+                    SetHeadTarget(i - 1, nullptr);
                 }
             } else {
-                // MC: pick a RANDOM valid living entity within the
-                // (20, 8, 20)-inflated box — same selector as the target
-                // goal (attackable, not a WITHER_FRIEND/undead).
+                // MC: level.getNearbyEntities(LivingEntity.class,
+                // TARGETING_CONDITIONS, this, box.inflate(20, 8, 20)) and a
+                // RANDOM one of them — LIVING_ENTITY_SELECTOR (not a
+                // #wither_friends, attackable) under forCombat range 20.
                 std::vector<LivingEntity*> candidates;
                 auto consider = [&](LivingEntity* living) {
-                    if (!living || !living->IsAlive()) return;
-                    if (IsUndeadEntityType(living->GetType())) return;
+                    if (!living || living == this) return;
+                    // #wither_friends — never a player (whose server view
+                    // carries a placeholder type).
+                    if (!living->IsPlayer() && IsUndeadEntityType(living->GetType())) return;
+                    // Projectiles, hanging entities and vehicles ride the mob
+                    // pipeline here (MC's are not LivingEntities).
                     if (dynamic_cast<const Projectile*>(living)) return;
-                    if (DistanceToSqr(*living) > 20.0 * 20.0) return;
+                    if (dynamic_cast<const BlockAttachedEntity*>(living)) return;
+                    if (IsVehicleEntityType(living->GetType())) return;
+                    // attackable(): an armor stand's is false in MC (the
+                    // engine's IsAttackable answers whether a player may hit
+                    // it, which is a different question).
+                    if (living->GetType() == EntityTypeId::ArmorStand) return;
                     if (!living->IsAttackable()) return;
+                    if (!m_headTargeting.Test(this, *living)) return;
                     candidates.push_back(living);
                 };
 
@@ -3724,6 +3873,10 @@ namespace Game {
                 std::vector<Entity*> nearby;
                 m_level->GetEntitiesInBox(box, this, nearby);
                 for (Entity* e : nearby) {
+                    // Players come from GetPlayers below — the box query can
+                    // return their views too, which would count them twice
+                    // in the random pick.
+                    if (!e || e->IsPlayer()) continue;
                     consider(dynamic_cast<LivingEntity*>(e));
                 }
                 std::vector<LivingEntity*> players;
@@ -3736,22 +3889,46 @@ namespace Game {
                 }
 
                 if (!candidates.empty()) {
-                    m_headTargets[i - 1] = candidates[rng.NextInt(
-                        static_cast<int>(candidates.size()))];
+                    SetHeadTarget(i - 1, candidates[static_cast<size_t>(
+                                             rng.NextInt(static_cast<int>(candidates.size())))]);
                 }
             }
         }
 
-        // MC syncs alternativeTarget(0) = getTarget()'s id here; the primary
-        // target is read straight off GetTarget() in this port (the synced
-        // id only feeds the skipped beam-of-heads client visuals).
+        // MC setAlternativeTarget(0, getTarget() != null ? id : 0) — what
+        // AiStep's chase reads.
+        m_primaryTarget = GetTarget();
 
-        // MC destroyBlocksTick: armed by Hurt, and at 0 (with mobGriefing)
-        // the wither smashes every non-WITHER_IMMUNE block its box overlaps.
-        // Block destruction by mobs is not modelled — the timer runs so the
-        // wiring reads like MC's, the smash itself is the skipped piece.
+        // MC destroyBlocksTick: armed by Hurt; at 0, with mobGriefing, every
+        // block in the box (floor(width / 2 + 1) out, height up) that is not
+        // air nor #wither_immune is destroyed with drops, and level event
+        // 1022 (the break sound) plays if any was.
         if (m_destroyBlocksTick > 0) {
             --m_destroyBlocksTick;
+            if (m_destroyBlocksTick == 0 && m_level->MobGriefing()) {
+                if (ILevelWrite* blocks = m_level->MutableBlocks()) {
+                    bool destroyed = false;
+                    const int width = static_cast<int>(std::floor(GetBbWidth() / 2.0f + 1.0f));
+                    const int height = static_cast<int>(std::floor(GetBbHeight()));
+                    const glm::ivec3 at = BlockPosition();
+                    for (int x = at.x - width; x <= at.x + width; ++x) {
+                        for (int y = at.y; y <= at.y + height; ++y) {
+                            for (int z = at.z - width; z <= at.z + width; ++z) {
+                                const BlockID block = blocks->GetBlock(x, y, z);
+                                if (block == BlockID::Air) continue;   // canDestroy: !isAir
+                                if (DataTags::HasTag(DataTags::Registry::Block, BlockRegistry::Get(block).registrySlug,
+                                                     "minecraft:wither_immune")) {
+                                    continue;
+                                }
+                                destroyed = blocks->DestroyBlock(glm::ivec3(x, y, z), true) || destroyed;
+                            }
+                        }
+                    }
+                    if (destroyed) {
+                        PlayEntityLevelEventSound(*m_level, EntityLevelEvent::WITHER_BREAK_BLOCK, at);
+                    }
+                }
+            }
         }
 
         // MC: 1 HP of regeneration every second.
@@ -3759,7 +3936,8 @@ namespace Game {
             Heal(1.0f);
         }
 
-        // MC updates the boss bar progress here — no boss bar UI.
+        // MC bossEvent.setProgress(health / maxHealth) — WitherBossEvents
+        // reads it off the health.
     }
 
     double Wither::GetHeadX(int head) const {
@@ -3862,7 +4040,7 @@ namespace Game {
         if (IsPowered() && source == MobDamageSource::Projectile) return false;
         // MC EntityTypeTags.WITHER_FRIENDS (#undead) never hurt it.
         if (auto* living = dynamic_cast<LivingEntity*>(attacker)) {
-            if (IsUndeadEntityType(living->GetType())) return false;
+            if (!living->IsPlayer() && IsUndeadEntityType(living->GetType())) return false;
         }
 
         // A landed hit arms the block-smash timer and hurries every idle
@@ -3890,16 +4068,18 @@ namespace Game {
     }
 
     void Wither::DropCustomDeathLoot(EntityLevel& level) {
-        // MC dropCustomDeathLoot: the nether star (setExtendedLifetime has no
-        // analogue — item entities here have one lifetime).
-        level.SpawnItemDrop(position, Items::NetherStar, 1);
+        // MC dropCustomDeathLoot: super's (the worn equipment — the death
+        // path's DropEquipmentOnDeath), then spawnAtLocation(NETHER_STAR)
+        // with setExtendedLifetime.
+        level.SpawnAtLocation(position, ItemStack(Items::NetherStar, 1), /*extendedLifetime=*/true);
     }
 
     void Wither::ClearReferenceTo(const Entity* entity) {
         Monster::ClearReferenceTo(entity);
-        for (LivingEntity*& target : m_headTargets) {
-            if (target == entity) target = nullptr;
+        for (int i = 0; i < 2; ++i) {
+            if (m_headTargets[i] && static_cast<const Entity*>(m_headTargets[i]) == entity) SetHeadTarget(i, nullptr);
         }
+        if (m_primaryTarget && static_cast<const Entity*>(m_primaryTarget) == entity) m_primaryTarget = nullptr;
     }
 
     // ── Strider ────────────────────────────────────────────────────────────
@@ -6298,6 +6478,10 @@ namespace Game {
         // skipped render half — the standard 20-tick death stands in.
         if (m_level && !m_level->IsClientSide() &&
             GetPhase() != DragonPhase::Dying && !IsPhaseSitting()) {
+            // MC die() runs before handleKillingBlow pins the health: the
+            // kill credit (the free_the_end advancement) is paid at this
+            // blow, not when the dive lands.
+            AwardKillCriteria(source, attacker);
             SetHealth(1.0f);
             SetPhase(DragonPhase::Dying);
             return;

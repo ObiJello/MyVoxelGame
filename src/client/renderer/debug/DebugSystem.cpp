@@ -18,6 +18,8 @@
 #include "../../world/ClientWorkerPool.hpp"
 #include "../../input/Input.hpp"
 #include <unordered_set>
+#include <cstdio>
+#include "common/world/level/DimensionId.hpp"
 #include <cmath>
 #include <filesystem>
 #include <algorithm>
@@ -93,6 +95,7 @@ namespace Debug {
     LogBuffer DebugSystem::s_logBuffer;
     ServerMetricsSnapshot DebugSystem::s_serverSnap;
     EntitySnapshot DebugSystem::s_entitySnap;
+    MobCapSnapshot DebugSystem::s_mobCapSnap;
     NetworkMetricsSnapshot DebugSystem::s_netSnap;
     ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
     WorldInfoSnapshot DebugSystem::s_worldInfoSnap;
@@ -303,6 +306,10 @@ namespace Debug {
         s_entitySnap = snap;
     }
 
+    void DebugSystem::SetMobCapSnapshot(MobCapSnapshot snap) {
+        s_mobCapSnap = std::move(snap);
+    }
+
     const PanelVisibility& DebugSystem::GetPanelVisibility() {
         return s_visibility;
     }
@@ -398,6 +405,7 @@ namespace Debug {
         if (s_visibility.chunkPipeline)  DrawChunkPipelinePanel();
         if (s_visibility.worldInfo)      DrawWorldInfoPanel();
         if (s_visibility.entities)       DrawEntitiesPanel(s_entitySnap);
+        if (s_visibility.mobCaps)        DrawMobCapPanel(s_mobCapSnap);
     }
 
     // ========================================================================
@@ -434,6 +442,8 @@ namespace Debug {
         ImGui::Checkbox("Chunk Pipeline",  &s_visibility.chunkPipeline);
         ImGui::Checkbox("World Info",      &s_visibility.worldInfo);
         ImGui::Checkbox("Entities",        &s_visibility.entities);
+        ImGui::SameLine();
+        ImGui::Checkbox("Mob Caps",        &s_visibility.mobCaps);
 
         ImGui::Separator();
         ImGui::TextColored(COL_GRAY, "F3: Overlay | ~: Log | Shift+~+D: Toggle UI");
@@ -2006,6 +2016,270 @@ namespace Debug {
             ImGui::Text("  health: %.1f / %.1f", snap.selectedHealth, snap.selectedMaxHealth);
             ImGui::Text("  path nodes: %d", snap.selectedPathNodes);
             ImGui::Text("  has target: %s", snap.selectedHasTarget ? "yes" : "no");
+        }
+
+        ImGui::End();
+    }
+
+
+    // ========================================================================
+    // MOB CAPS PANEL
+    // ========================================================================
+
+    namespace {
+        // Gray "label" + value on one line.
+        void MobCapLabel(const char* label) {
+            ImGui::TextColored(COL_GRAY, "%s", label);
+            ImGui::SameLine();
+        }
+
+        bool MobCapCategoryRelevant(const Game::MobCapReport& report,
+                                    const Game::MobCapReport::CategoryRow& row) {
+            // The Aether's categories only matter in the Aether — unless
+            // something of theirs is here anyway.
+            const bool aether = row.category == Game::MobCategory::AetherSurfaceMonster ||
+                                row.category == Game::MobCategory::AetherDarknessMonster ||
+                                row.category == Game::MobCategory::AetherSkyMonster ||
+                                row.category == Game::MobCategory::AetherAerwhale;
+            if (!aether) return true;
+            return report.dimension == static_cast<int>(Game::DimensionId::Aether) ||
+                   row.count > 0 || row.excludedPersistent > 0 || row.excludedTamed > 0;
+        }
+
+        void DrawMobCapReport(const Game::MobCapReport& report) {
+            const float ago = std::chrono::duration<float>(
+                std::chrono::steady_clock::now() - report.builtAt).count();
+
+            MobCapLabel("snapshot:");
+            ImGui::Text("tick %lld, %.1f s ago", static_cast<long long>(report.gameTick), ago);
+            if (ago > 3.0f) {
+                ImGui::SameLine();
+                ImGui::TextColored(COL_YELLOW, "(stale: level not ticking?)");
+            }
+
+            MobCapLabel("spawnable chunks:");
+            ImGui::Text("%d", report.spawnableChunkCount);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("The global cap's denominator: the union of the 17x17\n"
+                                  "chunk squares around every non-spectator player\n"
+                                  "(289 per player when nobody overlaps).\n"
+                                  "global cap = category max * this / 289");
+            }
+            ImGui::SameLine();
+            MobCapLabel("  attempting:");
+            ImGui::Text("%d", report.spawningChunkCount);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Chunks that received spawn attempts on the last pass:\n"
+                                  "ticking, loaded, centre within 128 blocks of a player.");
+            }
+            ImGui::SameLine();
+            MobCapLabel("  players:");
+            ImGui::Text("%d", report.playerCount);
+            ImGui::SameLine();
+            MobCapLabel("  live mobs:");
+            ImGui::Text("%d", report.totalLiveMobs);
+
+            MobCapLabel("rules:");
+            ImGui::TextColored(report.doMobSpawning ? COL_GREEN : COL_RED,
+                               "spawn_mobs %s", report.doMobSpawning ? "on" : "OFF");
+            ImGui::SameLine();
+            ImGui::TextColored(report.spawnMonstersRule ? COL_GREEN : COL_RED,
+                               " spawn_monsters %s", report.spawnMonstersRule ? "on" : "OFF");
+            ImGui::SameLine();
+            if (report.peaceful) ImGui::TextColored(COL_RED, " Peaceful (no monsters)");
+            else                 ImGui::TextColored(COL_GREEN, " difficulty allows monsters");
+
+            ImGui::Separator();
+            ImGui::TextColored(COL_GRAY, "category        count / global cap                status");
+
+            const float colCount  = 200.0f;
+            const float colBar    = 270.0f;
+            const float colStatus = 420.0f;
+
+            for (const auto& row : report.categories) {
+                if (!MobCapCategoryRelevant(report, row)) continue;
+                ImGui::PushID(row.name);
+
+                const bool open = ImGui::TreeNodeEx("cat", ImGuiTreeNodeFlags_None, "%s", row.name);
+
+                const bool misc = row.category == Game::MobCategory::Misc;
+                ImGui::SameLine(colCount);
+                if (misc) ImGui::Text("%d / -", row.count);
+                else      ImGui::Text("%d / %d", row.count, row.globalCap);
+
+                ImGui::SameLine(colBar);
+                {
+                    float fraction = 0.0f;
+                    if (row.globalCap > 0) fraction = std::min(1.0f, static_cast<float>(row.count) / row.globalCap);
+                    else if (!misc && row.count > 0) fraction = 1.0f;
+                    const ImVec4 barCol = fraction >= 1.0f ? COL_RED
+                                        : fraction >= 0.75f ? COL_YELLOW : COL_GREEN;
+                    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, barCol);
+                    char overlay[32];
+                    if (misc) std::snprintf(overlay, sizeof(overlay), "no cap");
+                    else      std::snprintf(overlay, sizeof(overlay), "%.0f%%", fraction * 100.0f);
+                    ImGui::ProgressBar(fraction, ImVec2(140.0f, 0.0f), overlay);
+                    ImGui::PopStyleColor();
+                }
+
+                ImGui::SameLine(colStatus);
+                if (!row.enabled) {
+                    ImGui::TextColored(COL_GRAY, "OFF: %s", row.disabledReason);
+                } else if (row.globalFull) {
+                    ImGui::TextColored(COL_RED, "FULL (global cap)");
+                } else if (row.localFullEverywhere) {
+                    ImGui::TextColored(COL_ORANGE, "FULL (local cap of every player)");
+                } else if (row.persistentGate) {
+                    ImGui::TextColored(COL_YELLOW, "open - next pass in %.1f s",
+                                       row.ticksToNextPass / 20.0f);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Persistent categories (creature) only get a spawn pass\n"
+                                          "every 400 ticks (MC getFilteredSpawningCategories).");
+                    }
+                } else {
+                    ImGui::TextColored(COL_GREEN, "spawning");
+                }
+                if (row.excludedPersistent > 0 || row.excludedTamed > 0) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(COL_GRAY, "  (+%d persistent, +%d tamed not counted)",
+                                       row.excludedPersistent, row.excludedTamed);
+                }
+
+                if (open) {
+                    ImGui::TextColored(COL_GRAY, "local cap (per player): %d  |  global: %d * %d / 289 = %d",
+                                       row.rawCap, row.rawCap, report.spawnableChunkCount, row.globalCap);
+                    if (row.types.empty()) {
+                        ImGui::TextDisabled("no mobs of this category");
+                    } else if (ImGui::BeginTable("types", 8,
+                                   ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                   ImGuiTableFlags_SizingFixedFit)) {
+                        ImGui::TableSetupColumn("type", ImGuiTableColumnFlags_WidthStretch);
+                        ImGui::TableSetupColumn("counted");
+                        ImGui::TableSetupColumn("named");
+                        ImGui::TableSetupColumn("persistent");
+                        ImGui::TableSetupColumn("leashed");
+                        ImGui::TableSetupColumn("riding");
+                        ImGui::TableSetupColumn("other");
+                        ImGui::TableSetupColumn("excluded (tamed)");
+                        ImGui::TableHeadersRow();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip(
+                                "counted: charged to the cap (named = has a custom name, MC still counts it)\n"
+                                "persistent: PersistenceRequired (name tag, picked-up loot, ...) - not counted\n"
+                                "leashed / riding / other: requiresCustomPersistence (other = bucket fish etc.) - not counted\n"
+                                "excluded (tamed): tamed pets - never counted (engine deviation from MC)");
+                        }
+                        auto cell = [](int v, const ImVec4& col) {
+                            ImGui::TableNextColumn();
+                            if (v == 0) ImGui::TextDisabled("-");
+                            else        ImGui::TextColored(col, "%d", v);
+                        };
+                        for (const auto& t : row.types) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(t.name.c_str());
+                            cell(t.counted,     COL_WHITE);
+                            cell(t.countedNamed, COL_WHITE);
+                            cell(t.persistent,  COL_BLUE);
+                            cell(t.leashed,     COL_BLUE);
+                            cell(t.passenger,   COL_BLUE);
+                            cell(t.otherCustom, COL_BLUE);
+                            cell(t.tamed,       COL_ORANGE);
+                        }
+                        ImGui::EndTable();
+                    }
+                    ImGui::TreePop();
+                }
+                ImGui::PopID();
+            }
+
+            // ── Per-player local caps (MC LocalMobCapCalculator) ───────────
+            ImGui::Separator();
+            if (ImGui::TreeNodeEx("local", ImGuiTreeNodeFlags_None,
+                                  "Local caps per player (LocalMobCapCalculator, %d players)",
+                                  static_cast<int>(report.players.size()))) {
+                ImGui::TextColored(COL_GRAY,
+                    "Mobs counted within 128 blocks (chunk centre, XZ) of each player vs the raw\n"
+                    "category max. A chunk spawns a category only while SOME player near it is under.");
+                if (report.players.empty()) {
+                    ImGui::TextDisabled("no non-spectator players in this dimension");
+                } else {
+                    std::vector<const Game::MobCapReport::CategoryRow*> cols;
+                    for (const auto& row : report.categories) {
+                        if (row.category == Game::MobCategory::Misc) continue;
+                        if (!MobCapCategoryRelevant(report, row)) continue;
+                        cols.push_back(&row);
+                    }
+                    const int columnCount = 1 + static_cast<int>(cols.size());
+                    if (ImGui::BeginTable("localcaps", columnCount,
+                            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                            ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_ScrollX,
+                            ImVec2(0.0f, 0.0f))) {
+                        ImGui::TableSetupColumn("player");
+                        for (const auto* c : cols) ImGui::TableSetupColumn(c->name);
+                        ImGui::TableHeadersRow();
+                        for (const auto& player : report.players) {
+                            ImGui::TableNextRow();
+                            ImGui::TableNextColumn();
+                            ImGui::TextUnformatted(player.name.c_str());
+                            for (const auto* c : cols) {
+                                ImGui::TableNextColumn();
+                                const int n = player.localCount[static_cast<size_t>(c->category)];
+                                const ImVec4 col = n >= c->rawCap ? COL_RED
+                                                 : n * 4 >= c->rawCap * 3 ? COL_YELLOW : COL_WHITE;
+                                ImGui::TextColored(col, "%d/%d", n, c->rawCap);
+                            }
+                        }
+                        ImGui::EndTable();
+                    }
+                }
+                ImGui::TreePop();
+            }
+        }
+    } // namespace
+
+    void DebugSystem::DrawMobCapPanel(const MobCapSnapshot& snap) {
+        ImGui::SetNextWindowSize(ImVec2(760, 520), ImGuiCond_FirstUseEver);
+        if (!ImGui::Begin("Mob Caps", &s_visibility.mobCaps)) { ImGui::End(); return; }
+
+        if (!snap.serverAvailable) {
+            ImGui::TextColored(COL_YELLOW,
+                "Mob caps are computed by the server. Connected to a remote server -\n"
+                "only the host (single-player / integrated server) can show them.");
+            ImGui::End();
+            return;
+        }
+
+        static bool s_allDimensions = false;
+        ImGui::Checkbox("Show all loaded dimensions", &s_allDimensions);
+        ImGui::SameLine();
+        ImGui::TextColored(COL_GRAY, "(rebuilt ~1/s on the server thread while open)");
+
+        const Game::MobCapReport* current = nullptr;
+        for (const auto& report : snap.reports) {
+            if (report.dimension == snap.playerDimension) current = &report;
+        }
+
+        ImGui::Separator();
+        if (current) {
+            ImGui::TextColored(COL_BLUE, "Your dimension: %s", current->dimensionName.c_str());
+            ImGui::PushID(current->dimension);
+            DrawMobCapReport(*current);
+            ImGui::PopID();
+        } else {
+            ImGui::TextDisabled("Waiting for the server's first snapshot of your dimension...");
+        }
+
+        if (s_allDimensions) {
+            for (const auto& report : snap.reports) {
+                if (&report == current) continue;
+                ImGui::PushID(report.dimension);
+                ImGui::Separator();
+                if (ImGui::CollapsingHeader(report.dimensionName.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) {
+                    DrawMobCapReport(report);
+                }
+                ImGui::PopID();
+            }
         }
 
         ImGui::End();

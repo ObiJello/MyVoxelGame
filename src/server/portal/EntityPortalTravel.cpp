@@ -25,6 +25,7 @@
 #include "common/entity/Attributes.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/entity/MobCategory.hpp"
+#include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/world/level/World.hpp"
 #include "common/core/Log.hpp"
@@ -717,7 +718,20 @@ namespace Server {
                 // Resume the hunt the moment the player's view exists here.
                 if (PlayerEntityView* view = level.MobLevel()
                         ? level.MobLevel()->GetPlayerView(chase.connectionId) : nullptr) {
-                    mob->SetTarget(view);
+                    // A brain mob hunts from ATTACK_TARGET (its GetTarget
+                    // reads that, never the goal field): resume it the way
+                    // MC StartAttacking.start does — set the memory, forget
+                    // the can't-reach timer — behind the same canAttack.
+                    Game::Brain* brain = mob->GetBrain();
+                    if (brain && brain->IsRegistered(Game::MemoryModule::AttackTarget)) {
+                        if (mob->CanAttack(*view)) {
+                            brain->SetMemory(Game::MemoryModule::AttackTarget,
+                                             static_cast<Game::Entity*>(view));
+                            brain->EraseMemory(Game::MemoryModule::CantReachWalkTargetSince);
+                        }
+                    } else {
+                        mob->SetTarget(view);
+                    }
                     it = m_chases.erase(it);
                     continue;
                 }

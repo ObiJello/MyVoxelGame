@@ -19,6 +19,7 @@
 // ── The Hush ────────────────────────────────────────────────────────────────
 ENGINE_BLOCK_LIGHT("resonant_crystal", 10)        // glowing crystal formations
 ENGINE_BLOCK_LIGHT("resonance_bloom", 7)          // glowing flower
+ENGINE_BLOCK_LIGHT("potted_resonance_bloom", 7)   // the bloom keeps its glow in a pot
 ENGINE_BLOCK_LIGHT("lantern_leaves", 8)           // whisperwood canopy glow
 ENGINE_BLOCK_LIGHT("hush_portal", 11)             // nether portal class
 ENGINE_BLOCK_LIGHT("resonant_cluster", 5)         // amethyst cluster class

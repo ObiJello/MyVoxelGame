@@ -15,6 +15,7 @@
 #include "common/entity/NeutralMob.hpp"
 #include "common/entity/RangedAttackMob.hpp"
 #include "common/entity/mobs/GenericMobs.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
 #include "common/entity/npc/VillagerData.hpp"
 #include "common/sound/SoundEvents.hpp"
 
@@ -884,13 +885,16 @@ namespace Game {
     // The parts that make an iron golem an iron golem here: the randomised
     // half-to-double melee damage with the 0.4 vertical launch (doHurtTarget),
     // the attack/offer-flower animation clocks and their entity events,
-    // hunting hostile mobs while never touching creepers, and the
-    // persistent-anger system (NeutralMob: the isAngryAt-gated player hunt at
-    // target priority 3 + ResetUniversalAngerTargetGoal at 4 — a golem only
-    // turns on players it is ANGRY at). Not modelled, each named at its site:
-    // the village layer (MoveBackToVillageGoal, GolemRandomStrollInVillageGoal,
-    // OfferFlowerGoal, DefendVillageTargetGoal), player construction
-    // (PlayerCreated flag), crackiness, and the iron-ingot repair interact.
+    // hunting hostile mobs while never touching creepers (and turning on one
+    // that bumps it, 1 in 20 — doPush), the persistent-anger system
+    // (NeutralMob: the isAngryAt-gated player hunt at target priority 3 +
+    // ResetUniversalAngerTargetGoal at 4), the village layer (GolemGoals.hpp:
+    // MoveTowardsTargetGoal, MoveBackToVillageGoal,
+    // GolemRandomStrollInVillageGoal, OfferFlowerGoal and the reputation-driven
+    // DefendVillageTargetGoal), Crackiness.GOLEM (the IRON_GOLEM_DAMAGE crack
+    // sound; the renderer's crack sheets) and the iron-ingot repair. Player
+    // construction is CarvedPumpkinBlock.cpp (it sets PlayerCreated); village
+    // construction is Villager::SpawnGolemIfNeeded.
     class IronGolem : public PathfinderMob, public NeutralMob {
     public:
         explicit IronGolem(EntityLevel* level);
@@ -907,9 +911,21 @@ namespace Game {
         // MC AbstractGolem.getAmbientSoundInterval — 120, like animals.
         int GetAmbientSoundInterval() const override { return 120; }
 
-        // MC IronGolem.canAttack: never a creeper (the playerCreated half
-        // needs the construction system).
+        // MC IronGolem.canAttack: a player-built golem never a player, and no
+        // golem ever a creeper.
         bool CanAttack(const LivingEntity& target) const override;
+
+        // MC IronGolem.isPlayerCreated / setPlayerCreated — DATA_FLAGS_ID's
+        // bit 1, set by CarvedPumpkinBlock.trySpawnGolem, saved as
+        // "PlayerCreated". Carried to the client in the wire's variant byte
+        // (MC syncs the flags byte; no client code reads it).
+        bool IsPlayerCreated() const { return (m_flags & kFlagPlayerCreated) != 0; }
+        void SetPlayerCreated(bool value) {
+            if (value) m_flags = static_cast<uint8_t>(m_flags | kFlagPlayerCreated);
+            else       m_flags = static_cast<uint8_t>(m_flags & ~kFlagPlayerCreated);
+        }
+        uint8_t GetVariantByte() const override { return m_flags; }
+        void    SetVariantByte(uint8_t v) override { m_flags = v; }
 
         // MC IronGolem.doHurtTarget — attackAnimationTick=10, entity event 4,
         // damage attackDamage/2 + nextInt(attackDamage), 0.4 vertical launch
@@ -921,6 +937,33 @@ namespace Game {
 
         // MC IronGolem.handleEntityEvent: 4 attack, 11/34 offer flower.
         void HandleEntityEvent(uint8_t id) override;
+
+        // MC IronGolem.offerFlower: the 400-tick clock and its entity event
+        // (11 offer / 34 withdraw) — OfferFlowerGoal's start and stop.
+        void OfferFlower(bool offer);
+
+        // MC Level.isBrightOutside at the golem: a dimension that keeps time
+        // with skyDarken < 4 (OfferFlowerGoal's daylight gate).
+        bool IsBrightOutside() const;
+
+        // MC IronGolem.doPush: an Enemy (never a creeper) that bumps the golem
+        // becomes its target, 1 time in 20.
+        void DoPush(Entity& other) override;
+
+        // MC IronGolem.hurtServer: a hit that moves the golem to another
+        // Crackiness.GOLEM level plays IRON_GOLEM_DAMAGE.
+        bool Hurt(MobDamageSource source, float amount, Entity* attacker) override;
+
+        // MC Crackiness.GOLEM.byFraction(health / maxHealth): 0 NONE, 1 LOW
+        // (< 0.75), 2 MEDIUM (< 0.5), 3 HIGH (< 0.25).
+        int GetCrackiness() const;
+
+        // MC IronGolem.mobInteract: an iron ingot heals 25 (passes when
+        // nothing healed), IRON_GOLEM_REPAIR at a random pitch, one consumed.
+        UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
+
+        // MC IronGolem.canSpawnSprintParticle: moving at all, and 1 in 5.
+        bool CanSpawnSprintParticle() const override;
 
         // MC IronGolemRenderer.extractRenderState inputs.
         int GetAttackAnimationTick() const { return m_attackAnimationTick; }
@@ -941,8 +984,11 @@ namespace Game {
         void RegisterGoals() override;
 
     private:
+        static constexpr uint8_t kFlagPlayerCreated = 0x01;   // MC DATA_FLAGS_ID & 1
+
         int m_attackAnimationTick = 0;
         int m_offerFlowerTick = 0;
+        uint8_t m_flags = 0;   // MC DATA_FLAGS_ID, defined (byte)0
     };
 
     // MC monster/Blaze. ATTACK_DAMAGE 6, MOVEMENT_SPEED 0.23, FOLLOW_RANGE 48.
@@ -1021,13 +1067,6 @@ namespace Game {
         // 0.91 (0.8 in water, 0.5 in lava).
         void Travel(const glm::dvec3& input) override;
 
-        // The registerGoals target predicate |targetY - y| <= 4, expressed
-        // through canAttack. DEVIATION NOTE: MC applies the filter only at
-        // target SELECTION; through canAttack it also drops a held target
-        // that climbs away, which reads the same in play (the ghast simply
-        // re-acquires when you level out).
-        bool CanAttack(const LivingEntity& target) const override;
-
         // MC Ghast.faceMovementDirection (static) — shared with GhastLookGoal.
         static void FaceMovementDirection(Mob& ghast);
 
@@ -1042,8 +1081,9 @@ namespace Game {
     // MC animal/golem/SnowGolem (AbstractGolem -> PathfinderMob). MAX_HEALTH
     // 4, MOVEMENT_SPEED 0.2. Throws 0-damage snowballs (3 vs blazes) via
     // RangedAttackGoal(1.25, 20, 10) at any hostile, and melts — 1 fire
-    // damage per tick — in any biome whose base temperature exceeds 1.0 (MC's
-    // SNOW_GOLEM_MELTS environment attribute) and in water (isSensitiveTo-
+    // damage per tick — wherever EnvironmentAttributes.SNOW_GOLEM_MELTS holds
+    // (BiomeAttributes: the deserts, savannas and badlands, the nether
+    // dimension, the mod biomes that set it) and in water (isSensitiveTo-
     // Water). Shears take the pumpkin off (mobInteract → shear: the
     // carved-pumpkin drop at eye height, DATA_PUMPKIN_ID cleared, the
     // renderer's SnowGolemHeadLayer stops drawing it). Leaves a trail of
@@ -1062,12 +1102,13 @@ namespace Game {
         uint8_t GetVariantByte() const override { return m_hasPumpkin ? 0x10 : 0x00; }
         void    SetVariantByte(uint8_t v) override { m_hasPumpkin = (v & 0x10) != 0; }
 
-        // MC SnowGolem.readyForShearing: alive and still wearing it.
-        bool ReadyForShearing() const { return IsAlive() && HasPumpkin(); }
-        // MC SnowGolem.shear: SNOW_GOLEM_SHEAR, setPumpkin(false), the
-        // shearing/snow_golem loot table (one carved pumpkin) dropped at
-        // eye height.
-        void Shear();
+        // MC SnowGolem.readyForShearing: still wearing it.
+        bool ReadyForShearing() const { return HasPumpkin(); }
+        // MC SnowGolem.shear(level, soundSource, tool): SNOW_GOLEM_SHEAR in
+        // `soundSource` (PLAYERS from a player, BLOCKS from a dispenser),
+        // setPumpkin(false), the shearing/snow_golem loot table (one carved
+        // pumpkin) dropped at eye height.
+        void Shear(SoundSource soundSource);
         // MC SnowGolem.mobInteract: shears + readyForShearing → shear, SUCCESS;
         // anything else PASS.
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
@@ -1185,12 +1226,21 @@ namespace Game {
         void SetAnimStateByte(uint8_t v) override {
             m_peekAmount = static_cast<int>(v);
         }
+        // The wire's variant byte: the attach face in the low 3 bits, the
+        // colour (DATA_COLOR_ID, 16 = none) above them.
         uint8_t GetVariantByte() const override {
-            return static_cast<uint8_t>(m_attachFace);
+            return static_cast<uint8_t>((m_attachFace & 7) | ((m_color & 0x1F) << 3));
         }
         void SetVariantByte(uint8_t v) override {
-            m_attachFace = v <= 5 ? static_cast<int>(v) : 0;
+            const int face = v & 7;
+            m_attachFace = face <= 5 ? face : 0;
+            const int color = v >> 3;
+            m_color = static_cast<uint8_t>(color <= 16 ? color : 16);
         }
+        // MC Shulker.getColor (DATA_COLOR_ID; 16 = no colour — the default
+        // purple sheet), saved as "Color", set by the shulker/color component.
+        uint8_t GetColor() const { return m_color; }
+        void SetColor(uint8_t color) { m_color = color <= 16 ? color : 16; }
         // Same clamp, named for what it is. Vanilla's AttachFace is a
         // Direction 3D-data value, so anything above 5 is corrupt and
         // vanilla's own decoder falls back to DOWN.
@@ -1209,6 +1259,7 @@ namespace Game {
         void RegisterGoals() override;
 
     private:
+        uint8_t m_color = 16;
         int FindAttachableSurface(const glm::ivec3& pos) const;
         void FindNewAttachment();
         void UpdateCoveredArmor();
@@ -1616,27 +1667,46 @@ namespace Game {
     // MC boss/wither/WitherBoss. MAX_HEALTH 300, MOVEMENT_SPEED 0.6,
     // FLYING_SPEED 0.6, FOLLOW_RANGE 40, ARMOR 4.
     //
-    // Ported: the 220-tick invulnerable spawn phase (health ramp, closing
-    // burst — entity-damage-only per project policy), three heads with
-    // independent targets and MC's exact volley cadences (10+rand(10) idle
-    // timers, the >15 idle-shot rule on NORMAL/HARD, 40+rand(20) after a
-    // shot, the 0.1% dangerous-skull roll), the half-health "powered" armor
-    // state with its projectile immunity, the 1 HP/s regen (10/s while
-    // spawning), the undead-exclusion targeting, hover flight toward the
-    // primary target, total status-effect immunity, and the nether star
-    // drop. Not modelled, each named at its site: the boss bar, block
-    // destruction (destroyBlocksTick — mob griefing of terrain is not
-    // modelled), the side-head visual aim (the model renders the small heads
-    // forward; syncing two extra rotation pairs is the skipped piece — the
-    // BEHAVIOUR, per-head volleys at per-head targets, is fully in), the
-    // armor overlay layer, and the soul-sand spawn ritual (/summon and the
-    // spawn egg call MakeInvulnerable instead, standing in for the ritual's
-    // makeInvulnerable call).
+    // Built by the soul-sand ritual (WitherSkullBlock.cpp — the skull's
+    // setPlacedBy and the dispenser, in any level), which makes it
+    // invulnerable: the 220-tick charge (health ramp from a third, the boss
+    // bar filling, the closing 7-power MOB explosion at the eyes and the
+    // world-wide scream). Then: three heads with independent targets and MC's
+    // exact volley cadences (10+rand(10) idle timers, the >15 idle-shot rule
+    // on NORMAL/HARD, 40+rand(20) after a shot, the 0.1% dangerous-skull
+    // roll), the side heads' targets synced (DATA_TARGET_B / _C →
+    // WitherHeadTargetsS2C) and turned toward on the client, the half-health
+    // "powered" armor state with its projectile immunity, the block smash a
+    // hit arms (destroyBlocksTick, mobGriefing), the 1 HP/s regen (10 per 10
+    // ticks while charging), the undead-exclusion targeting, hover flight
+    // toward the primary target, total status-effect immunity, the nether
+    // star, and the purple darken-screen boss bar (WitherBossEvents.cpp).
     class Wither : public Monster, public RangedAttackMob {
     public:
         explicit Wither(EntityLevel* level);
         // MC WitherBoss.canUsePortal: never.
         bool CanUsePortal(bool ignorePassenger) const override { (void)ignorePassenger; return false; }
+        // MC WitherBoss.canRide: never.
+        bool CanRide(const Entity&) const override { return false; }
+
+        // MC getAlternativeTarget(1) / (2): the side heads' target ids (0 =
+        // none) — the server's own, which the tracker sends whenever they
+        // change (ConsumeHeadTargetsDirty).
+        int32_t GetHeadTargetId(int sideHead) const { return m_headTargetIds[sideHead]; }
+        bool ConsumeHeadTargetsDirty() {
+            const bool dirty = m_headTargetsDirty;
+            m_headTargetsDirty = false;
+            return dirty;
+        }
+        // The client copy's: WitherHeadTargetsS2C.
+        void SetClientHeadTargets(int32_t rightHeadTarget, int32_t leftHeadTarget) {
+            m_headTargetIds[0] = rightHeadTarget;
+            m_headTargetIds[1] = leftHeadTarget;
+        }
+        // MC getHeadYRots / getHeadXRots — the side heads' look, degrees,
+        // turned toward their targets in AiStep (client side).
+        float GetHeadYRot(int sideHead) const { return m_yRotHeads[sideHead]; }
+        float GetHeadXRot(int sideHead) const { return m_xRotHeads[sideHead]; }
 
         static void CreateAttributes(AttributeMap& out);
 
@@ -1665,15 +1735,30 @@ namespace Game {
         void SetAnimStateByte(uint8_t v) override {
             m_clientInvulnerable = (v & 1) != 0;
             m_clientPowered = (v & 2) != 0;
-            m_clientInvulnerableTicks = ((v >> 2) & 63) * 5;
+            const int quantum = (v >> 2) & 63;
+            if (!m_clientInvulnerable) {
+                m_clientInvulnerableTicks = 0;
+                m_clientInvulnerableQuantum = -1;
+            } else if (quantum != m_clientInvulnerableQuantum) {
+                // First sight: the quantum's floor (exact at the ritual's
+                // 220). A step down: the server's count has just crossed
+                // into it, so it is the quantum's top; AiStep counts on from
+                // there, never below the floor, between the byte's steps.
+                m_clientInvulnerableTicks = m_clientInvulnerableQuantum < 0 ? quantum * 5 : quantum * 5 + 4;
+                m_clientInvulnerableQuantum = quantum;
+            }
         }
         bool IsInvulnerablePhaseClient() const { return m_clientInvulnerable; }
-        // MC WitherRenderState.invulnerableTicks, at the wire's 5-tick grain.
-        // Zero once the charge ends even though bit 0's last quantum may
-        // still be in flight — bit 0 is the authority on "spawning at all".
-        int GetClientInvulnerableTicks() const {
-            return m_clientInvulnerable ? m_clientInvulnerableTicks : 0;
+        // MC WitherRenderState.invulnerableTicks = ticks > 0 ? ticks -
+        // partialTicks : 0, from the client's count. Zero once the charge
+        // ends even though bit 0's last quantum may still be in flight —
+        // bit 0 is the authority on "spawning at all".
+        float GetClientInvulnerableTicks(float partialTick) const {
+            if (!m_clientInvulnerable || m_clientInvulnerableTicks <= 0) return 0.0f;
+            return static_cast<float>(m_clientInvulnerableTicks) - partialTick;
         }
+        // MC WitherRenderState.isPowered.
+        bool IsPoweredClient() const { return m_clientPowered; }
 
         // MC Wither.aiStep — the hover flight, head-timer bookkeeping, and
         // the client particle tail (head smoke / powered aura / charge-up
@@ -1695,19 +1780,21 @@ namespace Game {
         // MC Wither.checkDespawn: never despawns; peaceful discards.
         void CheckDespawn() override;
 
-        // MC Wither.addEffect returns false — nothing sticks to a wither.
-        bool CanBeAffected(const MobEffectInstance& effect) const override {
-            (void)effect;
+        // MC WitherBoss.addEffect returns false — no effect with a duration
+        // ever sticks; canBeAffected refuses only WITHER, so an instant
+        // effect (a healing / harming potion or cloud) and forceAddEffect
+        // still reach it.
+        bool AddEffect(MobEffectInstance effect, Entity* source = nullptr) override {
+            (void)effect; (void)source;
             return false;
+        }
+        bool CanBeAffected(const MobEffectInstance& effect) const override {
+            return effect.effect == MobEffectId::Wither ? false : Monster::CanBeAffected(effect);
         }
 
         // MC Wither.dropCustomDeathLoot — the nether star.
         void DropCustomDeathLoot(EntityLevel& level) override;
 
-        // The egg//summon spawn path charges the wither up (MakeInvulnerable),
-        // standing in for the soul-sand ritual's call.
-        std::shared_ptr<SpawnGroupData>
-        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
 
         void ClearReferenceTo(const Entity* entity) override;
 
@@ -1716,10 +1803,10 @@ namespace Game {
         void CustomServerAiStep() override;
 
     private:
-        // MC's alternativeTarget(1)/(2) — the side heads' own targets. MC
-        // syncs entity ids; this port keeps pointers (ClearReferenceTo drops
-        // them), since the side-head visual that would need them client-side
-        // is skipped.
+        // MC setAlternativeTarget(i, id) for a side head (1 or 2 → index 0
+        // or 1): the server keeps the pointer (ClearReferenceTo drops it) and
+        // the id the client is sent.
+        void SetHeadTarget(int sideHead, LivingEntity* target);
         void PerformRangedAttack(int head, LivingEntity& target);
         void PerformRangedAttack(int head, double tx, double ty, double tz,
                                  bool dangerous);
@@ -1728,18 +1815,30 @@ namespace Game {
         double GetHeadZ(int head) const;
         void SpawnBurstExplosion();
 
+        // MC getAlternativeTarget(0): getTarget() as customServerAiStep last
+        // saw it after the spawn charge — the chase's target.
+        LivingEntity* m_primaryTarget = nullptr;
         LivingEntity* m_headTargets[2] = { nullptr, nullptr };
+        int32_t m_headTargetIds[2] = { 0, 0 };
+        bool    m_headTargetsDirty = false;
+        // MC xRotHeads / yRotHeads (and their previous-tick copies).
+        float m_xRotHeads[2] = { 0.0f, 0.0f };
+        float m_yRotHeads[2] = { 0.0f, 0.0f };
+        float m_xRotOHeads[2] = { 0.0f, 0.0f };
+        float m_yRotOHeads[2] = { 0.0f, 0.0f };
         int m_nextHeadUpdate[2] = { 0, 0 };
         int m_idleHeadUpdates[2] = { 0, 0 };
         int m_invulnerableTicks = 0;
-        // MC destroyBlocksTick — armed by Hurt, counts down in
-        // customServerAiStep; the block destruction it would fire is the
-        // skipped mob-griefing piece, the timer is kept so the wiring reads
-        // like MC's.
+        // MC destroyBlocksTick — armed by Hurt, counted down in
+        // customServerAiStep; at 0 (mobGriefing) the box's blocks break.
         int m_destroyBlocksTick = 0;
+        // MC TARGETING_CONDITIONS: forCombat, range 20, the living-entity
+        // selector — a side head's random pick.
+        TargetingConditions m_headTargeting;
         bool m_clientInvulnerable = false;
         bool m_clientPowered = false;
         int  m_clientInvulnerableTicks = 0;
+        int  m_clientInvulnerableQuantum = -1;
     };
 
     // ── Strider ────────────────────────────────────────────────────────────

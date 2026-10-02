@@ -14,7 +14,7 @@
 namespace Game {
 
     bool BrewingStandBlockEntity::CanPlaceItem(int slot, const ItemStack& stack) const {
-        if (slot == SLOT_FUEL) return GetBrewingFuelUses(stack) > 0;
+        if (slot == SLOT_FUEL) return IsBrewingFuel(stack);
         if (slot == SLOT_INGREDIENT) return IsBrewingReagent(stack);
         return IsBrewingPotionInput(stack) && GetItem(slot).IsEmpty();
     }
@@ -81,7 +81,7 @@ namespace Game {
         // Refuel a spent stand.
         ItemStack& fuel = GetItem(SLOT_FUEL);
         const int uses = GetBrewingFuelUses(fuel);
-        if (m_fuel <= 0 && uses > 0) {
+        if (m_fuel <= 0 && IsBrewingFuel(fuel)) {
             m_fuel = uses;
             m_totalFuel = m_fuel;
             m_speedMultiplier = GetBrewingFuelSpeedMultiplier(fuel);

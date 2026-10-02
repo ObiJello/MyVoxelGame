@@ -9,10 +9,10 @@
 // Mutable → toImmutable → set flow, BundleItem.java:56-64) — never mutate a
 // fetched BundleContents in place.
 //
-// Weight is tracked in 64ths of a full bundle (MC uses exact Fractions with
-// per-item weight 1/maxStackSize; 64ths represents 1/64, 1/16 and 1/1 stacks
-// exactly). Full at 64 units. Bundle-in-bundle costs 4 units (= MC's 1/16,
-// BundleContents.java:141) plus its own contents.
+// Weight is an exact fraction of a full bundle, as MC's apache Fraction:
+// each item weighs 1/getMaxStackSize() — a stack's own limit, so a
+// `[max_stack_size=3]` stick weighs a third — a nested bundle 1/16 plus its
+// contents. Full at 1.
 //
 // NOT wired: BundleItem.use's hold-to-dump (BundleItem.java:127-130, :211-219)
 // — dumping spawns ItemEntities, which don't exist. The click ops are the
@@ -25,35 +25,86 @@
 #include "../inventory/AbstractContainerMenu.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <unordered_map>
 
 namespace Game {
 
     namespace {
 
-        constexpr int kFullBundleUnits     = 64;  // Fraction.ONE
-        constexpr int kBundleInBundleUnits = 4;   // 1/16 (BundleContents.java:141)
+        // org.apache.commons.lang3.math.Fraction, as far as the bundle uses
+        // it: reduced, positive denominator; an overflow (ArithmeticException
+        // in MC) marks the result invalid ("Excessive total bundle weight").
+        struct Fraction {
+            int64_t num = 0;
+            int64_t den = 1;
+            bool    valid = true;
 
-        int WeightUnitsOf(const ItemStack& stack);
-
-        // Total weight of a contents list, in 64ths (BundleContents.computeContentWeight).
-        int ContentsWeightUnits(const BundleContents& contents) {
-            int units = 0;
-            for (const auto& s : contents.items) {
-                units += WeightUnitsOf(s) * s.count;
+            static int64_t Gcd(int64_t a, int64_t b) {
+                a = a < 0 ? -a : a;
+                b = b < 0 ? -b : b;
+                while (b != 0) { const int64_t t = a % b; a = b; b = t; }
+                return a == 0 ? 1 : a;
             }
-            return units;
+            static Fraction Of(int64_t n, int64_t d) {
+                Fraction f;
+                if (d == 0) { f.valid = false; return f; }
+                if (d < 0) { n = -n; d = -d; }
+                const int64_t g = Gcd(n, d);
+                f.num = n / g;
+                f.den = d / g;
+                return f;
+            }
+            // Denominators stay far below this for any real contents (lcm of
+            // stack limits up to 99, nesting adds 16); past it is overflow.
+            static constexpr int64_t kLimit = int64_t{1} << 40;
+            // a * b, or false when it would overflow.
+            static bool Mul(int64_t a, int64_t b, int64_t& out) {
+                const int64_t aa = a < 0 ? -a : a;
+                const int64_t bb = b < 0 ? -b : b;
+                if (aa != 0 && bb > (INT64_MAX / 4) / aa) return false;
+                out = a * b;
+                return true;
+            }
+            Fraction Add(const Fraction& o) const {
+                if (!valid || !o.valid) return Invalid();
+                const int64_t g = Gcd(den, o.den);
+                int64_t d = 0, a = 0, b = 0;
+                if (!Mul(den / g, o.den, d) || d > kLimit) return Invalid();
+                if (!Mul(num, d / den, a) || !Mul(o.num, d / o.den, b)) return Invalid();
+                return Of(a + b, d);
+            }
+            Fraction Times(int64_t k) const {
+                if (!valid) return Invalid();
+                int64_t n = 0;
+                if (!Mul(num, k, n)) return Invalid();
+                return Of(n, den);
+            }
+            static Fraction Invalid() { Fraction f; f.valid = false; return f; }
+        };
+
+        const Fraction kBundleInBundleWeight = Fraction::Of(1, 16);   // BUNDLE_IN_BUNDLE_WEIGHT
+
+        Fraction WeightOf(const ItemStack& stack);
+
+        // BundleContents.computeContentWeight: Σ weight(stack) × count.
+        Fraction ContentsWeight(const BundleContents& contents) {
+            Fraction total = Fraction::Of(0, 1);
+            for (const auto& s : contents.items) {
+                total = total.Add(WeightOf(s).Times(s.count));
+                if (!total.valid) break;
+            }
+            return total;
         }
 
-        // Per-item weight — BundleContents.getWeight (:61-69): a nested
-        // bundle costs 1/16 + its own weight; anything else 1/maxStackSize.
-        // (The BEES branch is omitted — no bee data.)
-        int WeightUnitsOf(const ItemStack& stack) {
+        // BundleContents.getWeight: a nested bundle costs 1/16 + its own
+        // weight; anything else 1/getMaxStackSize(). (Occupied beehives weigh
+        // a whole bundle in MC; this engine's hive items carry no bees.)
+        Fraction WeightOf(const ItemStack& stack) {
             if (auto inner = stack.get(DataComponents::BUNDLE_CONTENTS)) {
-                return kBundleInBundleUnits + ContentsWeightUnits(*inner);
+                return ContentsWeight(*inner).Add(kBundleInBundleWeight);
             }
-            const int maxStack = std::max(1, ItemRegistry::Get(stack.itemId).maxStackSize);
-            return kFullBundleUnits / maxStack;
+            return Fraction::Of(1, std::max(1, GetMaxStackSize(stack)));
         }
 
         // BundleContents.canItemBeInBundle (:71-73).
@@ -62,11 +113,17 @@ namespace Game {
                 && ItemRegistry::Get(stack.itemId).canFitInsideContainerItems;
         }
 
-        // Mutable.getMaxAmountToAdd (:176-179).
+        // Mutable.getMaxAmountToAdd: (1 - weight) / itemWeight, truncated.
         int MaxAmountToAdd(const BundleContents& contents, const ItemStack& item) {
-            const int remaining = kFullBundleUnits - ContentsWeightUnits(contents);
-            const int perItem   = WeightUnitsOf(item);
-            return perItem > 0 ? std::max(remaining / perItem, 0) : 0;
+            const Fraction current = ContentsWeight(contents);
+            const Fraction perItem = WeightOf(item);
+            if (!current.valid || !perItem.valid || perItem.num <= 0) return 0;
+            const Fraction remaining = Fraction::Of(1, 1).Add(Fraction::Of(-current.num, current.den));
+            if (!remaining.valid || remaining.num <= 0) return 0;
+            // (rn/rd) / (pn/pd) = rn*pd / (rd*pn), Fraction.intValue truncates.
+            const long double q = (static_cast<long double>(remaining.num) * static_cast<long double>(perItem.den)) /
+                                  (static_cast<long double>(remaining.den) * static_cast<long double>(perItem.num));
+            return q >= 2147483647.0L ? 2147483647 : std::max(static_cast<int>(q), 0);
         }
 
         // Mutable.tryInsert (:181-203) — moves up to the weight-limited count
@@ -76,16 +133,12 @@ namespace Game {
             const int amount = std::min(toAdd.count, MaxAmountToAdd(contents, toAdd));
             if (amount == 0) return 0;
 
-            // findStackIndex (:162-174) — merge into an existing same-item
-            // stack (MC also requires same COMPONENTS; approximated by id +
-            // empty patches, the common case — nested bundles never merge
-            // because their weight differs anyway).
+            // findStackIndex: a stackable item merges into the first stack
+            // of the same item AND components.
             int stackIndex = -1;
-            if (ItemRegistry::Get(toAdd.itemId).maxStackSize > 1) {
+            if (IsStackable(toAdd)) {
                 for (size_t i = 0; i < contents.items.size(); ++i) {
-                    if (contents.items[i].itemId == toAdd.itemId
-                        && contents.items[i].components.empty()
-                        && toAdd.components.empty()) {
+                    if (IsSameItemSameComponents(contents.items[i], toAdd)) {
                         stackIndex = static_cast<int>(i);
                         break;
                     }

@@ -60,6 +60,9 @@ namespace Game {
 
         Villager& V(LivingEntity& body) { return static_cast<Villager&>(body); }
 
+        // InteractWithDoor's DOORS_TO_CLOSE store (CommonBehaviors.hpp).
+        std::vector<glm::ivec3>& VillagerDoorsToClose(LivingEntity& body) { return V(body).DoorsToClose(); }
+
         bool IsVillager(const Entity* e) { return e && e->GetType() == EntityTypeId::Villager; }
 
         // MC Vec3i.closerToCenterThan(Position, dist): the block's CENTRE
@@ -159,89 +162,6 @@ namespace Game {
         bool IsMaxAgeCrop(BlockState s) {
             const int max = CropMaxAge(s.Block());
             return max >= 0 && ReadIntProperty(s, "age") >= max;
-        }
-
-        // ── Doors (MC DoorBlock.setOpen / isOpen, #mob_interactable_doors) ─
-        bool IsMobInteractableDoor(BlockState s) { return IsWoodenDoorBlock(s.Block()); }
-        bool IsDoorOpen(BlockState s) { return s.GetValueByName("open") == "true"; }
-
-        void SetDoorOpen(EntityLevel& level, const glm::ivec3& pos, bool open, Entity* source) {
-            // MC DoorBlock.setOpen(entity, level, state, pos, open): flags 10
-            // (UPDATE_CLIENTS | UPDATE_IMMEDIATE), the other half following
-            // (MC through updateShape; explicit here — the engine has no
-            // double-block linkage), and the door's open/close sound.
-            ILevelWrite* world = level.MutableBlocks();
-            if (!world) return;
-            const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
-            if (!IsMobInteractableDoor(state) || IsDoorOpen(state) == open) return;
-            const std::string_view to = open ? "true" : "false";
-            constexpr uint32_t kFlags = World::UpdateFlags::UpdateClients | World::UpdateFlags::Immediate;
-            world->SetBlock(pos.x, pos.y, pos.z, state.SetName(PropertyId::OPEN, to), kFlags);
-            const bool lower = state.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
-            const glm::ivec3 other = pos + glm::ivec3(0, lower ? 1 : -1, 0);
-            const BlockState otherState = world->GetBlockState(other.x, other.y, other.z);
-            if (otherState.Block() == state.Block() &&
-                otherState.GetName(PropertyId::DOUBLE_BLOCK_HALF) == (lower ? "upper" : "lower")) {
-                world->SetBlock(other.x, other.y, other.z, otherState.SetName(PropertyId::OPEN, to), kFlags);
-            }
-            if (const BlockSetType* set = BlockSetTypeOf(state.Block())) {
-                // DoorBlock.playSound: pitch nextFloat() * 0.1 + 0.9.
-                const float pitch = level.Random().NextFloat() * 0.1f + 0.9f;
-                level.PlaySound(nullptr, pos, open ? set->doorOpen : set->doorClose,
-                                SoundSource::Blocks, 1.0f, pitch);
-            }
-            // MC setOpen: level.gameEvent(sourceEntity, BLOCK_OPEN / BLOCK_CLOSE, pos).
-            world->GameEvent(source, open ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
-        }
-
-        // MC InteractWithDoor.isMobComingThroughDoor — the other mob's live
-        // path (MC reads its PATH memory; the navigation holds the same path).
-        bool IsMobComingThroughDoor(LivingEntity& other, const glm::ivec3& doorPos) {
-            auto* mob = dynamic_cast<Mob*>(&other);
-            if (!mob || !mob->HasAiControls()) return false;
-            const Path* path = mob->GetNavigation().GetPath();
-            if (!path || path->IsDone() || path->GetNextNodeIndex() <= 0) return false;
-            const Node& from = path->GetNode(path->GetNextNodeIndex() - 1);
-            const Node& to = path->GetNextNode();
-            return doorPos == glm::ivec3(from.x, from.y, from.z) || doorPos == glm::ivec3(to.x, to.y, to.z);
-        }
-
-        // MC InteractWithDoor.closeDoorsThatIHaveOpenedOrPassedThrough.
-        void CloseDoorsThatIHaveOpenedOrPassedThrough(EntityLevel& level, Villager& body,
-                                                      const glm::ivec3* movingFrom,
-                                                      const glm::ivec3* movingTo) {
-            std::vector<glm::ivec3>& doors = body.DoorsToClose();
-            const Brain* brain = body.GetBrain();
-            const std::vector<Entity*>* nearest =
-                brain ? brain->GetEntityList(MemoryModule::NearestLivingEntities) : nullptr;
-            for (auto it = doors.begin(); it != doors.end();) {
-                const glm::ivec3 doorPos = *it;
-                if ((movingFrom && *movingFrom == doorPos) || (movingTo && *movingTo == doorPos)) {
-                    ++it;
-                    continue;
-                }
-                // isDoorTooFarAway: another dimension, or the door's centre 3+
-                // blocks from the body.
-                if (!CloserToCenterThan(doorPos, body.position, 3.0)) { it = doors.erase(it); continue; }
-                const BlockState state = StateAt(level, doorPos);
-                if (!IsMobInteractableDoor(state) || !IsDoorOpen(state)) { it = doors.erase(it); continue; }
-                bool othersComing = false;
-                if (nearest) {
-                    for (Entity* e : *nearest) {
-                        auto* other = e ? e->AsLiving() : nullptr;
-                        if (!other || other->GetType() != body.GetType()) continue;
-                        if (!CloserToCenterThan(doorPos, other->position, 2.0)) continue;
-                        if (IsMobComingThroughDoor(*other, doorPos)) { othersComing = true; break; }
-                    }
-                }
-                if (!othersComing) SetDoorOpen(level, doorPos, false, &body);
-                it = doors.erase(it);
-            }
-        }
-
-        void RememberDoorToClose(Villager& body, const glm::ivec3& pos) {
-            auto& doors = body.DoorsToClose();
-            if (std::find(doors.begin(), doors.end(), pos) == doors.end()) doors.push_back(pos);
         }
 
         // MC AcquirePoi.findPathToPois.
@@ -479,48 +399,6 @@ namespace Game {
         // ═════════════════════════════════════════════════════════════════
         // CORE
         // ═════════════════════════════════════════════════════════════════
-
-        // MC InteractWithDoor.
-        class InteractWithDoor : public Behavior {
-        public:
-            InteractWithDoor()
-                : Behavior({ { MemoryModule::DoorsToClose, MemoryStatus::Registered },
-                             { MemoryModule::NearestLivingEntities, MemoryStatus::Registered } }, 1) {}
-            const char* DebugString() const override { return "InteractWithDoor"; }
-        protected:
-            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
-                Villager& v = V(body);
-                // i.present(PATH): the navigation's live path.
-                const Path* path = v.GetNavigation().GetPath();
-                if (!path || path->GetNextNodeIndex() <= 0 || path->IsDone()) return false;
-                const Node& nextNode = path->GetNextNode();
-                const glm::ivec3 toPos(nextNode.x, nextNode.y, nextNode.z);
-                if (m_lastCheckedNode && *m_lastCheckedNode == toPos) {
-                    m_remainingCooldown = 20;
-                } else if (--m_remainingCooldown > 0) {
-                    return false;
-                }
-                m_lastCheckedNode = toPos;
-                const Node& fromNode = path->GetNode(path->GetNextNodeIndex() - 1);
-                const glm::ivec3 fromPos(fromNode.x, fromNode.y, fromNode.z);
-
-                const BlockState fromState = StateAt(level, fromPos);
-                if (IsMobInteractableDoor(fromState)) {
-                    if (!IsDoorOpen(fromState)) SetDoorOpen(level, fromPos, true, &v);
-                    RememberDoorToClose(v, fromPos);
-                }
-                const BlockState toState = StateAt(level, toPos);
-                if (IsMobInteractableDoor(toState) && !IsDoorOpen(toState)) {
-                    SetDoorOpen(level, toPos, true, &v);
-                    RememberDoorToClose(v, toPos);
-                }
-                CloseDoorsThatIHaveOpenedOrPassedThrough(level, v, &fromPos, &toPos);
-                return true;
-            }
-        private:
-            std::optional<glm::ivec3> m_lastCheckedNode;
-            int m_remainingCooldown = 0;
-        };
 
         // MC VillagerPanicTrigger.
         class VillagerPanicTrigger : public Behavior {
@@ -1057,17 +935,9 @@ namespace Game {
                     totalItemsToUse -= itemsToUse;
                     for (int j = 0; j < itemsToUse; ++j) {
                         // ComposterBlock.insertItem: below 7, a layer at the
-                        // compostable's chance (the seeds' COMPOSTABLE_LOW,
-                        // 0.3), and the item is spent either way.
-                        const int fill = ComposterLevel(temp);
-                        if (fill < 7) {
-                            if (level.Random().NextFloat() < 0.3f) {
-                                temp = temp.SetName(PropertyId::LEVEL_COMPOSTER, std::to_string(fill + 1));
-                                world->SetBlock(pos.x, pos.y, pos.z, temp, World::UpdateFlags::All);
-                            }
-                            stack.count -= 1;
-                            if (stack.count <= 0) stack.Clear();
-                        }
+                        // stack's COMPOSTABLE chance, and the item is spent
+                        // either way (reaching 7 schedules the ripening).
+                        temp = Composter::InsertItem(&v, temp, *world, stack, pos);
                         if (ComposterLevel(temp) == 7) { filled = true; break; }
                     }
                 }
@@ -1873,7 +1743,7 @@ namespace Game {
                 Villager& v = V(body);
                 Brain* brain = body.GetBrain();
                 if (!v.DoorsToClose().empty()) {
-                    CloseDoorsThatIHaveOpenedOrPassedThrough(level, v, nullptr, nullptr);
+                    Doors::CloseDoorsThatIHaveOpenedOrPassedThrough(level, v, v.DoorsToClose(), nullptr, nullptr);
                 }
                 const glm::ivec3 home = *brain->GetBlockPos(MemoryModule::Home);
                 if (v.StartSleeping(home)) brain->SetMemory(MemoryModule::LastSlept, timestamp);
@@ -2081,7 +1951,7 @@ namespace Game {
                 v.Gossip(*target, timestamp);
                 const bool isFarmer = v.GetVillagerData().profession == VillagerProfession::Farmer;
                 if (v.HasExcessFood() && (isFarmer || target->WantsMoreFood())) {
-                    ThrowHalfStack(v, [](const ItemStack& s) { return VillagerFoodNutrition(s.itemId) > 0; }, *target);
+                    ThrowHalfStack(v, [](const ItemStack& s) { return VillagerFoodNutrition(s) > 0; }, *target);
                 }
                 if (isFarmer && v.CountInventoryItem(Items::Wheat) > ItemRegistry::Get(Items::Wheat).maxStackSize / 2) {
                     ThrowHalfStack(v, [](const ItemStack& s) { return s.itemId == Items::Wheat; }, *target);
@@ -2107,7 +1977,7 @@ namespace Game {
                 for (int i = 0; i < inv.GetContainerSize(); ++i) {
                     ItemStack& s = inv.GetItem(i);
                     if (s.IsEmpty() || !pred(s)) continue;
-                    const int maxStack = ItemRegistry::Get(s.itemId).maxStackSize;
+                    const int maxStack = Game::GetMaxStackSize(s);
                     int count = 0;
                     if (s.count > maxStack / 2) count = s.count / 2;
                     else if (s.count > 24) count = s.count - 24;
@@ -2390,7 +2260,7 @@ namespace Game {
             const auto held = [profession](PoiType t) { return ProfessionHoldsJobSite(profession, t); };
             const auto acquirable = [profession](PoiType t) { return ProfessionCanAcquireJobSite(profession, t); };
             b.push_back(P<Swim>(0, 0.8f));
-            b.push_back(P<InteractWithDoor>(0));
+            b.push_back(P<InteractWithDoor>(0, &VillagerDoorsToClose));
             b.push_back(P<LookAtTargetSink>(0, 45, 90));
             b.push_back(P<VillagerPanicTrigger>(0));
             b.push_back(P<WakeUp>(0));

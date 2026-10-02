@@ -237,7 +237,12 @@ namespace Game::Anvil {
         w.Bool("redstone_plus",     data.redstonePlus);
         w.Bool("redstone_chunks",   data.redstoneChunks);
         w.Int ("vein_mine_max_blocks", data.veinMineMaxBlocks);
+        w.Int ("player_step_height", data.playerStepHeight);
         w.Bool("shared_vitals",     data.sharedVitals);
+        w.Bool("advancements_with_cheats", data.advancementsWithCheats);
+        w.Bool("shared_crafting_tables", data.sharedCraftingTables);
+        w.Bool("pistons_move_block_entities", data.pistonsMoveBlockEntities);
+        w.Bool("portal_gun_free_placement", data.portalGunFreePlacement);
         w.Bool("twilight_forest",   data.twilightForestEnabled);
         w.Bool("aether",            data.aetherEnabled);
         w.Bool("guest_commands",    data.guestCommandAccess);
@@ -444,7 +449,13 @@ namespace Game::Anvil {
         out.redstonePlus     = RuleBool(obey.get(), {"redstone_plus"},     out.redstonePlus);
         out.redstoneChunks   = RuleBool(obey.get(), {"redstone_chunks"},   out.redstoneChunks);
         out.veinMineMaxBlocks = RuleInt(obey.get(), {"vein_mine_max_blocks"}, out.veinMineMaxBlocks);
+        out.playerStepHeight = RuleInt(obey.get(), {"player_step_height"}, out.playerStepHeight);
         out.sharedVitals     = RuleBool(obey.get(), {"shared_vitals"},     out.sharedVitals);
+        out.advancementsWithCheats = RuleBool(obey.get(), {"advancements_with_cheats"}, out.advancementsWithCheats);
+        out.sharedCraftingTables = RuleBool(obey.get(), {"shared_crafting_tables"}, out.sharedCraftingTables);
+        out.pistonsMoveBlockEntities = RuleBool(obey.get(), {"pistons_move_block_entities"},
+                                                out.pistonsMoveBlockEntities);
+        out.portalGunFreePlacement = RuleBool(obey.get(), {"portal_gun_free_placement"}, out.portalGunFreePlacement);
         out.twilightForestEnabled = RuleBool(obey.get(), {"twilight_forest"}, out.twilightForestEnabled);
         out.aetherEnabled    = RuleBool(obey.get(), {"aether"},            out.aetherEnabled);
         // Only the explicit guest_commands key is a host's choice; a world

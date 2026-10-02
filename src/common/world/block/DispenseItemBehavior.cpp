@@ -23,6 +23,15 @@
 #include "common/entity/projectile/HurtingProjectile.hpp"
 #include "common/world/block/BlockPlacement.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/CarvedPumpkinBlock.hpp"
+#include "common/entity/mobs/Monsters.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/world/block/CandleBlocks.hpp"
+#include "common/entity/mobs/SulfurCube.hpp"
+#include "common/entity/mobs/Animals.hpp"
+#include "common/entity/Item.hpp"
+#include "common/entity/Leashable.hpp"
+#include "common/world/block/WitherSkullBlock.hpp"
 #include "common/world/block/RedstoneStateUtil.hpp"
 #include "common/world/block/TntBlock.hpp"
 #include "common/world/block/entity/DispenserBlockEntity.hpp"
@@ -359,8 +368,13 @@ namespace Game {
         ItemStack ExecuteSpawnEgg(const DispenseSource& source, ItemStack dispensed, EntityTypeId type) {
             const Direction direction = FacingOfSource(source);
             const glm::ivec3 target = Relative(source.pos, direction);
+            // SpawnEggItemBehavior: type.spawn(level, dispensed, null, …) —
+            // createDefaultStackConfig with no user (the op-only entity
+            // data types stay off).
+            const ItemStack egg = dispensed;
+            const auto configure = [&egg](Mob& mob) { ApplyDefaultStackConfig(mob, egg, /*userIsPlayer=*/false); };
             if (SpawnMobFromItem(type, target, /*tryMoveDown=*/direction != Direction::Up, false,
-                                 source.level.GetDimension())) {
+                                 source.level.GetDimension(), 0, configure)) {
                 dispensed.count -= 1;
                 if (dispensed.count <= 0) dispensed.Clear();
                 // SpawnEggItemBehavior:34 — gameEvent(null, ENTITY_PLACE, source.pos()).
@@ -424,6 +438,78 @@ namespace Game {
                 return true;
             }
             return false;
+        }
+
+        // MC ShearsDispenseItemBehavior.tryShearEntity: the first entity in
+        // the cell in front (NO_SPECTATORS) that has leads to cut, or that is
+        // alive, Shearable and readyForShearing — sheared with
+        // SoundSource.BLOCKS and the SHEAR game event at the cell.
+        bool TryShearEntityFromDispenser(const DispenseSource& source, const glm::ivec3& pos) {
+            EntityLevel* entities = source.level.Entities();
+            if (!entities) return false;
+            std::vector<Entity*> found;
+            entities->GetEntitiesInBox(AABB::FromMinMax(glm::vec3(pos), glm::vec3(pos) + glm::vec3(1.0f)),
+                                       nullptr, found);
+            for (Entity* entity : found) {
+                if (!entity || entity->IsRemoved() || entity->IsSpectator()) continue;
+                // entity.shearOffAllLeashConnections(null).
+                if (Leash::ShearOffAllLeashConnections(*entity, nullptr)) return true;
+                if (!entity->IsAlive()) continue;
+                bool sheared = false;
+                switch (entity->GetType()) {
+                    case EntityTypeId::Sheep: {
+                        auto& sheep = static_cast<Sheep&>(*entity);
+                        if (sheep.ReadyForShearing()) { sheep.Shear(SoundSource::Blocks); sheared = true; }
+                        break;
+                    }
+                    case EntityTypeId::Mooshroom: {
+                        auto& mooshroom = static_cast<Mooshroom&>(*entity);
+                        if (mooshroom.ReadyForShearing()) { mooshroom.Shear(SoundSource::Blocks); sheared = true; }
+                        break;
+                    }
+                    case EntityTypeId::SnowGolem: {
+                        auto& golem = static_cast<SnowGolem&>(*entity);
+                        if (golem.ReadyForShearing()) { golem.Shear(SoundSource::Blocks); sheared = true; }
+                        break;
+                    }
+                    case EntityTypeId::CopperGolem: {
+                        auto& golem = static_cast<CopperGolem&>(*entity);
+                        if (golem.ReadyForShearing()) { golem.Shear(SoundSource::Blocks); sheared = true; }
+                        break;
+                    }
+                    case EntityTypeId::SulfurCube: {
+                        auto& cube = static_cast<SulfurCube&>(*entity);
+                        if (cube.ReadyForShearing()) { cube.Shear(); sheared = true; }
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                if (sheared) {
+                    source.level.GameEvent(static_cast<Entity*>(nullptr), GameEventId::Shear, pos);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // MC ShearsDispenseItemBehavior.execute: server side, a full beehive
+        // in front (tryShearBeehive) or else an entity (tryShearEntity); a
+        // success wears the shears one point (hurtAndBreak with no player).
+        ItemStack ExecuteShears(const DispenseSource& source, ItemStack& stack, bool& success) {
+            success = false;
+            if (source.level.IsClientSide()) return stack;
+            const glm::ivec3 target = Relative(source.pos, FacingOfSource(source));
+            success = TryShearBeehiveFromDispenser(source.level, target) ||
+                      TryShearEntityFromDispenser(source, target);
+            if (success) {
+                JavaRandom fallback(static_cast<int64_t>(source.pos.x) * 3129871 ^
+                                    static_cast<int64_t>(source.pos.z) * 116129781 ^ source.pos.y);
+                JavaRandom* random = source.level.Random();
+                HurtAndBreak(stack, 1, random ? *random : fallback, /*hasInfiniteMaterials=*/false,
+                             [](const ItemStack&) {});
+            }
+            return stack;
         }
 
         // MC DispenseItemBehavior's CHEST behaviour: a tamed donkey, mule or
@@ -553,7 +639,8 @@ namespace Game {
             PlayDefaultSound(source, flag);
             return result;
         }
-        if (const EntityTypeId type = SpawnEggEntityType(id); type != EntityTypeId::Count) {
+        if (EntityTypeId type = SpawnEggEntityType(id); type != EntityTypeId::Count) {
+            if (const EntityTypeId fromData = SpawnEggType(stack); fromData != EntityTypeId::Count) type = fromData;
             const ItemStack result = ExecuteSpawnEgg(source, stack, type);
             PlayDefaultSound(source, true);
             return result;
@@ -565,6 +652,11 @@ namespace Game {
             PlayDefaultSound(source, true);
             return result;
         }
+        if (id == Items::Shears) {
+            const ItemStack result = ExecuteShears(source, stack, flag);
+            PlayDefaultSound(source, flag);
+            return result;
+        }
         // The chest's OptionalDispenseItemBehavior: onto a chested horse, else
         // the default throw (success stays true — the 1000 event either way).
         if (id == ItemRegistry::FromBlock(BlockID::Chest)) {
@@ -573,6 +665,66 @@ namespace Game {
                 return stack;
             }
             return DispenseDefault(source, stack);
+        }
+        // The wither skeleton skull's OptionalDispenseItemBehavior: into an
+        // empty cell where it finishes the soul-sand T (canSpawnMob), placed
+        // with setBlockAndUpdate, its ROTATION the dispenser's facing
+        // (RotationSegment.convertToSegment: a vertical facing is 0), the
+        // BLOCK_PLACE event, then WitherSkullBlock.checkSpawn; else onto the
+        // entity in front (dispenseEquipment). A failure is the fail click
+        // (1001) and the skull stays.
+        if (id == ItemRegistry::FromBlock(BlockID::WitherSkeletonSkull)) {
+            const Direction direction = FacingOfSource(source);
+            const glm::ivec3 target = Relative(source.pos, direction);
+            if (source.level.GetBlock(target.x, target.y, target.z) == BlockID::Air &&
+                WitherSkullCanSpawnMob(source.level, target, stack)) {
+                int segment = 0;
+                switch (direction) {
+                    case Direction::South: segment = 0;  break;
+                    case Direction::West:  segment = 4;  break;
+                    case Direction::North: segment = 8;  break;
+                    case Direction::East:  segment = 12; break;
+                    default:               segment = 0;  break;
+                }
+                source.level.SetBlock(target.x, target.y, target.z,
+                                      BlockStates::Default(BlockID::WitherSkeletonSkull)
+                                          .SetIndex(PropertyId::ROTATION, segment),
+                                      World::UpdateFlags::All);
+                source.level.GameEvent(static_cast<Entity*>(nullptr), GameEventId::BlockPlace, target);
+                WitherSkullCheckSpawn(source.level, target);
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+                flag = true;
+            } else {
+                flag = DispenseEquipment(source, stack);
+            }
+            PlayDefaultSound(source, flag);
+            return stack;
+        }
+        // The carved pumpkin's OptionalDispenseItemBehavior (registered for
+        // Blocks.CARVED_PUMPKIN only — a jack o'lantern is thrown): into an
+        // empty cell where it finishes a golem (canSpawnGolem), placed with
+        // its default state and flag 3 — onPlace then builds the golem; else
+        // onto the entity in front (dispenseEquipment). Unlike the
+        // EQUIPPABLE default below, a failure is NOT thrown out: it is the
+        // fail click (1001) and the pumpkin stays.
+        if (id == ItemRegistry::FromBlock(BlockID::CarvedPumpkin)) {
+            const glm::ivec3 target = Relative(source.pos, FacingOfSource(source));
+            if (source.level.GetBlock(target.x, target.y, target.z) == BlockID::Air &&
+                CarvedPumpkinCanSpawnGolem(source.level, target)) {
+                if (!source.level.IsClientSide()) {
+                    source.level.SetBlock(target.x, target.y, target.z, BlockStates::Default(BlockID::CarvedPumpkin),
+                                          World::UpdateFlags::All);
+                    source.level.GameEvent(static_cast<Entity*>(nullptr), GameEventId::BlockPlace, target);
+                }
+                stack.count -= 1;
+                if (stack.count <= 0) stack.Clear();
+                flag = true;
+            } else {
+                flag = DispenseEquipment(source, stack);
+            }
+            PlayDefaultSound(source, flag);
+            return stack;
         }
         // DispenserBlock.getDefaultDispenseMethod: anything EQUIPPABLE is
         // EquipmentDispenseItemBehavior — put on the entity in front, else

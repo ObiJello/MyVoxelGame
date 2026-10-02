@@ -106,9 +106,9 @@ echo ">>> Packaging as $ASSET_NAME..."
 
 cd "$BUILD_DIR/bin"
 if [ "$PLATFORM" = "macos" ]; then
-    zip -r "$PROJECT_DIR/$ASSET_NAME" MyVoxelGame.app/
+    zip -r -n .ogg:.png:.jpg:.zip "$PROJECT_DIR/$ASSET_NAME" MyVoxelGame.app/
 else
-    zip -r "$PROJECT_DIR/$ASSET_NAME" MyVoxelGame* \
+    zip -r -n .ogg:.png:.jpg:.zip "$PROJECT_DIR/$ASSET_NAME" MyVoxelGame* \
         -x "*.pdb" -x "*.ilk" -x "*.exp" -x "*.lib"
 fi
 cd "$PROJECT_DIR"

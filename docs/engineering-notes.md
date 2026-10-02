@@ -1424,3 +1424,51 @@ by default. Only the option itself or the Fabulous graphics preset turns it on.
 - **Not covered:** portal views, the panorama capture and shader packs draw their translucency the
   classic way. A shader pack disables the option, as OptiFine does. The portal gun's additive
   sparks also stay classic.
+
+## Render Resolution (scaled scene, 2026-10-02)
+
+Video Settings → Render Resolution (`renderScale`, 25–200 % in 5 % steps, default 100; every
+graphics preset writes 100) draws only the level at a scaled size. It is MC's `mainTarget`, made
+to exist only when needed:
+
+- **100 % costs nothing.** The level draws straight into the window as before; the only new work
+  is one branch in `BeginFrame`. Any other scale: `RenderBackend::RequestScaledScene(w, h)` before
+  `BeginFrame` moves "the frame" offscreen, `ResolveScaledScene()` after the post effects stretches
+  it over the window (bilinear both ways — a smooth upscale below 100 %, a 2×2 box filter at
+  200 %) and returns the frame to the window, depth cleared, for the HUD, screens, chat, F3 and
+  ImGui, which stay at the window's resolution. `EndFrame` resolves a scene nobody resolved.
+- **Backends.** Everything that names "the frame" follows the scene: GL keeps the frame FBO in
+  `m_defaultFbo` (the scene FBO: RGBA8 + a D24S8 *texture*, so the depth copies work as on the
+  window); Vulkan routes the frame passes, framebuffer, extent, colour image, final layout and depth
+  through `Frame*()` helpers. Vulkan keeps one colour + depth image per frame slot (frames
+  overlap), its scene passes are the frame passes ending in `COLOR_ATTACHMENT_OPTIMAL`
+  (compatible, so no pipeline is rebuilt), the resolve is a `vkCmdBlitImage` onto the acquired
+  image (the swapchain asks for `TRANSFER_DST`), and the GUI continues in
+  `m_renderPassAfterScene` (colour loaded, depth cleared). A size change rebuilds every slot after a
+  device idle; going back to 100 % frees them. Improved Transparency rebuilds its targets on the
+  scene's depth (`m_oitOnScene`).
+- **PlatformMain** swaps `width`/`height` to the scene's size from `glfwGetFramebufferSize` to the
+  resolve, so every viewport, projection, OIT/outline/post/shader-pack target and read-back of the
+  level follows; renderers that asked GLFW themselves read `Render::WorldFramebuffer` instead (block
+  outline — whose line width is scaled so it keeps its on-screen weight — chunk aspect, volumetric
+  beam depth copy, portal refraction snapshot).
+- **Native on purpose:** the leave capture's panorama faces (read back from the frame at the
+  window's size) and the join transition (the title panorama must match the title screen pixel
+  for pixel). There is no screenshot key; a panorama is always native.
+- Mouse picking is a ray from the camera, independent of any pixel grid.
+
+## Sky Block (2026-10-02)
+
+`sky_block` is a full opaque cube for culling, occlusion and light (it breaks, sounds, drops and
+blocks light like tinted glass) whose faces show the active sky in screen space, the way the end
+portal shows its starfield. The chunk mesher emits nothing for it (`Mesher::ProcessBlock`); its
+model is still a cube, so neighbours cull against it and the occlusion graph treats it as solid.
+`Render::SkyBlockRenderer` draws its exposed faces **depth-only** from `ChunkRenderer::RenderAll`,
+after the view's sky and before its first terrain pass: the colour buffer keeps exactly what the
+sky pass drew (vanilla sky, skybox, OptiFine layers, the End's sky, the Nether's fog colour), and
+the depth keeps everything behind the face from drawing over it. Because every view goes through
+`RenderAll` — the main view, immersive-portal far sides (stencil mask and clip plane applied), gun
+portal views, panorama faces — each shows its own dimension's sky. Blocks are found through
+`ClientChunk::skyBlocks` and `ClientChunkManager::SkyBlockChunks()` (kept exact on arrival,
+`SetBlockLocal`, retention restore, unload and clear), so a world without sky blocks pays one
+`empty()` per view. Clouds and weather behind a sky block are hidden, as by any opaque block.

@@ -58,6 +58,7 @@
 #include "../world/portal/PortalFamily.hpp"
 #include "../world/portal/PortalShape.hpp"
 #include "../world/portal/PortalState.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "../world/portal/EndPortalFrame.hpp"
 #include "../core/JavaRandom.hpp"
 #include "../core/Mth.hpp"
@@ -317,7 +318,12 @@ namespace Game {
             //  — note MC uses the CLICKED pos, not the fire's pos.
             GameEventEmit(ctx.world, ctx.player, GameEventId::BlockPlace, pos);
 
-            // TODO(advancements): CriteriaTriggers.PLACED_BLOCK.trigger(serverPlayer, firePos, itemStack);
+            // MC: `CriteriaTriggers.PLACED_BLOCK.trigger(serverPlayer, firePos, itemStack)`.
+            if (!ctx.world->IsClientSide()) {
+                if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(ctx.player)) {
+                    Server::CriteriaTriggers::PlacedBlock(*sp, firePos, stack);
+                }
+            }
 
             // MC: `if (player instanceof ServerPlayer) itemStack.hurtAndBreak(1, player, hand.asEquipmentSlot());`
             UseOnHurtAndBreak(stack, 1, ctx);
@@ -405,24 +411,37 @@ namespace Game {
             if (ctx.world->IsClientSide()) return UseResult::Success;
 
             const BlockState withEye = EndPortalFrame::WithEye(target, true);
-            // MC uses flag 2 (clients only, no neighbour updates). Nothing
-            // reacts to a frame block's shape, so the engine's MarkDirty —
-            // which also reaches the change accumulator — is the same thing.
-            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, withEye,
-                                     World::UpdateFlags::MarkDirty)) {
+            // MC Block.pushEntitiesUp(targetState, newState, level, pos): the
+            // eye ADDS EndPortalFrameBlock.SHAPE_EYE (column 8 wide, y 13..16
+            // px) to the frame's shape, and every entity overlapping that is
+            // lifted onto its top. (Players are the client's; their own
+            // collision resolve lifts them.)
+            if (EntityLevel* entities = ctx.world->Entities()) {
+                const glm::vec3 lo(static_cast<float>(pos.x) + 0.25f, static_cast<float>(pos.y) + 0.8125f,
+                                   static_cast<float>(pos.z) + 0.25f);
+                const glm::vec3 hi(static_cast<float>(pos.x) + 0.75f, static_cast<float>(pos.y) + 1.0f,
+                                   static_cast<float>(pos.z) + 0.75f);
+                std::vector<Entity*> colliding;
+                entities->GetEntitiesInBox(AABB::FromMinMax(lo, hi), nullptr, colliding);
+                const double top = static_cast<double>(pos.y) + 1.0;
+                for (Entity* entity : colliding) {
+                    if (!entity || entity->IsRemoved()) continue;
+                    const double lift = std::max(0.0, top - entity->position.y);
+                    if (lift > 0.0) entity->position.y += lift;
+                }
+            }
+            // MC level.setBlock(pos, newState, 2) — clients only.
+            if (!ctx.world->SetBlock(pos.x, pos.y, pos.z, withEye, World::UpdateFlags::UpdateClients)) {
                 return UseResult::Fail;
             }
-
+            // MC level.updateNeighbourForOutputSignal(pos, END_PORTAL_FRAME):
+            // comparators read HAS_EYE (15 with an eye).
+            ctx.world->UpdateNeighbourForOutputSignal(pos, BlockID::EndPortalFrame);
+            stack.count -= 1;
+            if (stack.count <= 0) stack.Clear();
             // MC: level.levelEvent(1503, pos, 0) — the eye-seated sound.
             PlayLevelEventSound(*ctx.world, nullptr, LevelEvent::END_PORTAL_FRAME_FILL, pos, 0,
                                 ctx.world->Random());
-            stack.count -= 1;
-            if (stack.count <= 0) stack.Clear();
-
-            // MC skips Block.pushEntitiesUp (the eye grows the block's
-            // collision shape by 3 pixels, so anything standing on the frame
-            // is nudged clear) and updateNeighbourForOutputSignal (comparators
-            // read HAS_EYE). Neither system exists here.
 
             const auto match = EndPortalFrame::PortalShapePattern().Find(*ctx.world, pos);
             if (!match) return UseResult::Success;
@@ -431,16 +450,17 @@ namespace Game {
             // world offsets. That works because the pattern search is
             // deterministic: the only orientation an inward-facing ring can
             // match is forwards=DOWN, up=SOUTH, which puts frontTopLeft at the
-            // ring's maximum X and Z. See BlockPattern.hpp.
-            const glm::ivec3 base = match->frontTopLeft + glm::ivec3(-3, 0, -3);
+            // ring's maximum X and Z. See EndPortalFrame.hpp.
+            const glm::ivec3 base = match->GetFrontTopLeft() + glm::ivec3(-3, 0, -3);
             for (int x = 0; x < 3; ++x) {
                 for (int z = 0; z < 3; ++z) {
                     const glm::ivec3 cell{ base.x + x, base.y, base.z + z };
-                    // MC destroyBlock(pos, true) first: the pattern's interior
-                    // predicate is ANY, so there can be something in the way,
-                    // and vanilla drops it rather than deleting it.
+                    // MC level.destroyBlock(cell, true, null) — the pattern's
+                    // interior predicate is ANY, so whatever is there drops —
+                    // then setBlock(cell, END_PORTAL, 2).
+                    ctx.world->DestroyBlock(cell, true);
                     ctx.world->SetBlock(cell.x, cell.y, cell.z, BlockID::EndPortal,
-                                        World::UpdateFlags::All);
+                                        World::UpdateFlags::UpdateClients);
                 }
             }
 
@@ -937,7 +957,11 @@ namespace Game {
         // rather than from captured state.
         template <uint8_t Color>
         UseResult InteractEntity_DyeColor(ItemStack& stack, LivingEntity& target) {
-            return InteractEntity_Dye(stack, target, Color);
+            // DyeItem.interactLivingEntity: the stack's DYE (a dye whose
+            // component was changed dyes that colour; one without passes).
+            const int dye = DyeColorOf(stack);
+            if (dye < 0) return UseResult::Pass;
+            return InteractEntity_Dye(stack, target, static_cast<uint8_t>(dye));
         }
 
         // ── Name tag — mirrors NameTagItem.interactLivingEntity ─────────────
@@ -993,7 +1017,10 @@ namespace Game {
             // stops the placement fallback from firing behind it.
             if (ctx.world->IsClientSide()) return UseResult::Success;
 
-            const EntityTypeId type = SpawnEggEntityType(stack.itemId);
+            // SpawnEggItem.getType(stack): the ENTITY_DATA type (every egg's
+            // default; a /give'n `entity_data={id:…}` swaps it).
+            EntityTypeId type = SpawnEggType(stack);
+            if (type == EntityTypeId::Count) type = SpawnEggEntityType(stack.itemId);
             if (type == EntityTypeId::Count) return UseResult::Fail;   // :62 FAIL
 
             const glm::ivec3 clicked = ctx.hitResult.blockPos;
@@ -1051,11 +1078,13 @@ namespace Game {
             // :91-105 spawnMob. The peaceful-difficulty rule and the placement
             // slide live server-side with the mob managers; see
             // IntegratedServer::SpawnMobFromItemUse.
-            // EntityType.createDefaultStackConfig → applyComponentsFromItemStack:
-            // a renamed egg names the mob it spawns.
-            std::optional<std::string> eggName = stack.components.get(DataComponents::CUSTOM_NAME);
-            const auto applyStackComponents = [&eggName](Mob& mob) {
-                if (eggName) mob.SetCustomName(eggName);
+            // EntityType.createDefaultStackConfig: applyComponentsFromItemStack
+            // (a renamed egg names its mob; the variant / collar / colour
+            // components set them) and the egg's ENTITY_DATA merged over the
+            // new mob (updateCustomEntityTag).
+            const ItemStack egg = stack;
+            const auto applyStackComponents = [&egg](Mob& mob) {
+                ApplyDefaultStackConfig(mob, egg, /*userIsPlayer=*/true);
             };
             if (SpawnMobFromItem(type, spawnPos, /*tryMoveDown=*/true, movedUp,
                                  ctx.world->GetDimension(), /*portalCooldownTicks=*/0,
@@ -1320,11 +1349,9 @@ namespace Game {
             auto hit = BucketClip(world, *player, /*stopOnFluid=*/false);
             if (!hit) return UseResult::Pass;
 
-            const auto data = stack.components.get(DataComponents::SULFUR_CUBE_BUCKET);
-            const auto configure = [data](Mob& mob) {
-                if (auto* cube = dynamic_cast<SulfurCube*>(&mob)) {
-                    cube->LoadFromBucket(data.value_or(SulfurCubeBucketData{}));
-                }
+            const ItemStack bucket = stack;
+            const auto configure = [bucket](Mob& mob) {
+                if (auto* cube = dynamic_cast<SulfurCube*>(&mob)) cube->LoadFromBucket(bucket);
             };
             if (!SpawnMobFromItem(EntityTypeId::SulfurCube, hit->beforePos,
                                   /*tryMoveDown=*/false, /*movedUp=*/false,
@@ -1369,7 +1396,11 @@ namespace Game {
                 const auto configure = [bucket](Mob& mob) {
                     // EntityType.createDefaultStackConfig: the custom name
                     // and the type's implicit components.
-                    if (auto name = bucket.components.get(DataComponents::CUSTOM_NAME)) mob.SetCustomName(*name);
+                    // MobBucketItem.spawn: EntityType.create(…, createDefault-
+                    // StackConfig(level, bucket, user)) — the custom name and
+                    // the mob's implicit components (variants) — then
+                    // loadFromBucketTag.
+                    ApplyComponentsFromItemStack(mob, bucket);
                     const BucketEntityData data =
                         bucket.components.get(DataComponents::BUCKET_ENTITY_DATA).value_or(BucketEntityData{});
                     if (auto* fish = dynamic_cast<Fish*>(&mob)) {
@@ -1427,7 +1458,7 @@ namespace Game {
             if (world->IsClientSide()) return UseResult::Success;
 
             const glm::dvec3 from = player->getPosition() + glm::dvec3(0.0, 0.5, 0.0);
-            if (!ThrowEnderEye(player->getDimensionId(), from, stack)) {
+            if (!ThrowEnderEye(player->getDimensionId(), from, stack, player)) {
                 // MC returns CONSUME with the stack UNTOUCHED when there is no
                 // structure to point at — the eye is not spent on a world that
                 // has nowhere to send it.
@@ -1573,6 +1604,12 @@ namespace Game {
                 // BucketItem.use:84 — gameEvent(player, FLUID_PICKUP, pos).
                 GameEventEmit(world, player, GameEventId::FluidPickup, hit->pos);
                 {
+                    // BucketItem.use:83 — CriteriaTriggers.FILLED_BUCKET.
+                    if (!world->IsClientSide()) {
+                        if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(player)) {
+                            Server::CriteriaTriggers::FilledBucket(*sp, ItemStack(filledWater, 1));
+                        }
+                    }
                     player->CreateFilledResult(stack, ItemStack(filledWater, 1));
                     player->markSlotDirty(player->handSlotIndex(hand));
                 }
@@ -1617,8 +1654,14 @@ namespace Game {
             // ItemUtils.createFilledResult: one bucket of the stack fills,
             // the rest stays (creative keeps the stack and gains the filled
             // bucket once).
-            player->CreateFilledResult(stack, ItemStack(hit->block == BlockID::Lava ? Items::LavaBucket
-                                                                                      : filledWater, 1));
+            const ItemStack filledBucket(hit->block == BlockID::Lava ? Items::LavaBucket : filledWater, 1);
+            // BucketItem.use:83 — CriteriaTriggers.FILLED_BUCKET.
+            if (!world->IsClientSide()) {
+                if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(player)) {
+                    Server::CriteriaTriggers::FilledBucket(*sp, filledBucket);
+                }
+            }
+            player->CreateFilledResult(stack, filledBucket);
             player->markSlotDirty(player->handSlotIndex(hand));
             return UseResult::Success;
         }
@@ -2035,10 +2078,28 @@ namespace Game {
         return BlockID::Air;
     }
 
+    ItemUseOnFn BlockTransformerUseOn(std::string_view key) {
+        // The BlockTransformers registry (AXE / HOE / SHOVEL): the engine's
+        // strip-scrape-wax, till and flatten behaviours.
+        if (key.rfind("minecraft:", 0) == 0) key.remove_prefix(10);
+        if (key == "axe")    return &UseOn_Axe;
+        if (key == "hoe")    return &UseOn_Hoe;
+        if (key == "shovel") return &UseOn_Shovel;
+        return nullptr;
+    }
+
     void ItemRegistry_RegisterBehaviors(std::unordered_map<ItemID, Item>& pureItems) {
         auto wireUseOn = [&](ItemID id, ItemUseOnFn fn) {
             auto it = pureItems.find(id);
             if (it != pureItems.end()) it->second.useOn = fn;
+        };
+        // Item.Properties.axe / hoe / shovel: BLOCK_TRANSFORMER, the holder
+        // Item.useOn applies (GameplayDataComponents' StackUseOn).
+        auto setTransformer = [&](ItemID id, const char* key) {
+            auto it = pureItems.find(id);
+            if (it != pureItems.end()) {
+                it->second.defaultComponents.set(DataComponents::BLOCK_TRANSFORMER, BlockTransformerHolder{key, {}});
+            }
         };
 
         // ── Seeds: pure items that place a block ────────────────────────────
@@ -2088,6 +2149,12 @@ namespace Game {
 
         // FlintAndSteel — single variant.
         wireUseOn(Items::FlintAndSteel, &UseOn_FlintAndSteel);
+        // DEBUG_STICK: DebugStickItem.useOn, and Items.java's
+        // .component(DEBUG_STICK_STATE, DebugStickState.EMPTY).
+        wireUseOn(Items::DebugStick, &BlockData::UseOnDebugStick);
+        if (auto it = pureItems.find(Items::DebugStick); it != pureItems.end()) {
+            it->second.defaultComponents.set(DataComponents::DEBUG_STICK_STATE, DebugStickState{});
+        }
         // FireChargeItem.useOn — lights campfires, candles and candle cakes,
         // else sets a fire; used up either way it succeeds.
         wireUseOn(Items::FireCharge, &UseOn_FireCharge);
@@ -2193,6 +2260,7 @@ namespace Game {
                 // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
                 Items::SkyrootHoe, Items::HolystoneHoe, Items::ZaniteHoe, Items::GravititeHoe, Items::IronwoodHoe, Items::SteeleafHoe }) {
             wireUseOn(id, &UseOn_Hoe);
+            setTransformer(id, "minecraft:hoe");
         }
 
         // Same for every shovel tier.
@@ -2203,6 +2271,7 @@ namespace Game {
                 // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
                 Items::SkyrootShovel, Items::HolystoneShovel, Items::ZaniteShovel, Items::GravititeShovel, Items::IronwoodShovel, Items::SteeleafShovel }) {
             wireUseOn(id, &UseOn_Shovel);
+            setTransformer(id, "minecraft:shovel");
         }
 
         // Every axe tier shares strip/scrape/wax-off (AxeItem.java:38-105).
@@ -2213,6 +2282,7 @@ namespace Game {
                 // the Aether's and Twilight Forest's tiers (docs/mod-ports.md)
                 Items::SkyrootAxe, Items::HolystoneAxe, Items::ZaniteAxe, Items::GravititeAxe, Items::IronwoodAxe, Items::SteeleafAxe, Items::KnightmetalAxe }) {
             wireUseOn(id, &UseOn_Axe);
+            setTransformer(id, "minecraft:axe");
         }
 
         // Honeycomb waxing (HoneycombItem.java:46-73).
@@ -2317,54 +2387,56 @@ namespace Game {
         };
 
         // Pickaxes
-        setTool(Items::WoodenPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Wood,      2.0f});
-        setTool(Items::CopperPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Stone,     5.0f});
-        setTool(Items::StonePickaxe,     Tool{ToolType::Pickaxe, MiningTier::Stone,     4.0f});
-        setTool(Items::GoldenPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Gold,     12.0f});
-        setTool(Items::IronPickaxe,      Tool{ToolType::Pickaxe, MiningTier::Iron,      6.0f});
-        setTool(Items::DiamondPickaxe,   Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
-        setTool(Items::NetheritePickaxe, Tool{ToolType::Pickaxe, MiningTier::Netherite, 9.0f});
-        setTool(Items::ResonitePickaxe,  Tool{ToolType::Pickaxe, MiningTier::Resonite,  9.0f});
+        setTool(Items::WoodenPickaxe,    MakeDiggerTool(ToolType::Pickaxe, MiningTier::Wood, 2.0f));
+        setTool(Items::CopperPickaxe,    MakeDiggerTool("#minecraft:incorrect_for_copper_tool", MineableTag(ToolType::Pickaxe), 5.0f));
+        setTool(Items::StonePickaxe,     MakeDiggerTool(ToolType::Pickaxe, MiningTier::Stone, 4.0f));
+        setTool(Items::GoldenPickaxe,    MakeDiggerTool(ToolType::Pickaxe, MiningTier::Gold, 12.0f));
+        setTool(Items::IronPickaxe,      MakeDiggerTool(ToolType::Pickaxe, MiningTier::Iron, 6.0f));
+        setTool(Items::DiamondPickaxe,   MakeDiggerTool(ToolType::Pickaxe, MiningTier::Diamond, 8.0f));
+        setTool(Items::NetheritePickaxe, MakeDiggerTool(ToolType::Pickaxe, MiningTier::Netherite, 9.0f));
+        setTool(Items::ResonitePickaxe,  MakeDiggerTool(ToolType::Pickaxe, MiningTier::Resonite, 9.0f));
         // Axes
-        setTool(Items::WoodenAxe,        Tool{ToolType::Axe,     MiningTier::Wood,      2.0f});
-        setTool(Items::CopperAxe,        Tool{ToolType::Axe,     MiningTier::Stone,     5.0f});
-        setTool(Items::StoneAxe,         Tool{ToolType::Axe,     MiningTier::Stone,     4.0f});
-        setTool(Items::GoldenAxe,        Tool{ToolType::Axe,     MiningTier::Gold,     12.0f});
-        setTool(Items::IronAxe,          Tool{ToolType::Axe,     MiningTier::Iron,      6.0f});
-        setTool(Items::DiamondAxe,       Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::NetheriteAxe,     Tool{ToolType::Axe,     MiningTier::Netherite, 9.0f});
-        setTool(Items::ResoniteAxe,      Tool{ToolType::Axe,     MiningTier::Resonite,  9.0f});
+        setTool(Items::WoodenAxe,        MakeDiggerTool(ToolType::Axe, MiningTier::Wood, 2.0f));
+        setTool(Items::CopperAxe,        MakeDiggerTool("#minecraft:incorrect_for_copper_tool", MineableTag(ToolType::Axe), 5.0f));
+        setTool(Items::StoneAxe,         MakeDiggerTool(ToolType::Axe, MiningTier::Stone, 4.0f));
+        setTool(Items::GoldenAxe,        MakeDiggerTool(ToolType::Axe, MiningTier::Gold, 12.0f));
+        setTool(Items::IronAxe,          MakeDiggerTool(ToolType::Axe, MiningTier::Iron, 6.0f));
+        setTool(Items::DiamondAxe,       MakeDiggerTool(ToolType::Axe, MiningTier::Diamond, 8.0f));
+        setTool(Items::NetheriteAxe,     MakeDiggerTool(ToolType::Axe, MiningTier::Netherite, 9.0f));
+        setTool(Items::ResoniteAxe,      MakeDiggerTool(ToolType::Axe, MiningTier::Resonite, 9.0f));
         // Shovels
-        setTool(Items::WoodenShovel,     Tool{ToolType::Shovel,  MiningTier::Wood,      2.0f});
-        setTool(Items::CopperShovel,     Tool{ToolType::Shovel,  MiningTier::Stone,     5.0f});
-        setTool(Items::StoneShovel,      Tool{ToolType::Shovel,  MiningTier::Stone,     4.0f});
-        setTool(Items::GoldenShovel,     Tool{ToolType::Shovel,  MiningTier::Gold,     12.0f});
-        setTool(Items::IronShovel,       Tool{ToolType::Shovel,  MiningTier::Iron,      6.0f});
-        setTool(Items::DiamondShovel,    Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
-        setTool(Items::NetheriteShovel,  Tool{ToolType::Shovel,  MiningTier::Netherite, 9.0f});
-        setTool(Items::ResoniteShovel,   Tool{ToolType::Shovel,  MiningTier::Resonite,  9.0f});
+        setTool(Items::WoodenShovel,     MakeDiggerTool(ToolType::Shovel, MiningTier::Wood, 2.0f));
+        setTool(Items::CopperShovel,     MakeDiggerTool("#minecraft:incorrect_for_copper_tool", MineableTag(ToolType::Shovel), 5.0f));
+        setTool(Items::StoneShovel,      MakeDiggerTool(ToolType::Shovel, MiningTier::Stone, 4.0f));
+        setTool(Items::GoldenShovel,     MakeDiggerTool(ToolType::Shovel, MiningTier::Gold, 12.0f));
+        setTool(Items::IronShovel,       MakeDiggerTool(ToolType::Shovel, MiningTier::Iron, 6.0f));
+        setTool(Items::DiamondShovel,    MakeDiggerTool(ToolType::Shovel, MiningTier::Diamond, 8.0f));
+        setTool(Items::NetheriteShovel,  MakeDiggerTool(ToolType::Shovel, MiningTier::Netherite, 9.0f));
+        setTool(Items::ResoniteShovel,   MakeDiggerTool(ToolType::Shovel, MiningTier::Resonite, 9.0f));
         // Hoes
-        setTool(Items::WoodenHoe,        Tool{ToolType::Hoe,     MiningTier::Wood,      2.0f});
-        setTool(Items::CopperHoe,        Tool{ToolType::Hoe,     MiningTier::Stone,     5.0f});
-        setTool(Items::StoneHoe,         Tool{ToolType::Hoe,     MiningTier::Stone,     4.0f});
-        setTool(Items::GoldenHoe,        Tool{ToolType::Hoe,     MiningTier::Gold,     12.0f});
-        setTool(Items::IronHoe,          Tool{ToolType::Hoe,     MiningTier::Iron,      6.0f});
-        setTool(Items::DiamondHoe,       Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::NetheriteHoe,     Tool{ToolType::Hoe,     MiningTier::Netherite, 9.0f});
-        setTool(Items::ResoniteHoe,      Tool{ToolType::Hoe,     MiningTier::Resonite,  9.0f});
-        // Swords (used for cobweb / bamboo speedup in MC)
-        setTool(Items::WoodenSword,      Tool{ToolType::Sword,   MiningTier::Wood,      2.0f});
-        setTool(Items::CopperSword,      Tool{ToolType::Sword,   MiningTier::Stone,     5.0f});
-        setTool(Items::StoneSword,       Tool{ToolType::Sword,   MiningTier::Stone,     4.0f});
-        setTool(Items::GoldenSword,      Tool{ToolType::Sword,   MiningTier::Gold,     12.0f});
-        setTool(Items::IronSword,        Tool{ToolType::Sword,   MiningTier::Iron,      6.0f});
-        setTool(Items::DiamondSword,     Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
-        setTool(Items::NetheriteSword,   Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
-        setTool(Items::ResoniteSword,    Tool{ToolType::Sword,   MiningTier::Resonite,  9.0f});
-        // Shears (single tier; MC speed = 1.5 against most, 15.0 vs wool/leaves)
+        setTool(Items::WoodenHoe,        MakeDiggerTool(ToolType::Hoe, MiningTier::Wood, 2.0f));
+        setTool(Items::CopperHoe,        MakeDiggerTool("#minecraft:incorrect_for_copper_tool", MineableTag(ToolType::Hoe), 5.0f));
+        setTool(Items::StoneHoe,         MakeDiggerTool(ToolType::Hoe, MiningTier::Stone, 4.0f));
+        setTool(Items::GoldenHoe,        MakeDiggerTool(ToolType::Hoe, MiningTier::Gold, 12.0f));
+        setTool(Items::IronHoe,          MakeDiggerTool(ToolType::Hoe, MiningTier::Iron, 6.0f));
+        setTool(Items::DiamondHoe,       MakeDiggerTool(ToolType::Hoe, MiningTier::Diamond, 8.0f));
+        setTool(Items::NetheriteHoe,     MakeDiggerTool(ToolType::Hoe, MiningTier::Netherite, 9.0f));
+        setTool(Items::ResoniteHoe,      MakeDiggerTool(ToolType::Hoe, MiningTier::Resonite, 9.0f));
+        // Swords — ToolMaterial.applySwordProperties: the same TOOL for every
+        // material (cobweb 15, #sword_instantly_mines, #sword_efficient 1.5;
+        // no creative breaking).
+        setTool(Items::WoodenSword,      MakeSwordTool());
+        setTool(Items::CopperSword,      MakeSwordTool());
+        setTool(Items::StoneSword,       MakeSwordTool());
+        setTool(Items::GoldenSword,      MakeSwordTool());
+        setTool(Items::IronSword,        MakeSwordTool());
+        setTool(Items::DiamondSword,     MakeSwordTool());
+        setTool(Items::NetheriteSword,   MakeSwordTool());
+        setTool(Items::ResoniteSword,    MakeSwordTool());
+        // Shears — ShearsItem.createToolProperties.
         // No useOn wired: ShearsItem's interactions (beehive honeycombs,
         // pumpkin carving) all produce item DROPS — BLOCKED on item entities.
-        setTool(Items::Shears,           Tool{ToolType::Shears,  MiningTier::Iron,      1.5f});
+        setTool(Items::Shears,           MakeShearsTool());
 
         // The Aether (AetherItemTiers) and Twilight Forest (TFToolMaterials)
         // tool sets, docs/mod-ports.md. Their incorrect-for-drops tags are the
@@ -2373,41 +2445,41 @@ namespace Game {
         // diamond, fiery = netherite), so they need no new MiningTier; the
         // speed is the material's own. The steeleaf sword is registered on
         // KNIGHTMETAL in TFItems, which has the same speed.
-        setTool(Items::SkyrootPickaxe,        Tool{ToolType::Pickaxe, MiningTier::Wood,      2.0f});
-        setTool(Items::SkyrootAxe,            Tool{ToolType::Axe,     MiningTier::Wood,      2.0f});
-        setTool(Items::SkyrootShovel,         Tool{ToolType::Shovel,  MiningTier::Wood,      2.0f});
-        setTool(Items::SkyrootHoe,            Tool{ToolType::Hoe,     MiningTier::Wood,      2.0f});
-        setTool(Items::SkyrootSword,          Tool{ToolType::Sword,   MiningTier::Wood,      2.0f});
-        setTool(Items::HolystonePickaxe,      Tool{ToolType::Pickaxe, MiningTier::Stone,     4.0f});
-        setTool(Items::HolystoneAxe,          Tool{ToolType::Axe,     MiningTier::Stone,     4.0f});
-        setTool(Items::HolystoneShovel,       Tool{ToolType::Shovel,  MiningTier::Stone,     4.0f});
-        setTool(Items::HolystoneHoe,          Tool{ToolType::Hoe,     MiningTier::Stone,     4.0f});
-        setTool(Items::HolystoneSword,        Tool{ToolType::Sword,   MiningTier::Stone,     4.0f});
-        setTool(Items::ZanitePickaxe,         Tool{ToolType::Pickaxe, MiningTier::Iron,      6.0f});
-        setTool(Items::ZaniteAxe,             Tool{ToolType::Axe,     MiningTier::Iron,      6.0f});
-        setTool(Items::ZaniteShovel,          Tool{ToolType::Shovel,  MiningTier::Iron,      6.0f});
-        setTool(Items::ZaniteHoe,             Tool{ToolType::Hoe,     MiningTier::Iron,      6.0f});
-        setTool(Items::ZaniteSword,           Tool{ToolType::Sword,   MiningTier::Iron,      6.0f});
-        setTool(Items::GravititePickaxe,      Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
-        setTool(Items::GravititeAxe,          Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::GravititeShovel,       Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
-        setTool(Items::GravititeHoe,          Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::GravititeSword,        Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
-        setTool(Items::IronwoodPickaxe,       Tool{ToolType::Pickaxe, MiningTier::Iron,      6.5f});
-        setTool(Items::IronwoodAxe,           Tool{ToolType::Axe,     MiningTier::Iron,      6.5f});
-        setTool(Items::IronwoodShovel,        Tool{ToolType::Shovel,  MiningTier::Iron,      6.5f});
-        setTool(Items::IronwoodHoe,           Tool{ToolType::Hoe,     MiningTier::Iron,      6.5f});
-        setTool(Items::IronwoodSword,         Tool{ToolType::Sword,   MiningTier::Iron,      6.5f});
-        setTool(Items::SteeleafPickaxe,       Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
-        setTool(Items::SteeleafAxe,           Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::SteeleafShovel,        Tool{ToolType::Shovel,  MiningTier::Diamond,   8.0f});
-        setTool(Items::SteeleafHoe,           Tool{ToolType::Hoe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::SteeleafSword,         Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
-        setTool(Items::KnightmetalPickaxe,    Tool{ToolType::Pickaxe, MiningTier::Diamond,   8.0f});
-        setTool(Items::KnightmetalAxe,        Tool{ToolType::Axe,     MiningTier::Diamond,   8.0f});
-        setTool(Items::KnightmetalSword,      Tool{ToolType::Sword,   MiningTier::Diamond,   8.0f});
-        setTool(Items::FieryPickaxe,          Tool{ToolType::Pickaxe, MiningTier::Netherite, 9.0f});
-        setTool(Items::FierySword,            Tool{ToolType::Sword,   MiningTier::Netherite, 9.0f});
+        setTool(Items::SkyrootPickaxe,        MakeDiggerTool(ToolType::Pickaxe, MiningTier::Wood, 2.0f));
+        setTool(Items::SkyrootAxe,            MakeDiggerTool(ToolType::Axe, MiningTier::Wood, 2.0f));
+        setTool(Items::SkyrootShovel,         MakeDiggerTool(ToolType::Shovel, MiningTier::Wood, 2.0f));
+        setTool(Items::SkyrootHoe,            MakeDiggerTool(ToolType::Hoe, MiningTier::Wood, 2.0f));
+        setTool(Items::SkyrootSword,          MakeSwordTool());
+        setTool(Items::HolystonePickaxe,      MakeDiggerTool(ToolType::Pickaxe, MiningTier::Stone, 4.0f));
+        setTool(Items::HolystoneAxe,          MakeDiggerTool(ToolType::Axe, MiningTier::Stone, 4.0f));
+        setTool(Items::HolystoneShovel,       MakeDiggerTool(ToolType::Shovel, MiningTier::Stone, 4.0f));
+        setTool(Items::HolystoneHoe,          MakeDiggerTool(ToolType::Hoe, MiningTier::Stone, 4.0f));
+        setTool(Items::HolystoneSword,        MakeSwordTool());
+        setTool(Items::ZanitePickaxe,         MakeDiggerTool(ToolType::Pickaxe, MiningTier::Iron, 6.0f));
+        setTool(Items::ZaniteAxe,             MakeDiggerTool(ToolType::Axe, MiningTier::Iron, 6.0f));
+        setTool(Items::ZaniteShovel,          MakeDiggerTool(ToolType::Shovel, MiningTier::Iron, 6.0f));
+        setTool(Items::ZaniteHoe,             MakeDiggerTool(ToolType::Hoe, MiningTier::Iron, 6.0f));
+        setTool(Items::ZaniteSword,           MakeSwordTool());
+        setTool(Items::GravititePickaxe,      MakeDiggerTool(ToolType::Pickaxe, MiningTier::Diamond, 8.0f));
+        setTool(Items::GravititeAxe,          MakeDiggerTool(ToolType::Axe, MiningTier::Diamond, 8.0f));
+        setTool(Items::GravititeShovel,       MakeDiggerTool(ToolType::Shovel, MiningTier::Diamond, 8.0f));
+        setTool(Items::GravititeHoe,          MakeDiggerTool(ToolType::Hoe, MiningTier::Diamond, 8.0f));
+        setTool(Items::GravititeSword,        MakeSwordTool());
+        setTool(Items::IronwoodPickaxe,       MakeDiggerTool(ToolType::Pickaxe, MiningTier::Iron, 6.5f));
+        setTool(Items::IronwoodAxe,           MakeDiggerTool(ToolType::Axe, MiningTier::Iron, 6.5f));
+        setTool(Items::IronwoodShovel,        MakeDiggerTool(ToolType::Shovel, MiningTier::Iron, 6.5f));
+        setTool(Items::IronwoodHoe,           MakeDiggerTool(ToolType::Hoe, MiningTier::Iron, 6.5f));
+        setTool(Items::IronwoodSword,         MakeSwordTool());
+        setTool(Items::SteeleafPickaxe,       MakeDiggerTool(ToolType::Pickaxe, MiningTier::Diamond, 8.0f));
+        setTool(Items::SteeleafAxe,           MakeDiggerTool(ToolType::Axe, MiningTier::Diamond, 8.0f));
+        setTool(Items::SteeleafShovel,        MakeDiggerTool(ToolType::Shovel, MiningTier::Diamond, 8.0f));
+        setTool(Items::SteeleafHoe,           MakeDiggerTool(ToolType::Hoe, MiningTier::Diamond, 8.0f));
+        setTool(Items::SteeleafSword,         MakeSwordTool());
+        setTool(Items::KnightmetalPickaxe,    MakeDiggerTool(ToolType::Pickaxe, MiningTier::Diamond, 8.0f));
+        setTool(Items::KnightmetalAxe,        MakeDiggerTool(ToolType::Axe, MiningTier::Diamond, 8.0f));
+        setTool(Items::KnightmetalSword,      MakeSwordTool());
+        setTool(Items::FieryPickaxe,          MakeDiggerTool(ToolType::Pickaxe, MiningTier::Netherite, 9.0f));
+        setTool(Items::FierySword,            MakeSwordTool());
 
         // ── RARITY defaults (name-line tooltip color) ───────────────────────
         // Rows verbatim from Items.java `.rarity(...)` builders in THIS

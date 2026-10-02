@@ -294,18 +294,12 @@ namespace Game {
     // a player forgets its specific grudge and becomes angry at ALL players
     // (optionally alerting every same-type neighbour to do the same).
     //
-    // The game rule defaults OFF and no game-rule system exists here, so
-    // canUse never opens — exactly MC's behaviour in a default world. The
-    // start/alert machinery is ported whole so flipping the constant is all
-    // a future game-rule system needs.
+    // canUse reads the universal_anger rule (Game::Rules), as MC does.
     //
     // MC's <T extends Mob & NeutralMob> intersection type is carried as the
     // Mob* plus a cross-cast to NeutralMob at construction.
     class ResetUniversalAngerTargetGoal : public Goal {
     public:
-        // The UNIVERSAL_ANGER game rule (MC default: false).
-        static constexpr bool kUniversalAnger = false;
-
         static constexpr int kAlertRangeY = 10;   // MC ALERT_RANGE_Y
 
         ResetUniversalAngerTargetGoal(Mob* mob, bool alertOthersOfSameType);

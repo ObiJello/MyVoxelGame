@@ -8,6 +8,7 @@
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/RedstoneStateUtil.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/sound/LevelSound.hpp"
 #include "common/sound/SoundEvents.hpp"
@@ -55,6 +56,23 @@ namespace Game {
     }
 
     // ── ThrownEnderpearl ───────────────────────────────────────────────────
+
+    void ThrownEnderpearl::Tick() {
+        // MC tick: on the server, an owner that is a dead player (no credits
+        // in this engine, so never wonGame) discards the pearl when
+        // ender_pearls_vanish_on_death is on; otherwise the flight runs. A
+        // dead player's view stays resolvable (health 0) until the respawn,
+        // which is MC's findOwnerIncludingDeadPlayer.
+        if (m_level && !m_level->IsClientSide()) {
+            Entity* owner = GetOwner();
+            if (owner && owner->IsPlayer() && !owner->IsAlive() &&
+                Rules::GetBool(Rules::Id::EnderPearlsVanishOnDeath)) {
+                Discard();
+                return;
+            }
+        }
+        ThrowableProjectile::Tick();
+    }
 
     void ThrownEnderpearl::OnHitEntity(LivingEntity& target, const HitResult& hit) {
         // MC onHitEntity: hurt for ZERO — the hit registers (flash, kill

@@ -129,14 +129,15 @@ namespace Server {
                 connection.SendChatMessage(
                     "Unable to apply this effect (target is either immune to effects, or has something stronger)", 1);
             } else if (tracker.nonZeroCount == 1) {
-                connection.SendChatMessage("Applied effect " + effectName + " to " + tracker.onlyNonZeroName, 1);
+                source.SendSuccess(connection, "Applied effect " + effectName + " to " + tracker.onlyNonZeroName, true);
             } else {
-                connection.SendChatMessage("Applied effect " + effectName + " to " +
-                                           std::to_string(tracker.nonZeroCount) + " targets", 1);
+                source.SendSuccess(connection, "Applied effect " + effectName + " to " +
+                                           std::to_string(tracker.nonZeroCount) + " targets", true);
             }
         }
 
-        void ClearEffects(const std::vector<SelectedEntity>& targets, ServerConnection& connection) {
+        void ClearEffects(const CommandSourceStack& source, const std::vector<SelectedEntity>& targets,
+                          ServerConnection& connection) {
             ResponseTracker tracker;
             for (const SelectedEntity& target : targets) {
                 Game::LivingEntity* living = LivingOf(target);
@@ -146,14 +147,15 @@ namespace Server {
             if (tracker.nonZeroCount == 0) {
                 connection.SendChatMessage("Target has no effects to remove", 1);
             } else if (tracker.nonZeroCount == 1) {
-                connection.SendChatMessage("Removed every effect from " + tracker.onlyNonZeroName, 1);
+                source.SendSuccess(connection, "Removed every effect from " + tracker.onlyNonZeroName, true);
             } else {
-                connection.SendChatMessage("Removed every effect from " +
-                                           std::to_string(tracker.nonZeroCount) + " targets", 1);
+                source.SendSuccess(connection, "Removed every effect from " +
+                                           std::to_string(tracker.nonZeroCount) + " targets", true);
             }
         }
 
-        void ClearEffect(const std::vector<SelectedEntity>& targets, Game::MobEffectId effect,
+        void ClearEffect(const CommandSourceStack& source, const std::vector<SelectedEntity>& targets,
+                         Game::MobEffectId effect,
                          ServerConnection& connection) {
             ResponseTracker tracker;
             for (const SelectedEntity& target : targets) {
@@ -165,10 +167,10 @@ namespace Server {
             if (tracker.nonZeroCount == 0) {
                 connection.SendChatMessage("Target doesn't have the requested effect", 1);
             } else if (tracker.nonZeroCount == 1) {
-                connection.SendChatMessage("Removed effect " + effectName + " from " + tracker.onlyNonZeroName, 1);
+                source.SendSuccess(connection, "Removed effect " + effectName + " from " + tracker.onlyNonZeroName, true);
             } else {
-                connection.SendChatMessage("Removed effect " + effectName + " from " +
-                                           std::to_string(tracker.nonZeroCount) + " targets", 1);
+                source.SendSuccess(connection, "Removed effect " + effectName + " from " +
+                                           std::to_string(tracker.nonZeroCount) + " targets", true);
             }
         }
 
@@ -228,9 +230,9 @@ namespace Server {
                     connection.SendChatMessage(error, 1);
                     return;
                 }
-                ClearEffect(targets, effect, connection);
+                ClearEffect(source, targets, effect, connection);
             } else {
-                ClearEffects(targets, connection);
+                ClearEffects(source, targets, connection);
             }
             return;
         }

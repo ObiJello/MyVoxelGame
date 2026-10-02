@@ -6,9 +6,8 @@
 //   • handle: addBox(-1,  -3, -1,  2,  6, 6)  texOffs(26, 0)
 // (ShieldModel.java lines 30-31, both texOffs and box dims verbatim.)
 //
-// Texture: assets/textures/entity/shield_base_nopattern.png (64×64). The
-// banner-pattern variant (shield_base.png) is used when the stack carries
-// BANNER_PATTERNS components — for v1 we always use the no-pattern texture.
+// Texture: ShieldTextures::ForStack — shield_base_nopattern.png (64×64), or
+// shield_base.png under the stack's BANNER_PATTERNS / BASE_COLOR layers.
 //
 // Inventory pose:
 //   1. MC's BEWLR `submit()` does poseStack.scale(1, -1, -1)
@@ -29,6 +28,7 @@
 #include "../GuiGraphics.hpp"
 #include "../GuiRenderState.hpp"
 #include "../../backend/RenderBackend.hpp"
+#include "client/renderer/entity/ShieldTextures.hpp"
 #include "common/entity/Item.hpp"
 #include "common/core/Log.hpp"
 
@@ -53,7 +53,7 @@ namespace Render {
             return b;
         }
 
-        TextureHandle LoadShieldTexture() {
+        [[maybe_unused]] TextureHandle LoadShieldTexture() {
             auto& tex = ShieldTexture();
             auto& tried = ShieldTextureTried();
             {
@@ -248,8 +248,9 @@ namespace Render {
 
         void RenderShieldInventory(GuiGraphics& g, const Game::ItemStack& stack,
                                    int x, int y) {
-            (void)stack; // banner patterns not yet wired — always render base
-            TextureHandle tex = LoadShieldTexture();
+            // ShieldSpecialRenderer: the plain sheet, or the shield's
+            // BANNER_PATTERNS / BASE_COLOR layers over shield_base.
+            TextureHandle tex = ShieldTextures::ForStack(stack);
             if (tex == INVALID_TEXTURE) return;
             GuiRenderState* rs = g.GetRenderState();
             if (!rs) return;

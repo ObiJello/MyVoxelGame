@@ -8,6 +8,7 @@
 
 namespace Render {
     class GuiGraphics;
+    class FontRenderer;
 
     // ── Server command list (MC ClientboundCommandsPacket) ──────────────────
     //
@@ -32,7 +33,13 @@ namespace Render {
 
     class ChatScreen {
     public:
-        static constexpr int MAX_MESSAGE_LENGTH = 256;
+        // DELIBERATE DEVIATION from MC (requested): no 256-character chat
+        // limit. The line may hold up to MC's network string maximum, 32767
+        // characters — the same cap ChatMessageC2S's reader enforces
+        // (Network::kMaxChatMessageLength), so nothing typed or pasted can
+        // exceed what the packet carries. The box scrolls horizontally (MC
+        // EditBox displayPos) to keep the caret in view.
+        static constexpr int MAX_MESSAGE_LENGTH = 32767;
         static constexpr int INPUT_HEIGHT = 12;
         // Pitch of the usage-hint lines above the input (the single hint
         // always sat 11 px above it).
@@ -57,9 +64,23 @@ namespace Render {
         // adopts the controlled client's line when it opens).
         void SetInputText(const std::string& text) {
             m_inputText = text.substr(0, static_cast<size_t>(MAX_MESSAGE_LENGTH));
-            m_cursorPos = static_cast<int>(m_inputText.size());
+            m_displayPos = 0;
+            MoveCursorTo(static_cast<int>(m_inputText.size()), false);
         }
-        bool OnKeyDown(int glfwKey);  // Returns true if key was consumed
+        // Returns true if the key was consumed. `mods` are GLFW_MOD_* bits:
+        // Shift extends the selection; Ctrl / Cmd / Alt jump by words (and
+        // delete words); Cmd/Ctrl+A selects all.
+        bool OnKeyDown(int glfwKey, int mods = 0);
+        // The selected text, or the whole line when nothing is selected
+        // (what Copy takes); Cut removes the selection and returns it.
+        std::string CopyText() const;
+        std::string CutText();
+        // Mouse in GUI coordinates (MC EditBox.onClick / onDrag): a click on
+        // the input line puts the caret under the pointer (Shift extends the
+        // selection); a drag from there selects. False when the click was
+        // not on the input line.
+        bool OnMouseClicked(double guiX, double guiY, bool shift);
+        void OnMouseDragged(double guiX);
 
         // Update cursor blink
         void Update(float deltaTime);
@@ -94,9 +115,8 @@ namespace Render {
         // Chat history
         std::vector<std::string> m_history;
     public:
-        // Drops the up-arrow recall history. Paired with ChatComponent::Clear()
-        // by /clearchat so the chat really is back to its just-launched state
-        // rather than just visually empty.
+        // Drops the up-arrow recall history. (/clearchat does NOT call this:
+        // it clears the shown messages and keeps what was sent.)
         void ClearHistory() { m_history.clear(); m_historyIndex = -1; }
     private:
         int m_historyIndex = -1;
@@ -134,6 +154,23 @@ namespace Render {
         void ApplySuggestionInPlace();
         void CycleSuggestion(int delta);
         void RenderSuggestions(GuiGraphics& graphics, int inputX, int inputY);
+
+        // ── MC EditBox editing state ────────────────────────────────────────
+        int  m_highlightPos = 0;   // the selection's other end (== cursor: none)
+        int  m_displayPos   = 0;   // first character shown (horizontal scroll)
+        int  m_innerWidth   = 300; // text area width in GUI px (from the last frame)
+        int  m_inputBarY    = 0;   // the input bar's top in GUI px (from the last frame)
+        const FontRenderer* m_font = nullptr;   // from the last frame, for measuring
+
+        int  CharAdvance(char c) const;
+        int  TextWidth(int from, int to) const;          // [from, to) of m_inputText
+        int  FitForward(int from, int width) const;      // chars from `from` within width
+        int  FitBackward(int to, int width) const;       // chars ending at `to` within width
+        void ScrollTo(int pos);                           // MC EditBox.scrollTo
+        void MoveCursorTo(int pos, bool extendSelection); // MC EditBox.moveCursorTo
+        int  WordPosition(int dir, int from) const;       // MC EditBox.getWordPosition
+        void DeleteSelectionOr(int fromCursorTo);         // MC EditBox.deleteText / deleteChars
+        int  IndexAtX(double guiX) const;
 
         // Helpers — MC's EditBox.setCursorPosition / moveCursor / moveCursorToStart / End
         void SetCursorPosition(int pos);

@@ -7,6 +7,7 @@
 // / resolveSlot, EquipmentSlot.limit, Mob.dropPreservedEquipment and
 // Mob.dropCustomDeathLoot's equipment loop.
 #include "common/entity/MobEquipment.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -39,23 +40,6 @@ namespace Game {
         int SlotIndex(EquipmentSlot slot) {
             const int i = static_cast<int>(slot);
             return i >= 0 && i < Mob::kEquipmentSlotCount ? i : -1;
-        }
-
-        ModifierId EquipmentModifierId(int slot, int k) {
-            return static_cast<ModifierId>(static_cast<uint32_t>(ModifierId::MobEquipmentBase) +
-                                           static_cast<uint32_t>(slot) * 4u + static_cast<uint32_t>(k));
-        }
-
-        // The armour slot group a piece's modifiers apply in.
-        bool ArmorGroupMatches(ArmorSlotGroup group, EquipmentSlot slot) {
-            switch (group) {
-                case ArmorSlotGroup::Head:  return slot == EquipmentSlot::HEAD;
-                case ArmorSlotGroup::Chest: return slot == EquipmentSlot::CHEST;
-                case ArmorSlotGroup::Legs:  return slot == EquipmentSlot::LEGS;
-                case ArmorSlotGroup::Feet:  return slot == EquipmentSlot::FEET;
-                case ArmorSlotGroup::Body:  return slot == EquipmentSlot::BODY;
-            }
-            return false;
         }
 
         // MC EquipmentSlot.limit: the armour slots hold one item; the hands
@@ -96,39 +80,16 @@ namespace Game {
             m_equipment = std::make_unique<EquipmentSlots>();
         }
         ItemStack& held = m_equipment->items[i];
+        const ItemStack previous = held;
         held = stack;
         if (held.count <= 0 || held.itemId == Items::Air) held = ItemStack{};
         m_equipment->dirtyMask |= static_cast<uint8_t>(1u << i);
 
-        // LivingEntity.collectEquipmentChanges: the old item's modifiers off,
-        // the new one's on — only those of the slot group the item is worn in
-        // (a helmet held in a hand adds no armour).
-        for (int k = 0; k < 3; ++k) {
-            const ModifierId id = EquipmentModifierId(i, k);
-            m_attributes.RemoveModifier(Attribute::Armor, id);
-            m_attributes.RemoveModifier(Attribute::ArmorToughness, id);
-            m_attributes.RemoveModifier(Attribute::KnockbackResistance, id);
-            m_attributes.RemoveModifier(Attribute::AttackDamage, id);
-            m_attributes.RemoveModifier(Attribute::AttackSpeed, id);
-        }
-        if (!held.IsEmpty()) {
-            const auto add = [this, i](Attribute attribute, int k, double amount) {
-                m_attributes.AddModifier(attribute, AttributeModifier{
-                    static_cast<uint32_t>(EquipmentModifierId(i, k)), amount, AttributeOperation::AddValue });
-            };
-            if (slot == EquipmentSlot::MAINHAND && HasItemAttackAttributes(held.itemId)) {
-                float damage = 0.0f, speed = 0.0f;
-                GetItemAttackAttributes(held.itemId, damage, speed);
-                add(Attribute::AttackDamage, 0, damage);
-                add(Attribute::AttackSpeed, 1, speed);
-            }
-            if (const ItemArmorRow* row = GetItemArmorAttributes(held.itemId);
-                row && ArmorGroupMatches(row->slot, slot)) {
-                if (row->armor != 0.0f) add(Attribute::Armor, 0, row->armor);
-                if (row->armorToughness != 0.0f) add(Attribute::ArmorToughness, 1, row->armorToughness);
-                if (row->knockbackResistance != 0.0f) add(Attribute::KnockbackResistance, 2, row->knockbackResistance);
-            }
-        }
+        // LivingEntity.collectEquipmentChanges: the old stack's modifiers
+        // off, the new one's on — its ATTRIBUTE_MODIFIERS entries for this
+        // slot (a helmet held in a hand adds no armour) and its enchantments'
+        // attribute effects.
+        SwapEquipmentModifiers(m_attributes, slot, previous, held);
     }
 
     float Mob::GetEquipmentDropChance(EquipmentSlot slot) const {
@@ -300,6 +261,10 @@ namespace Game {
             HurtAndBreak(shears, 1, player, EquipmentSlot::MAINHAND);
             const glm::dvec3 offset = GetPassengerAttachmentPoint(*this);
             SetEquipment(slot, ItemStack{});
+            // CriteriaTriggers.PLAYER_SHEARED_EQUIPMENT with the piece taken.
+            if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(&player)) {
+                Server::CriteriaTriggers::PlayerShearedEquipment(*sp, piece, *this);
+            }
             GameEvent(GameEventId::Shear, &player);
             DropItemStackAt(m_level->Dimension(), position + offset, piece);
             // this.playSound(equippable.shearingSound()).
@@ -325,26 +290,11 @@ namespace Game {
 
         // MC Mob.getApproximateAttributeWith: the mob's base value for the
         // attribute (0 when it has none) through the item's ATTRIBUTE_
-        // MODIFIERS for `slot` — the generated weapon / armour rows here, the
-        // same data SetEquipment applies.
+        // MODIFIERS for `slot` (ItemAttributeModifiers.compute).
         double ApproximateAttributeWith(const AttributeMap& attributes, const ItemStack& stack,
                                         Attribute attribute, EquipmentSlot slot) {
-            double value = attributes.Has(attribute) ? attributes.GetBaseValue(attribute) : 0.0;
-            if (stack.IsEmpty()) return value;
-            if (attribute == Attribute::AttackDamage) {
-                if (slot == EquipmentSlot::MAINHAND && HasItemAttackAttributes(stack.itemId)) {
-                    float damage = 0.0f, speed = 0.0f;
-                    GetItemAttackAttributes(stack.itemId, damage, speed);
-                    value += damage;
-                }
-                return value;
-            }
-            if (const ItemArmorRow* row = GetItemArmorAttributes(stack.itemId);
-                row && ArmorGroupMatches(row->slot, slot)) {
-                if (attribute == Attribute::Armor) value += row->armor;
-                else if (attribute == Attribute::ArmorToughness) value += row->armorToughness;
-            }
-            return value;
+            const double base = attributes.Has(attribute) ? attributes.GetBaseValue(attribute) : 0.0;
+            return ComputeItemAttribute(stack, attribute, base, slot);
         }
 
         bool IsInItemTag(const ItemStack& stack, const char* tag) {

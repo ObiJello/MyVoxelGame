@@ -1,13 +1,17 @@
 // File: src/common/entity/projectile/HurtingProjectile.cpp
 #include "common/entity/projectile/HurtingProjectile.hpp"
 #include "common/world/level/Explosion.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/world/block/BlockRegistry.hpp"
 #include "common/entity/projectile/AreaEffectCloud.hpp"
 #include "common/entity/EntityLevel.hpp"
+#include "common/entity/mobs/Monsters.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 #include "common/world/enchantment/EnchantmentHelper.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -167,7 +171,8 @@ namespace Game {
 
         bool wasHurt;
         if (auto* livingOwner = dynamic_cast<LivingEntity*>(GetOwner())) {
-            livingOwner->SetLastHurtMob(&target);
+            // (MC's skull never setLastHurtMob — only arrows, wind charges,
+            // melee and players do.)
             wasHurt = DealHitDamage(target, hit, MobDamageSource::Projectile, 8.0f,
                                     livingOwner);
             if (wasHurt && !target.IsAlive()) {
@@ -175,8 +180,13 @@ namespace Game {
                 livingOwner->Heal(5.0f);
             }
         } else {
-            wasHurt = DealHitDamage(target, hit, MobDamageSource::Generic, 5.0f,
-                                    this);
+            // MC damageSources().magic() — no causing and no direct entity,
+            // armour bypassed. (A dragon still routes through its part.)
+            if (dynamic_cast<EnderDragon*>(&target)) {
+                wasHurt = DealHitDamage(target, hit, MobDamageSource::Magic, 5.0f, nullptr);
+            } else {
+                wasHurt = target.HurtFrom(MobDamageSource::Magic, 5.0f, nullptr, nullptr);
+            }
         }
 
         // MC WitherSkull.onHitEntity: a landed hit applies WITHER II
@@ -195,6 +205,30 @@ namespace Game {
         }
     }
 
+    namespace {
+        // MC WitherSkull.getBlockExplosionResistance (through the
+        // EntityBasedExplosionDamageCalculator): a DANGEROUS (blue) skull
+        // treats every block WitherBoss.canDestroy — not air, not
+        // #wither_immune — as no tougher than 0.8, so it breaks obsidian.
+        bool DangerousSkullBlockResistance(const ExplosionParams&, const glm::ivec3&, BlockState state,
+                                           float& out) {
+            const BlockID id = state.Block();
+            if (id == BlockID::Air) return false;   // no resistance at all
+            // The resistance the default calculator hands it: max(block,
+            // fluid) — a waterlogged block wears water's.
+            float resistance = BlockRegistry::Get(id).explosionResistance;
+            if (BlockRegistry::ContainsWater(state)) {
+                resistance = std::max(resistance, BlockRegistry::Get(BlockID::Water).explosionResistance);
+            }
+            if (!DataTags::HasTag(DataTags::Registry::Block, BlockRegistry::Get(id).registrySlug,
+                                  "minecraft:wither_immune")) {
+                resistance = std::min(0.8f, resistance);
+            }
+            out = resistance;
+            return true;
+        }
+    } // namespace
+
     void WitherSkull::OnHit(const HitResult& hit) {
         HurtingProjectile::OnHit(hit);
         if (m_level && !m_level->IsClientSide()) {
@@ -207,6 +241,7 @@ namespace Game {
             params.source       = this;
             params.attributedTo = GetOwner();
             params.interaction  = ExplosionInteraction::Mob;
+            if (IsDangerous()) params.calculator.blockResistance = &DangerousSkullBlockResistance;
             Explode(*m_level, params);
             Discard();
         }

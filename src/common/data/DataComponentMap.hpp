@@ -35,7 +35,17 @@ namespace Game {
         template<typename T>
         std::optional<T> get(const DataComponentType<T>& key) const;
 
+        // A value is set (a removal marker is not a value).
         bool has(const DataComponentTypeBase& key) const;
+        // MC DataComponentPatch's removal (`Optional.empty()`): the item's
+        // default for `key` is taken AWAY on this stack — ItemStack::get
+        // answers nothing instead of falling back to the prototype
+        // (`stone_sword[!max_damage]`). set() replaces the marker; remove()
+        // drops it (back to the default).
+        void setRemoved(const DataComponentTypeBase& key);
+        bool isRemoved(const DataComponentTypeBase& key) const;
+        // Every component this map removes, in insertion order.
+        std::vector<const DataComponentTypeBase*> removedTypes() const;
         // MC CopyComponentsFunction's per-type copy: the value `src` holds
         // for the component registered as `name` ("custom_name",
         // "banner_patterns" — the id without its namespace) replaces this
@@ -72,19 +82,19 @@ namespace Game {
 
         // ── Network codec — mirrors MC DataComponentPatch.STREAM_CODEC
         // (DataComponentPatch.java:31-106): VarInt addedCount, VarInt
-        // removedCount, then per added entry (VarInt networkId, payload).
-        // Our flat map has no removals, so removedCount is always written 0 —
-        // the field is kept to preserve MC's wire layout. Only entries whose
+        // removedCount, then per added entry (VarInt networkId, payload),
+        // then per removed entry its VarInt networkId. Only entries whose
         // type has a network codec (networkId != 0) are written.
         void Serialize(Network::PacketBuffer& buffer) const;
-        // Throws std::runtime_error on unknown networkId / non-zero
-        // removedCount (protocol error — both endpoints run the same binary).
+        // Throws std::runtime_error on an unknown networkId (protocol error —
+        // both endpoints run the same binary).
         static DataComponentMap Deserialize(Network::PacketReader& reader);
 
     private:
         struct Entry {
             const DataComponentTypeBase* type;
             std::shared_ptr<void>        value; // type-erased; only set/get know how to cast
+                                                // null: the component is REMOVED (setRemoved)
         };
         std::vector<Entry> entries;
     };
@@ -105,6 +115,7 @@ namespace Game {
     std::optional<T> DataComponentMap::get(const DataComponentType<T>& key) const {
         for (const auto& e : entries) {
             if (e.type == &key) {
+                if (!e.value) return std::nullopt;   // removed
                 return *static_cast<const T*>(e.value.get());
             }
         }

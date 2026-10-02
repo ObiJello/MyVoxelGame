@@ -171,6 +171,17 @@ namespace Game {
         return DirectionalShade(dir);
     }
 
+    // The face shade of a block-model quad in the world: MC 26.1
+    // ClientLevel.getShade(direction, shade) — an element with `"shade":
+    // false` takes the table's flat UP value (1.0, or 0.9 under NETHER
+    // cardinal light) on every face. 26.3 spells the same thing
+    // `shade_direction_override: "up"` (BlockModelLighter.
+    // getDirectionalBrightness). The section mesher and the moving-block
+    // pass both read this, so a block's faces shade alike in both.
+    constexpr float ElementShade(FaceDir dir, bool elementShade, bool netherCardinalLight) {
+        return DirectionalShade(elementShade ? dir : FaceDir::Up, netherCardinalLight);
+    }
+
     // One cuboid "element" of the model (Minecraft models can have multiple cuboids)
     struct Element {
         glm::vec3 from{0.0f};                           // Bottom-left-back corner in 0-16 model space

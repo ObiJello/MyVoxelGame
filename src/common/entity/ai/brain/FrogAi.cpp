@@ -14,6 +14,8 @@
 
 #include <cmath>
 
+#include <algorithm>
+
 namespace Game {
 
     namespace {
@@ -106,10 +108,12 @@ namespace Game {
                 if (!target) return false;
 
                 // MC drops a target it cannot path within tongue reach of, and
-                // remembers it so it does not immediately re-acquire it.
+                // remembers it (UNREACHABLE_TONGUE_TARGETS, 100 ticks) so the
+                // attackables sensor does not hand it straight back.
                 const bool reachable = CanPathfindToTarget(*mob, *target);
                 if (!reachable) {
                     brain->EraseMemory(MemoryModule::AttackTarget);
+                    AddUnreachableTargetToMemory(*brain, *target);
                     return false;
                 }
                 return body.GetPose() != Pose::Croaking && FrogCanEat(*target);
@@ -207,6 +211,25 @@ namespace Game {
             }
 
         private:
+            // MC ShootTongue.addUnreachableTargetToMemory: at most five, the
+            // oldest dropped for a newcomer, the whole list re-armed for 100
+            // ticks (UNREACHABLE_TONGUE_TARGETS_COOLDOWN_DURATION).
+            static void AddUnreachableTargetToMemory(Brain& brain, LivingEntity& target) {
+                std::vector<Entity*> unreachable;
+                if (const std::vector<Entity*>* current =
+                        brain.GetEntityList(MemoryModule::UnreachableTongueTargets)) {
+                    unreachable = *current;
+                }
+                const bool add = std::find(unreachable.begin(), unreachable.end(),
+                                           static_cast<Entity*>(&target)) == unreachable.end();
+                if (unreachable.size() == 5 && add) unreachable.erase(unreachable.begin());
+                if (add) unreachable.push_back(&target);
+                brain.SetMemoryWithExpiry(MemoryModule::UnreachableTongueTargets,
+                                          std::move(unreachable), kUnreachableTongueTargetsCooldown);
+            }
+
+            static constexpr int kUnreachableTongueTargetsCooldown = 100;
+
             static bool CanPathfindToTarget(Mob& body, LivingEntity& target) {
                 auto path = body.GetNavigation().CreatePath(target.BlockPosition(), 0);
                 return path.has_value() && path->CanReach();
@@ -330,7 +353,6 @@ namespace Game {
     }
 
     void FrogAi::InitBrain(Frog& frog, Brain& brain) {
-        (void)frog;
 
         // MC Frog.MEMORY_TYPES. A memory that is not registered fails every
         // CheckMemory INCLUDING VALUE_ABSENT, so an unregistered one silently
@@ -351,7 +373,9 @@ namespace Game {
                                 MemoryModule::NearestAttackable,
                                 MemoryModule::IsInWater,
                                 MemoryModule::IsPregnant,
-                                MemoryModule::IsPanicking }) {
+                                MemoryModule::IsPanicking,
+                                // FrogAttackablesSensor.requires().
+                                MemoryModule::UnreachableTongueTargets }) {
             brain.RegisterMemory(m);
         }
 
@@ -359,7 +383,22 @@ namespace Game {
         brain.AddSensor(std::make_unique<NearestLivingEntitySensor>());
         brain.AddSensor(std::make_unique<HurtBySensor>());
         brain.AddSensor(std::make_unique<IsInWaterSensor>());
-        brain.AddSensor(std::make_unique<NearestAttackableSensor>(&FrogCanEat));
+        // MC FrogAttackablesSensor: Sensor.isEntityAttackable, frog food, not
+        // a remembered unreachable tongue target, and within 10 blocks.
+        brain.AddSensor(std::make_unique<NearestAttackableSensor>(
+            [&frog](LivingEntity& e) {
+                if (!SensorTargeting::IsEntityAttackable(frog, e) || !FrogCanEat(e)) return false;
+                if (const Brain* b = frog.GetBrain()) {
+                    if (const std::vector<Entity*>* unreachable =
+                            b->GetEntityList(MemoryModule::UnreachableTongueTargets)) {
+                        if (std::find(unreachable->begin(), unreachable->end(),
+                                      static_cast<Entity*>(&e)) != unreachable->end()) {
+                            return false;
+                        }
+                    }
+                }
+                return e.DistanceToSqr(frog) < 10.0 * 10.0;
+            }));
         brain.AddSensor(std::make_unique<TemptingSensor>([](uint32_t item) {
             // MC ItemTags.FROG_FOOD — a single item, resolved by slug because a
             // slime ball's id is not a compile-time constant here.

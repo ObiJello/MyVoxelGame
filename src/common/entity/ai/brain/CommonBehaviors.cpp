@@ -10,9 +10,20 @@
 #include "common/entity/ai/Controls.hpp"
 #include "common/entity/ai/RandomPos.hpp"
 #include "common/entity/ai/Sensing.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
 #include "common/entity/ai/brain/Brain.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/level/GameRules.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/pathfinder/Path.hpp"
+#include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/level/World.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/sound/SoundType.hpp"
+#include "common/world/block/BlockPlacement.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -67,11 +78,15 @@ namespace Game {
     bool AnimalPanic::CheckExtraStartConditions(EntityLevel&, LivingEntity& body) {
         const Brain* brain = body.GetBrain();
         if (!brain) return false;
-        // MC tests the damage type against PANIC_CAUSES. Every damage source
-        // this engine produces is in that tag, so "was hurt at all" is the same
-        // predicate — the same reasoning PanicGoal already documents.
-        return brain->HasMemoryValue(MemoryModule::HurtBy)
-            || brain->HasMemoryValue(MemoryModule::IsPanicking);
+        // MC: HURT_BY's damage source is(DamageTypeTags.PANIC_CAUSES), or
+        // IS_PANICKING. HURT_BY mirrors the mob's last damage source
+        // (HurtBySensor), so that source's type is tested against the tag —
+        // a fall, a drowning, cramming or the void does not start a panic.
+        if (brain->HasMemoryValue(MemoryModule::IsPanicking)) return true;
+        if (!brain->HasMemoryValue(MemoryModule::HurtBy)) return false;
+        const std::string_view type =
+            DamageSourceInfo::TypeIdFor(body.GetLastDamageSource(), nullptr, nullptr);
+        return DataTags::HasTag(DataTags::Registry::DamageType, type, "minecraft:panic_causes");
     }
 
     void AnimalPanic::Start(EntityLevel&, LivingEntity& body, int64_t) {
@@ -90,6 +105,15 @@ namespace Game {
         // MC only re-picks when the navigation has run out, so a panicking mob
         // commits to a direction instead of jittering.
         if (!mob->GetNavigation().IsDone()) return;
+        // MC AnimalPanic.getPanicPos: a burning mob runs for the closest
+        // water first (lookForWater), else a LandRandomPos 5 x 4 hop.
+        if (mob->IsOnFire()) {
+            if (auto water = LookForWater(*mob)) {
+                brain->SetMemory(MemoryModule::WalkTarget,
+                                 WalkTarget(PositionTracker::OfBlock(*water), m_speedMultiplier, 0));
+                return;
+            }
+        }
         if (auto pos = RandomPos::GetLandPos(*mob, 5, 4)) {
             brain->SetMemory(MemoryModule::WalkTarget,
                              WalkTarget(PositionTracker::OfBlock(glm::ivec3(
@@ -98,6 +122,42 @@ namespace Game {
                                             static_cast<int>(std::floor(pos->z)))),
                                         m_speedMultiplier, 0));
         }
+    }
+
+    std::optional<glm::ivec3> AnimalPanic::LookForWater(PathfinderMob& mob) {
+        // MC AnimalPanic.lookForWater: nothing from inside a collision shape;
+        // else BlockPos.findClosestMatch(pos, 5, 1, water) — for a mob two
+        // blocks wide (Mth.ceil(width) == 2) the 2x2 square out to the south
+        // east must all be water.
+        EntityLevel* level = mob.Level();
+        const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
+        if (!blocks) return std::nullopt;
+        const glm::ivec3 origin = mob.BlockPosition();
+        if (BlockRegistry::HasCollision(blocks->GetBlock(origin.x, origin.y, origin.z))) return std::nullopt;
+        const bool wide = static_cast<int>(std::ceil(mob.GetBbWidth())) == 2;
+        const auto isWater = [&](int x, int y, int z) {
+            if (!wide) return blocks->ContainsWater(x, y, z);
+            return blocks->ContainsWater(x, y, z) && blocks->ContainsWater(x + 1, y, z) &&
+                   blocks->ContainsWater(x, y, z + 1) && blocks->ContainsWater(x + 1, y, z + 1);
+        };
+        // findClosestMatch walks shells of growing Manhattan distance;
+        // minimising it over the box picks the same cell (ties in raster
+        // order, as arbitrary as MC's in-shell order).
+        std::optional<glm::ivec3> best;
+        int bestManhattan = 0;
+        for (int dx = -5; dx <= 5; ++dx) {
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dz = -5; dz <= 5; ++dz) {
+                    if (!isWater(origin.x + dx, origin.y + dy, origin.z + dz)) continue;
+                    const int manhattan = std::abs(dx) + std::abs(dy) + std::abs(dz);
+                    if (!best || manhattan < bestManhattan) {
+                        bestManhattan = manhattan;
+                        best = origin + glm::ivec3(dx, dy, dz);
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     void AnimalPanic::Stop(EntityLevel&, LivingEntity& body, int64_t) {
@@ -268,11 +328,16 @@ namespace Game {
 
     // ── StopAttackingIfTargetInvalid ───────────────────────────────────────
 
-    StopAttackingIfTargetInvalid::StopAttackingIfTargetInvalid()
+    StopAttackingIfTargetInvalid::StopAttackingIfTargetInvalid(
+            StopAttackCondition stopAttackingWhen, TargetErasedCallback onTargetErased,
+            bool canGrowTiredOfTryingToReachTarget)
         : Behavior({ MemoryCondition{ MemoryModule::AttackTarget, MemoryStatus::ValuePresent },
                      MemoryCondition{ MemoryModule::CantReachWalkTargetSince,
                                       MemoryStatus::Registered } },
-                   1) {}
+                   1),
+          m_stopAttackingWhen(std::move(stopAttackingWhen)),
+          m_onTargetErased(std::move(onTargetErased)),
+          m_canGrowTired(canGrowTiredOfTryingToReachTarget) {}
 
     bool StopAttackingIfTargetInvalid::CheckExtraStartConditions(EntityLevel& level,
                                                                  LivingEntity& body) {
@@ -280,23 +345,74 @@ namespace Game {
         Brain* brain = body.GetBrain();
         if (!mob || !brain) return false;
 
-        Entity* target = brain->GetEntity(MemoryModule::AttackTarget);
-        auto* living = dynamic_cast<LivingEntity*>(target);
+        auto* target = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget));
+        if (!target) {
+            // A reference that no longer resolves (MC's memory would hold the
+            // removed entity, which fails isAlive below). Nothing to hand the
+            // callback, so just drop it.
+            brain->EraseMemory(MemoryModule::AttackTarget);
+            return true;
+        }
 
         // MC TIMEOUT_TO_GET_WITHIN_ATTACK_RANGE: 200 ticks of failing to reach
         // the target and the mob gives up. Without it a frog stares at a slime
         // across a ravine forever.
         bool tired = false;
-        if (const std::optional<int64_t> since =
-                brain->GetLong(MemoryModule::CantReachWalkTargetSince)) {
-            tired = (level.GetGameTime() - *since) > 200;
+        if (m_canGrowTired) {
+            if (const std::optional<int64_t> since =
+                    brain->GetLong(MemoryModule::CantReachWalkTargetSince)) {
+                tired = (level.GetGameTime() - *since) > 200;
+            }
         }
 
-        if (!living || !living->IsAlive() || !mob->CanAttack(*living) || tired) {
+        // MC, condition for condition and in order.
+        const bool stillValid = mob->CanAttack(*target)
+            && !tired
+            && target->IsAlive()
+            && target->Level() == body.Level()
+            && !(m_stopAttackingWhen && m_stopAttackingWhen(level, *mob, *target));
+        if (!stillValid) {
+            if (m_onTargetErased) m_onTargetErased(level, *mob, *target);
             brain->EraseMemory(MemoryModule::AttackTarget);
         }
         return true;
     }
+
+    // ── Sensor targeting tests ─────────────────────────────────────────────
+
+    namespace SensorTargeting {
+
+        namespace {
+            TargetingConditions RangedFor(LivingEntity& body, TargetingConditions conditions) {
+                return conditions.Range(body.GetAttributeValue(Attribute::FollowRange));
+            }
+
+            bool IsAttackTarget(const LivingEntity& body, const LivingEntity& target) {
+                const Brain* brain = body.GetBrain();
+                return brain && brain->IsMemoryValue(MemoryModule::AttackTarget, &target);
+            }
+        } // namespace
+
+        bool IsEntityTargetable(LivingEntity& body, const LivingEntity& target) {
+            TargetingConditions conditions = RangedFor(body, TargetingConditions::ForNonCombat());
+            if (IsAttackTarget(body, target)) conditions.IgnoreInvisibility();
+            return conditions.Test(&body, target);
+        }
+
+        bool IsEntityAttackable(LivingEntity& body, const LivingEntity& target) {
+            TargetingConditions conditions = RangedFor(body, TargetingConditions::ForCombat());
+            if (IsAttackTarget(body, target)) conditions.IgnoreInvisibility();
+            return conditions.Test(&body, target);
+        }
+
+        bool IsEntityAttackableIgnoringLineOfSight(LivingEntity& body, const LivingEntity& target) {
+            TargetingConditions conditions =
+                RangedFor(body, TargetingConditions::ForCombat()).IgnoreLineOfSight();
+            if (IsAttackTarget(body, target)) conditions.IgnoreInvisibility();
+            return conditions.Test(&body, target);
+        }
+
+    } // namespace SensorTargeting
 
     // ── FollowTemptation ───────────────────────────────────────────────────
 
@@ -913,7 +1029,9 @@ namespace Game {
         Brain* brain = body.GetBrain();
         if (!brain) return false;
         auto* target = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt));
-        if (target && target->IsDeadOrDying()) {
+        // A dead PLAYER is forgiven only under forgive_dead_players.
+        if (target && target->IsDeadOrDying() &&
+            (!target->IsPlayer() || Rules::GetBool(Rules::Id::ForgiveDeadPlayers))) {
             brain->EraseMemory(MemoryModule::AngryAt);
         }
         return true;
@@ -1007,7 +1125,7 @@ namespace Game {
 
         // MC: a dead (or level-changed) attacker is forgotten immediately.
         if (Entity* attacker = brain->GetEntity(MemoryModule::HurtByEntity)) {
-            if (!attacker->IsAlive()) {
+            if (!attacker->IsAlive() || attacker->Level() != body.Level()) {
                 brain->EraseMemory(MemoryModule::HurtByEntity);
             }
         }
@@ -1034,17 +1152,18 @@ namespace Game {
         });
         brain->SetMemory(MemoryModule::NearestPlayers, players);
 
-        // The visible subset (MC isEntityTargetable → line of sight), then the
-        // attackable subset (MC isEntityAttackable → additionally not
-        // creative). Both keep the distance order.
-        auto* mob = dynamic_cast<Mob*>(&body);
+        // The visible subset (MC isEntityTargetable: non-combat conditions at
+        // follow range — line of sight, invisibility-scaled range), then the
+        // attackable subset of that (MC isEntityAttackable: the combat
+        // conditions — canAttack, allies, Peaceful). Both keep the distance
+        // order.
         std::vector<Entity*> attackable;
         Entity* nearestVisible = nullptr;
         for (Entity* e : players) {
             auto* p = static_cast<LivingEntity*>(e);
-            if (mob && !mob->GetSensing().HasLineOfSight(*p)) continue;
+            if (!SensorTargeting::IsEntityTargetable(body, *p)) continue;
             if (!nearestVisible) nearestVisible = p;
-            if (p->IsCreative()) continue;
+            if (!SensorTargeting::IsEntityAttackable(body, *p)) continue;
             attackable.push_back(p);
         }
         if (nearestVisible) {
@@ -1094,6 +1213,145 @@ namespace Game {
         if (found) brain->SetMemory(MemoryModule::NearestAttackable,
                                     static_cast<Entity*>(found));
         else       brain->EraseMemory(MemoryModule::NearestAttackable);
+    }
+
+    // ── Doors (MC DoorBlock.setOpen / isOpen, #mob_interactable_doors) ─────
+
+    namespace {
+        // MC Vec3i.closerToCenterThan(Position, dist): the block's CENTRE
+        // within `dist` (strictly) of the point.
+        bool DoorCloserToCenterThan(const glm::ivec3& b, const glm::dvec3& p, double dist) {
+            const double dx = b.x + 0.5 - p.x, dy = b.y + 0.5 - p.y, dz = b.z + 0.5 - p.z;
+            return dx * dx + dy * dy + dz * dz < dist * dist;
+        }
+
+        BlockState DoorStateAt(EntityLevel& level, const glm::ivec3& p) {
+            const IBlockAccess* blocks = level.Blocks();
+            return blocks ? blocks->GetBlockState(p.x, p.y, p.z) : BlockState{};
+        }
+
+        // MC InteractWithDoor.isMobComingThroughDoor — the other mob's live
+        // path (MC reads its PATH memory; the navigation holds the same path).
+        bool IsMobComingThroughDoor(LivingEntity& other, const glm::ivec3& doorPos) {
+            auto* mob = dynamic_cast<Mob*>(&other);
+            if (!mob || !mob->HasAiControls()) return false;
+            const Path* path = mob->GetNavigation().GetPath();
+            if (!path || path->IsDone() || path->GetNextNodeIndex() <= 0) return false;
+            const Node& from = path->GetNode(path->GetNextNodeIndex() - 1);
+            const Node& to = path->GetNextNode();
+            return doorPos == glm::ivec3(from.x, from.y, from.z) || doorPos == glm::ivec3(to.x, to.y, to.z);
+        }
+
+        void RememberDoorToClose(std::vector<glm::ivec3>& doors, const glm::ivec3& pos) {
+            if (std::find(doors.begin(), doors.end(), pos) == doors.end()) doors.push_back(pos);
+        }
+    } // namespace
+
+    namespace Doors {
+
+        bool IsMobInteractableDoor(BlockState s) { return IsWoodenDoorBlock(s.Block()); }
+        bool IsDoorOpen(BlockState s) { return s.GetValueByName("open") == "true"; }
+
+        void SetDoorOpen(EntityLevel& level, const glm::ivec3& pos, bool open, Entity* source) {
+            // MC DoorBlock.setOpen(entity, level, state, pos, open): flags 10
+            // (UPDATE_CLIENTS | UPDATE_IMMEDIATE), the other half following
+            // (MC through updateShape; explicit here — the engine has no
+            // double-block linkage), and the door's open/close sound.
+            ILevelWrite* world = level.MutableBlocks();
+            if (!world) return;
+            const BlockState state = world->GetBlockState(pos.x, pos.y, pos.z);
+            if (!IsMobInteractableDoor(state) || IsDoorOpen(state) == open) return;
+            const std::string_view to = open ? "true" : "false";
+            constexpr uint32_t kFlags = World::UpdateFlags::UpdateClients | World::UpdateFlags::Immediate;
+            world->SetBlock(pos.x, pos.y, pos.z, state.SetName(PropertyId::OPEN, to), kFlags);
+            const bool lower = state.GetName(PropertyId::DOUBLE_BLOCK_HALF) == "lower";
+            const glm::ivec3 other = pos + glm::ivec3(0, lower ? 1 : -1, 0);
+            const BlockState otherState = world->GetBlockState(other.x, other.y, other.z);
+            if (otherState.Block() == state.Block() &&
+                otherState.GetName(PropertyId::DOUBLE_BLOCK_HALF) == (lower ? "upper" : "lower")) {
+                world->SetBlock(other.x, other.y, other.z, otherState.SetName(PropertyId::OPEN, to), kFlags);
+            }
+            if (const BlockSetType* set = BlockSetTypeOf(state.Block())) {
+                // DoorBlock.playSound: pitch nextFloat() * 0.1 + 0.9.
+                const float pitch = level.Random().NextFloat() * 0.1f + 0.9f;
+                level.PlaySound(nullptr, pos, open ? set->doorOpen : set->doorClose,
+                                SoundSource::Blocks, 1.0f, pitch);
+            }
+            // MC setOpen: level.gameEvent(sourceEntity, BLOCK_OPEN / BLOCK_CLOSE, pos).
+            world->GameEvent(source, open ? GameEventId::BlockOpen : GameEventId::BlockClose, pos);
+        }
+
+        void CloseDoorsThatIHaveOpenedOrPassedThrough(EntityLevel& level, LivingEntity& body,
+                                                      std::vector<glm::ivec3>& doors,
+                                                      const glm::ivec3* movingFrom,
+                                                      const glm::ivec3* movingTo) {
+            const Brain* brain = body.GetBrain();
+            const std::vector<Entity*>* nearest =
+                brain ? brain->GetEntityList(MemoryModule::NearestLivingEntities) : nullptr;
+            for (auto it = doors.begin(); it != doors.end();) {
+                const glm::ivec3 doorPos = *it;
+                if ((movingFrom && *movingFrom == doorPos) || (movingTo && *movingTo == doorPos)) {
+                    ++it;
+                    continue;
+                }
+                // isDoorTooFarAway: another dimension, or the door's centre 3+
+                // blocks from the body.
+                if (!DoorCloserToCenterThan(doorPos, body.position, 3.0)) { it = doors.erase(it); continue; }
+                const BlockState state = DoorStateAt(level, doorPos);
+                if (!IsMobInteractableDoor(state) || !IsDoorOpen(state)) { it = doors.erase(it); continue; }
+                bool othersComing = false;
+                if (nearest) {
+                    for (Entity* e : *nearest) {
+                        auto* other = e ? e->AsLiving() : nullptr;
+                        if (!other || other->GetType() != body.GetType()) continue;
+                        if (!DoorCloserToCenterThan(doorPos, other->position, 2.0)) continue;
+                        if (IsMobComingThroughDoor(*other, doorPos)) { othersComing = true; break; }
+                    }
+                }
+                if (!othersComing) SetDoorOpen(level, doorPos, false, &body);
+                it = doors.erase(it);
+            }
+        }
+
+    } // namespace Doors
+
+    // ── InteractWithDoor ───────────────────────────────────────────────────
+
+    InteractWithDoor::InteractWithDoor(Doors::DoorsToCloseFn doorsToClose)
+        : Behavior({ { MemoryModule::DoorsToClose, MemoryStatus::Registered },
+                     { MemoryModule::NearestLivingEntities, MemoryStatus::Registered } }, 1),
+          m_doorsToClose(doorsToClose) {}
+
+    bool InteractWithDoor::CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) {
+        auto* mob = dynamic_cast<Mob*>(&body);
+        if (!mob || !m_doorsToClose) return false;
+        // i.present(PATH): the navigation's live path.
+        const Path* path = mob->GetNavigation().GetPath();
+        if (!path || path->GetNextNodeIndex() <= 0 || path->IsDone()) return false;
+        const Node& nextNode = path->GetNextNode();
+        const glm::ivec3 toPos(nextNode.x, nextNode.y, nextNode.z);
+        if (m_lastCheckedNode && *m_lastCheckedNode == toPos) {
+            m_remainingCooldown = 20;
+        } else if (--m_remainingCooldown > 0) {
+            return false;
+        }
+        m_lastCheckedNode = toPos;
+        const Node& fromNode = path->GetNode(path->GetNextNodeIndex() - 1);
+        const glm::ivec3 fromPos(fromNode.x, fromNode.y, fromNode.z);
+
+        std::vector<glm::ivec3>& doors = m_doorsToClose(body);
+        const BlockState fromState = DoorStateAt(level, fromPos);
+        if (Doors::IsMobInteractableDoor(fromState)) {
+            if (!Doors::IsDoorOpen(fromState)) Doors::SetDoorOpen(level, fromPos, true, &body);
+            RememberDoorToClose(doors, fromPos);
+        }
+        const BlockState toState = DoorStateAt(level, toPos);
+        if (Doors::IsMobInteractableDoor(toState) && !Doors::IsDoorOpen(toState)) {
+            Doors::SetDoorOpen(level, toPos, true, &body);
+            RememberDoorToClose(doors, toPos);
+        }
+        Doors::CloseDoorsThatIHaveOpenedOrPassedThrough(level, body, doors, &fromPos, &toPos);
+        return true;
     }
 
 } // namespace Game

@@ -1,5 +1,7 @@
 // File: src/common/entity/LivingEntity.cpp
 #include "common/entity/LivingEntity.hpp"
+#include "common/entity/ConsumableBehavior.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/entity/SpearItem.hpp"
 #include "common/entity/vehicle/VehicleEntity.hpp"
 
@@ -26,6 +28,7 @@
 #include "common/world/enchantment/EnchantmentHelper.hpp"
 #include "common/entity/TamableAnimal.hpp"
 #include "common/core/Log.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -422,7 +425,7 @@ namespace Game {
         // spear STABs for its attack duration (Item.Properties.spear).
         if (const ItemStack* main = const_cast<LivingEntity*>(this)->EquipmentInSlot(EquipmentSlot::MAINHAND);
             main && !main->IsEmpty()) {
-            swingDuration = Spear::AttackAnimationDuration(main->itemId);
+            swingDuration = Spear::AttackAnimationDuration(*main);
         }
         if (HasDigSpeed(EffectStorage())) {
             // MobEffectUtil.hasDigSpeed: HASTE or CONDUIT_POWER, the larger
@@ -543,12 +546,19 @@ namespace Game {
             if (IsInWater() && TravelInWaterOverride(input, baseGravity, isFalling, oldY)) {
                 customWaterTravel = true;
             } else if (IsInWater()) {
-                // MC travelInWater. Not carried: WATER_MOVEMENT_EFFICIENCY
-                // (depth strider) — no such attribute here. DOLPHINS_GRACE
-                // replaces the slow-down outright.
+                // MC travelInWater: WATER_MOVEMENT_EFFICIENCY (Depth
+                // Strider, /attribute) blends the drag toward the land's
+                // 0.546 and the push toward the walking speed — halved off
+                // the ground. DOLPHINS_GRACE replaces the slow-down outright.
                 float slowDown = IsSprinting() ? 0.9f : GetWaterSlowDown();
+                float speed    = 0.02f;
+                float waterWalker = static_cast<float>(GetAttributeValue(Attribute::WaterMovementEfficiency));
+                if (!onGround) waterWalker *= 0.5f;
+                if (waterWalker > 0.0f) {
+                    slowDown += (0.54600006f - slowDown) * waterWalker;
+                    speed += (GetSpeed() - speed) * waterWalker;
+                }
                 if (HasEffect(MobEffectId::DolphinsGrace)) slowDown = 0.96f;
-                const float speed    = 0.02f;
                 MoveRelative(speed, input);
                 Move(velocity);
                 glm::dvec3 movement = velocity;
@@ -804,8 +814,27 @@ namespace Game {
             PlaySound(damage > 4 ? sounds.big : sounds.small, 1.0f, 1.0f);
             PlayBlockFallSound();
         }
-        Hurt(MobDamageSource::Fall, static_cast<float>(damage), nullptr);
+        Hurt(CurrentFallDamageSource(), static_cast<float>(damage), nullptr);
         return true;
+    }
+
+    namespace {
+        // The landing being resolved on this thread (server tick or a
+        // ParallelFor worker): Fall unless a scope says otherwise.
+        thread_local MobDamageSource t_fallDamageSource = MobDamageSource::Fall;
+    }
+
+    LivingEntity::FallDamageSourceScope::FallDamageSourceScope(MobDamageSource source)
+        : m_previous(t_fallDamageSource) {
+        t_fallDamageSource = source;
+    }
+
+    LivingEntity::FallDamageSourceScope::~FallDamageSourceScope() {
+        t_fallDamageSource = m_previous;
+    }
+
+    MobDamageSource LivingEntity::CurrentFallDamageSource() {
+        return t_fallDamageSource;
     }
 
     // ── Sound ───────────────────────────────────────────────────────────────
@@ -1242,6 +1271,8 @@ namespace Game {
     }
 
     void LivingEntity::Tick() {
+        // MC onAttributeUpdated(SCALE) → refreshDimensions, read once a tick.
+        RefreshAttributeScale();
         BaseTick();
 
         // MC LivingEntity.tick: super.tick(), then updatingUsingItem.
@@ -1407,9 +1438,12 @@ namespace Game {
         // DamageTypeTags.IS_FIRE over this engine's sources. The fireball
         // damage types (DamageSources.fireball) arrive here as a Projectile
         // hit whose DIRECT entity is the fireball (Projectile::DealHitDamage
-        // → HurtFrom), so they are recognised by that entity's type. (hot
-        // floor and campfire have no damage source in this engine.)
-        if (source == MobDamageSource::Fire || source == MobDamageSource::Lava) return true;
+        // → HurtFrom), so they are recognised by that entity's type. A magma
+        // block's hot floor and a lit campfire are #is_fire too.
+        if (source == MobDamageSource::Fire || source == MobDamageSource::Lava ||
+            source == MobDamageSource::HotFloor || source == MobDamageSource::Campfire) {
+            return true;
+        }
         if (source == MobDamageSource::Projectile && m_hurtDirectEntity) {
             const EntityTypeId t = m_hurtDirectEntity->GetType();
             return t == EntityTypeId::SmallFireball || t == EntityTypeId::Fireball;
@@ -1450,6 +1484,9 @@ namespace Game {
         ResetNoActionTime();
 
         bool tookFullDamage = true;
+        // PLAYER_HURT_ENTITY's dealt / taken (MC originalDamage / damage).
+        const float dealtAmount = amount;
+        float takenAmount = amount;
 
         // ── The two-stage invulnerability window (MC hurtServer step 5) ────
         //
@@ -1459,6 +1496,7 @@ namespace Game {
         // most reimplementations drop.
         if (m_invulnerableTime > kHurtDuration) {
             if (amount <= m_lastHurt) return false;
+            takenAmount = amount - m_lastHurt;
             ActuallyHurt(source, amount - m_lastHurt, attacker);
             m_lastHurt = amount;
             tookFullDamage = false;
@@ -1514,7 +1552,9 @@ namespace Game {
         // near. A player's own voice belongs to the player half of the port
         // (MC Player.getHurtSound / LocalPlayer), so a player view is quiet.
         const bool voiced = m_level && !m_level->IsClientSide() && !IsPlayer();
-        if (IsDeadOrDying()) {
+        if (IsDeadOrDying() && !IsPlayer() && CheckDeathProtection(source)) {
+            // MC checkTotemDeathProtection saved it: no death cry, no die().
+        } else if (IsDeadOrDying()) {
             if (voiced && tookFullDamage) MakeSound(GetDeathSound());
             m_killerId = attacker ? attacker->GetId() : -1;
             m_killerDirectId = m_hurtDirectEntity ? m_hurtDirectEntity->GetId() : m_killerId;
@@ -1530,6 +1570,17 @@ namespace Game {
             const std::vector<MobEffectInstance> effects = EffectStorage();
             for (const MobEffectInstance& e : effects) {
                 OnEffectMobHurt(*this, e.effect, e.amplifier);
+            }
+        }
+
+        // MC hurtServer's tail: a player's blow is PLAYER_HURT_ENTITY (a
+        // player's own hurt is ENTITY_HURT_PLAYER, in ServerPlayer::damage,
+        // where the shield is known).
+        if (m_level && !m_level->IsClientSide() && attacker) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(attacker)) {
+                Server::CriteriaTriggers::PlayerHurtEntity(*player, *this,
+                                                           DamageSourceInfo::Of(source, attacker, m_hurtDirectEntity),
+                                                           dealtAmount, takenAmount, false);
             }
         }
 
@@ -1614,6 +1665,70 @@ namespace Game {
         }
     }
 
+    double LivingEntity::GetEquipmentVisibilityFactor(const Entity* targetingEntity) const {
+        if (!targetingEntity || !HasEquipmentSlots()) return 1.0;
+        auto* self = const_cast<LivingEntity*>(this);
+        double factor = 1.0;
+        for (int i = 0; i < 8; ++i) {
+            const EquipmentSlot slot = static_cast<EquipmentSlot>(i);
+            const ItemStack* item = self->EquipmentInSlot(slot);
+            if (!item || item->IsEmpty() || !item->has(DataComponents::MOB_VISIBILITY)) continue;
+            const auto equippable = item->get(DataComponents::EQUIPPABLE);
+            if (!equippable || equippable->slot != slot) continue;
+            factor *= MobVisibilityFactor(*item, targetingEntity->GetType());
+        }
+        return factor;
+    }
+
+    bool LivingEntity::CheckDeathProtection(MobDamageSource source) {
+        // MC LivingEntity.checkTotemDeathProtection: #bypasses_invulnerability
+        // (out_of_world) cannot be cheated; else the first hand (main, off)
+        // holding a DEATH_PROTECTION item spends one, the health goes to 1,
+        // its death effects apply and entity event 35 plays the totem.
+        if (!m_level || m_level->IsClientSide() || source == MobDamageSource::Void) return false;
+        std::optional<DeathProtection> protection;
+        for (const EquipmentSlot hand : { EquipmentSlot::MAINHAND, EquipmentSlot::OFFHAND }) {
+            ItemStack* stack = EquipmentInSlot(hand);
+            if (!stack || stack->IsEmpty()) continue;
+            protection = stack->get(DataComponents::DEATH_PROTECTION);
+            if (!protection) continue;
+            ItemStack after = *stack;
+            after.count -= 1;
+            if (after.count <= 0) after = ItemStack{};
+            if (auto* mob = dynamic_cast<Mob*>(this)) mob->ReplaceEquipmentStack(hand, after);
+            else *stack = after;
+            break;
+        }
+        if (!protection) return false;
+        SetHealth(1.0f);
+        for (const ConsumeEffect& e : protection->deathEffects) ConsumableBehavior::ApplyConsumeEffect(*this, e);
+        m_level->BroadcastEntityEvent(*this, 35);
+        return true;
+    }
+
+    void LivingEntity::AwardKillCriteria(MobDamageSource source, Entity* attacker) {
+        // MC LivingEntity.die → getKillCredit().awardKillScore(this, source):
+        // a player killer gets PLAYER_KILLED_ENTITY (ServerPlayer.
+        // awardKillScore), a killed player ENTITY_KILLED_PLAYER
+        // (Entity.awardKillScore). The kill credit is the causing entity, else
+        // the last mob to hurt this one within MC's 100-tick memory.
+        Entity* credit = attacker;
+        if (!credit) {
+            if (Entity* last = GetLastHurtByMob();
+                last && m_level->GetGameTime() - GetLastHurtByMobTimestamp() <= 100) {
+                credit = last;
+            }
+        }
+        if (!credit || credit == this) return;
+        const DamageSourceInfo info = DamageSourceInfo::Of(source, attacker, HurtDirectEntity());
+        if (Server::ServerPlayer* killer = Server::CriteriaTriggers::PlayerOf(credit)) {
+            Server::CriteriaTriggers::PlayerKilledEntity(*killer, *this, info);
+        }
+        if (Server::ServerPlayer* victim = Server::CriteriaTriggers::PlayerOf(this)) {
+            Server::CriteriaTriggers::EntityKilledPlayer(*victim, *credit, info);
+        }
+    }
+
     void LivingEntity::Die(MobDamageSource source, Entity* attacker) {
         if (m_dead) return;
         m_dead = true;
@@ -1624,6 +1739,7 @@ namespace Game {
             if (auto* killer = dynamic_cast<LivingEntity*>(attacker); killer && killer != this) {
                 killer->KilledEntity(*this);
             }
+            AwardKillCriteria(source, attacker);
         }
 
         if (m_level && !m_level->IsClientSide() && !IsPlayer()) AnnounceDeath();

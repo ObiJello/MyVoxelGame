@@ -3,7 +3,11 @@
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/IUsePlayer.hpp"
+#include "common/entity/EntityLevel.hpp"
+#include "common/entity/GeneratedItemList.hpp"
 #include "common/entity/Item.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"
+#include "common/world/block/entity/CopperGolemStatueBlockEntity.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/CopperChestBlock.hpp"
@@ -13,6 +17,7 @@
 #include "common/world/tags/DataTags.hpp"
 
 #include <cstdlib>
+#include <memory>
 
 namespace Game {
 
@@ -32,24 +37,61 @@ namespace Game {
             return BlockStates::FromIndex(block, dst.IndexOf(src.PropertiesOf(from.Index())));
         }
 
-        // CopperGolemStatueBlock.useItemOn: an axe passes (to the axe's
-        // scrape / wax-off); anything else turns the pose.
+        bool IsAxe(const ItemStack& stack) {
+            return !stack.IsEmpty() &&
+                   DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:axes");
+        }
+
+        // CopperGolemStatueBlock.updatePose: the sound, the next pose,
+        // BLOCK_CHANGE.
+        UseResult UpdatePose(ILevelWrite& level, const glm::ivec3& pos, IUsePlayer* player) {
+            if (level.IsClientSide()) return UseResult::Success;
+            const BlockState state = level.GetBlockState(pos.x, pos.y, pos.z);
+            const int pose = state.GetIndex(PropertyId::COPPER_GOLEM_POSE);
+            if (pose < 0) return UseResult::Pass;
+            level.PlaySound(nullptr, pos, SoundEvents::COPPER_GOLEM_BECOME_STATUE, SoundSource::Blocks, 1.0f, 1.0f);
+            level.SetBlock(pos.x, pos.y, pos.z, state.SetIndex(PropertyId::COPPER_GOLEM_POSE, (pose + 1) % 4),
+                           World::UpdateFlags::All);
+            level.GameEvent(player ? player->GameEventSource() : nullptr, GameEventId::BlockChange, pos);
+            return UseResult::Success;
+        }
+
+        // CopperGolemStatueBlock.useItemOn (the four waxed statues): an axe
+        // passes (to the axe's wax-off); anything else turns the pose.
         UseResult StatueUseItemOn(ItemStack& stack, ILevelWrite* level, const glm::ivec3& pos,
                                   IUsePlayer* player, uint32_t /*hand*/, const BlockHitResult& /*hit*/) {
             if (!level) return UseResult::Pass;
-            if (!stack.IsEmpty() &&
-                DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:axes")) {
-                return UseResult::Pass;
+            if (IsAxe(stack)) return UseResult::Pass;
+            return UpdatePose(*level, pos, player);
+        }
+
+        // WeatheringCopperGolemStatueBlock.useItemOn (the four unwaxed
+        // statues), only with its CopperGolemStatueBlockEntity in place:
+        // honeycomb passes (to the honeycomb's wax-on), anything else but an
+        // axe turns the pose; an axe on the UNAFFECTED statue wakes the golem
+        // (removeStatue — one point of wear, the golem added, the block
+        // removed), and on an older one passes to the axe's scrape.
+        UseResult WeatheringStatueUseItemOn(ItemStack& stack, ILevelWrite* level, const glm::ivec3& pos,
+                                            IUsePlayer* player, uint32_t hand, const BlockHitResult& /*hit*/) {
+            if (!level) return UseResult::Pass;
+            auto* statueEntity = dynamic_cast<CopperGolemStatueBlockEntity*>(level->GetBlockEntity(pos));
+            if (!statueEntity) return UseResult::Pass;
+            if (!IsAxe(stack)) {
+                if (!stack.IsEmpty() && stack.itemId == Items::Honeycomb) return UseResult::Pass;
+                return UpdatePose(*level, pos, player);
             }
-            if (level->IsClientSide()) return UseResult::Success;
-            // updatePose: the sound, the next pose, BLOCK_CHANGE.
             const BlockState state = level->GetBlockState(pos.x, pos.y, pos.z);
-            const int pose = state.GetIndex(PropertyId::COPPER_GOLEM_POSE);
-            if (pose < 0) return UseResult::Pass;
-            level->PlaySound(nullptr, pos, SoundEvents::COPPER_GOLEM_BECOME_STATUE, SoundSource::Blocks, 1.0f, 1.0f);
-            level->SetBlock(pos.x, pos.y, pos.z, state.SetIndex(PropertyId::COPPER_GOLEM_POSE, (pose + 1) % 4),
-                            World::UpdateFlags::All);
-            level->GameEvent(player ? player->GameEventSource() : nullptr, GameEventId::BlockChange, pos);
+            if (state.Block() != BlockID::CopperGolemStatue) return UseResult::Pass;   // getAge() == UNAFFECTED
+            // The client predicts the swing; the golem is the server's.
+            if (level->IsClientSide()) return UseResult::Success;
+            EntityLevel* entities = level->Entities();
+            std::unique_ptr<CopperGolem> copperGolem =
+                entities ? statueEntity->RemoveStatue(state, *entities) : nullptr;
+            HurtAndBreak(stack, 1, level, player, hand);
+            if (!copperGolem) return UseResult::Pass;
+            entities->AddFreshEntity(std::move(copperGolem));
+            // level.removeBlock(pos, false): the statue's water stays.
+            if (auto* world = dynamic_cast<World*>(level)) world->RemoveBlock(pos, false);
             return UseResult::Success;
         }
 
@@ -59,6 +101,11 @@ namespace Game {
                                        const BlockHitResult& hit) {
             ItemStack empty;
             return StatueUseItemOn(empty, level, pos, player, 0, hit);
+        }
+        UseResult WeatheringStatueUseWithoutItem(ILevelWrite* level, const glm::ivec3& pos, IUsePlayer* player,
+                                                 const BlockHitResult& hit) {
+            ItemStack empty;
+            return WeatheringStatueUseItemOn(empty, level, pos, player, 0, hit);
         }
 
         int StatueAnalogOutput(ILevelWrite& level, const glm::ivec3& pos, BlockState state, Direction) {
@@ -112,8 +159,10 @@ namespace Game {
     void RegisterCopperGolemStatueBehaviors(std::array<Block, BlockRegistry::Size>& blocks) {
         for (int i = 0; i < 8; ++i) {
             Block& b = blocks[static_cast<size_t>(kStatues[i])];
-            b.useItemOn                   = &StatueUseItemOn;
-            b.useWithoutItem              = &StatueUseWithoutItem;
+            // kStatues[0..3] are WeatheringCopperGolemStatueBlocks, [4..7]
+            // the waxed CopperGolemStatueBlocks.
+            b.useItemOn                   = i < 4 ? &WeatheringStatueUseItemOn : &StatueUseItemOn;
+            b.useWithoutItem              = i < 4 ? &WeatheringStatueUseWithoutItem : &StatueUseWithoutItem;
             b.hasAnalogOutputSignal       = true;
             b.getAnalogOutputSignal       = &StatueAnalogOutput;
             b.affectNeighborsAfterRemoval = &StatueAfterRemoval;

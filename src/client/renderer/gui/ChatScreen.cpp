@@ -2,9 +2,15 @@
 #include "ChatScreen.hpp"
 #include "CommandSuggestions.hpp"
 #include "GuiGraphics.hpp"
+#include "FontRenderer.hpp"
+#include "common/network/packets/game/ChatMessageC2SPacket.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+
+static_assert(Render::ChatScreen::MAX_MESSAGE_LENGTH == static_cast<int>(Network::kMaxChatMessageLength),
+              "the chat box and the chat packet must agree on the length cap");
 
 namespace {
     // Wall-clock millis since some fixed epoch, mirroring Java's System.currentTimeMillis() /
@@ -62,15 +68,15 @@ namespace Render {
         m_open = true;
         m_inputText = withSlash ? "/" : "";
         m_submittedMessage.clear();
-        m_cursorPos = static_cast<int>(m_inputText.size()); // Caret at end (after '/' if present)
-        ResetCursorBlink();
+        m_displayPos = 0;
+        MoveCursorTo(static_cast<int>(m_inputText.size()), false); // Caret at end (after '/' if present)
         m_historyIndex = -1;
     }
 
     void ChatScreen::Close() {
         m_open = false;
         m_inputText.clear();
-        m_cursorPos = 0;
+        m_cursorPos = m_highlightPos = m_displayPos = 0;
         CloseSuggestions();
     }
 
@@ -89,39 +95,176 @@ namespace Render {
         return ((elapsed / 300LL) % 2LL) == 0LL;
     }
 
-    void ChatScreen::SetCursorPosition(int pos) {
-        // MC: Mth.clamp(pos, 0, value.length())
+    // ── MC EditBox: measuring, scrolling, selection ─────────────────────────
+    //
+    // The line is one row that scrolls horizontally (EditBox.displayPos):
+    // only the characters from m_displayPos that fit the box are drawn, and
+    // every caret move scrolls just enough to keep the caret visible. Widths
+    // are the font's per-glyph advances (FontRenderer: glyph + 1 px, the input
+    // being printable ASCII), so measuring a 32 767-character line stays
+    // linear in what is measured.
+
+    int ChatScreen::CharAdvance(char c) const {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (!m_font) return 6;
+        if (u < 32 || u > 126) return 4;
+        return m_font->GetCharWidth(u) + 1;
+    }
+
+    int ChatScreen::TextWidth(int from, int to) const {
+        int w = 0;
+        for (int i = std::max(0, from); i < to && i < static_cast<int>(m_inputText.size()); ++i) {
+            w += CharAdvance(m_inputText[static_cast<size_t>(i)]);
+        }
+        return w > 0 ? w - 1 : 0;   // no spacing after the last glyph
+    }
+
+    // MC Font.plainSubstrByWidth(value.substring(from), width).length().
+    int ChatScreen::FitForward(int from, int width) const {
+        int w = 0, n = 0;
+        for (int i = from; i < static_cast<int>(m_inputText.size()); ++i) {
+            const int adv = CharAdvance(m_inputText[static_cast<size_t>(i)]);
+            if (w + adv - 1 > width) break;
+            w += adv;
+            ++n;
+        }
+        return n;
+    }
+
+    // The same from the other end: characters ending at `to` within width.
+    int ChatScreen::FitBackward(int to, int width) const {
+        int w = 0, n = 0;
+        for (int i = std::min(to, static_cast<int>(m_inputText.size())) - 1; i >= 0; --i) {
+            const int adv = CharAdvance(m_inputText[static_cast<size_t>(i)]);
+            if (w + adv - 1 > width) break;
+            w += adv;
+            ++n;
+        }
+        return n;
+    }
+
+    // MC EditBox.scrollTo: keep `pos` inside the shown window; reaching the
+    // left edge pages a window's worth back.
+    void ChatScreen::ScrollTo(int pos) {
+        const int length = static_cast<int>(m_inputText.size());
+        m_displayPos = std::min(m_displayPos, length);
+        const int lastPos = m_displayPos + FitForward(m_displayPos, m_innerWidth);
+        if (pos == m_displayPos && m_displayPos > 0) {
+            m_displayPos -= FitBackward(m_displayPos, m_innerWidth);
+        }
+        if (pos > lastPos) {
+            m_displayPos += pos - lastPos;
+        } else if (pos <= m_displayPos) {
+            m_displayPos -= m_displayPos - pos;
+        }
+        m_displayPos = std::clamp(m_displayPos, 0, length);
+    }
+
+    void ChatScreen::MoveCursorTo(int pos, bool extendSelection) {
         const int n = static_cast<int>(m_inputText.size());
         m_cursorPos = std::clamp(pos, 0, n);
+        if (!extendSelection) m_highlightPos = m_cursorPos;
+        m_highlightPos = std::clamp(m_highlightPos, 0, n);
+        ScrollTo(m_cursorPos);
         ResetCursorBlink();
     }
+
+    void ChatScreen::SetCursorPosition(int pos) { MoveCursorTo(pos, false); }
 
     void ChatScreen::MoveCursor(int dir) { SetCursorPosition(m_cursorPos + dir); }
     void ChatScreen::MoveCursorToStart() { SetCursorPosition(0); }
     void ChatScreen::MoveCursorToEnd()   { SetCursorPosition(static_cast<int>(m_inputText.size())); }
 
+    // MC EditBox.getWordPosition(dir, from, stripSpaces = true).
+    int ChatScreen::WordPosition(int dir, int from) const {
+        const int length = static_cast<int>(m_inputText.size());
+        int result = from;
+        if (dir > 0) {
+            const size_t space = m_inputText.find(' ', static_cast<size_t>(result));
+            result = space == std::string::npos ? length : static_cast<int>(space);
+            while (result < length && m_inputText[static_cast<size_t>(result)] == ' ') ++result;
+        } else {
+            while (result > 0 && m_inputText[static_cast<size_t>(result - 1)] == ' ') --result;
+            while (result > 0 && m_inputText[static_cast<size_t>(result - 1)] != ' ') --result;
+        }
+        return result;
+    }
+
+    // MC EditBox.deleteText / deleteCharsToPos: a selection goes first;
+    // otherwise everything between the caret and `fromCursorTo`.
+    void ChatScreen::DeleteSelectionOr(int fromCursorTo) {
+        int start = std::min(m_cursorPos, m_highlightPos);
+        int end   = std::max(m_cursorPos, m_highlightPos);
+        if (start == end) {
+            const int to = std::clamp(fromCursorTo, 0, static_cast<int>(m_inputText.size()));
+            start = std::min(m_cursorPos, to);
+            end   = std::max(m_cursorPos, to);
+        }
+        if (start == end) return;
+        m_inputText.erase(static_cast<size_t>(start), static_cast<size_t>(end - start));
+        MoveCursorTo(start, false);
+    }
+
+    std::string ChatScreen::CopyText() const {
+        const int start = std::min(m_cursorPos, m_highlightPos);
+        const int end   = std::max(m_cursorPos, m_highlightPos);
+        if (start == end) return m_inputText;
+        return m_inputText.substr(static_cast<size_t>(start), static_cast<size_t>(end - start));
+    }
+
+    std::string ChatScreen::CutText() {
+        if (m_cursorPos == m_highlightPos) return {};
+        std::string cut = CopyText();
+        DeleteSelectionOr(m_cursorPos);
+        CloseSuggestions();
+        return cut;
+    }
+
+    int ChatScreen::IndexAtX(double guiX) const {
+        constexpr int kInputX = 4;
+        const int width = static_cast<int>(std::floor(guiX)) - kInputX;
+        if (width <= 0) return m_displayPos;
+        return m_displayPos + FitForward(m_displayPos, width);
+    }
+
+    bool ChatScreen::OnMouseClicked(double guiX, double guiY, bool shift) {
+        if (!m_open || guiY < m_inputBarY) return false;
+        MoveCursorTo(IndexAtX(guiX), shift);
+        CloseSuggestions();
+        return true;
+    }
+
+    void ChatScreen::OnMouseDragged(double guiX) {
+        if (!m_open) return;
+        MoveCursorTo(IndexAtX(guiX), true);
+    }
+
     void ChatScreen::InsertText(const std::string& text) {
         if (!m_open) return;
+        // MC EditBox.insertText: filtered (SharedConstants.filterText — line
+        // breaks and controls dropped), replacing the selection, cut at the
+        // length limit.
+        std::string filtered;
+        filtered.reserve(text.size());
         for (const char c : text) {
             const unsigned char u = static_cast<unsigned char>(c);
-            if (u == '\n' || u == '\r' || u == '\t') continue;
-            OnCharInput(u);
+            if (u >= 32 && u < 127) filtered += c;
         }
+        const int start = std::min(m_cursorPos, m_highlightPos);
+        const int end   = std::max(m_cursorPos, m_highlightPos);
+        const int room  = MAX_MESSAGE_LENGTH - (static_cast<int>(m_inputText.size()) - (end - start));
+        if (room < static_cast<int>(filtered.size())) filtered.resize(static_cast<size_t>(std::max(0, room)));
+        m_inputText.replace(static_cast<size_t>(start), static_cast<size_t>(end - start), filtered);
+        MoveCursorTo(start + static_cast<int>(filtered.size()), false);
+        // MC: typing closes the suggestion popup. The user types TAB again to
+        // re-open with the new word.
+        CloseSuggestions();
     }
 
     void ChatScreen::OnCharInput(unsigned int codepoint) {
         if (!m_open) return;
-        if (static_cast<int>(m_inputText.size()) >= MAX_MESSAGE_LENGTH) return;
-
-        // Only accept printable ASCII for now
-        if (codepoint >= 32 && codepoint < 127) {
-            // MC: EditBox.insertText splices at cursor and advances by length inserted.
-            m_inputText.insert(m_inputText.begin() + m_cursorPos, static_cast<char>(codepoint));
-            SetCursorPosition(m_cursorPos + 1);
-            // MC: typing closes the suggestion popup. The user types TAB
-            // again to re-open with the new word.
-            CloseSuggestions();
-        }
+        // Only printable ASCII for now.
+        if (codepoint >= 32 && codepoint < 127) InsertText(std::string(1, static_cast<char>(codepoint)));
     }
 
     // ── Cycle-in-place completion ───────────────────────────────────────────
@@ -206,8 +349,19 @@ namespace Render {
         SetCursorPosition(m_suggestionAnchor + static_cast<int>(sel.size()));
     }
 
-    bool ChatScreen::OnKeyDown(int glfwKey) {
+    bool ChatScreen::OnKeyDown(int glfwKey, int mods) {
         if (!m_open) return false;
+        const bool shift = (mods & GLFW_MOD_SHIFT) != 0;
+        // MC Screen.hasControlDown (Cmd on macOS, Ctrl elsewhere); Alt too,
+        // macOS's own word modifier.
+        const bool word  = (mods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER | GLFW_MOD_ALT)) != 0;
+
+        // Select all (MC EditBox: Screen.isSelectAll).
+        if (glfwKey == GLFW_KEY_A && (mods & (GLFW_MOD_CONTROL | GLFW_MOD_SUPER))) {
+            MoveCursorTo(static_cast<int>(m_inputText.size()), false);
+            m_highlightPos = 0;
+            return true;
+        }
 
         // TAB — first press opens the list AND fills in its first entry; each
         // further press walks down the list, replacing the filled-in word and
@@ -236,7 +390,8 @@ namespace Render {
                 // MC ChatScreen.keyPressed with closeOnSubmit = false: the
                 // line is sent, the box is emptied and stays up (the bed).
                 m_inputText.clear();
-                m_cursorPos = 0;
+                m_displayPos = 0;
+                MoveCursorTo(0, false);
                 CloseSuggestions();
             }
             return true;
@@ -251,29 +406,37 @@ namespace Render {
         }
 
         if (glfwKey == GLFW_KEY_BACKSPACE) {
-            // MC: EditBox.deleteText(-1) — remove the char before the cursor and step back.
-            if (m_cursorPos > 0) {
-                m_inputText.erase(m_inputText.begin() + (m_cursorPos - 1));
-                SetCursorPosition(m_cursorPos - 1);
-            }
+            // MC EditBox.deleteText(-1): the selection, else the character
+            // (or, with Ctrl/Cmd/Alt, the word) before the caret.
+            DeleteSelectionOr(word ? WordPosition(-1, m_cursorPos) : m_cursorPos - 1);
             CloseSuggestions();
             return true;
         }
 
         if (glfwKey == GLFW_KEY_DELETE) {
-            // MC: EditBox.deleteText(+1) — remove the char at the cursor.
-            if (m_cursorPos < static_cast<int>(m_inputText.size())) {
-                m_inputText.erase(m_inputText.begin() + m_cursorPos);
-                ResetCursorBlink();
-            }
+            // MC EditBox.deleteText(+1): the selection, else what follows.
+            DeleteSelectionOr(word ? WordPosition(+1, m_cursorPos) : m_cursorPos + 1);
             CloseSuggestions();
             return true;
         }
 
-        if (glfwKey == GLFW_KEY_LEFT)  { CloseSuggestions(); MoveCursor(-1); return true; }
-        if (glfwKey == GLFW_KEY_RIGHT) { CloseSuggestions(); MoveCursor(+1); return true; }
-        if (glfwKey == GLFW_KEY_HOME)  { CloseSuggestions(); MoveCursorToStart(); return true; }
-        if (glfwKey == GLFW_KEY_END)   { CloseSuggestions(); MoveCursorToEnd();   return true; }
+        // Caret moves (MC EditBox.keyPressed): Shift extends the selection;
+        // Ctrl/Cmd/Alt jump a word; Home/End (and Cmd+arrow on macOS) go to
+        // the ends. Each scrolls the line to keep the caret in view.
+        const bool lineEnd = (mods & GLFW_MOD_SUPER) != 0 && (mods & (GLFW_MOD_CONTROL | GLFW_MOD_ALT)) == 0;
+        if (glfwKey == GLFW_KEY_LEFT) {
+            CloseSuggestions();
+            MoveCursorTo(lineEnd ? 0 : word ? WordPosition(-1, m_cursorPos) : m_cursorPos - 1, shift);
+            return true;
+        }
+        if (glfwKey == GLFW_KEY_RIGHT) {
+            CloseSuggestions();
+            MoveCursorTo(lineEnd ? static_cast<int>(m_inputText.size())
+                                 : word ? WordPosition(+1, m_cursorPos) : m_cursorPos + 1, shift);
+            return true;
+        }
+        if (glfwKey == GLFW_KEY_HOME) { CloseSuggestions(); MoveCursorTo(0, shift); return true; }
+        if (glfwKey == GLFW_KEY_END)  { CloseSuggestions(); MoveCursorTo(static_cast<int>(m_inputText.size()), shift); return true; }
 
         if (glfwKey == GLFW_KEY_UP) {
             // MC: UP cycles suggestion selection when popup is open, else
@@ -286,6 +449,7 @@ namespace Render {
                     m_historyIndex--;
                 }
                 m_inputText = m_history[m_historyIndex];
+                m_displayPos = 0;
                 MoveCursorToEnd();
             }
             return true;
@@ -301,6 +465,7 @@ namespace Render {
                 } else {
                     m_inputText = m_history[m_historyIndex];
                 }
+                m_displayPos = 0;
                 MoveCursorToEnd();
             }
             return true;
@@ -334,28 +499,46 @@ namespace Render {
         const int inputX = 4;
         graphics.Fill(0, inputY, guiWidth, guiHeight, 0x80000000);
 
-        // Render the full input text (no trailing underscore — cursor is drawn separately)
+        // MC EditBox.renderWidget: only the window from displayPos that fits
+        // the box (font.plainSubstrByWidth), the selection highlighted, the
+        // caret relative to the window. The inner width is this frame's; a
+        // resize re-scrolls to keep the caret visible.
+        m_font = graphics.GetFontRenderer();
+        m_inputBarY = inputY;
+        const int innerWidth = std::max(16, guiWidth - inputX - 6);
+        if (innerWidth != m_innerWidth) {
+            m_innerWidth = innerWidth;
+            ScrollTo(m_cursorPos);
+        }
+        m_displayPos = std::clamp(m_displayPos, 0, static_cast<int>(m_inputText.size()));
+        const int shownLen = FitForward(m_displayPos, m_innerWidth);
+        const int shownEnd = m_displayPos + shownLen;
+        const std::string shown = m_inputText.substr(static_cast<size_t>(m_displayPos), static_cast<size_t>(shownLen));
         const int textY = inputY + 2;
-        graphics.DrawString(m_inputText, inputX, textY, 0xFFFFFFFF, true);
 
-        // Cursor — matches MC's EditBox.renderWidget (lines 411-458):
-        //   MC line 415:   drawX += font.width(text_before) + 1;       // +1 = inter-char gap
-        //   MC line 422-4: if insert (mid-text):  cursorX = drawX - 1; // bar drawn between glyphs
-        //                  else (at end of text): cursorX = drawX;     // underscore one gap past last char
-        //
-        // Effectively:
+        // Selection (MC renderHighlight), clipped to the shown window.
+        if (m_highlightPos != m_cursorPos) {
+            const int selStart = std::clamp(std::min(m_cursorPos, m_highlightPos), m_displayPos, shownEnd);
+            const int selEnd   = std::clamp(std::max(m_cursorPos, m_highlightPos), m_displayPos, shownEnd);
+            if (selEnd > selStart) {
+                const int x0 = inputX + (selStart > m_displayPos ? TextWidth(m_displayPos, selStart) + 1 : 0);
+                const int x1 = inputX + TextWidth(m_displayPos, selEnd) + 1;
+                graphics.Fill(x0 - 1, textY - 1, x1, textY + 1 + 9, 0xFF3050C8);
+            }
+        }
+        graphics.DrawString(shown, inputX, textY, 0xFFFFFFFF, true);
+
+        // Cursor — matches MC's EditBox.renderWidget (lines 411-458), measured
+        // from the window's start:
         //   - At end of text: underscore at  text_start + width(before) + 1
-        //   - Mid-text:       vertical bar at text_start + width(before) + 1 - 1 = + 0 above
-        //                     (which is what GetStringWidth(before) already gives us)
-        if (ShouldShowCursor()) {
-            std::string before = m_inputText.substr(0, m_cursorPos);
-            int beforeWidth = graphics.GetStringWidth(before);
+        //   - Mid-text:       vertical bar at text_start + width(before)
+        if (ShouldShowCursor() && m_cursorPos >= m_displayPos && m_cursorPos <= shownEnd) {
+            const int beforeWidth = m_cursorPos > m_displayPos ? TextWidth(m_displayPos, m_cursorPos) + 1 : 0;
             const bool atEnd = (m_cursorPos >= static_cast<int>(m_inputText.size()));
             if (atEnd) {
-                int underscoreX = inputX + beforeWidth + 1;
-                graphics.DrawString("_", underscoreX, textY, 0xFFFFFFFF, true);
+                graphics.DrawString("_", inputX + (beforeWidth > 0 ? beforeWidth : 1), textY, 0xFFFFFFFF, true);
             } else {
-                int barX = inputX + beforeWidth;
+                const int barX = inputX + std::max(0, beforeWidth - 1);
                 graphics.Fill(barX, textY - 1, barX + 1, textY + 1 + 9, 0xFFFFFFFF);
             }
         }
@@ -378,8 +561,9 @@ namespace Render {
         // X anchor: align the popup's left edge to the start of the word
         // being completed (MC's CommandSuggestions.render). That's:
         //   inputX + width(prefix-before-anchor)
-        const std::string before = m_inputText.substr(0, m_suggestionAnchor);
-        const int anchorX = inputX + graphics.GetStringWidth(before);
+        // The anchor's x in the SCROLLED line (left of the window: the box's
+        // left edge), the popup then kept on screen.
+        int anchorX = inputX + (m_suggestionAnchor > m_displayPos ? TextWidth(m_displayPos, m_suggestionAnchor) + 1 : 0);
 
         // Width: max suggestion width + 2px horizontal padding (MC uses 1
         // px padding either side, total 2 in interior).
@@ -387,6 +571,7 @@ namespace Render {
         for (const auto& s : m_suggestions) {
             maxW = std::max(maxW, graphics.GetStringWidth(s));
         }
+        anchorX = std::clamp(anchorX, inputX, std::max(inputX, graphics.GuiWidth() - maxW - 2));
         const int boxX0 = anchorX - 1;            // 1px left padding
         const int boxX1 = anchorX + maxW + 1;     // 1px right padding
 

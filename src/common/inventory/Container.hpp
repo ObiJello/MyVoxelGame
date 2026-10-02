@@ -36,7 +36,7 @@ namespace Game {
         // MC Container.getMaxStackSize(ItemStack): the container's ceiling
         // capped by the item's own.
         int GetMaxStackSize(const ItemStack& stack) const {
-            return std::min(GetMaxStackSize(), ItemRegistry::Get(stack.itemId).maxStackSize);
+            return std::min(GetMaxStackSize(), Game::GetMaxStackSize(stack));
         }
 
         // MC Container.canPlaceItem(slot, stack) — may this go here at all?
@@ -69,8 +69,9 @@ namespace Game {
 
         // MC Container.getMaxStackSize — the container's own ceiling, before
         // the per-item limit is applied. Slot::GetMaxStackSize(stack) takes the
-        // min of the two.
-        virtual int GetMaxStackSize() const { return 64; }
+        // min of the two. 99 (Item.ABSOLUTE_MAX_STACK_SIZE) as in MC, so a
+        // stack whose max_stack_size component is above 64 fills a slot.
+        virtual int GetMaxStackSize() const { return 99; }
 
         // MC Container.setChanged — "something in here was mutated". The
         // player inventory has nothing to do here (the per-tick container diff

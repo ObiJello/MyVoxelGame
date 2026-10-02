@@ -10,6 +10,7 @@
 // simply never wears anything. The server's per-tick container diff sends the
 // changed DAMAGE, or the emptied slot, like any other inventory change.
 #include "Item.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "IUsePlayer.hpp"
 #include "EntityLevel.hpp"
 #include "LivingEntity.hpp"
@@ -155,10 +156,13 @@ namespace Game {
 
     namespace {
 
-        // ItemStack.applyDamage.
+        // ItemStack.applyDamage. `player` is MC's `@Nullable ServerPlayer
+        // player`: when the damage is a server player's, the stack (before
+        // the change) and the new damage go to ITEM_DURABILITY_CHANGED.
         void ApplyDamage(ItemStack& stack, int newDamage,
-                         const std::function<void(const ItemStack&)>& onBreak) {
-            // (CriteriaTriggers.ITEM_DURABILITY_CHANGED — no advancements.)
+                         const std::function<void(const ItemStack&)>& onBreak,
+                         Server::ServerPlayer* player = nullptr) {
+            if (player) Server::CriteriaTriggers::ItemDurabilityChanged(*player, stack, newDamage);
             SetDamageValue(stack, newDamage);
             if (IsBrokenItem(stack)) {
                 const ItemStack broken = stack;
@@ -175,12 +179,19 @@ namespace Game {
             return random;
         }
 
+        // hurtAndBreak with MC's player argument (see ApplyDamage).
+        void HurtAndBreakBy(ItemStack& stack, int amount, JavaRandom& random, bool hasInfiniteMaterials,
+                            const std::function<void(const ItemStack& broken)>& onBreak,
+                            Server::ServerPlayer* player) {
+            const int newAmount = ProcessDurabilityChange(stack, amount, random, hasInfiniteMaterials);
+            if (newAmount != 0) ApplyDamage(stack, GetDamageValue(stack) + newAmount, onBreak, player);
+        }
+
     } // namespace
 
     void HurtAndBreak(ItemStack& stack, int amount, JavaRandom& random, bool hasInfiniteMaterials,
                       const std::function<void(const ItemStack& broken)>& onBreak) {
-        const int newAmount = ProcessDurabilityChange(stack, amount, random, hasInfiniteMaterials);
-        if (newAmount != 0) ApplyDamage(stack, GetDamageValue(stack) + newAmount, onBreak);
+        HurtAndBreakBy(stack, amount, random, hasInfiniteMaterials, onBreak, nullptr);
     }
 
     void HurtWithoutBreaking(ItemStack& stack, int amount, JavaRandom& random,
@@ -197,8 +208,9 @@ namespace Game {
         // Only a ServerPlayer is passed on (player != null) — its
         // hasInfiniteMaterials is creative.
         const bool infinite = owner.IsPlayer() && owner.IsCreative();
-        HurtAndBreak(stack, amount, level->Random(), infinite,
-                     [&owner, slot](const ItemStack& broken) { owner.OnEquippedItemBroken(broken, slot); });
+        HurtAndBreakBy(stack, amount, level->Random(), infinite,
+                       [&owner, slot](const ItemStack& broken) { owner.OnEquippedItemBroken(broken, slot); },
+                       Server::CriteriaTriggers::PlayerOf(&owner));
     }
 
     void HurtAndBreak(ItemStack& stack, int amount, ILevelWrite* level, IUsePlayer* player,
@@ -208,10 +220,11 @@ namespace Game {
         const bool infinite = player && player->isCreative();
         const EquipmentSlot slot = hand == 1 ? EquipmentSlot::OFFHAND : EquipmentSlot::MAINHAND;
         const bool wasEmpty = stack.IsEmpty();
-        HurtAndBreak(stack, amount, random ? *random : FallbackRandom(), infinite,
-                     [player, slot](const ItemStack& broken) {
-                         if (player) player->OnEquippedItemBroken(broken, slot);
-                     });
+        HurtAndBreakBy(stack, amount, random ? *random : FallbackRandom(), infinite,
+                       [player, slot](const ItemStack& broken) {
+                           if (player) player->OnEquippedItemBroken(broken, slot);
+                       },
+                       Server::CriteriaTriggers::PlayerOf(player));
         if (player && !wasEmpty) player->markSlotDirty(player->handSlotIndex(hand));
     }
 
@@ -221,11 +234,12 @@ namespace Game {
         if (!level || level->IsClientSide()) return stack;
         std::optional<ItemStack> broken;
         const bool infinite = owner.IsPlayer() && owner.IsCreative();
-        HurtAndBreak(stack, amount, level->Random(), infinite,
-                     [&](const ItemStack& b) {
-                         broken = b;
-                         owner.OnEquippedItemBroken(b, slot);
-                     });
+        HurtAndBreakBy(stack, amount, level->Random(), infinite,
+                       [&](const ItemStack& b) {
+                           broken = b;
+                           owner.OnEquippedItemBroken(b, slot);
+                       },
+                       Server::CriteriaTriggers::PlayerOf(&owner));
         if (!stack.IsEmpty() || !broken) return stack;
         // transmuteCopyIgnoreEmpty(newItem, 1): the new item with the broken
         // stack's component patch; a damageable result starts undamaged.
@@ -334,7 +348,11 @@ namespace Game {
                 // The sword's / mace's / trident's TOOL. The mace and trident
                 // have no mining rules (their createToolProperties is an empty
                 // rule list at speed 1.0), which a type-None tool at 1.0 is.
-                Tool tool = c.get(DataComponents::TOOL).value_or(Tool{});
+                // MaceItem / TridentItem.createToolProperties: Tool(List.of(),
+                // 1.0F, 2, false) — no rules, and no creative breaking.
+                const std::optional<Tool> existing = c.get(DataComponents::TOOL);
+                Tool tool = existing.value_or(Tool{});
+                if (!existing) tool.canDestroyBlocksInCreative = false;
                 tool.damagePerBlock = row.toolDamagePerBlock;
                 c.set(DataComponents::TOOL, tool);
             }

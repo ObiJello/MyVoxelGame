@@ -1,194 +1,103 @@
 // File: src/launcher/updater/GitHubAPI.cpp
 #include "GitHubAPI.hpp"
 #include "VersionInfo.hpp"
+#include "HttpSession.hpp"
 #include "launcher/LauncherConfig.hpp"
 #include "common/core/Log.hpp"
-#include <curl/curl.h>
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+#include <cstring>
 
 namespace Launcher {
-
-    static size_t WriteCallback(void* contents, size_t size, size_t nmemb, std::string* output) {
-        size_t totalSize = size * nmemb;
-        output->append(static_cast<char*>(contents), totalSize);
-        return totalSize;
-    }
 
     GitHubAPI::GitHubAPI(const std::string& owner, const std::string& repo)
         : m_owner(owner), m_repo(repo) {}
 
-    bool GitHubAPI::HttpGet(const std::string& url, std::string& outResponse) {
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            Log::Error("Failed to initialize curl");
-            return false;
-        }
-
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Accept: application/vnd.github.v3+json");
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, UserAgent);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outResponse);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-
-        CURLcode res = curl_easy_perform(curl);
-
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK) {
-            Log::Error("HTTP request failed: %s", curl_easy_strerror(res));
-            return false;
-        }
-
-        if (httpCode != 200) {
-            Log::Error("HTTP %ld from: %s", httpCode, url.c_str());
-            return false;
-        }
-
-        return true;
-    }
-
-    bool GitHubAPI::HttpGetWithLink(const std::string& url,
-                                    std::string& outBody,
-                                    std::string& outNextUrl) {
-        outNextUrl.clear();
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            Log::Error("Failed to initialize curl");
-            return false;
-        }
-
-        struct curl_slist* headers = nullptr;
-        headers = curl_slist_append(headers, "Accept: application/vnd.github.v3+json");
-
-        std::string headerBuf;
-
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_USERAGENT, UserAgent);
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outBody);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, WriteCallback);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, &headerBuf);
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
-        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-
-        CURLcode res = curl_easy_perform(curl);
-        long httpCode = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
-
-        curl_slist_free_all(headers);
-        curl_easy_cleanup(curl);
-
-        if (res != CURLE_OK) {
-            Log::Error("HTTP request failed: %s", curl_easy_strerror(res));
-            return false;
-        }
-        if (httpCode != 200) {
-            Log::Error("HTTP %ld from: %s", httpCode, url.c_str());
-            return false;
-        }
-
-        outNextUrl = ParseLinkNext(headerBuf);
-        return true;
-    }
-
-    // GitHub Link header looks like:
+    // GitHub's Link header looks like:
     //   Link: <https://api.github.com/.../releases?per_page=100&page=2>; rel="next",
-    //         <https://api.github.com/.../releases?per_page=100&page=4>; rel="last"
-    // Find the URL whose rel parameter is "next" (case-insensitive).
-    std::string GitHubAPI::ParseLinkNext(const std::string& headerBlock) {
-        // Locate the "Link:" header line (case-insensitive).
-        auto toLowerCopy = [](const std::string& s) {
-            std::string out = s;
-            std::transform(out.begin(), out.end(), out.begin(),
-                           [](unsigned char c) { return std::tolower(c); });
-            return out;
-        };
-        const std::string lower = toLowerCopy(headerBlock);
-        size_t lpos = lower.find("link:");
-        if (lpos == std::string::npos) return "";
-
-        size_t lineEnd = headerBlock.find("\r\n", lpos);
-        if (lineEnd == std::string::npos) lineEnd = headerBlock.size();
-        const std::string line = headerBlock.substr(lpos, lineEnd - lpos);
-
-        // Each comma-separated piece: `<URL>; rel="something"`. Find the one
-        // tagged rel="next" and pull the URL out of its angle brackets.
-        size_t pos = 0;
-        while (pos < line.size()) {
-            size_t lt = line.find('<', pos);
-            if (lt == std::string::npos) break;
-            size_t gt = line.find('>', lt + 1);
-            if (gt == std::string::npos) break;
-            size_t semi = line.find(';', gt);
-            size_t comma = line.find(',', gt);
-            // `comma` is either npos (no further entries) or a valid position
-            // within `line`, so it's always <= line.size() — no clamp needed.
-            // Using std::min here would collide with the Windows `min` macro
-            // unless we wrap it in extra parens; just inline the conditional.
-            size_t segEnd = (comma == std::string::npos) ? line.size() : comma;
-            const std::string segParams = line.substr(gt + 1,
-                                                      (segEnd > gt + 1) ? (segEnd - gt - 1) : 0);
-            const std::string segLower = toLowerCopy(segParams);
-            if (segLower.find("rel=\"next\"") != std::string::npos) {
-                return line.substr(lt + 1, gt - lt - 1);
-            }
-            pos = (comma == std::string::npos) ? line.size() : (comma + 1);
-            (void)semi; // unused — segParams already starts after '>'
+    //         <https://api.github.com/.../releases?per_page=100&page=3>; rel="last"
+    int GitHubAPI::ParseLastPage(const std::string& headerBlock) {
+        std::string lower = headerBlock;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+        const size_t link = lower.find("\nlink:");
+        if (link == std::string::npos) return 1;
+        size_t lineEnd = lower.find('\n', link + 1);
+        if (lineEnd == std::string::npos) lineEnd = lower.size();
+        const size_t rel = lower.find("rel=\"last\"", link);
+        if (rel == std::string::npos || rel > lineEnd) return 1;
+        const size_t open = lower.rfind('<', rel);
+        const size_t close = lower.find('>', open);
+        if (open == std::string::npos || open < link || close == std::string::npos || close > rel) return 1;
+        const std::string url = lower.substr(open + 1, close - open - 1);
+        // "page=" as its own parameter, not the tail of "per_page=".
+        for (const char* key : {"?page=", "&page="}) {
+            const size_t at = url.find(key);
+            if (at != std::string::npos) return std::max(1, std::atoi(url.c_str() + at + 6));
         }
-        return "";
+        return 1;
     }
 
-    // Walk every page until exhausted or MAX_PAGES hit. Each page can hold up
-    // to 100 releases (GitHub's max), so MAX_PAGES=10 covers 1000 releases —
-    // many years of active development. The semantic-version comparison in the
-    // caller picks the highest match across the union of all pages, so the
-    // algorithm is correct regardless of GitHub's `created_at` ordering.
+    // The release list is newest-first, but the highest version of each tag
+    // family is semver-picked across every page (FetchLatest*), so all pages are
+    // read: the repo holds launcher and per-platform game releases, and the one
+    // wanted can sit on page 2+.
     bool GitHubAPI::FetchAllReleases(std::vector<nlohmann::json>& outReleases) {
-        outReleases.clear();
+        if (m_releasesFetched) {
+            outReleases = m_releases;
+            return m_releasesOk;
+        }
+        m_releasesFetched = true;
         constexpr int MAX_PAGES = 10;
+        const auto start = std::chrono::steady_clock::now();
 
-        std::string url = std::string(GitHubAPIBase) + "/repos/" + m_owner + "/" + m_repo
-                        + "/releases?per_page=100";
+        const std::string base = std::string(GitHubAPIBase) + "/repos/" + m_owner + "/" + m_repo
+                               + "/releases?per_page=100";
+        auto pageRequest = [&](int page) {
+            Http::Request r;
+            r.url = base + "&page=" + std::to_string(page);
+            r.headers = {"Accept: application/vnd.github.v3+json"};
+            r.acceptCompressed = true;
+            return r;
+        };
 
-        for (int page = 0; page < MAX_PAGES; ++page) {
-            std::string body;
-            std::string nextUrl;
-            if (!HttpGetWithLink(url, body, nextUrl)) {
-                // Network failure: return what we already have. Empty result =>
-                // caller treats as "no releases found"; partial result is still
-                // usable since we semver-pick the best match downstream.
-                return !outReleases.empty();
-            }
-            try {
-                auto json = nlohmann::json::parse(body);
-                if (!json.is_array()) {
-                    Log::Error("Expected array of releases on page %d", page + 1);
-                    break;
-                }
-                for (const auto& r : json) outReleases.push_back(r);
-            } catch (const nlohmann::json::exception& e) {
-                Log::Error("Failed to parse releases JSON on page %d: %s", page + 1, e.what());
-                break;
-            }
-            if (nextUrl.empty()) break; // last page
-            url = nextUrl;
+        Http::Session session;
+        std::vector<Http::Request> pages;
+        pages.push_back(pageRequest(1));
+        pages[0].captureHeaders = true;
+        session.Fetch({&pages[0]});
+        if (!pages[0].Ok()) {
+            Log::Error("Release list request failed: HTTP %ld %s", pages[0].status, pages[0].error.c_str());
+            return false;
+        }
+        const int lastPage = std::min(ParseLastPage(pages[0].responseHeaders), MAX_PAGES);
+        for (int page = 2; page <= lastPage; ++page) pages.push_back(pageRequest(page));
+        if (pages.size() > 1) {
+            std::vector<Http::Request*> rest;
+            for (size_t i = 1; i < pages.size(); ++i) rest.push_back(&pages[i]);
+            session.Fetch(rest);
         }
 
-        Log::Info("Fetched %zu releases across pagination", outReleases.size());
-        return !outReleases.empty();
+        for (size_t i = 0; i < pages.size(); ++i) {
+            if (!pages[i].Ok()) continue;   // a missing page: semver-pick across the rest
+            try {
+                auto json = nlohmann::json::parse(pages[i].body.begin(), pages[i].body.end());
+                if (!json.is_array()) {
+                    Log::Error("Expected array of releases on page %zu", i + 1);
+                    continue;
+                }
+                for (auto& r : json) m_releases.push_back(std::move(r));
+            } catch (const nlohmann::json::exception& e) {
+                Log::Error("Failed to parse releases JSON on page %zu: %s", i + 1, e.what());
+            }
+        }
+
+        m_releasesOk = !m_releases.empty();
+        Log::Info("Fetched %zu releases across %zu pages in %.0f ms", m_releases.size(), pages.size(),
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        outReleases = m_releases;
+        return m_releasesOk;
     }
 
     bool GitHubAPI::ParseRelease(const nlohmann::json& json, ReleaseInfo& outInfo) {
@@ -322,9 +231,29 @@ namespace Launcher {
             std::transform(s.begin(), s.end(), s.begin(), ::tolower);
             return s;
         };
+        auto endsWith = [](const std::string& s, const char* suffix) {
+            const size_t n = std::strlen(suffix);
+            return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
+        };
+
+        // The release's binary patch, if it has one. Its name carries no platform
+        // tag (the release itself is per-platform), so it never matches below.
+        info.hasPatchAsset = false;
+        for (const auto& asset : info.assets) {
+            if (endsWith(toLower(asset.name), ".obpatch")) {
+                info.patchAsset = asset;
+                info.hasPatchAsset = true;
+                break;
+            }
+        }
+        // Only zips are installable; anything else on a release is not the game.
+        std::vector<ReleaseAsset> zips;
+        for (const auto& asset : info.assets) {
+            if (endsWith(toLower(asset.name), ".zip")) zips.push_back(asset);
+        }
 
         // Try exact platform+arch match
-        for (const auto& asset : info.assets) {
+        for (const auto& asset : zips) {
             std::string nameLower = toLower(asset.name);
             if (nameLower.find(toLower(primaryTag)) != std::string::npos) {
                 info.platformAsset = asset;
@@ -336,7 +265,7 @@ namespace Launcher {
 
         // Try universal
         std::string universalTag = fallbackTag + "-universal";
-        for (const auto& asset : info.assets) {
+        for (const auto& asset : zips) {
             std::string nameLower = toLower(asset.name);
             if (nameLower.find(toLower(universalTag)) != std::string::npos) {
                 info.platformAsset = asset;
@@ -347,7 +276,7 @@ namespace Launcher {
         }
 
         // Try generic platform fallback
-        for (const auto& asset : info.assets) {
+        for (const auto& asset : zips) {
             std::string nameLower = toLower(asset.name);
             if (nameLower.find(toLower(fallbackTag)) != std::string::npos) {
                 info.platformAsset = asset;

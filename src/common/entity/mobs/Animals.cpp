@@ -1,6 +1,9 @@
 // File: src/common/entity/mobs/Animals.cpp
 #include "common/entity/mobs/Animals.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
+#include "common/entity/mobs/FarmSoundVariants.hpp"
 #include "common/core/Log.hpp"
+#include "common/text/Language.hpp"
 #include "common/entity/mobs/Monsters.hpp"   // ZombifiedPiglin (Pig::ThunderHit), Skeleton (the trap)
 #include "common/entity/LightningBolt.hpp"
 #include "common/world/enchantment/EnchantmentDefinitions.hpp"
@@ -124,7 +127,7 @@ namespace Game {
         return Animal::MobInteract(player, held);
     }
 
-    void Mooshroom::Shear() {
+    void Mooshroom::Shear(SoundSource soundSource) {
         if (!m_level) return;
         // MC MushroomCow.shear: convertTo(COW), then the SHEAR_MOOSHROOM
         // loot table — five mushrooms, each popped a metre up as its OWN
@@ -139,9 +142,8 @@ namespace Game {
         EntityLevel* level = m_level;
         const glm::dvec3 dropPos = position + glm::dvec3(0.0, 1.0, 0.0);
         const glm::dvec3 midBody = position + glm::dvec3(0.0, static_cast<double>(GetBbHeight()) * 0.5, 0.0);
-        // MC shear: level.playSound(null, this, MOOSHROOM_SHEAR, source, 1, 1)
-        // — PLAYERS from a player's shears.
-        level->PlaySoundFromEntity(nullptr, *this, SoundEvents::MOOSHROOM_SHEAR, SoundSource::Players, 1.0f, 1.0f);
+        // MC shear: level.playSound(null, this, MOOSHROOM_SHEAR, source, 1, 1).
+        level->PlaySoundFromEntity(nullptr, *this, SoundEvents::MOOSHROOM_SHEAR, soundSource, 1.0f, 1.0f);
         if (ConvertTo(std::make_unique<Cow>(level))) {
             // The EXPLOSION poof at the swap (sendParticles, 1, at getY(0.5)).
             level->SendParticles(ParticleOptions(ParticleKind::Explosion), false, false, midBody.x, midBody.y,
@@ -450,19 +452,84 @@ namespace Game {
     std::shared_ptr<SpawnGroupData>
     Cow::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
         SetVariant(SpawnVariantFor(*this, m_level));
+        // CowSoundVariants.pickRandomSoundVariant: registry.getRandom.
+        if (m_level) {
+            m_soundVariant = static_cast<uint8_t>(m_level->Random().NextInt(FarmSoundVariants::Count(FarmSoundVariants::Mob::Cow)));
+        }
         return Animal::FinalizeSpawn(reason, std::move(groupData));
     }
 
     std::shared_ptr<SpawnGroupData>
     Pig::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
         SetVariant(SpawnVariantFor(*this, m_level));
+        // PigSoundVariants.pickRandomSoundVariant: registry.getRandom.
+        if (m_level) {
+            m_soundVariant = static_cast<uint8_t>(m_level->Random().NextInt(FarmSoundVariants::Count(FarmSoundVariants::Mob::Pig)));
+        }
         return Animal::FinalizeSpawn(reason, std::move(groupData));
     }
 
     std::shared_ptr<SpawnGroupData>
     Chicken::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
         SetVariant(SpawnVariantFor(*this, m_level));
+        // ChickenSoundVariants.pickRandomSoundVariant: registry.getRandom.
+        if (m_level) {
+            m_soundVariant = static_cast<uint8_t>(m_level->Random().NextInt(FarmSoundVariants::Count(FarmSoundVariants::Mob::Chicken)));
+        }
         return Animal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    // ── The farm animals' sound variants (FarmSoundVariants.hpp) ─────────
+    //
+    // Pig / Chicken: the variant's adult set, the shared baby set for a
+    // baby. Cow: no baby set — a moody calf moos moody. Classic (and every
+    // baby's) sounds are the type's own (EntitySounds).
+
+    const char* Pig::GetAmbientSound() const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetAmbientSound();
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_PIG_BIG_AMBIENT : SoundEvents::ENTITY_PIG_MINI_AMBIENT;
+    }
+    const char* Pig::GetHurtSound(MobDamageSource source) const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetHurtSound(source);
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_PIG_BIG_HURT : SoundEvents::ENTITY_PIG_MINI_HURT;
+    }
+    const char* Pig::GetDeathSound() const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetDeathSound();
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_PIG_BIG_DEATH : SoundEvents::ENTITY_PIG_MINI_DEATH;
+    }
+    void Pig::PlayEatingSound() {
+        // MC Pig.playEatingSound: makeSound(the set's eat sound).
+        if (IsBaby()) { MakeSound(SoundEvents::PIG_EAT_BABY); return; }
+        MakeSound(m_soundVariant == 1 ? SoundEvents::ENTITY_PIG_BIG_EAT
+                : m_soundVariant == 2 ? SoundEvents::ENTITY_PIG_MINI_EAT : SoundEvents::ENTITY_PIG_EAT);
+    }
+
+    const char* Cow::GetAmbientSound() const {
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_COW_MOODY_AMBIENT : Animal::GetAmbientSound();
+    }
+    const char* Cow::GetHurtSound(MobDamageSource source) const {
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_COW_MOODY_HURT : Animal::GetHurtSound(source);
+    }
+    const char* Cow::GetDeathSound() const {
+        return m_soundVariant == 1 ? SoundEvents::ENTITY_COW_MOODY_DEATH : Animal::GetDeathSound();
+    }
+    void Cow::PlayStepSound(const glm::ivec3& pos, BlockState state) {
+        // MC Cow.playStepSound: playSound(the set's step sound, 0.15, 1).
+        if (m_soundVariant == 1) { PlaySound(SoundEvents::ENTITY_COW_MOODY_STEP, 0.15f, 1.0f); return; }
+        Animal::PlayStepSound(pos, state);
+    }
+
+    const char* Chicken::GetAmbientSound() const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetAmbientSound();
+        return SoundEvents::ENTITY_CHICKEN_PICKY_AMBIENT;
+    }
+    const char* Chicken::GetHurtSound(MobDamageSource source) const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetHurtSound(source);
+        return SoundEvents::ENTITY_CHICKEN_PICKY_HURT;
+    }
+    const char* Chicken::GetDeathSound() const {
+        if (IsBaby() || m_soundVariant == 0) return Animal::GetDeathSound();
+        return SoundEvents::ENTITY_CHICKEN_PICKY_DEATH;
     }
 
     std::shared_ptr<SpawnGroupData>
@@ -504,7 +571,7 @@ namespace Game {
         return IsAlive() && !IsSheared() && !IsBaby();
     }
 
-    void Sheep::Shear() {
+    void Sheep::Shear(SoundSource soundSource) {
         if (!m_level) return;
 
         // MC data/minecraft/loot_table/shearing/sheep/<color>.json — one pool,
@@ -516,7 +583,7 @@ namespace Game {
         // their own a moment later, which is exactly what vanilla looks like.
         // MC Sheep.shear: level.playSound(null, this, SHEEP_SHEAR, source,
         // 1, 1) — PLAYERS from a player's shears.
-        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SHEEP_SHEAR, SoundSource::Players, 1.0f, 1.0f);
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::SHEEP_SHEAR, soundSource, 1.0f, 1.0f);
         JavaRandom& rng = m_level->Random();
         const int rolls = 1 + rng.NextInt(3);
         const uint32_t wool = WoolItemForColor(GetColor());
@@ -1178,10 +1245,128 @@ namespace Game {
                itemId == DandelionItem();
     }
 
+    namespace {
+        struct RabbitGroupData : SpawnGroupData {
+            Rabbit::Variant variant;
+            explicit RabbitGroupData(Rabbit::Variant v) : variant(v) {}
+        };
+
+        // MC Rabbit.getRandomRabbitVariant: #spawns_white_rabbits (80%
+        // white, else white-splotched), #spawns_gold_rabbits (gold), else
+        // brown 50% / salt 40% / black 10%. The two biome tags as the data
+        // pack lists them.
+        Rabbit::Variant RandomRabbitVariant(const Mob& mob, EntityLevel* level) {
+            if (!level) return Rabbit::Variant::Brown;
+            const int roll = level->Random().NextInt(100);
+            std::string_view biome;
+            if (const IBlockAccess* blocks = level->Blocks()) {
+                const glm::ivec3 p = mob.BlockPosition();
+                biome = BiomeRegistry::Get(blocks->GetBiome(p.x, p.y, p.z)).name;
+            }
+            if (biome.rfind("minecraft:", 0) == 0) biome.remove_prefix(10);
+            static constexpr std::string_view kWhite[] = {"snowy_plains", "ice_spikes", "frozen_ocean", "snowy_taiga",
+                                                          "frozen_river", "snowy_beach", "frozen_peaks", "jagged_peaks",
+                                                          "snowy_slopes", "grove"};
+            if (std::find(std::begin(kWhite), std::end(kWhite), biome) != std::end(kWhite)) {
+                return roll < 80 ? Rabbit::Variant::White : Rabbit::Variant::WhiteSplotched;
+            }
+            if (biome == "desert") return Rabbit::Variant::Gold;
+            return roll < 50 ? Rabbit::Variant::Brown : (roll < 90 ? Rabbit::Variant::Salt : Rabbit::Variant::Black);
+        }
+    }
+
+    const char* Rabbit::VariantName(Variant v) {
+        switch (v) {
+            case Variant::Brown:          return "brown";
+            case Variant::White:          return "white";
+            case Variant::Black:          return "black";
+            case Variant::WhiteSplotched: return "white_splotched";
+            case Variant::Gold:           return "gold";
+            case Variant::Salt:           return "salt";
+            case Variant::Evil:           return "evil";
+        }
+        return "brown";
+    }
+
+    void Rabbit::SetVariant(Variant v) {
+        if (v == Variant::Evil) {
+            // MC setVariant(EVIL): armour 8, MeleeAttackGoal(1.4, true) at 4,
+            // HurtByTargetGoal(alert others) at 1, NearestAttackableTarget
+            // players and wolves at 2, +5 attack damage, the name.
+            m_attributes.SetBaseValue(Attribute::Armor, 8.0);
+            if (!m_evilGoalsAdded) {
+                m_evilGoalsAdded = true;
+                m_goalSelector.AddGoal(4, std::make_unique<MeleeAttackGoal>(this, 1.4, true));
+                m_targetSelector.AddGoal(1, [this] {
+                    auto goal = std::make_unique<HurtByTargetGoal>(this);
+                    goal->SetAlertOthers();
+                    return goal;
+                }());
+                m_targetSelector.AddGoal(2, std::make_unique<NearestAttackableTargetGoal>(this, true));
+                static constexpr EntityTypeId kWolf[] = { EntityTypeId::Wolf };
+                m_targetSelector.AddGoal(2, std::make_unique<NearestAttackableTargetGoal>(this, kWolf, 1, true));
+            }
+            m_attributes.RemoveModifier(Attribute::AttackDamage, ModifierId::RabbitEvilAttackPower);
+            m_attributes.AddModifier(Attribute::AttackDamage,
+                                     AttributeModifier{static_cast<uint32_t>(ModifierId::RabbitEvilAttackPower), 5.0,
+                                                       AttributeOperation::AddValue});
+            if (!HasCustomName()) {
+                SetCustomName(Language::GetOrDefault("entity.minecraft.killer_bunny", "The Killer Bunny"));
+            }
+        } else {
+            m_attributes.RemoveModifier(Attribute::AttackDamage, ModifierId::RabbitEvilAttackPower);
+        }
+        m_variant = v;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Rabbit::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // MC finalizeSpawn: the biome's roll, or the group's.
+        Variant variant = RandomRabbitVariant(*this, m_level);
+        if (const auto* group = dynamic_cast<const RabbitGroupData*>(groupData.get())) {
+            variant = group->variant;
+        } else {
+            groupData = std::make_shared<RabbitGroupData>(variant);
+        }
+        SetVariant(variant);
+        return Animal::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void Rabbit::SpawnChildFromBreeding(Animal& partner) {
+        if (const auto* other = dynamic_cast<const Rabbit*>(&partner)) {
+            m_breedPartnerVariant = static_cast<int>(other->GetVariant());
+        }
+        Animal::SpawnChildFromBreeding(partner);
+        m_breedPartnerVariant = -1;
+    }
+
     std::unique_ptr<Animal> Rabbit::CreateBaby() {
-        // MC getBreedOffspring rolls the baby's variant — the variant system
-        // is not ported, so every rabbit is brown.
-        return std::make_unique<Rabbit>(m_level);
+        // MC getBreedOffspring: the biome's roll; 19 in 20 a parent's
+        // variant instead (the partner's or this one's, evenly).
+        auto baby = std::make_unique<Rabbit>(m_level);
+        Variant variant = RandomRabbitVariant(*this, m_level);
+        if (m_level && m_level->Random().NextInt(20) != 0) {
+            if (m_breedPartnerVariant >= 0 && m_level->Random().NextBool()) {
+                variant = static_cast<Variant>(m_breedPartnerVariant);
+            } else {
+                variant = m_variant;
+            }
+        }
+        baby->SetVariant(variant);
+        return baby;
+    }
+
+    SoundSource Rabbit::GetSoundSource() const {
+        return m_variant == Variant::Evil ? SoundSource::Hostile : SoundSource::Neutral;
+    }
+
+    bool Rabbit::DoHurtTarget(Entity& target) {
+        // MC Rabbit.playAttackSound: the killer bunny's bite.
+        if (m_variant == Variant::Evil && m_level) {
+            JavaRandom& rng = m_level->Random();
+            PlaySound(SoundEvents::RABBIT_ATTACK, 1.0f, (rng.NextFloat() - rng.NextFloat()) * 0.2f + 1.0f);
+        }
+        return Animal::DoHurtTarget(target);
     }
 
     void Rabbit::RegisterGoals() {
@@ -1292,8 +1477,8 @@ namespace Game {
     }
 
     void Rabbit::CustomServerAiStep() {
-        // MC Rabbit.customServerAiStep — the hop planner, verbatim minus the
-        // EVIL-variant jump-at-target block (the variant system is skipped).
+        // MC Rabbit.customServerAiStep — the hop planner, the killer bunny's
+        // jump at its target included.
         if (m_jumpDelayTicks > 0) {
             --m_jumpDelayTicks;
         }
@@ -1309,6 +1494,18 @@ namespace Game {
             if (!m_wasOnGround) {
                 SetJumping(false);
                 CheckLandingDelay();
+            }
+
+            // The killer bunny leaps at a target within four blocks.
+            if (m_variant == Variant::Evil && m_jumpDelayTicks == 0) {
+                LivingEntity* target = GetTarget();
+                if (target && DistanceToSqr(*target) < 16.0) {
+                    FacePoint(target->position.x, target->position.z);
+                    m_moveControl->SetWantedPosition(target->position.x, target->position.y, target->position.z,
+                                                     m_moveControl->GetSpeedModifier());
+                    StartJumping();
+                    m_wasOnGround = true;
+                }
             }
 
             auto& jumpControl = static_cast<RabbitJumpControl&>(GetJumpControl());
@@ -1779,7 +1976,52 @@ namespace Game {
             m_level->BroadcastEntityEvent(*this, 8);
         }
 
+        if (m_healLoadedAnger) HealLoadedTameAnger();
         UpdatePersistentAnger(/*stayAngryIfTargetPresent=*/true);
+    }
+
+    void Wolf::HealLoadedTameAnger() {
+        // A tamed wolf in MC only ever targets through the owner goals,
+        // HurtByTargetGoal, the anger-gated player hunt and the skeleton
+        // goal; sheep/rabbit/fox (and beached baby turtles) are
+        // NonTameRandomTargetGoal's alone. A tamed wolf that starts life here
+        // holding such a grudge was saved in the broken state.
+        // (An owner-ordered hunt of a sheep saved mid-fight is dropped too —
+        // the owner hits it again and the wolf rejoins.)
+        const auto isWildPrey = [](const Entity& e) {
+            return IsPrey(e.GetType()) || e.GetType() == EntityTypeId::Turtle;
+        };
+
+        if (!IsTame()) { m_healLoadedAnger = false; return; }
+
+        // Taken on the first step, before UpdatePersistentAnger can turn a
+        // target this session's goals chose into a grudge: what is held here
+        // is the saved one. (The target itself is not saved — only the
+        // grudge — so a freshly chosen target is this session's business.)
+        if (!m_healAngerUuidTaken) {
+            m_healAngerUuidTaken = true;
+            m_healAngerUuid = AngryAtRef().GetUuid();
+        }
+
+        // The grudge ended, or was replaced by one this session started —
+        // nothing left that came from the save.
+        if (AngryAtRef().Empty() || AngryAtRef().GetUuid() != m_healAngerUuid) {
+            m_healLoadedAnger = false;
+            return;
+        }
+
+        // Resolve the saved grudge; an entity not loaded yet (the sheep's
+        // chunk still streaming in) is retried next step. One that never
+        // loads simply runs out with the anger window.
+        LivingEntity* angryAt = GetPersistentAngerTarget();
+        if (!angryAt) return;
+        if (isWildPrey(*angryAt)) {
+            // MC stopBeingAngry: grudge, target, last attacker and the anger
+            // window all go — IsAngry() turns false, so the anim byte's
+            // angry bit (client tail/texture) clears on the next sync.
+            StopBeingAngry();
+        }
+        m_healLoadedAnger = false;
     }
 
     void Wolf::Tick() {
@@ -1987,7 +2229,7 @@ namespace Game {
                 return UseResult::Success;
             }
 
-            const int dye = DyeColorOfItem(held.itemId);
+            const int dye = DyeColorOf(held);
             if (dye < 0 || !IsOwnedBy(player)) {
                 // MC isEquippableInSlot(stack, BODY): wolf armor is the one
                 // item whose EQUIPPABLE is BODY with the wolf allowed.
@@ -2122,9 +2364,10 @@ namespace Game {
             if (IsWearingBodyArmor() &&
                 (source == MobDamageSource::Void || source == MobDamageSource::Cramming ||
                  source == MobDamageSource::Drown)) {
-                m_attributes.RemoveModifier(Attribute::Armor, ModifierId::BodyArmorEquipment);
+                SwapEquipmentModifiers(m_attributes, EquipmentSlot::BODY, m_bodyArmorModifiersFrom, ItemStack{});
+                m_bodyArmorModifiersFrom = ItemStack{};
                 GenericAnimal::ActuallyHurt(source, amount, attacker);
-                SetBodyArmorItem(m_bodyArmor);   // re-applies the modifier
+                SetBodyArmorItem(m_bodyArmor);   // re-applies the modifiers
                 return;
             }
             GenericAnimal::ActuallyHurt(source, amount, attacker);
@@ -2163,15 +2406,8 @@ namespace Game {
         // MC LivingEntity.collectEquipmentChanges: the BODY slot's item
         // attribute modifiers ("When equipped: +11 Armor") come and go with
         // the piece. Server-side state; the client never reads armour.
-        m_attributes.RemoveModifier(Attribute::Armor, ModifierId::BodyArmorEquipment);
-        if (m_bodyArmor.IsEmpty()) return;
-        if (const ItemArmorRow* row = GetItemArmorAttributes(m_bodyArmor.itemId);
-            row && row->slot == ArmorSlotGroup::Body && row->armor != 0.0f) {
-            m_attributes.AddModifier(Attribute::Armor,
-                AttributeModifier{ static_cast<uint32_t>(ModifierId::BodyArmorEquipment),
-                                   static_cast<double>(row->armor),
-                                   AttributeOperation::AddValue });
-        }
+        SwapEquipmentModifiers(m_attributes, EquipmentSlot::BODY, m_bodyArmorModifiersFrom, m_bodyArmor);
+        m_bodyArmorModifiersFrom = m_bodyArmor;
     }
 
     ItemStack* Wolf::EquipmentInSlot(EquipmentSlot slot) {
@@ -3445,10 +3681,15 @@ namespace Game {
 
     void Turtle::SpawnChildFromBreeding(Animal& partner) {
         // MC TurtleBreedGoal.breed: no baby spawns — the goal's own turtle
-        // becomes gravid and both parents cool down. (The BRED_ANIMALS
-        // advancement rides a system that does not exist.)
+        // becomes gravid and both parents cool down; the love cause gets
+        // BRED_ANIMALS with no child.
         const int32_t feeder = GetLoveCauseId() != -1 ? GetLoveCauseId()
                                                       : partner.GetLoveCauseId();
+        if (m_level && !m_level->IsClientSide() && feeder != -1) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(m_level->ResolveEntityById(feeder))) {
+                Server::CriteriaTriggers::BredAnimals(*player, *this, partner, nullptr);
+            }
+        }
         SetHasEgg(true);
         SetAge(kParentAgeAfterBreeding);
         partner.SetAge(kParentAgeAfterBreeding);
@@ -3610,6 +3851,13 @@ namespace Game {
         partner.SetAge(kParentAgeAfterBreeding);
         ResetLove();
         partner.ResetLove();
+
+        // finalizeSpawnChildFromBreeding: BRED_ANIMALS for the love cause.
+        if (m_level && !m_level->IsClientSide() && feeder != -1) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(m_level->ResolveEntityById(feeder))) {
+                Server::CriteriaTriggers::BredAnimals(*player, *this, partner, baby.get());
+            }
+        }
 
         if (m_level) m_level->AddFreshEntity(std::move(baby));
 
@@ -4191,7 +4439,7 @@ namespace Game {
 
         if (IsTame()) {
             if (IsOwnedBy(player)) {
-                const int dye = DyeColorOfItem(held.itemId);
+                const int dye = DyeColorOf(held);
                 if (dye >= 0) {
                     // MC ItemTags.CAT_COLLAR_DYES (= #dyes): a new colour
                     // recolours the collar; the same colour falls through to
@@ -4331,7 +4579,8 @@ namespace Game {
 
         if ((IsLying() || IsRelaxStateOne()) && tickCount % 5 == 0 && m_level) {
             JavaRandom& rng = m_level->Random();
-            PlaySound(IsBaby() ? SoundEvents::CAT_PURR_BABY : SoundEvents::ENTITY_CAT_PURR,
+            PlaySound(IsBaby() ? SoundEvents::CAT_PURR_BABY
+                      : m_soundVariant == 1 ? SoundEvents::ENTITY_CAT_ROYAL_PURR : SoundEvents::ENTITY_CAT_PURR,
                       0.6f + 0.4f * (rng.NextFloat() - rng.NextFloat()), 1.0f);
         }
 
@@ -4354,23 +4603,43 @@ namespace Game {
     }
 
     const char* Cat::GetAmbientSound() const {
-        // MC Cat.getAmbientSound off the classic sound set (the sound-variant
-        // registry is not modelled).
+        // MC Cat.getAmbientSound off the sound set (CatSoundVariant: classic
+        // or royal for adults; babies share the baby set).
         const bool baby = IsBaby();
-        if (!IsTame()) return baby ? SoundEvents::CAT_STRAY_AMBIENT_BABY : SoundEvents::ENTITY_CAT_STRAY_AMBIENT;
-        if (IsInLove()) return baby ? SoundEvents::CAT_PURR_BABY : SoundEvents::ENTITY_CAT_PURR;
-        if (m_level && m_level->Random().NextInt(4) == 0) {
-            return baby ? SoundEvents::CAT_PURREOW_BABY : SoundEvents::ENTITY_CAT_PURREOW;
+        const bool royal = !baby && m_soundVariant == 1;
+        if (!IsTame()) {
+            return baby ? SoundEvents::CAT_STRAY_AMBIENT_BABY
+                 : royal ? SoundEvents::ENTITY_CAT_ROYAL_STRAY_AMBIENT : SoundEvents::ENTITY_CAT_STRAY_AMBIENT;
         }
-        return baby ? SoundEvents::CAT_AMBIENT_BABY : SoundEvents::ENTITY_CAT_AMBIENT;
+        if (IsInLove()) {
+            return baby ? SoundEvents::CAT_PURR_BABY : royal ? SoundEvents::ENTITY_CAT_ROYAL_PURR : SoundEvents::ENTITY_CAT_PURR;
+        }
+        if (m_level && m_level->Random().NextInt(4) == 0) {
+            return baby ? SoundEvents::CAT_PURREOW_BABY
+                 : royal ? SoundEvents::ENTITY_CAT_ROYAL_PURREOW : SoundEvents::ENTITY_CAT_PURREOW;
+        }
+        return baby ? SoundEvents::CAT_AMBIENT_BABY : royal ? SoundEvents::ENTITY_CAT_ROYAL_AMBIENT : SoundEvents::ENTITY_CAT_AMBIENT;
+    }
+
+    const char* Cat::GetHurtSound(MobDamageSource source) const {
+        if (!IsBaby() && m_soundVariant == 1) return SoundEvents::ENTITY_CAT_ROYAL_HURT;
+        return Animal::GetHurtSound(source);
+    }
+
+    const char* Cat::GetDeathSound() const {
+        if (!IsBaby() && m_soundVariant == 1) return SoundEvents::ENTITY_CAT_ROYAL_DEATH;
+        return Animal::GetDeathSound();
     }
 
     void Cat::PlayEatingSound() {
-        PlaySound(IsBaby() ? SoundEvents::CAT_EAT_BABY : SoundEvents::ENTITY_CAT_EAT, 1.0f, 1.0f);
+        const bool royal = !IsBaby() && m_soundVariant == 1;
+        PlaySound(IsBaby() ? SoundEvents::CAT_EAT_BABY : royal ? SoundEvents::ENTITY_CAT_ROYAL_EAT : SoundEvents::ENTITY_CAT_EAT,
+                  1.0f, 1.0f);
     }
 
     void Cat::Hiss() {
-        MakeSound(IsBaby() ? SoundEvents::CAT_HISS_BABY : SoundEvents::ENTITY_CAT_HISS);
+        const bool royal = !IsBaby() && m_soundVariant == 1;
+        MakeSound(IsBaby() ? SoundEvents::CAT_HISS_BABY : royal ? SoundEvents::ENTITY_CAT_ROYAL_HISS : SoundEvents::ENTITY_CAT_HISS);
     }
 
     float Cat::GetLieDownAmount(float partialTick) const {
@@ -4396,6 +4665,8 @@ namespace Game {
         // uniform over the 11 variants.
         if (m_level) {
             m_variant = static_cast<uint8_t>(m_level->Random().NextInt(kVariantCount));
+            // CatSoundVariants.pickRandomSoundVariant.
+            m_soundVariant = static_cast<uint8_t>(m_level->Random().NextInt(FarmSoundVariants::Count(FarmSoundVariants::Mob::Cat)));
         }
         return Animal::FinalizeSpawn(reason, std::move(groupData));
     }

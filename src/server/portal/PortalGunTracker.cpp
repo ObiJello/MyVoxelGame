@@ -281,6 +281,10 @@ namespace Game::Portal {
             // Results (written by the worker, read after `finished`).
             std::unordered_set<uint64_t> found;
             std::unordered_map<uint64_t, std::pair<DimensionId, glm::ivec3>> foundInChunk;
+            // Guns in an offline player's saved file: gun -> the file's UUID.
+            std::unordered_map<uint64_t, std::string> foundInPlayerFile;
+            // Player file UUID -> the name saved in it.
+            std::unordered_map<std::string, std::string> playerNames;
             size_t files  = 0;
             size_t chunks = 0;
             size_t errors = 0;
@@ -295,6 +299,31 @@ namespace Game::Portal {
             // r.<x>.<z>.mca
             return std::sscanf(name.c_str(), "r.%d.%d.mca", &rx, &rz) == 2 &&
                    name.size() > 4 && name.compare(name.size() - 4, 4, ".mca") == 0;
+        }
+
+        // The name a player file records (PlayerDataStore writes it as the
+        // named TAG_String "obeycraft:last_known_name"; files saved before
+        // that have none). Byte scan, like ScanNbtForGunIds.
+        bool ReadSavedPlayerName(const std::vector<uint8_t>& nbt, std::string& out) {
+            static const std::string needle = [] {
+                constexpr std::string_view name = "obeycraft:last_known_name";
+                std::string n;
+                n.push_back(static_cast<char>(8));   // TAG_String
+                n.push_back(static_cast<char>((name.size() >> 8) & 0xFF));
+                n.push_back(static_cast<char>(name.size() & 0xFF));
+                n.append(name);
+                return n;
+            }();
+            const std::string_view hay(reinterpret_cast<const char*>(nbt.data()), nbt.size());
+            const size_t at = hay.find(needle);
+            if (at == std::string_view::npos) return false;
+            size_t p = at + needle.size();
+            if (p + 2 > nbt.size()) return false;
+            const size_t len = (static_cast<size_t>(nbt[p]) << 8) | nbt[p + 1];
+            p += 2;
+            if (len == 0 || len > 64 || p + len > nbt.size()) return false;
+            out.assign(reinterpret_cast<const char*>(nbt.data() + p), len);
+            return true;
         }
 
         bool ReadWholeFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
@@ -397,6 +426,13 @@ namespace Game::Portal {
                 // inconclusive; any other .dat that fails is not a holder.
                 const std::string parent = path.parent_path().filename().string();
                 const bool holder = path.filename() == "level.dat" || parent == "playerdata" || parent == "players";
+                // playerdata/<uuid>.dat: whose inventory a gun is in.
+                const std::string playerUuid = (parent == "playerdata" || parent == "players")
+                    ? path.stem().string() : std::string();
+                auto noteFileGun = [&](uint64_t id) {
+                    job.found.insert(id);
+                    if (!playerUuid.empty()) job.foundInPlayerFile.emplace(id, playerUuid);
+                };
                 std::vector<uint8_t> raw;
                 if (!ReadWholeFile(path, raw)) {
                     if (holder) ++job.errors;
@@ -412,9 +448,13 @@ namespace Game::Portal {
                         }
                         continue;
                     }
-                    ScanNbtForGunIds(nbt.data(), nbt.size(), [&](uint64_t id) { job.found.insert(id); });
+                    ScanNbtForGunIds(nbt.data(), nbt.size(), noteFileGun);
+                    std::string savedName;
+                    if (!playerUuid.empty() && ReadSavedPlayerName(nbt, savedName)) {
+                        job.playerNames[playerUuid] = savedName;
+                    }
                 } else {
-                    ScanNbtForGunIds(raw.data(), raw.size(), [&](uint64_t id) { job.found.insert(id); });
+                    ScanNbtForGunIds(raw.data(), raw.size(), noteFileGun);
                 }
             }
             if (ec) {
@@ -531,6 +571,15 @@ namespace Game::Portal {
             }
         }
 
+        // A pair saved before owners were recorded (or fired by a player the
+        // server never named) takes the gun's holder as its owner the first
+        // time the gun is found in a player's hands or saved inventory.
+        void BackfillOwner(PortalPair& pair) {
+            if (pair.owner.empty() && pair.seen.kind == Kind::Player && !pair.seen.player.empty()) {
+                pair.owner = pair.seen.player;
+            }
+        }
+
         void CloseForLostGun(uint64_t gunId, const char* why) {
             Log::Info("[PortalGun] gun=%llu %s - closing its portals",
                       static_cast<unsigned long long>(gunId), why);
@@ -563,6 +612,7 @@ namespace Game::Portal {
             RunCensus(server, /*includeEntities=*/true, census);
 
             PortalRegistry& registry = ServerRegistry();
+            for (const auto& [uuid, name] : job->playerNames) registry.NotePlayerName(uuid, name);
             std::vector<uint64_t> orphans;
             size_t kept = 0;
             std::vector<uint64_t> gunIds;
@@ -575,18 +625,28 @@ namespace Game::Portal {
                 auto live = census.find(gunId);
                 if (live != census.end()) {
                     pair.seen = live->second;
+                    BackfillOwner(pair);
                     ++kept;
                     continue;
                 }
                 if (st.seenDuringSweep.count(gunId) || job->found.count(gunId)) {
                     if (pair.seen.kind == Kind::Unknown) {
+                        auto inFile = job->foundInPlayerFile.find(gunId);
                         auto at = job->foundInChunk.find(gunId);
-                        if (at != job->foundInChunk.end()) {
+                        if (inFile != job->foundInPlayerFile.end()) {
+                            // An offline player's saved inventory: their
+                            // name if they were ever seen joining, else the
+                            // UUID the file is named by.
+                            pair.seen = GunWhereabouts{};
+                            pair.seen.kind   = Kind::Player;
+                            pair.seen.player = registry.PlayerNameFor(inFile->second);
+                        } else if (at != job->foundInChunk.end()) {
                             pair.seen.kind      = Kind::Stored;
                             pair.seen.dimension = at->second.first;
                             pair.seen.pos       = at->second.second;
                         }
                     }
+                    BackfillOwner(pair);
                     ++kept;
                     continue;
                 }
@@ -692,6 +752,8 @@ namespace Game::Portal {
     }
 
     void NoteGunTrackerPlayerJoined(const std::string& playerName) {
+        // Remembered by UUID for offline lookups (PortalRegistry::PlayerNameFor).
+        ServerRegistry().NotePlayerName(playerName);
         TrackerState& st = State();
         st.joinTick[Lower(playerName)] = st.tick;
         st.censusDue = true;
@@ -705,6 +767,29 @@ namespace Game::Portal {
         // The one-time sweep, first tick after the world opened.
         if (!st.autoSweepChecked) {
             st.autoSweepChecked = true;
+            // Names of every player with a saved file, so an offline owner
+            // or holder is named without having to rejoin first.
+            if (Server::ServerLevel* overworld = server.GetLevel(DimensionId::Overworld)) {
+                const std::string& savePath = overworld->Config().savePath;
+                std::error_code ec;
+                const std::filesystem::path dir = std::filesystem::path(savePath) / "playerdata";
+                if (!savePath.empty() && std::filesystem::is_directory(dir, ec)) {
+                    std::vector<uint8_t> raw, nbt;
+                    size_t named = 0;
+                    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
+                        if (entry.path().extension() != ".dat") continue;
+                        if (!ReadWholeFile(entry.path(), raw)) continue;
+                        nbt.clear();
+                        if (!Nbt::GzipDecompress(raw, nbt, 64u * 1024u * 1024u)) continue;
+                        std::string name;
+                        if (ReadSavedPlayerName(nbt, name)) {
+                            registry.NotePlayerName(entry.path().stem().string(), name);
+                            ++named;
+                        }
+                    }
+                    if (named > 0) Log::Info("[PortalGun] %zu player name(s) read from playerdata", named);
+                }
+            }
             if (!registry.OrphanSweepDone()) {
                 if (registry.All().empty()) {
                     // Nothing to reconcile; every pair from now on is tracked.
@@ -761,6 +846,7 @@ namespace Game::Portal {
             switch (QuickCheck(server, st, gunId, pair->seen)) {
                 case Check::Present:
                     pair->seen.misses = 0;
+                    BackfillOwner(*pair);
                     if (st.sweep) st.seenDuringSweep.insert(gunId);
                     break;
                 case Check::Missing:
@@ -798,7 +884,10 @@ namespace Game::Portal {
             PortalPair* pair = registry.TryGetPairMutable(gunId);
             if (!pair) continue;
             auto found = census.find(gunId);
-            if (found != census.end()) pair->seen = found->second;   // misses reset with it
+            if (found != census.end()) {
+                pair->seen = found->second;   // misses reset with it
+                BackfillOwner(*pair);
+            }
         }
 
         // 4. Missing from a live location and found nowhere live: gone.
@@ -894,8 +983,11 @@ namespace Game::Portal {
         char buf[160];
         const std::string dim(DimensionName(w.dimension));
         switch (w.kind) {
-            case Kind::Player:
-                return "carried by " + w.player;
+            case Kind::Player: {
+                Server::IntegratedServer* server = Server::g_integratedServer.get();
+                if (server && FindOnlinePlayer(*server, w.player)) return "held by " + w.player;
+                return "in " + w.player + "'s saved inventory (offline)";
+            }
             case Kind::ItemEntity:
                 std::snprintf(buf, sizeof(buf), "dropped at %d %d %d (%s)", w.pos.x, w.pos.y, w.pos.z, dim.c_str());
                 return buf;

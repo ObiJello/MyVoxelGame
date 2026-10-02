@@ -288,7 +288,7 @@ namespace Game {
             if (inventoryItem.IsEmpty() || !cost.Test(inventoryItem)) continue;
             const ItemStack current = m_trade.GetItem(paymentSlot);
             if (!current.IsEmpty() && !IsSameItemSameComponents(inventoryItem, current)) continue;
-            const int maxStackSize = ItemRegistry::Get(inventoryItem.itemId).maxStackSize;
+            const int maxStackSize = Game::GetMaxStackSize(inventoryItem);
             const int moveCount = std::min(maxStackSize - current.count, inventoryItem.count);
             ItemStack newPayment = inventoryItem;
             newPayment.count = current.count + moveCount;

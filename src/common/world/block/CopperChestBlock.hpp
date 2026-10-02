@@ -35,7 +35,9 @@ namespace Game {
     // HoneycombItem.WAX_OFF_BY_BLOCK has the block: a waxed copper stage.
     bool IsWaxedCopperBlock(BlockID id);
 
-    // Wires the copper chests' hooks. Called from BlockRegistry_RegisterBehaviors.
+    // Wires the copper chests' hooks, and ChestBlock.updateShape (the pair's
+    // TYPE kept in step, DoubleChest.hpp ChestUpdateShape) on the chest and
+    // the trapped chest. Called from BlockRegistry_RegisterBehaviors.
     void RegisterCopperChestBehaviors(std::array<Block, BlockRegistry::Size>& blocks);
 
 } // namespace Game

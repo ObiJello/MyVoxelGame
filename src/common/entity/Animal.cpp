@@ -1,5 +1,6 @@
 // File: src/common/entity/Animal.cpp
 #include "common/entity/Animal.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
@@ -275,6 +276,14 @@ namespace Game {
         // MC finalizeSpawnChildFromBreeding: broadcastEntityEvent(18) — the
         // 7-heart burst everyone sees when the child appears.
         if (m_level) m_level->BroadcastEntityEvent(*this, 18);
+
+        // MC finalizeSpawnChildFromBreeding: the love cause (this parent's,
+        // else the partner's) gets CriteriaTriggers.BRED_ANIMALS.
+        if (m_level && !m_level->IsClientSide() && feeder != -1) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(m_level->ResolveEntityById(feeder))) {
+                Server::CriteriaTriggers::BredAnimals(*player, *this, partner, baby.get());
+            }
+        }
 
         if (m_level) m_level->AddFreshEntity(std::move(baby));
 

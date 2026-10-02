@@ -263,7 +263,11 @@ namespace Game {
                               float maxDistance, double walkSpeedModifier,
                               double sprintSpeedModifier);
 
+        // MC RabbitAvoidEntityGoal.canUse: never for the killer bunny.
+        bool CanUse() override;
         const char* Name() const override { return "RabbitAvoidEntityGoal"; }
+    private:
+        Rabbit* m_rabbit = nullptr;
     };
 
     // The name this port used before the goal was generalised.

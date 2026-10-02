@@ -1,4 +1,5 @@
 // File: src/common/entity/npc/VillagerData.cpp
+#include "common/data/DataComponents.hpp"
 #include "common/entity/npc/VillagerData.hpp"
 
 #include "common/entity/GeneratedItemList.hpp"
@@ -192,9 +193,9 @@ namespace Game {
     }
 
     int VillagerFoodNutrition(ItemID item) {
-        if (item == Items::Bread) return 4;
-        if (item == Items::Carrot || item == Items::Potato || item == Items::Beetroot) return 1;
-        return 0;
+        // The item's default VILLAGER_FOOD (bread 4, carrot / potato /
+        // beetroot 1 — Items.java .villagerFood).
+        return VillagerFoodNutrition(ItemStack(item, 1));
     }
 
     bool IsVillagerPlantableSeed(ItemID item) {

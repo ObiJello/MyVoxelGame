@@ -73,9 +73,13 @@ namespace Server {
         // Book and quill / lectern (BookPackets.hpp)
         void onEditBookC2S(const Network::EditBookC2SPacket& packet) override;
         void onContainerButtonClickC2S(const Network::ContainerButtonClickC2SPacket& packet) override;
+        // The Advancements screen's tab / close (AdvancementPackets.hpp)
+        void onSeenAdvancementsC2S(const Network::SeenAdvancementsC2SPacket& packet) override;
         // Trading (MerchantPackets.hpp)
         void onSelectTradeC2S(const Network::SelectTradeC2SPacket& packet) override;
         void onRenameItemC2S(const Network::RenameItemC2SPacket& packet) override;
+        // This client's look (PlayerAppearances.hpp)
+        void onPlayerAppearanceC2S(const Network::PlayerAppearanceC2SPacket& packet) override;
         // Spectator mode (SpectatorPackets.hpp)
         void onSpectatorActionC2S(const Network::SpectatorActionC2SPacket& packet) override;
         void onTeleportToEntityC2S(const Network::TeleportToEntityC2SPacket& packet) override;

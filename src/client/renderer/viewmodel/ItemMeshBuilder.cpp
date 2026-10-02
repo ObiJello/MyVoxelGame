@@ -269,7 +269,8 @@ namespace Render {
     // gets that corner rather than the whole thing stretched.
     static void emitModelFace(std::vector<ItemCubeVert>& verts, std::vector<uint32_t>& idx,
                        const Game::BlockModel& bm, const Game::Element& el,
-                       Game::FaceDir dir, const glm::vec3 q[4], const glm::vec2 uvT[4]) {
+                       Game::FaceDir dir, const glm::vec3 q[4], const glm::vec2 uvT[4],
+                       std::vector<BlockModelQuad>* quads) {
         auto it = el.faces.find(dir);
         if (it == el.faces.end()) return;
         const Game::FaceDef& face = it->second;
@@ -324,6 +325,10 @@ namespace Render {
         }
 
         appendCubeFace(verts, idx, q, uv, r, g, b);
+        if (quads) {
+            quads->push_back(BlockModelQuad{dir, face.tintIndex, face.cullfaceDir, el.shade,
+                                            {q[0], q[1], q[2], q[3]}});
+        }
     }
 
     // Returns false when the model has no usable geometry, so the caller
@@ -339,9 +344,11 @@ namespace Render {
 
     bool BuildBlockModelMeshFrom(const Game::BlockModel& model,
                                  std::vector<ItemCubeVert>& verts,
-                                 std::vector<uint32_t>& idx) {
+                                 std::vector<uint32_t>& idx,
+                                 std::vector<BlockModelQuad>* quads) {
         verts.clear();
         idx.clear();
+        if (quads) quads->clear();
         const Game::BlockModel* bm = &model;
         if (bm->elements.empty()) return false;
 
@@ -364,22 +371,22 @@ namespace Render {
             // Same six corner/UV templates as the cube path.
             { const glm::vec3 q[4] = {v010, v011, v111, v110};
               const glm::vec2 t[4] = {{0,0},{0,1},{1,1},{1,0}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::Up, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::Up, q, t, quads); }
             { const glm::vec3 q[4] = {v000, v100, v101, v001};
               const glm::vec2 t[4] = {{0,0},{1,0},{1,1},{0,1}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::Down, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::Down, q, t, quads); }
             { const glm::vec3 q[4] = {v001, v101, v111, v011};
               const glm::vec2 t[4] = {{0,1},{1,1},{1,0},{0,0}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::South, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::South, q, t, quads); }
             { const glm::vec3 q[4] = {v000, v010, v110, v100};
               const glm::vec2 t[4] = {{1,1},{1,0},{0,0},{0,1}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::North, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::North, q, t, quads); }
             { const glm::vec3 q[4] = {v100, v110, v111, v101};
               const glm::vec2 t[4] = {{1,1},{1,0},{0,0},{0,1}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::East, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::East, q, t, quads); }
             { const glm::vec3 q[4] = {v000, v001, v011, v010};
               const glm::vec2 t[4] = {{0,1},{1,1},{1,0},{0,0}};
-              emitModelFace(verts, idx, *bm, el, Game::FaceDir::West, q, t); }
+              emitModelFace(verts, idx, *bm, el, Game::FaceDir::West, q, t, quads); }
 
             // MC FaceBakery.applyElementRotation — an arbitrary angle about
             // the element's own origin, so it cannot be folded into from/to

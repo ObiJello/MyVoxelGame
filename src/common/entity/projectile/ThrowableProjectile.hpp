@@ -64,16 +64,21 @@ namespace Game {
     // MC ThrownEnderpearl. 0 damage on a direct hit; on ANY hit the OWNER is
     // pulled to the pearl's pre-impact position — the 5% endermite, the 5.0
     // teleport damage and the fall-distance reset included. Ported minus,
-    // each noted at its site: the teleport sound (sound system stub), MC 1.21's
-    // pearl chunk tickets / owner-logout survival / ENDER_PEARLS_VANISH_ON_
-    // DEATH gamerule (pearls here live like every other projectile, in
-    // loaded chunks with a live owner reference), and dimension travel (the
+    // each noted at its site: MC 1.21's pearl chunk tickets / owner-logout
+    // survival (pearls here live like every other projectile, in loaded
+    // chunks with a live owner reference), and dimension travel (the
     // engine's portals move players only — a pearl thrown into a portal
-    // sits, it does not cross).
+    // sits, it does not cross). The ender_pearls_vanish_on_death rule is
+    // honoured in Tick.
     class ThrownEnderpearl : public ThrowableProjectile {
     public:
         explicit ThrownEnderpearl(EntityLevel* level)
             : ThrowableProjectile(EntityTypeId::EnderPearl, level) {}
+
+        // MC ThrownEnderpearl.tick (server): a pearl whose player owner is
+        // dead vanishes when ender_pearls_vanish_on_death is on, before the
+        // flight step.
+        void Tick() override;
 
     protected:
         void OnHitEntity(LivingEntity& target, const HitResult& hit) override;

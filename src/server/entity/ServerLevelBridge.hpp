@@ -41,6 +41,7 @@
 #include <unordered_map>
 #include <atomic>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 namespace Game { class World; }
@@ -99,6 +100,10 @@ namespace Server {
         float BaseBbWidth()   const override;
         float BaseBbHeight()  const override;
         float BaseEyeHeight() const override;
+        // MC LivingEntity.canBreatheUnderwater by the body's type: a player
+        // morphed into a water breather (a fish, a squid, a drowned — the
+        // #can_breathe_under_water tag) keeps its air under water.
+        bool CanBreatheUnderwater() const override;
 
         // MC ServerPlayer.getKnownMovement: the movement the client actually
         // reported, not `velocity` (which on a view is only the knockback
@@ -172,12 +177,6 @@ namespace Server {
         // default would call a player undead — harming would heal them.
         bool IsInvertedHealAndHarm() const override { return false; }
 
-        // MC: a player is not in #can_breathe_under_water (the placeholder
-        // Zombie type would say it is — undead); LivingEntity.baseTick's
-        // `isPlayer && abilities.invulnerable` exemption (creative and
-        // spectator) is folded in here, which gives the same air outcome.
-        bool CanBreatheUnderwater() const override { return IsCreative() || IsSpectator(); }
-
         // The view's own health is a mirror; REGENERATION and INSTANT_HEALTH
         // must land on the real player or the next SyncFromPlayer would
         // silently erase them.
@@ -232,6 +231,13 @@ namespace Server {
 
         // Called once per server tick, before mobs tick.
         void SyncFromPlayer();
+        // The player's own attribute rows (ServerPlayer::attributes — the
+        // bases and the own modifiers /attribute and the step-height rule
+        // put there) onto this view's map, beside the effect and equipment
+        // modifiers the view keeps itself — so every LivingEntity read of
+        // the view (burning time, oxygen bonus, knockback resistance,
+        // gravity, step height …) sees what the player's attributes say.
+        void MirrorPlayerAttributes();
 
         // The enchantment half of MC LivingEntity.baseTick / tick for the
         // player: EnchantmentHelper.tickEffects, onChangedBlock's
@@ -362,6 +368,9 @@ namespace Server {
         glm::ivec3                           m_lastBlockPos{0};
         bool                                 m_hasLastBlockPos = false;
         Game::ActiveLocationEnchantments     m_locationEnchantments;
+        // The own-map modifiers MirrorPlayerAttributes last put on the view,
+        // so one the player has lost since comes off again.
+        std::vector<std::pair<Game::Attribute, uint32_t>> m_mirroredModifiers;
     };
 
     // Game::EntityLevel over the server's world and session list.
@@ -508,17 +517,20 @@ namespace Server {
                                             size_t count,
                                             const Game::CollisionGrid* occlusion) override;
 
-        // MC ClientboundHurtAnimationPacket, sent to that player alone.
-        void SendHurtAnimation(int32_t connectionId, float hurtDir);
+        // MC ClientboundHurtAnimationPacket, sent to that player alone; with
+        // `damageEvent` it is the victim's copy of MC's
+        // ClientboundDamageEventPacket instead (hurtDir untouched).
+        void SendHurtAnimation(int32_t connectionId, float hurtDir, bool damageEvent = false);
         // ClientboundSetEntityMotionPacket to one player about their own
         // movement (the id is the connection id their client answers to).
         void SendPlayerMotion(int32_t connectionId, const glm::dvec3& velocity);
         void SpawnItemDrop(const glm::dvec3& pos, uint32_t itemId, int count) override;
         void SpawnItemStackDrop(const glm::dvec3& pos, const Game::ItemStack& stack) override;
+        void SpawnAtLocation(const glm::dvec3& pos, const Game::ItemStack& stack, bool extendedLifetime) override;
         // MC BehaviorUtils.throwItem's ItemEntity: an exact spawn point,
         // velocity and pickup delay.
         void SpawnThrownItem(const glm::dvec3& pos, const glm::dvec3& velocity,
-                             const Game::ItemStack& stack, int pickupDelay) override;
+                             const Game::ItemStack& stack, int pickupDelay, int32_t throwerId = 0) override;
 
         // MC ServerLevel.getPoiManager — ServerLevel owns it; set once.
         void SetPoiManager(Game::PoiManager* poi) { m_poi = poi; }
@@ -620,6 +632,11 @@ namespace Server {
         Game::World*          m_world;
         PlayerSessionManager* m_sessions;
         MobManager*           m_mobs = nullptr;
+        // The last mob take (TakeFromItemEntity): what left which item entity,
+        // for NoteItemEntityTaken's THROWN_ITEM_PICKED_UP_BY_ENTITY — the
+        // stack is gone from the entity by then.
+        int32_t               m_lastTakenItemId = 0;
+        Game::ItemStack       m_lastTakenStack;
 #if ENABLE_IMMERSIVE_PORTALS
         MobPortalCollision    m_portalCollision;
 #endif

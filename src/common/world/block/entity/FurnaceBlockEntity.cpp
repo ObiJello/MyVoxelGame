@@ -6,6 +6,7 @@
 #include "common/world/level/World.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/core/JavaRandom.hpp"
+#include "common/data/DataComponents.hpp"
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -16,7 +17,8 @@ namespace Game {
         if (slot == SLOT_RESULT) return false;
         if (slot != SLOT_FUEL) return true;
         const ItemStack& fuel = GetItem(SLOT_FUEL);
-        return RecipeManager::GetFuelBurnTime(stack) > 0 ||
+        // MC: itemStack.has(COOKING_FUEL) || a bucket onto a bucket.
+        return IsCookingFuel(stack) ||
                (stack.itemId == Items::Bucket && fuel.itemId == Items::Bucket);
     }
 
@@ -49,7 +51,8 @@ namespace Game {
         if (result.itemId != recipe->resultItem) return false;   // different item in the way
 
         const int combined = result.count + recipe->resultCount;
-        const int limit = std::min(ItemRegistry::Get(result.itemId).maxStackSize, 64);
+        // min(getMaxStackSize(), burnResult.getMaxStackSize()).
+        const int limit = GetMaxStackSize(result);
         return combined <= limit;
     }
 
@@ -57,7 +60,20 @@ namespace Game {
         // MC getTotalCookTime: 200 ticks when the input matches nothing, which
         // is only ever a placeholder — nothing cooks without a recipe.
         const CookingRecipe* recipe = RecipeManager::FindCooking(m_kind, GetItem(SLOT_INPUT));
-        return recipe ? recipe->cookingTime : 200;
+        if (!recipe) return 200;
+        // MC getTotalCookTime(recipe, entity): the recipe's time over the
+        // burning fuel's speed multiplier (unchanged at <= 0). The engine's
+        // recipe data (26.1) already carries the fast furnaces' vanilla 2x,
+        // so the fuel's multiplier counts relative to that default.
+        const float base = DefaultCookingSpeedMultiplier(GetBlockId());
+        const float speed = m_speedMultiplier < 0.0f ? base : m_speedMultiplier;
+        const float vanillaTime = static_cast<float>(recipe->cookingTime) * base;
+        if (speed <= 0.0f) return static_cast<int>(vanillaTime);
+        return static_cast<int>(std::ceil(vanillaTime / speed));
+    }
+
+    float FurnaceBlockEntity::SpeedMultiplier() const {
+        return m_speedMultiplier < 0.0f ? DefaultCookingSpeedMultiplier(GetBlockId()) : m_speedMultiplier;
     }
 
     void FurnaceBlockEntity::SetItem(int index, const ItemStack& stack) {
@@ -111,8 +127,19 @@ namespace Game {
             // a non-fuel gives 0, which leaves the furnace dark and consumes
             // nothing, so the check doubles as the "is this actually fuel" test.
             if (!IsLit() && CanBurn(recipe)) {
-                m_litTime     = RecipeManager::GetFuelBurnTime(fuel);
-                m_litDuration = m_litTime;
+                // getBurnDuration / getSpeedMultiplier: the fuel's
+                // COOKING_FUEL, resolved against this furnace block.
+                JavaRandom* random = world ? world->Random() : nullptr;
+                m_litTime         = GetCookingFuelBurnTime(fuel, GetBlockId(), random);
+                m_litDuration     = m_litTime;
+                m_speedMultiplier = GetCookingFuelSpeedMultiplier(fuel, GetBlockId(), random);
+                // A cook in progress keeps its completion ratio under the
+                // new speed.
+                if (m_cookingTotal > 0 && m_cookingTime < m_cookingTotal) {
+                    const float ratio = static_cast<float>(m_cookingTime) / static_cast<float>(m_cookingTotal);
+                    m_cookingTotal = TotalCookTime();
+                    m_cookingTime  = static_cast<int>(std::ceil(ratio * static_cast<float>(m_cookingTotal)));
+                }
                 if (IsLit()) {
                     changed = true;
                     if (hasFuel) {
@@ -202,6 +229,7 @@ namespace Game {
         out.WriteVarInt(static_cast<uint32_t>(m_cookingTime));
         out.WriteVarInt(static_cast<uint32_t>(m_cookingTotal));
         out.WriteFloat(m_storedXp);
+        out.WriteFloat(m_speedMultiplier);
     }
 
     void FurnaceBlockEntity::Load(Network::PacketReader& in) {
@@ -212,6 +240,7 @@ namespace Game {
         m_cookingTime  = static_cast<int>(in.ReadVarInt());
         m_cookingTotal = static_cast<int>(in.ReadVarInt());
         if (in.HasMore()) m_storedXp = in.ReadFloat();
+        if (in.HasMore()) m_speedMultiplier = in.ReadFloat();
     }
 
     void FurnaceBlockEntity::PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos, BlockState oldState) {

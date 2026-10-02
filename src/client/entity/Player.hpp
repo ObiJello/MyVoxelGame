@@ -16,6 +16,7 @@
 #include <array>
 #include <optional>
 #include <chrono>
+#include <utility>
 #include <vector>
 
 namespace Game {
@@ -91,6 +92,12 @@ namespace Game {
         // /morph item: carried by this player (0 = not). The body rides on
         // the holder; MorphHeldS2C sets and clears it.
         uint32_t   heldByPlayer = 0;
+        // The partial tick the holder is drawn at this frame (the host loop
+        // sets it before UpdatePhysics, and the world pass draws with the
+        // same value): the held body rides the holder's INTERPOLATED pose,
+        // as an MC passenger's position is its vehicle's lerped one, so the
+        // view moves every frame instead of in tick steps.
+        float      heldFramePartial = 1.0f;
         glm::dvec3 morphLockPos{0.0};
         // The server put the real block in the locked cell and this client
         // has seen it there; when the cell empties after that, someone
@@ -122,6 +129,13 @@ namespace Game {
         // Status — synced from the server via SetHealthS2C
         // (ClientPacketHandler::handleSetHealth); read by the HUD.
         int   health     = 20;
+        // MC getHealth() unrounded — `health` is its Mth.ceil, what the HUD
+        // draws; LocalPlayer.hurtTo compares the exact value.
+        float healthExact = 20.0f;
+        // MC LocalPlayer.flashOnSetHealth: false for a fresh LocalPlayer
+        // (login, respawn, dimension change), so the first SetHealthS2C only
+        // sets the health; every later drop flashes (hurtTo).
+        bool  flashOnSetHealth = false;
         int   food       = 20;
         float saturation = 5.0f;
         // The HUD's extras, appended to SetHealthS2C: absorption hearts, the
@@ -130,9 +144,10 @@ namespace Game {
         float   absorption = 0.0f;
         uint8_t hudFlags   = 0;
         int     airSupply  = 300;
-        // MC LivingEntity.invulnerableTime as the HUD sees it (Gui reads
-        // player.damageCooldownTime): 20 ticks from the hurt animation
-        // packet, counted down in Tick. The heart blink keys on it.
+        // MC LivingEntity.damageCooldownTime as the HUD sees it (Hud reads
+        // player.damageCooldownTime): 20 from the damage event or a health
+        // drop, 10 from a heal (LocalPlayer.hurtTo), counted down in Tick.
+        // The heart blink keys on it.
         int     damageCooldownTime = 0;
         // XP — synced via SetExperienceS2C (handleSetExperience); the HUD's
         // bar fill and level number read these each frame.
@@ -209,9 +224,34 @@ namespace Game {
         // A player attribute: `base` through the worn enchantments, the
         // active location effects and the status effects.
         double EnchantedAttributeValue(Game::Attribute attribute, double base);
+        // The same from the player's own base (PlayerBaseAttributeValue) —
+        // any player attribute as the local player predicts it.
+        double PlayerAttribute(Game::Attribute attribute) const;
+        // The whole instance the local player predicts with: the server's
+        // synced own row (ownAttributes) through the worn enchantments, the
+        // location effects and the status effects, plus the creative reach
+        // modifiers — what /attribute reads on the server.
+        Game::AttributeInstance PlayerAttributeInstance(Game::Attribute attribute) const;
+        // MC ClientPacketListener.handleUpdateAttributes for the local
+        // player: each synced row's base and modifier stack replace the own
+        // map's (UpdateAttributesS2C under the player's own id).
+        void ApplyOwnAttributes(const std::vector<std::pair<Game::Attribute, Game::AttributeInstance>>& rows);
+        // MC Player.blockInteractionRange / entityInteractionRange: the
+        // attribute with the creative +0.5 / +2.0.
+        double GetBlockInteractionRange();
+        double GetEntityInteractionRange();
+        // Player.getDestroySpeed's effect factor times BLOCK_BREAK_SPEED.
+        float GetDigSpeedMultiplier();
+        // MC LivingEntity.getScale: the SCALE attribute.
+        float GetAttributeScale();
 
         Game::ActiveLocationEnchantments enchantmentLocationState;
         Game::AttributeMap               enchantmentLocationAttributes;
+        // MC LocalPlayer.getAttributes: the player's own rows as the server
+        // syncs them (bases set by /attribute, its permanent modifiers, the
+        // step-height rule's). Player.createAttributes' defaults until the
+        // first UpdateAttributesS2C.
+        Game::AttributeMap               ownAttributes;
         std::array<Game::ItemStack, 8>   enchantmentLastEquipment{};
         glm::ivec3                       enchantmentLastBlockPos{0};
         bool                             enchantmentHasLastBlockPos = false;
@@ -369,10 +409,12 @@ namespace Game {
 
         // ── Camera damage tilt / death spin (MC GameRenderer.bobHurt) ──────
         //
-        // MC LivingEntity.animateHurt sets hurtDuration = hurtTime = 10 when a
-        // hurt-animation packet arrives, and baseTick counts hurtTime down.
-        // hurtDir is the attacker's bearing RELATIVE to our own yaw, which is
-        // why the tilt leans away from the blow instead of always the same way.
+        // hurtDuration = hurtTime = 10 from every source MC uses: the damage
+        // event (handleDamageEvent), the hurt animation (Player.animateHurt,
+        // which also sets hurtDir) and any health drop (LocalPlayer.hurtTo);
+        // baseTick counts hurtTime down. hurtDir is the attacker's bearing
+        // RELATIVE to our own yaw, which is why the tilt leans away from the
+        // blow; a hit with no direction keeps the last one, as in MC.
         int   hurtTime     = 0;
         int   hurtDuration = 10;
         float hurtDir      = 0.0f;

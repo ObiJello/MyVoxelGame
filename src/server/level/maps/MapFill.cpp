@@ -254,8 +254,10 @@ namespace Server::MapFill {
         void Execute(const CommandSourceStack& source, const std::vector<std::string>& args,
                      ServerConnection& connection, PlayerSessionManager& /*sessions*/) {
             IntegratedServer* server = g_integratedServer.get();
-            ServerPlayer* player = source.sender;
-            if (!server || !player) return;
+            // The executor's map (`/execute as Steve run mapfill`).
+            ServerPlayer* player = source.ExecutorPlayer();
+            if (!server) return;
+            if (!player) { connection.SendChatMessage(CommandSourceStack::kPlayerRequired, 1); return; }
 
             // `/mapfill cancel`: every fill this player started.
             if (!args.empty() && args[0] == "cancel") {

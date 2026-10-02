@@ -7,6 +7,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/ai/navigation/PathNavigation.hpp"
 #include "common/entity/ai/Controls.hpp"
+#include "common/entity/ai/TargetingConditions.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/spawn/GeneratedSpawnTags.hpp"
@@ -111,13 +112,23 @@ namespace Game {
         }
         if (m_target) {
             // MC continueAggroTargetConditions: forCombat().ignoreLineOfSight()
-            // — keep the target while it lives and stays in follow range.
-            if (!m_target->IsAlive()) return false;
-            if (m_target->IsCreative() || m_target->IsSpectator()) return false;
-            const double range = m_enderman->GetAttributeValue(Attribute::FollowRange);
-            return m_enderman->DistanceToSqr(*m_target) <= range * range;
+            // with NO range — a provoked enderman keeps its player at any
+            // distance while the player stays a valid combat target (alive,
+            // not creative/spectator, not on Peaceful). It only tests; it
+            // never calls setTarget, so it re-applies nothing.
+            if (TargetingConditions::ForCombat().IgnoreLineOfSight().Test(m_enderman, *m_target)) {
+                return true;
+            }
         }
-        return false;
+        // MC falls through to super.canContinueToUse() — TargetGoal's, on the
+        // mob's CURRENT target (mustSee false; this goal never sets
+        // targetMob, so there is no remembered target to fall back on).
+        LivingEntity* target = m_enderman->GetTarget();
+        if (!target || !m_enderman->CanAttack(*target)) return false;
+        const double range = m_enderman->GetAttributeValue(Attribute::FollowRange);
+        if (m_enderman->DistanceToSqr(*target) > range * range) return false;
+        m_enderman->SetTarget(target);
+        return true;
     }
 
     void EndermanLookForPlayerGoal::Tick() {

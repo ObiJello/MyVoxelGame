@@ -34,6 +34,8 @@ namespace Game::Rules {
             Id::KeepInventory,                    // PlayerSession death edge: inventory + XP drop
             Id::ImmediateRespawn,                 // mirrored to clients (WorldRulesS2C), death screen skipped
             Id::PlayerMovementCheck,              // ServerPlayer::setPosition "moved too fast"
+            Id::ElytraMovementCheck,              //   ... and the same check while gliding
+            Id::EnderPearlsVanishOnDeath,         // ThrownEnderpearl::Tick
             Id::PlayersNetherPortalDefaultDelay,  // Portals::GetTransitionTime
             Id::PlayersNetherPortalCreativeDelay,
             Id::Pvp,                              // PlayerEntityView::Hurt
@@ -48,18 +50,29 @@ namespace Game::Rules {
             Id::SpawnWanderingTraders,            // WanderingTraderSpawner::Tick
             Id::SpawnPatrols,                     // PatrolSpawner::Tick
             Id::SpawnWardens,                     // SculkShriekerBlockEntity::CanRespond
+            Id::SpawnPhantoms,                    // PhantomSpawner::Tick (time_since_rest, stats/<uuid>.json)
             // Drops
             Id::BlockDrops, Id::MobDrops,         // ItemEntityManager::PopResource + block XP; MobManager::DropDeathLoot
             // Chat
             Id::ShowDeathMessages,                // PlayerSession death broadcast
+            Id::ShowAdvancementMessages,          // PlayerAdvancements completion announcement
+            Id::SendCommandFeedback,              // CommandSourceStack::SendSuccess (+ the gamemode/scale notices)
+            Id::LogAdminCommands,                 // CommandSourceStack broadcastToAdmins -> server log
+            Id::CommandBlockOutput,               // command block minecart source (shouldInformAdmins)
             // Updates
             Id::WaterSourceConversion,            // Fluids::GetNewLiquid (FlowingFluid.canConvertToSource)
             Id::LavaSourceConversion,
             Id::AdvanceWeather,                   // Server::ServerWeather (advanceWeatherCycle, the night skip)
             Id::MaxSnowAccumulationHeight,        // Precipitation::TickPrecipitation
+            Id::FireSpreadRadiusAroundPlayer,     // FireBlock tick, lava random tick, lightning (canSpreadFireAround)
+            Id::SpreadVines,                      // VineRandomTick
             // Misc
             Id::AllowEnteringNetherUsingPortals,  // PortalTravel + immersive crossing
             Id::MaxCommandForks,                  // ExecuteCommand fork limit
+            Id::MaxCommandSequenceLength,         // CommandDispatcher top-level command quota
+            Id::CommandBlocksWork,                // MinecartCommandBlock::PerformCommand
+            Id::GlobalSoundEvents,                // PlayGlobalLevelEventSound (wither, dragon, end portal)
+            Id::ProjectilesCanBreakBlocks,        // Projectile::MayBreak (pot, chorus flower, speleothems)
             Id::MaxBlockModifications,            // FillBiomeCommand volume limit
             Id::SpawnerBlocksWork,                // SpawnerBlockEntity::Tick, the spawn egg's spawner branch
             Id::ReducedDebugInfo,                 // mirrored to clients, F3 reduced view

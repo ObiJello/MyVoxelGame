@@ -11,13 +11,14 @@
 //               (AcquirePoi.findPathToPois hands it to the pathfinder).
 //
 // Registered: the types a villager touches — the thirteen job sites, HOME (the
-// HEAD half of every dyed bed) and MEETING (the bell) — and LIGHTNING_ROD,
-// which the thunderstorm's strike search reads (ServerLevel.findLightningRod,
-// Server::ServerWeather). MC's other entries (bee nests, beehives, nether
-// portals, lodestones, test instances) are consumed by systems this engine
-// runs on its own indexes (the nether portal index) or does not run through
-// the POI manager at all (the bee). Registering them here with no reader
-// would only make every chunk scan pay for blocks nothing asks about.
+// HEAD half of every dyed bed) and MEETING (the bell) — BEEHIVE and BEE_NEST,
+// which the bee's hive search reads (Bee.BeeLocateHiveGoal), and
+// LIGHTNING_ROD, which the thunderstorm's strike search reads
+// (ServerLevel.findLightningRod, Server::ServerWeather). MC's other entries
+// (nether portals, lodestones, test instances) are consumed by systems this
+// engine runs on its own indexes (the nether portal index); registering them
+// here with no reader would only make every chunk scan pay for blocks nothing
+// asks about.
 #pragma once
 
 #include "common/world/block/BlockState.hpp"
@@ -45,6 +46,10 @@ namespace Game {
         Weaponsmith,
         Home,
         Meeting,
+        // MC BEEHIVE / BEE_NEST — every state of each; 0 tickets, valid
+        // range 1. Together the #bee_home tag the bee's hive search reads.
+        Beehive,
+        BeeNest,
         // MC LIGHTNING_ROD — every state of every lightning rod (the four
         // oxidation stages, waxed and not); 0 tickets, valid range 1.
         LightningRod,
@@ -77,5 +82,7 @@ namespace Game {
     //   village              acquirable_job_site + home + meeting
     bool IsAcquirableJobSite(PoiType type);
     bool IsVillagePoi(PoiType type);
+    //   bee_home             beehive + bee_nest
+    inline bool IsBeeHome(PoiType type) { return type == PoiType::Beehive || type == PoiType::BeeNest; }
 
 } // namespace Game

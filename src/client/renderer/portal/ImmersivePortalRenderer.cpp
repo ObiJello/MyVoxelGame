@@ -20,6 +20,7 @@
 #include <GLFW/glfw3.h>
 #endif
 #include "client/world/ClientLevel.hpp"
+#include "client/world/LevelLoadTracker.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
@@ -30,9 +31,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Render {
@@ -976,6 +979,32 @@ namespace Render {
                     ChunkRenderer::SetRenderDistanceOverride(farRenderDistance);
                     if (!FlickerDiag::DebugFill()) renderLevel(ctx);
                     ChunkRenderer::SetRenderDistanceOverride(0);
+                    // For the first seconds after a join's hand-over: per
+                    // portal view, how many sections it lists and how many
+                    // of them are compiled, a few times a second — two
+                    // portals' far sides should converge together.
+                    if (g_chunkRenderer && Client::g_levelLoadTracker.IsLoaded()) {
+                        constexpr auto kDiagWindow = std::chrono::milliseconds(2500);
+                        constexpr auto kDiagEvery  = std::chrono::milliseconds(200);
+                        static std::unordered_map<Game::Immersive::PortalId, std::chrono::steady_clock::time_point> s_lastDiag;
+                        const auto now = std::chrono::steady_clock::now();
+                        const auto since = now - Client::g_levelLoadTracker.LoadedAt();
+                        if (since <= kDiagWindow) {
+                            auto& last = s_lastDiag[portal.id];
+                            if (now - last >= kDiagEvery) {
+                                last = now;
+                                int visible = 0, meshed = 0;
+                                g_chunkRenderer->CountLastViewMeshed(visible, meshed);
+                                static const char* kSources[] = { "bfs", "bfs-fallback", "bfs-cold", "frustum" };
+                                Log::Info("[PortalView] +%.2f s portal #%u layer %d -> %s: %d visible sections, %d meshed (%s)",
+                                          std::chrono::duration<float>(since).count(), portal.id, inner,
+                                          std::string(Game::DimensionName(farDim)).c_str(), visible, meshed,
+                                          kSources[static_cast<int>(g_chunkRenderer->LastPrepareSource()) & 3]);
+                            }
+                        } else if (!s_lastDiag.empty() && since > kDiagWindow + std::chrono::seconds(1)) {
+                            s_lastDiag.clear();
+                        }
+                    }
                     if (g_chunkRenderer) g_chunkRenderer->ClearPortalViewSeed();
                     if (FlickerDiag::DumpPending() && g_chunkRenderer) {
                         Log::Info("[PortalDiag]     far view of #%u: sections=%d drawCalls=%d bfsSource=%d",

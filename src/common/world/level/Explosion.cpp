@@ -1,6 +1,7 @@
 // File: src/common/world/level/Explosion.cpp
 #include "common/data/DataComponentMap.hpp"
 #include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/BeehiveBlockEntity.hpp"
 #include "common/world/level/Explosion.hpp"
 #include "common/world/level/gameevent/GameEvent.hpp"
 
@@ -1112,6 +1113,11 @@ namespace Game {
                     // entity still there — collected before the cell is
                     // cleared and its contents spill (a shulker box leaves
                     // with them aboard; a chest's spill as the air goes in).
+                    // MC BeehiveBlock.getDrops: a hive blasted by TNT, a
+                    // creeper or a wither lets its bees out first.
+                    if (id == BlockID::Beehive || id == BlockID::BeeNest) {
+                        BeehiveExplodedBy(*write, pos, state, p.source);
+                    }
                     DataComponentMap entityComponents;
                     if (BlockEntity* be = write->GetBlockEntity(pos)) {
                         be->CollectComponents(entityComponents);
@@ -1136,7 +1142,7 @@ namespace Game {
                             if (remaining.IsEmpty()) break;
                             if (c.stack.itemId != remaining.itemId) continue;
                             const int cap = std::min(
-                                ItemRegistry::Get(c.stack.itemId).maxStackSize,
+                                Game::GetMaxStackSize(c.stack),
                                 kMaxDropsPerStack);
                             const int room = cap - c.stack.count;
                             if (room <= 0) continue;
@@ -1183,6 +1189,9 @@ namespace Game {
                 if (id == BlockID::Tnt) {
                     level.OnTntExploded(pos, p.attributedTo);
                 }
+                // MC BeehiveBlock.onExplosionHit: the bees around turn on
+                // the players near the hive.
+                if (id == BlockID::Beehive || id == BlockID::BeeNest) AngerNearbyBees(*write, pos);
             }
 
             for (const Collected& c : collected) {

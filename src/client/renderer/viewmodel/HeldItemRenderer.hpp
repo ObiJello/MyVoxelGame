@@ -49,6 +49,11 @@ namespace Render {
         // The main arm's swing, 0..1 through it (0 at rest) — the local
         // player's LivingEntity.getAttackAnim(partialTick), which also poses
         // their own humanoid body in third person (a /morph Herobrine).
+        // The server made the local player swing (/swing — its
+        // ClientboundAnimatePacket on the player's own id): the next Tick
+        // starts a swing as an attack press would.
+        void RequestSwing() { m_swingRequested = true; }
+
         // MC LivingEntity.isSwinging for the local player.
         bool IsSwinging() const { return m_swingActive; }
         float AttackAnim(float partialTick) const {
@@ -138,6 +143,21 @@ namespace Render {
             m_ticksSinceKineticHitFeedback = ticksSinceKineticHitFeedback;
         }
 
+        // The local player's skin for the arms (Client::PlayerSkins), per
+        // frame: a skin look draws MC's bare arm in an empty main hand
+        // (renderArmWithItem → renderPlayerArm) — classic or slim, the
+        // sleeves as the skin's parts show them — and the map hands in it;
+        // INVALID_TEXTURE (the stick figure) draws no bare arm and Steve's
+        // map hands. `visible` false: INVISIBILITY (MC isInvisible) hides
+        // the bare arm.
+        void SetPlayerSkin(TextureHandle skin, bool slim, bool rightSleeve, bool leftSleeve, bool visible) {
+            m_armSkin = skin;
+            m_armSlim = slim;
+            m_armRightSleeve = rightSleeve;
+            m_armLeftSleeve = leftSleeve;
+            m_armVisible = visible;
+        }
+
     private:
         // ── Per-hand state (advanced by Tick) ───────────────────────
         // Index 0 = main hand (MC HumanoidArm.RIGHT, invert = +1),
@@ -167,6 +187,7 @@ namespace Render {
         float m_swingProgress     = 0.0f;
         float m_swingProgressPrev = 0.0f;
         bool  m_swingActive       = false;
+        bool  m_swingRequested    = false;   // RequestSwing, consumed by Tick
         // The swing's SwingAnimation (ItemStack.getAttackAnimation of the
         // main hand when it began): a spear STABs for its attack duration,
         // everything else WHACKs for 6 ticks.
@@ -181,6 +202,8 @@ namespace Render {
         // The trident's first-person draw (TridentSpecialRenderer): its model
         // through `pose` (block units, the item's display already applied).
         void RenderTridentModel(int hand, const glm::mat4& pose, float aspect);
+        // ShieldSpecialRenderer in the hand (ShieldModel, the stack's sheet).
+        void RenderShieldModel(int hand, const glm::mat4& pose, float aspect, const Game::ItemStack& stack);
 
         // Hold-to-use pose (eat wiggle / shield block). See SetUseState.
         bool                   m_useActive    = false;
@@ -231,6 +254,16 @@ namespace Render {
         float m_viewPitchDeg = 0.0f;
         TextureHandle m_skinTexture = INVALID_TEXTURE;
         bool m_skinTried = false;
+        // SetPlayerSkin's (owned by Client::PlayerSkins, not destroyed here).
+        TextureHandle m_armSkin = INVALID_TEXTURE;
+        bool m_armSlim = false;
+        bool m_armRightSleeve = true;
+        bool m_armLeftSleeve = true;
+        bool m_armVisible = true;
+        // The arms' sheet: the player's skin, else Steve (m_skinTexture).
+        TextureHandle ArmSkin();
+        // MC renderArmWithItem for an empty main hand: renderPlayerArm.
+        void RenderEmptyArm(float aspect, float partialTick, float walkDistance);
 
         bool m_initialized = false;
         ShaderHandle  m_shader        = INVALID_SHADER;

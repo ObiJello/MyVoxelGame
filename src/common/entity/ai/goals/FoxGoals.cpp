@@ -738,8 +738,8 @@ namespace Game {
     bool DefendTrustedTargetGoal::CanUse() {
         EntityLevel* level = m_fox->Level();
         if (!level || level->IsClientSide()) return false;
-        // NearestAttackableTargetGoal's randomInterval (10, reducedTickDelay).
-        if (level->Random().NextInt(10) != 0) return false;
+        // NearestAttackableTargetGoal's randomInterval: reducedTickDelay(10).
+        if (level->Random().NextInt(ReducedTickDelay(10)) != 0) return false;
 
         // The first trusted identity that resolves to a living entity in this
         // level (MC EntityReference.getEntity(level, LivingEntity.class)).
@@ -764,14 +764,23 @@ namespace Game {
         if (target.GetLastHurtMob() == nullptr) return false;
         if (!(target.GetLastHurtMobTimestamp() < level->GetGameTime() + 600)) return false;
         if (m_fox->Trusts(target)) return false;
+        // NearestAttackableTargetGoal's targetConditions: forCombat over the
+        // follow range — line of sight INCLUDED (mustSee only governs
+        // canContinueToUse, never acquisition).
         const TargetingConditions conditions =
-            TargetingConditions::ForCombat().Range(GetFollowDistance()).IgnoreLineOfSight();
-        return conditions.Test(m_fox, target);
+            TargetingConditions::ForCombat().Range(GetFollowDistance());
+        if (!conditions.Test(m_fox, target)) return false;
+        // The rest of TargetGoal.canAttack: the home restriction.
+        return m_fox->IsWithinHome(target.BlockPosition());
     }
 
     void DefendTrustedTargetGoal::Start() {
+        // MC: target = trustedLastHurtBy, then NearestAttackableTargetGoal
+        // .start's mob.setTarget(target). targetMob is never set, so a target
+        // something else clears (the fox sleeping, a trusted player's
+        // grudge forgotten) stays cleared — CanContinueToUse has nothing to
+        // fall back on.
         m_fox->SetTarget(m_trustedLastHurtBy);
-        m_targetMob = m_trustedLastHurtBy;
         if (m_trustedLastHurt) m_timestamp = m_trustedLastHurt->GetLastHurtByMobTimestamp();
         m_fox->PlaySound(SoundEvents::FOX_AGGRO, 1.0f, 1.0f);
         m_fox->SetDefending(true);
@@ -789,7 +798,8 @@ namespace Game {
 
     FoxPreyTargetGoal::FoxPreyTargetGoal(Fox* fox, Kind kind, int randomInterval)
         : TargetGoal(fox, /*mustSee=*/false, /*mustReach=*/false),
-          m_fox(fox), m_kind(kind), m_randomInterval(randomInterval) {}
+          // MC NearestAttackableTargetGoal stores reducedTickDelay(interval).
+          m_fox(fox), m_kind(kind), m_randomInterval(ReducedTickDelay(randomInterval)) {}
 
     bool FoxPreyTargetGoal::CanUse() {
         EntityLevel* level = m_fox->Level();
@@ -800,13 +810,17 @@ namespace Game {
         }
 
         const double follow = GetFollowDistance();
-        TargetingConditions conditions =
-            TargetingConditions::ForCombat().Range(follow).IgnoreLineOfSight();
+        // MC NearestAttackableTargetGoal.targetConditions: forCombat over the
+        // follow range, line of sight included (mustSee=false only relaxes
+        // canContinueToUse).
+        const TargetingConditions conditions =
+            TargetingConditions::ForCombat().Range(follow);
 
-        // MC getTargetSearchArea: follow range horizontally, 4 vertically.
+        // MC 26.3 getTargetSearchArea: the follow range on ALL axes (the old
+        // 4-block vertical clamp is gone).
         AABB box = m_fox->GetAABB();
-        box.min -= glm::vec3(follow, 4.0, follow);
-        box.max += glm::vec3(follow, 4.0, follow);
+        box.min -= glm::vec3(follow, follow, follow);
+        box.max += glm::vec3(follow, follow, follow);
 
         std::vector<Entity*> nearby;
         level->GetEntitiesInBox(box, m_fox, nearby);
@@ -847,8 +861,9 @@ namespace Game {
     }
 
     void FoxPreyTargetGoal::Start() {
+        // MC NearestAttackableTargetGoal.start: setTarget + super only — no
+        // targetMob cache to resurrect a cleared target from.
         m_fox->SetTarget(m_found);
-        m_targetMob = m_found;
         TargetGoal::Start();
     }
 

@@ -78,7 +78,12 @@ namespace Game::Anvil {
         bool redstonePlus    = false;   // engine rule (RedstonePlus.hpp)
         bool redstoneChunks  = false;   // engine rule (ChunkKeeper.hpp)
         int  veinMineMaxBlocks = 64;    // engine rule (PlayerSession::VeinMineFrom)
+        int  playerStepHeight = 6;      // engine rule (ServerPlayer::applyStepHeightRule), tenths of a block
         bool sharedVitals    = false;   // engine rule (PlayerSessionManager::ShareVitals)
+        bool advancementsWithCheats = false;   // engine rule (server/advancements: progress with cheats on)
+        bool sharedCraftingTables = false;   // engine rule (CraftingTableBlockEntity)
+        bool pistonsMoveBlockEntities = true;   // engine rule (PistonBlockEntities.hpp); absent = on
+        bool portalGunFreePlacement = false;   // engine rule (PortalRegistry::PlacePortal)
         bool twilightForestEnabled = true;   // engine rule (ModDimensions.hpp)
         bool aetherEnabled   = true;    // engine rule (ModDimensions.hpp)
         // World Options "Command Access": may guests use commands. MC keeps

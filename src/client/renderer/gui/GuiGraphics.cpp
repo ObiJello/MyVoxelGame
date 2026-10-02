@@ -3,6 +3,7 @@
 #include "common/entity/GeneratedItemList.hpp"
 #include "client/resource/ResourcePacks.hpp"
 #include "GuiGraphics.hpp"
+#include "common/data/DataComponents.hpp"
 #include "FontRenderer.hpp"
 #include "items/ItemLighting.hpp"
 #include "../texture/AtlasBuilder.hpp"
@@ -881,8 +882,22 @@ namespace Render {
         m_renderState->SubmitQuad(q);
     }
 
+    bool GuiGraphics::HasSprite(const std::string& spriteId) const {
+        return m_atlas && m_atlas->GetSprite(spriteId) != nullptr;
+    }
+
     void GuiGraphics::RenderItem(const Game::ItemStack& stack, int x, int y) {
         if (stack.IsEmpty()) return;
+        // MC ItemModelResolver: ITEM_MODEL / CUSTOM_MODEL_DATA choose the
+        // model (Game::GetRenderStack) — drawn as that model's item.
+        {
+            Game::ItemStack scratch;
+            const Game::ItemStack& drawn = Game::GetRenderStack(stack, scratch);
+            if (&drawn != &stack) {
+                RenderItem(drawn, x, y);
+                return;
+            }
+        }
         // 1. Custom renderer takes precedence (matches MC's BEWLR dispatch).
         auto& crs = CustomRenderers();
         auto crIt = crs.find(stack.itemId);

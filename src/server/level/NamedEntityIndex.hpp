@@ -79,6 +79,10 @@ namespace Server {
 
         // Called when KnownNames changes (Service checks once a second).
         void SetNamesChangedCallback(void (*callback)());
+        // Run that callback now (it resends CommandsS2C to everyone): a
+        // command whose tree carries live suggestions — /tag's tag names,
+        // /bossbar's ids — re-registered it and the clients need the new one.
+        void ResendCommands();
 
         // Write what changed. Cheap when nothing did.
         void Save();

@@ -39,6 +39,16 @@
     "minecraft:potted_cherry_sapling",
     "minecraft:potted_torchflower",
     "minecraft:potted_golden_dandelion",
-    "minecraft:potted_poplar_sapling"
+    "minecraft:potted_poplar_sapling",
+    "minecraft:potted_resonance_bloom",
+    "minecraft:potted_whisperwood_sapling",
+    "minecraft:potted_twilight_oak_sapling",
+    "minecraft:potted_canopy_sapling",
+    "minecraft:potted_tf_mangrove_sapling",
+    "minecraft:potted_darkwood_sapling",
+    "minecraft:potted_skyroot_sapling",
+    "minecraft:potted_golden_oak_sapling",
+    "minecraft:potted_white_flower",
+    "minecraft:potted_purple_flower"
   ]
 }

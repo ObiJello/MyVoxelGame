@@ -78,7 +78,15 @@ namespace Render {
                           bool isSitting = false,
                           bool spectatorHead = false,
                           float fallFlyTicks = 0.0f,
-                          float spinAttackAgeTicks = -1.0f);
+                          float spinAttackAgeTicks = -1.0f,
+                          uint32_t subjectId = kLocalPlayer);
+        // `subjectId`: whose look the figure takes — kLocalPlayer (the
+        // launcher's choice: colour, or the painted figure), or a remote
+        // player's id (their painted figure from PlayerAppearanceS2C; the
+        // colour still comes from `colorId`). A subject whose look is a
+        // Minecraft skin draws nothing here — the player model is
+        // MobRenderer::RenderPlayerSkins'.
+        static constexpr uint32_t kLocalPlayer = 0xFFFFFFFFu;
         // `fallFlyTicks` (> 0 while gliding, partial tick included): the
         // elytra glide tip (MC setupRotations' fall-flying branch), as the
         // bulk pass gives remote players.

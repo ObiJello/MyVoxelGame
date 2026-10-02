@@ -1,6 +1,7 @@
 // File: src/client/renderer/entity/ItemEntityRenderer.cpp
 #include "../mesh/ChunkRenderer.hpp"
 #include "ItemEntityRenderer.hpp"
+#include "common/data/DataComponents.hpp"
 #include "EntityCulling.hpp"
 #include "../core/Frustum.hpp"
 #include "../core/RenderOrigin.hpp"
@@ -440,6 +441,15 @@ namespace Render {
                                       const glm::vec3& cameraPos,
                                       PassState& pass, float scale,
                                       const ClusterPose* cluster) {
+        // ITEM_MODEL / CUSTOM_MODEL_DATA (Game::GetRenderStack).
+        {
+            Game::ItemStack scratch;
+            const Game::ItemStack& drawn = Game::GetRenderStack(stack, scratch);
+            if (&drawn != &stack) {
+                DrawItem(drawn, pos, ageTicks, bobOffs, viewProj, cameraPos, pass, scale, cluster);
+                return;
+            }
+        }
             const Game::Item& item = Game::ItemRegistry::Get(stack.itemId);
 
             // Bob: sin(age/10 + phase) * 0.1 + 0.1, so it oscillates in

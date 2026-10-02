@@ -15,6 +15,8 @@
 #include "common/entity/Item.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/decoration/ItemFrame.hpp"
+#include "common/entity/projectile/Projectile.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/RedstonePlus.hpp"
@@ -1279,6 +1281,15 @@ namespace Game {
         void TargetOnProjectileHit(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
                                    const glm::dvec3& hitPos, Direction face, Entity& projectile) {
             const int redstoneStrength = TargetGetRedstoneStrength(face, hitPos);
+            // MC updateRedstoneOutput: a player's projectile is
+            // CriteriaTriggers.TARGET_BLOCK_HIT (before the tick gate).
+            if (!level.IsClientSide()) {
+                if (auto* shot = dynamic_cast<Projectile*>(&projectile)) {
+                    if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(shot->GetOwner())) {
+                        Server::CriteriaTriggers::TargetHit(*player, projectile, hitPos, redstoneStrength);
+                    }
+                }
+            }
             const EntityTypeId t = projectile.GetType();
             const int duration = (t == EntityTypeId::Arrow || t == EntityTypeId::Trident) ? 20 : 8;
             if (!HasScheduledTick(level, pos, BlockID::Target)) {
@@ -2032,6 +2043,8 @@ namespace Game {
             wire.onPlace                     = &TripWireOnPlace;
             wire.affectNeighborsAfterRemoval = &TripWireAfterRemoval;
             wire.entityInside                = &TripWireEntityInside;
+            // MC TripWireBlock.getEntityInsideCollisionShape → getShape.
+            wire.entityInsideShape           = EntityInsideShape::Outline;
             wire.anyInside                   = &TripWireAnyInside;
             wire.tick                        = &TripWireTick;
 

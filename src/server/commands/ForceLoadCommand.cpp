@@ -73,8 +73,8 @@ namespace Server {
             if (args.size() >= 3) {
                 Game::Math::ChunkPos c; std::string error;
                 if (!ParseColumn(args[1], args[2], source, c, error)) { connection.SendChatMessage(error, 1); return; }
-                connection.SendChatMessage("Chunk at " + ChunkText(c) + " in " + dim +
-                                           (keeper->IsForced(c) ? " is marked for force loading" : " is not marked for force loading"), 1);
+                source.SendSuccess(connection, "Chunk at " + ChunkText(c) + " in " + dim +
+                                           (keeper->IsForced(c) ? " is marked for force loading" : " is not marked for force loading"), false);
                 return;
             }
             const auto forced = keeper->ForcedChunks();
@@ -83,7 +83,7 @@ namespace Server {
             const size_t shown = std::min<size_t>(forced.size(), 32);
             for (size_t i = 0; i < shown; ++i) list += (i ? ", " : "") + ChunkText(forced[i]);
             if (forced.size() > shown) list += ", ... (" + std::to_string(forced.size() - shown) + " more)";
-            connection.SendChatMessage(std::to_string(forced.size()) + " force-loaded chunk(s) were found in " + dim + " at: " + list, 1);
+            source.SendSuccess(connection, std::to_string(forced.size()) + " force-loaded chunk(s) were found in " + dim + " at: " + list, false);
             return;
         }
 
@@ -93,7 +93,7 @@ namespace Server {
         if (!add && args.size() >= 2 && args[1] == "all") {
             keeper->RemoveAllForced();
             keeper->Save();
-            connection.SendChatMessage("Unmarked all force-loaded chunks in " + dim, 1);
+            source.SendSuccess(connection, "Unmarked all force-loaded chunks in " + dim, true);
             return;
         }
         if (args.size() != 3 && args.size() != 5) { Usage(connection); return; }
@@ -127,13 +127,13 @@ namespace Server {
             return;
         }
         if (changed == 1) {
-            connection.SendChatMessage((add ? "Marked chunk " : "Unmarked chunk ") + ChunkText(last) + " in " + dim +
-                                       (add ? " to be force-loaded" : " for force loading"), 1);
+            source.SendSuccess(connection, (add ? "Marked chunk " : "Unmarked chunk ") + ChunkText(last) + " in " + dim +
+                                       (add ? " to be force-loaded" : " for force loading"), true);
             return;
         }
-        connection.SendChatMessage((add ? "Marked " : "Unmarked ") + std::to_string(changed) + " chunks in " + dim +
+        source.SendSuccess(connection, (add ? "Marked " : "Unmarked ") + std::to_string(changed) + " chunks in " + dim +
                                    " from " + ChunkText(lo) + " to " + ChunkText(hi) +
-                                   (add ? " to be force-loaded" : " for force loading"), 1);
+                                   (add ? " to be force-loaded" : " for force loading"), true);
     }
 
 } // namespace Server

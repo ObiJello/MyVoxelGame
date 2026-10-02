@@ -111,6 +111,13 @@ namespace Render {
         void SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) override;
         void BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) override;
         bool CopyFramebufferToRenderTarget(RenderTargetHandle dst) override;
+        // Scaled scene (Render Resolution) — see RenderBackend.hpp.
+        void RequestScaledScene(int width, int height) override;
+        bool ScaledSceneActive() const override { return m_sceneActive; }
+        void GetScaledSceneSize(int& width, int& height) const override {
+            if (m_sceneActive) { width = m_sceneWidth; height = m_sceneHeight; }
+        }
+        void ResolveScaledScene() override;
         // Improved Transparency: MC 26.3 OIT (see RenderBackend.hpp).
         void SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) override;
         bool OitEnsureTargets(int width, int height) override;
@@ -333,6 +340,25 @@ namespace Render {
 
         // Window reference
         GLFWwindow* m_window = nullptr;
+
+        // ── Scaled scene (RequestScaledScene) ──────────────────────────
+        // "The frame" is m_defaultFbo: 0 (the window) normally, the scene
+        // FBO from a scaled frame's BeginFrame until ResolveScaledScene.
+        // Every place that used to name FBO 0 as the frame names this. The
+        // scene's depth-stencil is a D24S8 TEXTURE, the window's own format,
+        // so CopyFramebufferDepthToTexture copies from it exactly as from
+        // the window. Raw GL objects, not handles: nothing outside sees them.
+        GLuint m_defaultFbo     = 0;
+        GLuint m_sceneFbo       = 0;
+        GLuint m_sceneColorTex  = 0;
+        GLuint m_sceneDepthTex  = 0;
+        int    m_sceneWidth     = 0, m_sceneHeight = 0;     // the allocated size
+        int    m_sceneReqWidth  = 0, m_sceneReqHeight = 0;  // RequestScaledScene, for the next BeginFrame
+        bool   m_sceneActive    = false;
+        bool   m_sceneBroken    = false;                    // incomplete FBO once: native for the session
+        int    m_sceneMaxDim    = 0;                        // min(max renderbuffer, max texture); 0 = not asked yet
+        bool   EnsureSceneTarget(int width, int height);
+        void   DestroySceneTarget();
         // Tracked from SetViewport so SetScissorRect can flip a top-left rect
         // into GL's bottom-left origin. glGet on every scissor call would be a
         // driver round-trip; this costs a store per viewport change.

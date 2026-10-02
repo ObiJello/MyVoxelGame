@@ -600,7 +600,7 @@ namespace Server {
             connection.SendChatMessage("The particle was not visible for anybody", 1);
             return;
         }
-        connection.SendChatMessage("Displaying particle " + std::string(Game::ParticleTypes::Name(options.kind)), 1);
+        source.SendSuccess(connection, "Displaying particle " + std::string(Game::ParticleTypes::Name(options.kind)), true);
     }
 
 } // namespace Server

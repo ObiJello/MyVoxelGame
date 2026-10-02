@@ -7,6 +7,7 @@
 #include "PortalCrosshair.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "client/portal/ClientPortalManager.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -88,24 +89,7 @@ void main() {
         };
         static_assert(sizeof(QuadVertex) == 24, "must match block vertex layout stride");
 
-        // Per-side placement state. False = no portal of that colour
-        // is currently on a wall → draw the outline (invalid sprite,
-        // tinted in colour). True = portal active → draw the filled
-        // (valid sprite) variant. Flips via Notify* below.
-        bool s_blueActive   = false;
-        bool s_orangeActive = false;
     } // namespace
-
-    void PortalCrosshair::NotifyPortalPlaced(uint8_t color) {
-        if (color == 0)      s_blueActive   = true;
-        else if (color == 1) s_orangeActive = true;
-    }
-
-    void PortalCrosshair::NotifyPortalRemoved(uint8_t color) {
-        // PortalRemoveS2C uses color=2 to mean "clear both".
-        if (color == 0 || color == 2) s_blueActive   = false;
-        if (color == 1 || color == 2) s_orangeActive = false;
-    }
 
     bool PortalCrosshair::Initialize() {
         if (m_initialized) return true;
@@ -186,7 +170,7 @@ void main() {
 
     void PortalCrosshair::Render(int windowWidth, int windowHeight,
                                  int framebufferWidth, int framebufferHeight,
-                                 float dt) {
+                                 float dt, uint64_t heldGunId) {
         if (!m_initialized || !g_renderBackend) return;
         if (framebufferWidth <= 0 || framebufferHeight <= 0) return;
         if (m_atlasW <= 0 || m_atlasH <= 0) return;
@@ -282,6 +266,14 @@ void main() {
         //     orange as an orange outline.
         //   active (portal placed) → "valid" sprite, the filled-in
         //     bracket. Same tint.
+        // Per-side state from the held gun's own pair (see Render's doc).
+        bool s_blueActive = false, s_orangeActive = false;
+        if (heldGunId != 0) {
+            if (const Client::ClientPortalPair* pair = Client::GetClientPortalManager().FindPair(heldGunId)) {
+                s_blueActive   = pair->blue.active;
+                s_orangeActive = pair->orange.active;
+            }
+        }
         const AtlasRegion& leftRegion  = s_blueActive   ? kLeftValid  : kLeftInvalid;
         const AtlasRegion& rightRegion = s_orangeActive ? kRightValid : kRightInvalid;
 

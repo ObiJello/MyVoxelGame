@@ -12,6 +12,7 @@
 #pragma once
 
 #include "common/network/PacketRegistry.hpp"
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -42,6 +43,17 @@ namespace Network {
         // it hit. The server runs that as a bare BlockItem placement — no
         // block use, no item useOn. Trailing, optional.
         bool     fromUse = false;
+        // The look rotation the click was made with, in the CLICKED BLOCK'S
+        // space (MC yaw/pitch degrees): the player's own rotation, or — when
+        // the ray reached the block through a portal — the look vector mapped
+        // through that portal. Block placement derives facing from it (MC
+        // BlockPlaceContext.getHorizontalDirection / getNearestLookingDirection
+        // / getRotation). Rotation is client-authoritative anyway (every move
+        // packet carries it), so trusting it grants nothing new. Trailing,
+        // optional: absent → the server uses the player's synced rotation.
+        bool     hasLookRotation = false;
+        float    lookYaw   = 0.0f;
+        float    lookPitch = 0.0f;
 
         UseItemOnC2SPacket() = default;
         UseItemOnC2SPacket(uint32_t h, int32_t x, int32_t y, int32_t z, uint32_t dir,
@@ -69,6 +81,11 @@ namespace Network {
             buffer.WriteByte(packet.altInteract ? 0x01 : 0x00);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             buffer.WriteByte(packet.fromUse ? 0x01 : 0x00);
+            buffer.WriteByte(packet.hasLookRotation ? 0x01 : 0x00);
+            if (packet.hasLookRotation) {
+                buffer.WriteFloat(packet.lookYaw);
+                buffer.WriteFloat(packet.lookPitch);
+            }
             return buffer.GetData();
         }
 
@@ -90,6 +107,16 @@ namespace Network {
             packet.altInteract = reader.HasMore() ? (reader.ReadByte() != 0) : false;
             packet.dimensionId = reader.HasMore() ? static_cast<int8_t>(reader.ReadByte()) : packet.kDimensionUnknown;
             packet.fromUse = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            packet.hasLookRotation = reader.HasMore() ? (reader.ReadByte() != 0) : false;
+            if (packet.hasLookRotation) {
+                packet.lookYaw   = reader.ReadFloat();
+                packet.lookPitch = reader.ReadFloat();
+                // A malformed rotation is dropped, not trusted.
+                if (!std::isfinite(packet.lookYaw) || !std::isfinite(packet.lookPitch)) {
+                    packet.hasLookRotation = false;
+                    packet.lookYaw = packet.lookPitch = 0.0f;
+                }
+            }
             return packet;
         }
 

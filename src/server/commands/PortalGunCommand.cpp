@@ -82,7 +82,8 @@ namespace Server {
             return false;
         }
 
-        void ExecuteMove(const std::vector<std::string>& args, ServerPlayer& sender,
+        // `nearest` is nearest the command SOURCE, `@s` the executor.
+        void ExecuteMove(const CommandSourceStack& source, const std::vector<std::string>& args, ServerPlayer& sender,
                          ServerConnection& connection) {
             Game::Portal::PortalRegistry& registry = Game::Portal::ServerRegistry();
             // move <target> <color> ...
@@ -106,14 +107,15 @@ namespace Server {
                 }
                 i += 2;
             } else if (target == "nearest") {
-                gunId = NearestGun(sender.getPosition(), Game::DimensionFromRaw(sender.getDimensionId()));
+                gunId = NearestGun(source.position, source.dimension);
                 if (gunId == 0) {
                     connection.SendChatMessage("No portal-gun portal within 32 blocks of you", 1);
                     return;
                 }
                 i += 1;
             } else {
-                std::string name = args[i] == "@s" ? sender.getName() : args[i];
+                const ServerPlayer* self = source.ExecutorPlayer();
+                std::string name = args[i] == "@s" ? (self ? self->getName() : sender.getName()) : args[i];
                 const std::vector<uint64_t> guns = Game::Portal::GunsOfPlayer(name);
                 if (guns.empty()) {
                     connection.SendChatMessage("No portal-gun portals of " + name, 1);
@@ -192,8 +194,8 @@ namespace Server {
                 std::snprintf(at, sizeof(at), "(%d, %d, %d)",
                               static_cast<int>(std::floor(p.origin.x)), static_cast<int>(std::floor(p.origin.y)),
                               static_cast<int>(std::floor(p.origin.z)));
-                connection.SendChatMessage(std::string("Moved ") + name + " portal of " + owner + " " + what +
-                                           " to " + at, 1);
+                source.SendSuccess(connection, std::string("Moved ") + name + " portal of " + owner + " " + what +
+                                           " to " + at, true);
             };
             if (pair && moveBlue)   report(pair->blue, "blue");
             if (pair && moveOrange) report(pair->orange, "orange");
@@ -207,17 +209,19 @@ namespace Server {
         }
 
         std::string DescribePortal(const Game::Portal::Portal& p) {
-            if (!p.active) return "-";
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), "%.0f %.0f %.0f (%s)", p.origin.x, p.origin.y, p.origin.z,
+            if (!p.active) return "closed";
+            char buf[112];
+            std::snprintf(buf, sizeof(buf), "open at %d %d %d (%s)",
+                          static_cast<int>(std::floor(p.origin.x)), static_cast<int>(std::floor(p.origin.y)),
+                          static_cast<int>(std::floor(p.origin.z)),
                           std::string(Game::DimensionName(p.dimension)).c_str());
             return buf;
         }
 
         // Close each gun's pair (fizzle burst + PortalRemoveS2C through
         // ClearPair) and report the count.
-        void CloseGuns(const std::vector<uint64_t>& guns, const std::string& what,
-                       ServerPlayer& sender, ServerConnection& connection) {
+        void CloseGuns(const CommandSourceStack& source, const std::vector<uint64_t>& guns,
+                       const std::string& what, ServerPlayer& sender, ServerConnection& connection) {
             if (guns.empty()) {
                 connection.SendChatMessage("No portal-gun portals " + what, 1);
                 return;
@@ -225,8 +229,8 @@ namespace Server {
             for (uint64_t gunId : guns) Game::Portal::ServerRegistry().ClearPair(gunId);
             Log::Info("[PortalGunCommand] %s closed %zu pair(s) %s",
                       sender.getName().c_str(), guns.size(), what.c_str());
-            connection.SendChatMessage("Closed " + std::to_string(guns.size()) +
-                                       " portal-gun pair" + (guns.size() == 1 ? " " : "s ") + what, 1);
+            source.SendSuccess(connection, "Closed " + std::to_string(guns.size()) +
+                                       " portal-gun pair" + (guns.size() == 1 ? " " : "s ") + what, true);
         }
 
     } // namespace
@@ -287,16 +291,25 @@ namespace Server {
             std::vector<uint64_t> guns;
             for (const auto& [gunId, pair] : registry.All()) guns.push_back(gunId);
             std::sort(guns.begin(), guns.end());
-            connection.SendChatMessage(std::to_string(guns.size()) + " portal-gun pair(s):", 1);
+            source.SendSuccess(connection, std::to_string(guns.size()) + " portal-gun pair(s):", false);
             for (uint64_t gunId : guns) {
                 const Game::Portal::PortalPair* pair = registry.TryGetPair(gunId);
                 if (!pair) continue;
-                connection.SendChatMessage(
-                    "  gun " + std::to_string(gunId) +
-                    " (" + (pair->owner.empty() ? std::string("owner unknown") : pair->owner) + ")" +
-                    ": blue " + DescribePortal(pair->blue) +
-                    ", orange " + DescribePortal(pair->orange) +
-                    "; gun " + Game::Portal::DescribeWhereabouts(gunId), 1);
+                // Owner: who fired it, or (for a pair from before owners were
+                // saved) whoever the tracker has found holding the gun; a
+                // UUID resolves to the name the server has seen it under.
+                std::string owner = registry.PlayerNameFor(pair->owner);
+                if (owner.empty() && pair->seen.kind == Game::Portal::GunWhereabouts::Kind::Player) {
+                    owner = registry.PlayerNameFor(pair->seen.player);
+                }
+                // No firer on record (the pair predates owner saving) and no
+                // player holds the gun: the first player to pick it up is
+                // taken as its owner.
+                if (owner.empty()) owner = "not recorded (set when a player next holds the gun)";
+                source.SendSuccess(connection, "  gun " + std::to_string(gunId) + " - owner " + owner +
+                    " - gun " + Game::Portal::DescribeWhereabouts(gunId), false);
+                source.SendSuccess(connection, "    blue " + DescribePortal(pair->blue) +
+                    ", orange " + DescribePortal(pair->orange), false);
             }
             return;
         }
@@ -306,7 +319,7 @@ namespace Server {
             if (target == "all" && args.size() == 2) {
                 std::vector<uint64_t> guns;
                 for (const auto& [gunId, pair] : registry.All()) guns.push_back(gunId);
-                CloseGuns(guns, "(all)", sender, connection);
+                CloseGuns(source, guns, "(all)", sender, connection);
                 return;
             }
             if (target == "gun" && args.size() == 3) {
@@ -321,35 +334,38 @@ namespace Server {
                     connection.SendChatMessage("Gun " + args[2] + " has no open portals", 1);
                     return;
                 }
-                CloseGuns({static_cast<uint64_t>(id)}, "for gun " + args[2], sender, connection);
+                CloseGuns(source, {static_cast<uint64_t>(id)}, "for gun " + args[2], sender, connection);
                 return;
             }
             if (args.size() == 2) {
                 // A player's name: online or not (the pair remembers who
                 // fired it), @s for yourself.
                 std::string name = args[1];
-                if (name == "@s") name = sender.getName();
+                if (name == "@s") {
+                    const ServerPlayer* self = source.ExecutorPlayer();
+                    name = self ? self->getName() : sender.getName();
+                }
                 for (const auto& session : sessionManager.GetAllSessions()) {
                     if (session && session->GetPlayer() && Lower(session->GetPlayer()->getName()) == Lower(name)) {
                         name = session->GetPlayer()->getName();   // their own spelling
                         break;
                     }
                 }
-                CloseGuns(Game::Portal::GunsOfPlayer(name), "of " + name, sender, connection);
+                CloseGuns(source, Game::Portal::GunsOfPlayer(name), "of " + name, sender, connection);
                 return;
             }
         }
 
         if (sub == "move") {
-            ExecuteMove(args, sender, connection);
+            ExecuteMove(source, args, sender, connection);
             return;
         }
 
         if (sub == "sweep" && args.size() == 1) {
             switch (Game::Portal::StartOrphanSweep(sender.getPlayerId())) {
                 case Game::Portal::SweepStart::Started:
-                    connection.SendChatMessage("Portal gun sweep started - reading every saved chunk and "
-                                               "player file for the guns of the open pairs", 1);
+                    source.SendSuccess(connection, "Portal gun sweep started - reading every saved chunk and "
+                                               "player file for the guns of the open pairs", true);
                     break;
                 case Game::Portal::SweepStart::AlreadyRunning:
                     connection.SendChatMessage("A portal gun sweep is already running", 1);

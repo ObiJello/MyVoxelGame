@@ -128,6 +128,8 @@ ALIAS_EXACT = {
     # engine blocks (redstone_plus): the zero-delay torch shares the redstone torch's states
     "blue_redstone_torch":      "redstone_torch",
     "blue_redstone_wall_torch": "redstone_wall_torch",
+    # Sky Block (2026-10-02): a plain cube, no properties.
+    "sky_block": "tinted_glass",
     # 26.2/26.3 blocks (2026-09-05) — the upstream data is 1.21.6, so every
     # one of them copies the older block MC registers with the same class.
     "cinnabar": "stone", "chiseled_cinnabar": "stone", "polished_cinnabar": "stone",
@@ -141,6 +143,18 @@ ALIAS_EXACT = {
     "poplar_planks": "oak_planks", "poplar_log": "oak_log", "poplar_wood": "oak_wood",
     "stripped_poplar_log": "stripped_oak_log", "stripped_poplar_wood": "stripped_oak_wood",
     "poplar_sapling": "oak_sapling", "potted_poplar_sapling": "potted_oak_sapling",
+    # Flower pots for the engine dimensions' plants (2026-10-02): FlowerPotBlock,
+    # no properties, like every vanilla pot.
+    "potted_resonance_bloom": "potted_dandelion",
+    "potted_whisperwood_sapling": "potted_dandelion",
+    "potted_twilight_oak_sapling": "potted_dandelion",
+    "potted_canopy_sapling": "potted_dandelion",
+    "potted_tf_mangrove_sapling": "potted_dandelion",
+    "potted_darkwood_sapling": "potted_dandelion",
+    "potted_skyroot_sapling": "potted_dandelion",
+    "potted_golden_oak_sapling": "potted_dandelion",
+    "potted_white_flower": "potted_dandelion",
+    "potted_purple_flower": "potted_dandelion",
     "orange_poplar_leaves": "oak_leaves", "red_poplar_leaves": "oak_leaves",
     "yellow_poplar_leaves": "oak_leaves",
     # The Hush (engine dimension, 2026-09-21). Each property set MUST equal

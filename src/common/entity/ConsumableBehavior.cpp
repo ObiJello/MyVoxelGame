@@ -7,6 +7,7 @@
 #include "Inventory.hpp"
 #include "../world/level/WorldDrops.hpp"
 #include "server/player/ServerPlayer.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/effect/MobEffects.hpp"
@@ -14,10 +15,15 @@
 #include "common/sound/SoundEvents.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/level/gameevent/GameEvent.hpp"
+#include "common/world/block/BlockRegistry.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
+#include "common/world/tags/DataTags.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/physics/Physics.hpp"
+#include "common/data/DataComponents.hpp"
 
 #include <array>
 #include <cstdlib>
-#include <sstream>
 #include <string>
 #include <vector>
 
@@ -71,102 +77,150 @@ namespace Game::ConsumableBehavior {
                              drink ? 0.5f : eatVolume, drink ? drinkPitch : eatPitch);
         }
 
-        // The FoodDefs payload for ApplyStatusEffects: "name Nt ampM
-        // [chanceP]" entries separated by ';' — the ApplyStatusEffects
-        // ConsumeEffect record's (effects, probability). The chance, when
-        // present, is the record's single probability.
-        struct ParsedApply {
-            std::vector<MobEffectInstance> effects;
-            float probability = 1.0f;
-        };
+    } // namespace
 
-        ParsedApply ParseApplyPayload(const std::string& payload) {
-            ParsedApply out;
-            size_t start = 0;
-            while (start <= payload.size()) {
-                size_t end = payload.find(';', start);
-                if (end == std::string::npos) end = payload.size();
-                std::istringstream entry(payload.substr(start, end - start));
-                std::string name, word;
-                if (entry >> name) {
-                    int duration = 0, amplifier = 0;
-                    while (entry >> word) {
-                        if (word.size() > 1 && word.back() == 't') {
-                            duration = std::atoi(word.substr(0, word.size() - 1).c_str());
-                        } else if (word.rfind("amp", 0) == 0) {
-                            amplifier = std::atoi(word.substr(3).c_str());
-                        } else if (word.rfind("chance", 0) == 0) {
-                            out.probability = static_cast<float>(std::atof(word.substr(6).c_str()));
-                        }
-                    }
-                    MobEffectId id;
-                    if (ParseEffectId(name, id)) out.effects.emplace_back(id, duration, amplifier);
-                    else Log::Warning("[Consume] unknown effect '%s' in payload", name.c_str());
-                }
-                start = end + 1;
+    namespace {
+        // MC LivingEntity.randomTeleport(x, y, z, broadcast, forbidden):
+        // drop to the first motion-blocking block below, refuse a landing on
+        // #consumable_does_not_teleport_to, then the body must fit there
+        // without touching a liquid; entity event 46 (the portal puff).
+        bool RandomTeleport(LivingEntity& user, const glm::dvec3& target,
+                            const std::function<void(const glm::dvec3&)>& moveUser) {
+            EntityLevel* level = user.Level();
+            const IBlockAccess* blocks = level ? level->Blocks() : nullptr;
+            if (!blocks) return false;
+            glm::ivec3 pos(static_cast<int>(std::floor(target.x)), static_cast<int>(std::floor(target.y)),
+                           static_cast<int>(std::floor(target.z)));
+            double y = target.y;
+            bool landed = false;
+            BlockID below = BlockID::Air;
+            while (!landed && pos.y > level->GetMinY()) {
+                below = blocks->GetBlock(pos.x, pos.y - 1, pos.z);
+                if (BlockRegistry::HasCollision(below)) landed = true;
+                else { y -= 1.0; --pos.y; }
             }
-            return out;
+            if (!landed) return false;
+            if (DataTags::HasTag(DataTags::Registry::Block, BlockRegistry::Get(below).registrySlug,
+                                 "#minecraft:consumable_does_not_teleport_to")) {
+                return false;
+            }
+            const glm::dvec3 destination(target.x, y, target.z);
+            const glm::vec3 half = user.HalfExtents();
+            const AABB box(glm::vec3(destination.x, destination.y + half.y, destination.z), half * 2.0f);
+            if (CollidesAt(box, level->Physics())) return false;
+            const int x0 = static_cast<int>(std::floor(destination.x - half.x));
+            const int x1 = static_cast<int>(std::floor(destination.x + half.x));
+            const int y1 = static_cast<int>(std::floor(destination.y + half.y * 2.0f));
+            const int z0 = static_cast<int>(std::floor(destination.z - half.z));
+            const int z1 = static_cast<int>(std::floor(destination.z + half.z));
+            for (int bx = x0; bx <= x1; ++bx) {
+                for (int by = pos.y; by <= y1; ++by) {
+                    for (int bz = z0; bz <= z1; ++bz) {
+                        if (blocks->ContainsWater(bx, by, bz)) return false;
+                        const BlockID b = blocks->GetBlock(bx, by, bz);
+                        if (b == BlockID::Lava) return false;
+                    }
+                }
+            }
+            if (moveUser) moveUser(destination);
+            user.position = destination;
+            user.velocity = glm::dvec3(0.0);
+            user.needsSync = true;
+            level->BroadcastEntityEvent(user, 46);
+            return true;
         }
 
-        void ApplyConsumeEffect(Server::ServerPlayer& player, const ConsumeEffect& effect) {
-            switch (effect.type) {
-                case ConsumeEffect::Type::ApplyStatusEffects: {
-                    // ApplyStatusEffectsConsumeEffect.apply:
-                    // `user.getRandom().nextFloat() >= probability` skips the
-                    // whole list; otherwise each effect is added in turn.
-                    const ParsedApply parsed = ParseApplyPayload(effect.payload);
-                    LivingEntity* user = player.effectEntity();
-                    if (!user) break;
-                    if (EntityLevel* level = user->Level()) {
-                        if (level->Random().NextFloat() >= parsed.probability) break;
-                    }
-                    for (const MobEffectInstance& e : parsed.effects) {
-                        player.addEffect(MobEffectInstance(e));
-                    }
-                    break;
+        bool TeleportRandomly(LivingEntity& user, const ConsumeEffect& effect,
+                              const std::function<void(const glm::dvec3&)>& moveUser) {
+            EntityLevel* level = user.Level();
+            if (!level) return false;
+            JavaRandom& random = level->Random();
+            const double d = static_cast<double>(effect.diameter);
+            for (int attempt = 0; attempt < 16; ++attempt) {
+                const double xx = user.position.x + (random.NextDouble() - 0.5) * d;
+                const double yy = std::clamp(user.position.y + (random.NextDouble() - 0.5) * d,
+                                             static_cast<double>(level->GetMinY()),
+                                             static_cast<double>(level->GetMaxY()));
+                const double zz = user.position.z + (random.NextDouble() - 0.5) * d;
+                if (user.IsPassenger()) user.StopRiding();
+                const glm::dvec3 oldPos = user.position;
+                if (!RandomTeleport(user, glm::dvec3(xx, yy, zz), moveUser)) continue;
+                if (ILevelWrite* write = level->MutableBlocks()) {
+                    write->GameEvent(GameEventId::Teleport, oldPos, GameEventContext::Of(&user));
                 }
-                case ConsumeEffect::Type::RemoveStatusEffects: {
-                    // RemoveStatusEffectsConsumeEffect: every listed effect.
-                    std::istringstream names(effect.payload);
-                    std::string name;
-                    while (names >> name) {
-                        MobEffectId id;
-                        if (ParseEffectId(name, id)) player.removeEffect(id);
-                    }
-                    break;
+                const bool fox = user.GetType() == EntityTypeId::Fox;
+                level->PlaySound(nullptr, user.position, fox ? SoundEvents::FOX_TELEPORT : SoundEvents::CHORUS_FRUIT_TELEPORT,
+                                 fox ? SoundSource::Neutral : SoundSource::Players, 1.0f, 1.0f);
+                if (effect.directionalParticles) {
+                    const glm::ivec3 origin(static_cast<int>(std::floor(oldPos.x)), static_cast<int>(std::floor(oldPos.y)),
+                                            static_cast<int>(std::floor(oldPos.z)));
+                    level->PlayLevelEvent(nullptr, LevelEvent::PARTICLES_CONSUME_EFFECT_TELEPORT, origin,
+                                          ClampedPackDifferenceInPosition(origin, user.BlockPosition(), 127, 127, 127));
                 }
-                case ConsumeEffect::Type::ClearAllStatusEffects:
-                    // ClearAllStatusEffectsConsumeEffect — milk.
-                    player.removeAllEffects();
-                    break;
-                case ConsumeEffect::Type::PlaySound: {
-                    // PlaySoundConsumeEffect.apply: level.playSound(null, user
-                    // x/y/z, sound, user.getSoundSource(), 1, 1).
-                    if (World* world = player.soundWorld(); world && !effect.payload.empty()) {
-                        world->PlaySound(nullptr, player.getPosition(), effect.payload,
-                                         SoundSource::Players, 1.0f, 1.0f);
-                    }
-                    break;
-                }
-                default:
-                    // TeleportRandomly: no random-teleport system here yet.
-                    Log::Debug("[Consume] effect type=%u payload='%s' — no system to apply it",
-                               static_cast<unsigned>(effect.type), effect.payload.c_str());
-                    break;
+                user.ResetFallDistance();
+                return true;
             }
+            return false;
         }
     } // namespace
+
+    bool ApplyConsumeEffect(LivingEntity& user, const ConsumeEffect& effect,
+                            const std::function<void(const glm::dvec3&)>& moveUser) {
+        EntityLevel* level = user.Level();
+        if (!level || level->IsClientSide()) return false;
+        switch (effect.type) {
+            case ConsumeEffect::Type::ApplyStatusEffects: {
+                // ApplyStatusEffectsConsumeEffect.apply: one roll gates the
+                // whole list.
+                if (level->Random().NextFloat() >= effect.probability) return false;
+                bool any = false;
+                for (const MobEffectInstance& e : effect.effects) any |= user.AddEffect(MobEffectInstance(e));
+                return any;
+            }
+            case ConsumeEffect::Type::RemoveStatusEffects: {
+                // RemoveStatusEffectsConsumeEffect: each effect of the set.
+                bool any = false;
+                for (const std::string& entry : effect.removeEffects) {
+                    if (!entry.empty() && entry[0] == '#') {
+                        for (int i = 0; i < kMobEffectCount; ++i) {
+                            const auto id = static_cast<MobEffectId>(i);
+                            if (DataTags::HasTag(DataTags::Registry::MobEffect, GetEffectName(id), entry)) {
+                                any |= user.RemoveEffect(id);
+                            }
+                        }
+                        continue;
+                    }
+                    MobEffectId id;
+                    if (ParseEffectId(entry, id)) any |= user.RemoveEffect(id);
+                }
+                return any;
+            }
+            case ConsumeEffect::Type::ClearAllStatusEffects:
+                return user.RemoveAllEffects();
+            case ConsumeEffect::Type::TeleportRandomly:
+                return TeleportRandomly(user, effect, moveUser);
+            case ConsumeEffect::Type::PlaySound:
+                // PlaySoundConsumeEffect: level.playSound(null, user, sound,
+                // user.getSoundSource(), 1, 1).
+                if (effect.sound.empty()) return false;
+                level->PlaySound(nullptr, user.position, effect.sound, user.GetSoundSource(), 1.0f, 1.0f);
+                return true;
+        }
+        return false;
+    }
 
     // Mirrors Consumable.onConsume — Consumable.java:54-70.
     void OnConsume(World* world, Server::ServerPlayer& player,
                    ItemStack& stack, const Consumable& consumable) {
         (void)world;
 
-        // :56 emitParticlesAndSounds(random, user, stack, 16 particles). The
-        // particle half (16 item particles at the mouth) is still TODO.
+        // :56 emitParticlesAndSounds(random, user, stack, 16 particles): the
+        // sound for everyone else; the eater's client spawns the crumbs
+        // (has_consume_particles) and its own sound while it predicts.
         EmitConsumeSound(player, consumable);
 
-        // :58-59 awardStat + CONSUME_ITEM criteria — no stats/advancements.
+        // :58-59 awardStat (no statistics here) + CriteriaTriggers.CONSUME_ITEM.
+        Server::CriteriaTriggers::ConsumeItem(player, stack);
 
         // :62 ConsumableListener components — stack.getAllOfType(
         // ConsumableListener.class): FOOD, POTION_CONTENTS and
@@ -219,8 +273,10 @@ namespace Game::ConsumableBehavior {
         // always is. The status-effect kinds run through the player's
         // LivingEntity (ServerPlayer::addEffect → PlayerEntityView), exactly
         // MC's user.addEffect / removeEffect / removeAllEffects.
-        for (const auto& effect : consumable.onConsumeEffects) {
-            ApplyConsumeEffect(player, effect);
+        if (LivingEntity* user = player.effectEntity()) {
+            Server::ServerPlayer* owner = &player;
+            const auto move = [owner](const glm::dvec3& to) { owner->teleport(to); };
+            for (const auto& effect : consumable.onConsumeEffects) ApplyConsumeEffect(*user, effect, move);
         }
 
         // :67 user.gameEvent(animation == DRINK ? DRINK : EAT) — at the
@@ -253,7 +309,8 @@ namespace Game::ConsumableBehavior {
                    int remainingTicks) {
         auto consumable = stack.get(DataComponents::CONSUMABLE);
         if (consumable && ShouldEmitParticlesAndSounds(*consumable, remainingTicks)) {
-            // :1063 emitParticlesAndSounds(…, 5 particles) — the sound half.
+            // :1063 emitParticlesAndSounds(…, 5 particles) — the sound half
+            // (the particles are the eater's client's).
             EmitConsumeSound(player, *consumable);
         }
     }
@@ -355,39 +412,7 @@ namespace Game::ConsumableBehavior {
                                                  /*showIcon=*/true));
             }
             // onConsumeEffects.
-            for (const auto& effect : consumable->onConsumeEffects) {
-                switch (effect.type) {
-                    case ConsumeEffect::Type::ApplyStatusEffects: {
-                        const ParsedApply parsed = ParseApplyPayload(effect.payload);
-                        if (r.NextFloat() >= parsed.probability) break;
-                        for (const MobEffectInstance& e : parsed.effects) user.AddEffect(MobEffectInstance(e));
-                        break;
-                    }
-                    case ConsumeEffect::Type::RemoveStatusEffects: {
-                        std::istringstream names(effect.payload);
-                        std::string name;
-                        while (names >> name) {
-                            MobEffectId id;
-                            if (ParseEffectId(name, id)) user.RemoveEffect(id);
-                        }
-                        break;
-                    }
-                    case ConsumeEffect::Type::ClearAllStatusEffects:
-                        user.RemoveAllEffects();
-                        break;
-                    case ConsumeEffect::Type::PlaySound:
-                        // PlaySoundConsumeEffect: at the user, its sound source.
-                        if (!effect.payload.empty()) {
-                            level->PlaySeededSound(nullptr, user.position, effect.payload, user.GetSoundSource(),
-                                                   1.0f, 1.0f, r.NextLong());
-                        }
-                        break;
-                    default:
-                        Log::Debug("[Consume] mob effect type=%u payload='%s' — no system to apply it",
-                                   static_cast<unsigned>(effect.type), effect.payload.c_str());
-                        break;
-                }
-            }
+            for (const auto& effect : consumable->onConsumeEffects) ApplyConsumeEffect(user, effect);
             user.GameEvent(drink ? GameEventId::Drink : GameEventId::Eat);
             // stack.consume(1, user) — a mob never has infinite materials.
             handStack.count -= 1;

@@ -118,11 +118,18 @@ namespace Game {
         constexpr uint16_t COPPER_GOLEM_STATUE = 35;
         // MC BlockEntityTypes.CHISELED_BOOKSHELF — the six book slots.
         constexpr uint16_t CHISELED_BOOKSHELF  = 36;
+        // MC BlockEntityTypes.BEEHIVE — beehives and bee nests: the resting
+        // bees and the remembered flower (BeehiveBlockEntity).
+        constexpr uint16_t BEEHIVE             = 37;
         // ... 20..29 reserved for the remaining MC BE types (Sign, Banner,
         // Bed, Bell, Conduit, EnchantingTable, Lectern, MobSpawner,
         // TrialSpawner, Vault, StructureBlock, TestInstanceBlock, Piston,
         // BrushableBlock, DecoratedPot, CopperGolemStatue, Shelf,
         // HangingSign). Added in later stages.
+        // Engine block entity (shared_crafting_tables rule): a crafting
+        // table's stored 3x3 grid (CraftingTableBlockEntity), saved as
+        // `obeycraft:crafting_table`. Attached lazily — see LazyForBlock.
+        constexpr uint16_t OBEY_CRAFTING_TABLE = 56;
         constexpr uint16_t MAX_ID        = 64;
     }
 
@@ -144,6 +151,19 @@ namespace Game {
 
         // → BlockEntityType by save/debug id ("chest"), or nullptr.
         static const BlockEntityType* ByStringId(const std::string& stringId);
+
+        // Block entities a block MAY carry but is never given automatically
+        // (not in ForBlock / HasBlockEntity, so placement, worldgen, the
+        // mesher and pistons treat the block as entity-less): the crafting
+        // table's, which exists only while the shared_crafting_tables rule
+        // has items stored in it or players using it. Whoever needs one
+        // creates it through this type.
+        static const BlockEntityType* LazyForBlock(BlockID id);
+        // HasBlockEntity, or a lazy type: whether a block entity found at a
+        // cell of this block belongs there — World::SetBlock's removal of
+        // the old block's entity asks this, so a broken table's entity goes
+        // (and spills) with it.
+        static bool MayHaveBlockEntity(BlockID id);
 
     private:
         BlockEntityTypes() = delete;

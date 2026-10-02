@@ -11,6 +11,8 @@
 #include "common/entity/ItemEntity.hpp"
 #include "../IntegratedServer.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../entity/ExperienceOrbManager.hpp"
+#include "common/entity/ExperienceOrb.hpp"
 #include "../level/ServerLevel.hpp"
 
 #include <algorithm>
@@ -96,13 +98,27 @@ namespace Server {
                 case SelectedEntity::Kind::Item: {
                     // Items are addressed by id — see the note in
                     // EntitySelector.hpp about why no pointer is carried.
-                    // Same route the selector took to find them: the SENDER's
-                    // level, matching CollectItems' dimension scoping.
+                    // The level the selector found it in.
                     ServerLevel* level = g_integratedServer
-                        ? g_integratedServer->GetLevel(source.dimension) : nullptr;
+                        ? g_integratedServer->GetLevel(target.dimension) : nullptr;
                     if (auto* items = level ? level->Items() : nullptr) {
                         if (Game::ItemEntity* item = items->Find(target.id)) {
                             item->stack.Clear();   // emptied -> reaped next tick
+                            ++killed;
+                        }
+                    }
+                    break;
+                }
+                case SelectedEntity::Kind::Orb: {
+                    // MC kill() on an orb discards it. Aged out, it despawns
+                    // on its level's next tick — the path that broadcasts the
+                    // removal to the watchers.
+                    ServerLevel* level = g_integratedServer
+                        ? g_integratedServer->GetLevel(target.dimension) : nullptr;
+                    if (auto* orbs = level ? level->Orbs() : nullptr) {
+                        auto it = orbs->AllMutable().find(target.id);
+                        if (it != orbs->AllMutable().end()) {
+                            it->second.age = Game::ExperienceOrb::kLifetimeTicks;
                             ++killed;
                         }
                     }
@@ -114,10 +130,10 @@ namespace Server {
         if (killed == 0) {
             connection.SendChatMessage("No entities were killed", 1);
         } else if (killed == 1 && !targets.empty()) {
-            connection.SendChatMessage("Killed " + targets.front().name, 1);
+            source.SendSuccess(connection, "Killed " + targets.front().name, true);
         } else {
-            connection.SendChatMessage("Killed " + std::to_string(killed) + " entities" +
-                                       (sparedSelf ? " (you were spared)" : ""), 1);
+            source.SendSuccess(connection, "Killed " + std::to_string(killed) + " entities" +
+                                       (sparedSelf ? " (you were spared)" : ""), true);
         }
         Log::Info("[KillCommand] %s killed %d entit%s via '%s'",
                   sender.getName().c_str(), killed, killed == 1 ? "y" : "ies",

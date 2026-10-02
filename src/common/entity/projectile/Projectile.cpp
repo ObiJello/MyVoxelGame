@@ -9,6 +9,7 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
 #include "common/world/tags/DataTags.hpp"
+#include "common/world/level/GameRules.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 
@@ -29,6 +30,30 @@ namespace Game {
 
     Projectile::Projectile(EntityTypeId type, EntityLevel* level)
         : Mob(type, level) {}
+
+    bool Projectile::MayInteract() {
+        Entity* owner = GetOwner();
+        if (owner && owner->IsPlayer()) return true;   // Player.mayInteract: no spawn protection
+        return owner == nullptr || Rules::GetBool(Rules::Id::MobGriefing);
+    }
+
+    bool Projectile::MayBreak() {
+        if (!DataTags::HasTag(DataTags::Registry::EntityType, TypeInfo().slug,
+                              "minecraft:impact_projectiles")) {
+            return false;
+        }
+        if (!Rules::GetBool(Rules::Id::ProjectilesCanBreakBlocks)) return false;
+        // canBreakBlockInAdventureMode: an owned shot answers by its owner — a
+        // non-player owner, or a player in adventure mode (mayBuild false and
+        // not a spectator), needs the projectile's can_break predicate, which
+        // nothing in this engine sets. An unowned shot (a dispenser's) may;
+        // MC also refuses it when the server's default game type is
+        // adventure, which the level does not expose (deviation).
+        Entity* owner = GetOwner();
+        if (!owner) return true;
+        if (!owner->IsPlayer()) return false;
+        return owner->MayBuild() || owner->IsSpectator();
+    }
 
     bool Projectile::CollisionShapeContains(const IBlockAccess& blocks,
                                             const glm::ivec3& bp,

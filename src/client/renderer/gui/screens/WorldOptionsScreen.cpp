@@ -416,7 +416,12 @@ namespace Render {
 
     void WorldOptionsScreen::ApplyChanges() {
         if (m_wantedDifficulty != m_initialDifficulty)
-            SendCommand(std::string("/difficulty ") + kDifficultyCmd[std::clamp(m_wantedDifficulty, 0, 3)]);
+            // MC ServerboundChangeDifficultyPacket: the singleplayer owner may
+            // always change it (cheats or not) — /worldoptions difficulty,
+            // owner-only and lock-respecting; anyone else needs gamemaster
+            // permission — the command.
+            SendCommand(std::string(m_host ? "/worldoptions difficulty " : "/difficulty ") +
+                        kDifficultyCmd[std::clamp(m_wantedDifficulty, 0, 3)]);
         if (m_wantedLocked && !m_initialLocked)
             SendCommand("/worldoptions difficulty_lock");
         if (!m_host) return;

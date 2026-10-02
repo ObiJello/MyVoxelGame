@@ -76,6 +76,11 @@ namespace Game {
         // other non-plain content, so every text is editable.
         bool HasEditableText(SignTextSlot) const { return true; }
 
+        // MC SignBlockEntity.applyImplicitComponents: SIGN_TEXT_FRONT /
+        // SIGN_TEXT_BACK (each face's lines, colour and glow) and WAXED from
+        // the placed sign item.
+        void ApplyItemComponents(const DataComponentMap& components) override;
+
         // Wire + snapshot: 4 lines, colour, glow per face; waxed.
         void Save(Network::PacketBuffer& out) const override;
         void Load(Network::PacketReader& in) override;

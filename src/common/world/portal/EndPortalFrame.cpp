@@ -29,12 +29,14 @@ namespace Game {
             // The four ring predicates. `facing` is the direction the frame
             // block points, which in a completed ring is toward the centre —
             // so a frame whose facing is NORTH sits on the SOUTH side.
-            BlockPattern::StatePredicate EyedFrameFacing(Direction facing) {
-                return [facing](BlockState state) {
+            // BlockInWorld.hasState(BlockStatePredicate.forBlock(END_PORTAL_FRAME)
+            //     .where(HAS_EYE, true).where(FACING, facing)).
+            BlockInWorld::Predicate EyedFrameFacing(Direction facing) {
+                return BlockInWorld::HasState([facing](BlockState state) {
                     return state.Is(BlockID::EndPortalFrame)
                         && HasEye(state)
                         && Facing(state) == facing;
-                };
+                });
             }
         } // namespace
 
@@ -47,13 +49,16 @@ namespace Game {
             // The middle rows are MC's ">???<". Written with the third '?'
             // escaped because "??<" is a trigraph — gone from the language in
             // C++17 but still warned about, and the escape costs nothing.
-            static const BlockPattern pattern = BlockPatternBuilder()
+            static const BlockPattern pattern = BlockPatternBuilder::Start()
                 .Aisle({ "?vvv?",
                          ">??\?<",
                          ">??\?<",
                          ">??\?<",
                          "?^^^?" })
-                .Where('?', [](BlockState) { return true; })
+                // BlockInWorld.hasState(BlockStatePredicate.ANY): any cell
+                // at all — hasState only rejects a null BlockInWorld, and
+                // ANY accepts even an unloaded cell's null state.
+                .Where('?', [](BlockInWorld* block) { return block != nullptr; })
                 .Where('^', EyedFrameFacing(Direction::South))
                 .Where('>', EyedFrameFacing(Direction::West))
                 .Where('v', EyedFrameFacing(Direction::North))

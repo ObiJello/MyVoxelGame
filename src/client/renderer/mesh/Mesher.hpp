@@ -3,6 +3,7 @@
 
 #include "SectionMesh.hpp"
 #include "FluidMeshBuilder.hpp"
+#include "BlockTint.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/Blocks.hpp"
@@ -172,23 +173,10 @@ namespace Render {
             // ~99% of blocks that have none.
             bool hasStates;
 
-            // MC BlockColors.createDefault, flattened. Vanilla dispatches the
-            // tint on the BLOCK and treats tintIndex only as a filter inside
-            // that block's resolver — which is why grass_block (tintindex 0)
-            // takes the GRASS colormap while oak_leaves (also tintindex 0)
-            // takes FOLIAGE. Dispatching on the index alone, as this mesher
-            // used to, cannot express that distinction at all.
-            enum class TintSource : uint8_t {
-                None,      // no resolver registered -> untinted (MC returns -1)
-                Biome,     // blend `tintChannel` over the biome grid
-                Constant,  // fixed colour (spruce / birch leaves)
-                FlowerBed, // tintIndex 0 untinted, otherwise grass
-                StemAge,   // melon / pumpkin stem: colour computed from `age`
-                RedstonePower, // redstone dust: RedstoneWireBlock.COLORS[power]
-            };
-            TintSource tintSource = TintSource::None;
-            uint8_t    tintChannel = 0;            // BiomeChannel
-            uint32_t   tintConstant = 0xFFFFFF;
+            // MC BlockColors.createDefault for this block — which tint
+            // source it registers (BlockTint.hpp, shared with the
+            // moving-block pass so a block tints the same in both).
+            BlockTint::Profile tint;
 
             // MC HalfTransparentBlock.skipRendering: a face touching a
             // neighbour of the SAME block is dropped. Non-opaque blocks are
@@ -429,6 +417,11 @@ namespace Render {
             return LightCoordsWith(GetCachedBlockState(worldX, worldY, worldZ), worldX, worldY, worldZ);
         }
         bool LightPermeableAt(int worldX, int worldY, int worldZ) const;
+        // The caches above as BlockModelLighter's level (Mesher.cpp): the
+        // light and AO arithmetic is shared with the moving-block pass
+        // (BlockCubeEntityRenderer), so a block handed between the two is
+        // lit identically.
+        struct LighterLevel;
         // The four vertices' light words (TerrainVertex::light) for one face:
         // MC prepareQuadAmbientOcclusion's light half when `smooth`, else
         // prepareQuadFlat. `localPos` = the vertices relative to the block
@@ -616,11 +609,14 @@ namespace Render {
 
         // **NEW**: Biome tinting methods for different tint indices
         // MC BiomeColors' four ColorResolvers.
-        enum class BiomeChannel : uint8_t { Grass, Foliage, DryFoliage, Water };
+        using BiomeChannel = BlockTint::Channel;
 
         uint16_t  ResolveBiome(int worldX, int worldY, int worldZ) const;
         glm::vec4 BlendedBiomeTint(BiomeChannel channel,
                                    int worldX, int worldY, int worldZ) const;
+        // BlendedBiomeTint as 0xRRGGBB, through the per-section tint cache.
+        uint32_t  BlendedBiomeTintPacked(BiomeChannel channel,
+                                         int worldX, int worldY, int worldZ) const;
         uint32_t  BlendedBiomeColor(BiomeChannel channel,
                                     int worldX, int worldY, int worldZ) const;
 

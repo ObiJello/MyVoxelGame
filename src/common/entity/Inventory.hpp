@@ -38,7 +38,9 @@ namespace Game {
         static constexpr int HOTBAR_SIZE        = 9;
         static constexpr int OFFHAND_BEGIN      = 45;
         static constexpr int TOTAL_SIZE         = 46;
-        static constexpr int MAX_STACK_SIZE     = 64;
+        // MC Container.getMaxStackSize (Inventory does not override it): the
+        // per-slot ceiling above every item's own limit.
+        static constexpr int MAX_STACK_SIZE     = 99;
 
         Inventory();
 

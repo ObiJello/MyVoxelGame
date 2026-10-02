@@ -1,5 +1,6 @@
 // File: src/common/entity/mobs/AetherMobs.cpp
 #include "common/entity/mobs/AetherMobs.hpp"
+#include "common/data/DataComponents.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Mth.hpp"
@@ -136,15 +137,6 @@ namespace Game {
             return static_cast<float>(level->GetMaxLocalRawBrightness(pos.x, pos.y, pos.z)) - 0.5f;
         }
 
-        // DyeItem.getDyeColor over the sixteen dye items (DyeColor order;
-        // the generated item ids run white..black contiguously). -1 = not a
-        // dye.
-        int DyeColorOf(uint32_t itemId) {
-            if (itemId >= Items::WhiteDye && itemId <= Items::BlackDye) {
-                return static_cast<int>(itemId - Items::WhiteDye);
-            }
-            return -1;
-        }
     } // namespace
 
     // ══ Mountable animals ══════════════════════════════════════════════════
@@ -450,7 +442,7 @@ namespace Game {
     UseResult Sheepuff::MobInteract(LivingEntity& player, ItemStack& held) {
         // Sheepuff.mobInteract: dye an unshorn sheepuff (two dyes while
         // puffed).
-        const int dye = DyeColorOf(held.itemId);
+        const int dye = DyeColorOf(held);   // the stack's DYE
         if (dye >= 0 && !IsSheared() && GetColor() != dye) {
             const int cost = m_puffed ? 2 : 1;
             if (held.count >= cost) {

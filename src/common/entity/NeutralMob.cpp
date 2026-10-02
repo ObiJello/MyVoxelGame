@@ -73,7 +73,17 @@ namespace Game {
         // that MC makes against it is made against the reference: a grudge
         // against a player who is offline (unresolved) still expires, and
         // "is this a new target" is a UUID compare, not a pointer one.
-        LivingEntity* previousTarget = m_neutralSelf->GetTarget();   // getTargetUnchecked
+        // The load's setTarget(EntityReference.getLivingEntity(angry_at)).
+        if (m_restoreTargetFromRef) {
+            m_restoreTargetFromRef = false;
+            if (EntityLevel* level = m_neutralSelf->Level(); level && !m_angryAtRef.Empty()) {
+                if (Entity* entity = m_angryAtRef.Get(*level)) {
+                    if (LivingEntity* living = entity->AsLiving()) m_neutralSelf->SetTarget(living);
+                }
+            }
+        }
+
+        LivingEntity* previousTarget = m_neutralSelf->GetTargetUnchecked();
         const EntityRef startRef = m_angryAtRef;
         const bool hadAngerTarget = !startRef.Empty();
 

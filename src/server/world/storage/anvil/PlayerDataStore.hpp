@@ -19,7 +19,9 @@
 
 #include "common/core/Uuid.hpp"
 
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Server { class ServerPlayer; }
 namespace Game { class Mob; }
@@ -33,6 +35,12 @@ namespace Game::Anvil {
     bool WritePlayerData(const SaveRoot& root, const Server::ServerPlayer& player,
                          int dataVersion, std::string& error,
                          const Game::Mob* rootVehicle = nullptr, const Game::Uuid* attachUuid = nullptr);
+
+    // The player file's root compound, uncompressed — what WritePlayerData
+    // writes, and what an `nbt=` selector tests a player against.
+    bool BuildPlayerNbt(const Server::ServerPlayer& player, int dataVersion, std::vector<uint8_t>& out,
+                        std::string& error, const Game::Mob* rootVehicle = nullptr,
+                        const Game::Uuid* attachUuid = nullptr);
 
     // Restores position, rotation, health, food, XP, game mode and inventory.
     // Returns false with an EMPTY error when the player has simply never been

@@ -218,7 +218,10 @@ namespace Game {
 
             if (auto* angry =
                     dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt))) {
-                if (mob.CanAttack(*angry)) return angry;
+                // MC Sensor.isEntityAttackableIgnoringLineOfSight — the
+                // grudge holds only within follow range; past it the piglin
+                // falls back to the other candidates (or none).
+                if (SensorTargeting::IsEntityAttackableIgnoringLineOfSight(mob, *angry)) return angry;
             }
             // UNIVERSAL_ANGER (the universal_anger game rule): any visible
             // attackable player will do.
@@ -233,9 +236,11 @@ namespace Game {
                 return nemesis;
             }
             // MC NEAREST_TARGETABLE_PLAYER_NOT_WEARING_GOLD — the sensor
-            // leaves out a player in the gold set.
-            return dynamic_cast<LivingEntity*>(
+            // leaves out a player in the gold set — and only while
+            // Sensor.isEntityAttackable holds (sight and follow range).
+            auto* player = dynamic_cast<LivingEntity*>(
                 brain->GetEntity(MemoryModule::NearestTargetablePlayerNotWearingGold));
+            return player && SensorTargeting::IsEntityAttackable(mob, *player) ? player : nullptr;
         }
 
         // MC PiglinAi.wantsToDance — 10% per kill, rolled from a RandomSource
@@ -376,9 +381,9 @@ namespace Game {
             }
         };
 
-        // MC StartCelebratingIfTargetDead — party over the corpse.
-        // FORGIVE_DEAD_PLAYERS defaults true, so the dead-player anger wipe is
-        // unconditional here.
+        // MC StartCelebratingIfTargetDead — party over the corpse; the
+        // target and the grudge are dropped unless it was a player and
+        // forgive_dead_players is off.
         class StartCelebratingIfTargetDead : public Behavior {
         public:
             explicit StartCelebratingIfTargetDead(int celebrateDuration)
@@ -407,8 +412,10 @@ namespace Game {
                 }
                 brain->SetMemoryWithExpiry(MemoryModule::CelebrateLocation,
                                            target->BlockPosition(), m_duration);
-                brain->EraseMemory(MemoryModule::AttackTarget);
-                brain->EraseMemory(MemoryModule::AngryAt);
+                if (!target->IsPlayer() || Rules::GetBool(Rules::Id::ForgiveDeadPlayers)) {
+                    brain->EraseMemory(MemoryModule::AttackTarget);
+                    brain->EraseMemory(MemoryModule::AngryAt);
+                }
                 return true;
             }
 
@@ -467,41 +474,6 @@ namespace Game {
             int   m_closeEnough;
             float m_speedModifier;
             Pred  m_pred;
-        };
-
-        // MC's StopAttackingIfTargetInvalid.create(target != nearest valid) —
-        // the shared body plus the piglin's tighter validity rule.
-        class PiglinStopAttacking : public Behavior {
-        public:
-            PiglinStopAttacking()
-                : Behavior({ MemoryCondition{ MemoryModule::AttackTarget,
-                                              MemoryStatus::ValuePresent },
-                             MemoryCondition{ MemoryModule::CantReachWalkTargetSince,
-                                              MemoryStatus::Registered } },
-                           1) {}
-            const char* DebugString() const override { return "PiglinStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
-                auto* mob = dynamic_cast<Mob*>(&body);
-                Brain* brain = body.GetBrain();
-                if (!mob || !brain) return false;
-
-                auto* target = dynamic_cast<LivingEntity*>(
-                    brain->GetEntity(MemoryModule::AttackTarget));
-
-                bool tired = false;
-                if (const std::optional<int64_t> since =
-                        brain->GetLong(MemoryModule::CantReachWalkTargetSince)) {
-                    tired = (level.GetGameTime() - *since) > 200;
-                }
-
-                if (!target || !target->IsAlive() || !mob->CanAttack(*target) || tired
-                    || FindTarget(*mob) != target) {
-                    brain->EraseMemory(MemoryModule::AttackTarget);
-                }
-                return true;
-            }
         };
 
         // MC piglin babySometimesRideBabyHoglin — the ticker-gated copy of
@@ -1637,10 +1609,10 @@ namespace Game {
     }
 
     void PiglinAi::SetAngerTarget(Mob& piglin, LivingEntity& target) {
-        // MC PiglinAi.setAngerTarget. The attackable pre-check
-        // (isEntityAttackableIgnoringLineOfSight) is the mob's canAttack.
+        // MC PiglinAi.setAngerTarget, gated on
+        // Sensor.isEntityAttackableIgnoringLineOfSight.
         Brain* brain = piglin.GetBrain();
-        if (!brain || !piglin.CanAttack(target)) return;
+        if (!brain || !SensorTargeting::IsEntityAttackableIgnoringLineOfSight(piglin, target)) return;
         brain->EraseMemory(MemoryModule::CantReachWalkTargetSince);
         brain->SetMemoryWithExpiry(MemoryModule::AngryAt,
                                    static_cast<Entity*>(&target), kAngerDuration);
@@ -1660,7 +1632,7 @@ namespace Game {
         if (!brain) return;
         // MC: never retaliate out of an active retreat.
         if (brain->IsActive(Activity::Avoid)) return;
-        if (!piglin.CanAttack(attacker)) return;
+        if (!SensorTargeting::IsEntityAttackableIgnoringLineOfSight(piglin, attacker)) return;
 
         // MC isOtherTargetMuchFurtherAwayThanCurrentAttackTarget(4.0).
         if (auto* current = dynamic_cast<LivingEntity*>(
@@ -1713,7 +1685,9 @@ namespace Game {
             // told, the baby itself runs.
             brain->SetMemoryWithExpiry(MemoryModule::AvoidTarget,
                                        static_cast<Entity*>(&attacker), 100);
-            if (piglin.CanAttack(attacker)) BroadcastAngerTarget(level, piglin, attacker);
+            if (SensorTargeting::IsEntityAttackableIgnoringLineOfSight(piglin, attacker)) {
+                BroadcastAngerTarget(level, piglin, attacker);
+            }
         } else if (attacker.GetType() == EntityTypeId::Hoglin
                    && HoglinsOutnumberPiglins(piglin)) {
             // MC setAvoidTargetAndDontHuntForAWhile + broadcastRetreat (the
@@ -1837,7 +1811,11 @@ namespace Game {
         // the spear fights by its three behaviours, the melee stands down
         // while either is held (canUseNonMeleeWeapon).
         std::vector<BehaviorPtr> fight;
-        fight.push_back(std::make_unique<PiglinStopAttacking>());
+        // MC StopAttackingIfTargetInvalid.create(!isNearestValidAttackTarget).
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(
+            [](EntityLevel&, Mob& body, LivingEntity& target) {
+                return FindTarget(body) != &target;
+            }));
         fight.push_back(std::make_unique<BackUpIfTooClose>(kMinDistFromTargetWithCrossbow,
                                                            kSpeedWhenStrafingBack));
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(1.0f));

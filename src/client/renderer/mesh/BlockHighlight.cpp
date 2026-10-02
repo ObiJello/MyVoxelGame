@@ -2,6 +2,7 @@
 #include "BlockHighlight.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "../core/RenderOrigin.hpp"
+#include "../core/WorldFramebuffer.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -229,12 +230,17 @@ void main() {
 
         int fbWidth, fbHeight, winWidth, winHeight;
         GLFWwindow* win = g_renderBackend->GetWindow();
-        glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
+        // The level's framebuffer: the scaled scene's under Render
+        // Resolution, the window's otherwise.
+        if (!WorldFramebuffer::Get(fbWidth, fbHeight)) glfwGetFramebufferSize(win, &fbWidth, &fbHeight);
         glfwGetWindowSize(win, &winWidth, &winHeight);
         g_renderBackend->SetUniformVec2(m_shader, "uScreenSize",
             glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
-        // Minecraft: max(2.5, windowWidth / 1920.0 * 2.5)
+        // Minecraft: max(2.5, windowWidth / 1920.0 * 2.5) — in the scene's
+        // pixels, so the outline keeps its on-screen weight once the scene
+        // is stretched over the window (never thinner than one pixel).
         float lineWidth = std::max(2.5f, static_cast<float>(winWidth) / 1920.0f * 2.5f);
+        lineWidth = std::max(1.0f, lineWidth * WorldFramebuffer::Scale());
         g_renderBackend->SetUniformFloat(m_shader, "uLineWidth", lineWidth);
 
         g_renderBackend->DrawIndexed(m_mesh, 72); // 12 edges * 6 indices

@@ -19,6 +19,8 @@
 #include "common/entity/Bucketable.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/world/biome/Biomes.hpp"
+#include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/tags/DataTags.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/core/Mth.hpp"
@@ -1340,6 +1342,23 @@ namespace Game {
         : AbstractNautilus(EntityTypeId::ZombieNautilus, level) {
         m_brain = std::make_unique<Brain>();
         ZombieNautilusAi::InitBrain(*this, *m_brain);
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    ZombieNautilus::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        // VariantUtils.selectVariantToSpawn: warm (priority 1) in
+        // #spawns_coral_variant_zombie_nautilus — minecraft:warm_ocean —
+        // else the temperate fallback.
+        m_variant = 0;
+        if (m_level) {
+            if (const IBlockAccess* blocks = m_level->Blocks()) {
+                const glm::ivec3 p = BlockPosition();
+                std::string_view biome = BiomeRegistry::Get(blocks->GetBiome(p.x, p.y, p.z)).name;
+                if (biome.rfind("minecraft:", 0) == 0) biome.remove_prefix(10);
+                if (biome == "warm_ocean") m_variant = 1;
+            }
+        }
+        return AbstractNautilus::FinalizeSpawn(reason, std::move(groupData));
     }
 
     void ZombieNautilus::UpdateBrainActivity() {

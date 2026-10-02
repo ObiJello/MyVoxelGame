@@ -30,6 +30,7 @@
 #include <array>
 
 #include "common/world/level/DimensionId.hpp"
+#include "common/world/spawn/MobCapReport.hpp"
 #include "common/world/portal/PortalFamily.hpp"
 
 namespace Game {
@@ -85,6 +86,8 @@ namespace Server {
         int  spaced = 1;
         glm::ivec3 facing{0, 0, 1};   // cardinal the player faced
         glm::ivec3 base{0};           // base centre (bottom, middle)
+        // The level it is built in: the command source's (`/execute in`).
+        Game::DimensionId dimension = Game::DimensionId::Overworld;
 
         // How far the shape extends along the facing axis (for the default
         // "in front of you" placement).
@@ -136,6 +139,7 @@ namespace Server {
     class MorphCarry;
     class WanderingTraderSpawner;
     class PatrolSpawner;
+    class PhantomSpawner;
     class ServerWeather;
     class MorphBlockAnchor;
     class ServerSoundBroadcaster;
@@ -221,10 +225,32 @@ namespace Server {
         // /gamerule vein_mine_max_blocks (PlayerSession::VeinMineFrom): the
         // most extra blocks one vein mine takes. Per world (level.dat).
         int veinMineMaxBlocks = 64;
+        // /gamerule player_step_height (ServerPlayer::applyStepHeightRule):
+        // every player's STEP_HEIGHT, in tenths of a block. Per world
+        // (level.dat obeycraft).
+        int playerStepHeight = 6;
         // /gamerule shared_vitals (PlayerSessionManager::ShareVitals): every
         // player in the world has one health and one hunger between them.
         // Per world (level.dat obeycraft).
         bool sharedVitals = false;
+        // /gamerule advancements_with_cheats (server/advancements): whether
+        // advancements progress in a world with cheats on. Off by default: a
+        // world with cheats earns none. Per world (level.dat obeycraft).
+        bool advancementsWithCheats = false;
+        // /gamerule shared_crafting_tables (CraftingTableBlockEntity): a
+        // crafting table keeps its grid, and everyone at one table shares it.
+        // Per world (level.dat obeycraft).
+        bool sharedCraftingTables = false;
+        // /gamerule pistons_move_block_entities (PistonBlockEntities.hpp):
+        // pistons push and pull chests, barrels, furnaces … with their block
+        // entity. Per world (level.dat obeycraft). On by default; off is
+        // vanilla (blocks with a block entity never move).
+        bool pistonsMoveBlockEntities = true;
+        // /gamerule portal_gun_free_placement (PortalRegistry::PlacePortal):
+        // portal-gun portals sit where they are shot (nudged only to fit)
+        // instead of snapping to the block grid. Per world (level.dat
+        // obeycraft). Off = the grid, as always.
+        bool portalGunFreePlacement = false;
         // /gamerule twilight_forest, /gamerule aether (ModDimensions.hpp):
         // whether each ported mod dimension can be entered. Per world.
         bool twilightForestEnabled = true;
@@ -352,10 +378,35 @@ namespace Server {
         static constexpr int kDefaultVeinMineMaxBlocks = 64;
         static constexpr int kMaxVeinMineMaxBlocks     = 4096;
         void SetVeinMineMaxBlocks(int count);
+        // /gamerule player_step_height: how high every player steps up, in
+        // tenths of a block (6 = vanilla's 0.6). An engine rule over MC's
+        // step_height attribute — ServerPlayer::applyStepHeightRule turns it
+        // into a modifier, so /attribute still composes with it.
+        static constexpr int kDefaultPlayerStepHeight = 6;
+        static constexpr int kMaxPlayerStepHeight     = 100;   // the attribute's own 10-block cap
+        void SetPlayerStepHeight(int tenths);
+        int  PlayerStepHeight() const { return m_config.playerStepHeight; }
         // /gamerule shared_vitals: one health and hunger pool for every
         // player (PlayerSessionManager::ShareVitals).
         void SetSharedVitals(bool on);
         bool SharedVitalsEnabled() const { return m_config.sharedVitals; }
+        // /gamerule advancements_with_cheats (ServerAdvancements::TriggersEnabled).
+        void SetAdvancementsWithCheats(bool on);
+        bool AdvancementsWithCheats() const { return m_config.advancementsWithCheats; }
+        // /gamerule shared_crafting_tables: read as each table is opened
+        // (PlayerSession::CreateCraftingTableMenu); turning it off keeps
+        // what tables store until they are next opened or broken.
+        void SetSharedCraftingTables(bool on);
+        bool SharedCraftingTablesEnabled() const { return m_config.sharedCraftingTables; }
+        // /gamerule pistons_move_block_entities: config + the common-side
+        // global the piston resolver reads, mirrored to every client
+        // (WorldRulesS2C) because clients replay piston moves themselves.
+        void SetPistonsMoveBlockEntities(bool on);
+        bool PistonsMoveBlockEntitiesEnabled() const { return m_config.pistonsMoveBlockEntities; }
+        // /gamerule portal_gun_free_placement. Portals already placed stay
+        // where they are either way.
+        void SetPortalGunFreePlacement(bool on) { m_config.portalGunFreePlacement = on; }
+        bool PortalGunFreePlacement() const { return m_config.portalGunFreePlacement; }
         // /gamerule twilight_forest / aether: can the mod dimension be entered.
         void SetModDimensionEnabled(Game::DimensionId dimension, bool on);
         bool ModDimensionEnabled(Game::DimensionId dimension) const {
@@ -484,6 +535,16 @@ namespace Server {
         // seed, the searched-for spawn, the current time), so it is rewritten
         // rather than written once.
         void WriteLevelDat();
+
+        // MC ServerLevel.setRespawnData for the overworld (/setworldspawn):
+        // the world spawn moves to `block` (feet at its bottom centre), the
+        // angle new players face is (yaw, pitch), every client gets the new
+        // ClientboundSetDefaultSpawnPositionPacket and level.dat is rewritten.
+        // Server thread.
+        void SetWorldSpawn(const glm::ivec3& block, float yaw, float pitch);
+        glm::vec3 GetWorldSpawn() const { return m_worldSpawn; }
+        float GetWorldSpawnYaw() const { return m_worldSpawnYaw; }
+        float GetWorldSpawnPitch() const { return m_worldSpawnPitch; }
 
         // ── Pause ───────────────────────────────────────────────────────────
         //
@@ -745,6 +806,22 @@ namespace Server {
         void SetConfig(const IntegratedServerConfig& config) { m_config = config; }
         const IntegratedServerConfig& GetConfig() const { return m_config; }
 
+        // ── Server-admin commands (/save-all, /save-on, /save-off, /stop) ─
+        // MC MinecraftServer.setAutoSave (every level's noSave): false when
+        // it already was. Off stops the five-minute autosave and the pause
+        // save; /save-all and shutdown still save (MC saves with force=true).
+        bool SetAutoSave(bool enabled);
+        bool IsAutoSave() const { return m_autoSave.load(); }
+        // MC MinecraftServer.saveEverything(suppressLog, flush, force=true):
+        // players, chunks, entities, level.dat — `flush` waits for the
+        // chunk writes instead of queueing them. False when the world cannot
+        // be saved (no save path, read-only).
+        bool SaveEverything(bool flush);
+        // MC MinecraftServer.halt(false) for /stop: asks whoever runs this
+        // server (the headless loop in PlatformMain) to shut it down.
+        void RequestHalt() { m_haltRequested.store(true); }
+        bool HaltRequested() const { return m_haltRequested.load(); }
+
         // The world's difficulty (MC Difficulty id, 0 peaceful .. 3 hard),
         // pushed to every level's World and written to the save.
         int  GetDifficulty() const { return m_config.difficulty; }
@@ -875,6 +952,12 @@ namespace Server {
         // status lookup per chunk in a 39x39 square each tick).
         void SetDebugWantsChunkMap(bool wants) { m_debugWantsChunkMap.store(wants, std::memory_order_relaxed); }
         void SetDebugWantsChunkGen(bool wants) { m_debugWantsChunkGen.store(wants, std::memory_order_relaxed); }
+        // The ImGui Mob Caps panel: while it is open, each level's tick
+        // rebuilds that level's MobCapReport about once a second (a census
+        // walk over its mobs with the spawner's own rules). Reports of every
+        // level built so far, invalid slots left out.
+        void SetDebugWantsMobCaps(bool wants) { m_debugWantsMobCaps.store(wants, std::memory_order_relaxed); }
+        std::vector<Game::MobCapReport> GetMobCapReports() const;
         // The F3+2 TPS chart: every tick since the last drain as
         // {full tick, tickServer, scheduled tasks, idle} nanoseconds
         // (MC TpsDebugDimensions).
@@ -991,6 +1074,9 @@ namespace Server {
         std::atomic<bool> m_hardcore{false};
         std::atomic<bool> m_difficultyLocked{false};
         std::atomic<bool> m_guestCommandAccess{true};
+        // /save-on / /save-off (SetAutoSave) and /stop (RequestHalt).
+        std::atomic<bool> m_autoSave{true};
+        std::atomic<bool> m_haltRequested{false};
         std::atomic<bool> m_forceGameMode{true};
         std::atomic<bool> m_joinable{true};
         // Disconnect every connection that is not the singleplayer owner.
@@ -1052,6 +1138,11 @@ namespace Server {
         // before any player joins; joins run on the same thread, so no further
         // synchronization is needed.
         glm::vec3 m_worldSpawn{0.5f, 67.0f, 0.5f};
+        // The spawn's angle (level.dat spawn.yaw / pitch): what a first-time
+        // player faces. Read from level.dat at startup, moved by
+        // /setworldspawn, written back by WriteLevelDat.
+        float m_worldSpawnYaw   = 0.0f;
+        float m_worldSpawnPitch = 0.0f;
 
         // Held for the whole session on a world we own, released only after
         // the final flush. Null for an imported read-only world, which we
@@ -1065,6 +1156,9 @@ namespace Server {
         // MC's overworld CustomSpawner for pillager patrols (its countdown
         // lives in memory only, as MC's does — PatrolSpawner.hpp).
         std::unique_ptr<PatrolSpawner> m_patrolSpawner;
+        // MC's overworld CustomSpawner for phantoms (countdown in memory only,
+        // as MC's — PhantomSpawner.hpp).
+        std::unique_ptr<PhantomSpawner> m_phantomSpawner;
         // MC's weather — the server's one WeatherData (saved in level.dat)
         // and every weather level's eased levels (ServerWeather.hpp).
         std::unique_ptr<ServerWeather> m_weather;
@@ -1099,6 +1193,11 @@ namespace Server {
         std::vector<std::array<int64_t, 4>> m_tickTimeSamples;
         std::atomic<bool> m_debugWantsChunkMap{false};
         std::atomic<bool> m_debugWantsChunkGen{false};
+        std::atomic<bool> m_debugWantsMobCaps{false};
+        mutable std::mutex m_mobCapMutex;
+        std::array<Game::MobCapReport, Game::kDimensionCount> m_mobCapReports;
+        // Server thread only: when each level's report was last rebuilt.
+        std::array<std::chrono::steady_clock::time_point, Game::kDimensionCount> m_mobCapBuiltAt{};
         glm::ivec3 m_debugGenPos{INT32_MIN, 0, 0};
         Game::DimensionId m_debugGenDimension = Game::DimensionId::Overworld;
         std::vector<std::string> m_debugGenLines;
@@ -1168,6 +1267,9 @@ namespace Server {
 
         // MC NaturalSpawner's per-tick pass over one level's spawnable chunks.
         void RunNaturalSpawner(ServerLevel& level, int64_t serverTick);
+        // The Mob Caps debug panel's report for one level (see
+        // SetDebugWantsMobCaps). Runs after RunNaturalSpawner, throttled.
+        void BuildMobCapReport(ServerLevel& level, int64_t serverTick);
 
         // ========================================================================
         // PORTALS (nether / end)
@@ -1300,13 +1402,13 @@ namespace Server {
         // Everything faces `origin` and is persistent, and lands within
         // tracking range so a single tick shows the lot.
         struct LineupResult { int types = 0, adults = 0, babies = 0; };
-        LineupResult SpawnMobLineup(const PlayerSession& session, const glm::dvec3& origin,
+        LineupResult SpawnMobLineup(Game::DimensionId dimension, const glm::dvec3& origin,
                                     double spacing, bool adults, bool babies);
 
         // /shape: accept a build job (false while one is still streaming) and
         // the per-tick pump that places its blocks. See ShapeCommand.
         bool SubmitShapeJob(const ShapeJobRequest& job);
-        void TickShapeJob();
+        void TickShapeJob(Game::DimensionId ticking);
 
         // MC EntityType.spawn(level, stack, user, pos, SPAWN_ITEM_USE,
         // tryMoveDown, movedUp) — the spawn-egg path. Reached from common code
@@ -1346,12 +1448,6 @@ namespace Server {
         // Per tick: loads for force-loaded / redstone-indexed chunks (ChunkKeeper).
         void ServiceKeptChunks();
 
-        // MC WitherSkullBlock.checkSpawn — the soul-sand ritual. Called by
-        // PlayerSession right after a wither skeleton skull block (floor or
-        // wall) is placed at `pos`; scans for the completed "^^^ / ### / ~#~"
-        // pattern in any orientation and, on a match, clears it and spawns the
-        // charging Wither. No-op in peaceful or when no pattern is complete.
-        void CheckWitherSpawn(const glm::ivec3& pos);
 
         // Read-only, for the debug panel. Null before the session system is
         // initialised. Callers must treat this as a same-thread snapshot

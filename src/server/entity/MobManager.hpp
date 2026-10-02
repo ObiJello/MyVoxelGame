@@ -142,6 +142,12 @@ namespace Server {
         // be harmless anyway — the atomic is here to keep it defined.
         void SetSpawnableChunkCount(int n) { m_spawnableChunks.store(n, std::memory_order_relaxed); }
         int  GetSpawnableChunkCount() const { return m_spawnableChunks.load(std::memory_order_relaxed); }
+        // The chunks that actually received spawn attempts on the spawner's
+        // last pass (MC collectSpawningChunks: ticking, loaded, centre within
+        // 128 blocks of a player) — the Mob Caps debug panel's companion
+        // number to the cap's denominator above.
+        void SetSpawningChunkCount(int n) { m_spawningChunks.store(n, std::memory_order_relaxed); }
+        int  GetSpawningChunkCount() const { return m_spawningChunks.load(std::memory_order_relaxed); }
 
         Game::Mob* Find(int32_t id) const;
 
@@ -251,6 +257,7 @@ namespace Server {
         std::atomic<int> m_categoryCounts[8] = {};
         std::atomic<int> m_typeCounts[static_cast<size_t>(Game::EntityTypeId::Count)] = {};
         std::atomic<int> m_spawnableChunks{0};
+        std::atomic<int> m_spawningChunks{0};
     };
 
 } // namespace Server

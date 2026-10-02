@@ -1,10 +1,14 @@
 // File: src/server/player/ServerPlayer.cpp
 #include "ServerPlayer.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
+#include <limits>
 #include "common/entity/SpearItem.hpp"
 #include "common/physics/Physics.hpp"   // AABBd — block interaction range
 #include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/entity/EquipmentSlot.hpp"
 #include "common/entity/ConsumableBehavior.hpp"
+#include "common/entity/WeaponItems.hpp"
+#include "common/entity/projectile/Arrow.hpp"
 #include "common/world/level/World.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/world/fluid/FluidState.hpp"
@@ -18,6 +22,7 @@
 #include "server/network/ServerConnection.hpp"
 #include "server/entity/ServerLevelBridge.hpp"
 #include "common/network/packets/game/MobEffectPackets.hpp"
+#include "common/network/packets/game/UpdateAttributesS2CPacket.hpp"
 #include "common/network/packets/game/CooldownS2CPacket.hpp"
 #include "common/entity/Attributes.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -30,6 +35,35 @@
 #include <cmath>
 
 namespace Server {
+
+    namespace {
+        // MC ServerPlayer.die: `killer = getKillCredit(); if (killer != null)
+        // killer.awardKillScore(this, source)` — Entity.awardKillScore fires
+        // ENTITY_KILLED_PLAYER for the victim, and ServerPlayer.awardKillScore
+        // adds PLAYER_KILLED_ENTITY when the killer is a player. The credit is
+        // the blow's causing living entity (hurtServer records it as
+        // lastHurtByMob / lastHurtByPlayer before die), else the last mob to
+        // hurt the player within MC's 100-tick memory. (Mob deaths award from
+        // LivingEntity::AwardKillCriteria; a player's death never reaches it,
+        // so Adventure's root — killed_by_something — never fired.)
+        void AwardDeathCriteria(ServerPlayer& victim, const Game::DamageSourceInfo& info) {
+            Game::LivingEntity* view = victim.effectEntity();
+            if (!view) return;
+            Game::Entity* credit = dynamic_cast<Game::LivingEntity*>(info.causing);
+            if (!credit) {
+                if (Game::Entity* last = view->GetLastHurtByMob();
+                    last && view->Level() &&
+                    view->Level()->GetGameTime() - view->GetLastHurtByMobTimestamp() <= 100) {
+                    credit = last;
+                }
+            }
+            if (!credit || credit == view) return;
+            CriteriaTriggers::EntityKilledPlayer(victim, *credit, info);
+            if (ServerPlayer* killer = CriteriaTriggers::PlayerOf(credit); killer && killer != &victim) {
+                CriteriaTriggers::PlayerKilledEntity(*killer, *view, info);
+            }
+        }
+    } // namespace
 
     ServerPlayer::ServerPlayer(uint32_t playerId, const std::string& name)
         : m_playerId(playerId)
@@ -49,6 +83,10 @@ namespace Server {
         // PlayerDataStore, which replaces it).
         m_enchantmentSeed = m_soundRandom.Next(32);   // random.nextInt()
 
+        // MC Player.createAttributes — the player's own attribute rows (a
+        // returning player's saved bases and modifiers replace them).
+        Game::CreatePlayerAttributes(m_attributes);
+
         Log::Info("ServerPlayer: Created player %u '%s' at (%.1f, %.1f, %.1f)",
                  m_playerId, m_name.c_str(), m_position.x, m_position.y, m_position.z);
     }
@@ -66,20 +104,11 @@ namespace Server {
     // === LIFECYCLE ===
 
     float ServerPlayer::getCurrentItemAttackStrengthDelay() const {
-        // MC: 1 / ATTACK_SPEED * 20. The player's base is 4.0 and the held
-        // weapon's modifier is ADDED to it, so a bare hand refills in 5 ticks
-        // and an axe in 20-25.
-        float itemDamage = 0.0f, itemSpeed = 0.0f;
-        Game::GetItemAttackAttributes(
-            m_inventory.GetSlot(Game::Inventory::HotbarToIndex(
-                m_inventory.GetSelectedSlot())).itemId,
-            itemDamage, itemSpeed);
-        // The ATTACK_SPEED attribute: base 4.0 plus the weapon's ADD_VALUE,
-        // then HASTE (+10%/level) and MINING_FATIGUE (-10%/level) as
-        // ADD_MULTIPLIED_TOTAL.
-        const float attackSpeed = static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::AttackSpeed,
-            static_cast<double>(Game::kPlayerBaseAttackSpeed + itemSpeed), m_activeEffects));
+        // MC Player.getCurrentItemAttackStrengthDelay: 1 / ATTACK_SPEED * 20.
+        // The player's base is 4.0 and the held weapon's BASE_ATTACK_SPEED
+        // modifier is added to it (a bare hand refills in 5 ticks, an axe in
+        // 20-25), then HASTE / MINING_FATIGUE.
+        const float attackSpeed = static_cast<float>(getAttributeValue(Game::Attribute::AttackSpeed));
         // A pathological modifier could zero this; MC would divide by zero too,
         // but a NaN delay would make every hit read as full strength.
         if (attackSpeed <= 0.0f) return 1.0e6f;
@@ -103,10 +132,7 @@ namespace Server {
         // has interact_vibrations — true for every item's default
         // (UseEffects.DEFAULT) and false for the spears (Item.spear's
         // UseEffects(true, false, 1.0)).
-        if (stack.IsEmpty()) return;
-        const std::string_view slug = Game::ItemRegistry::Slug(stack.itemId);
-        const std::string_view suffix = "_spear";
-        if (slug.size() >= suffix.size() && slug.substr(slug.size() - suffix.size()) == suffix) return;
+        if (stack.IsEmpty() || !Game::GetUseEffects(stack).interactVibrations) return;
         if (Game::Entity* self = GameEventSource()) self->GameEvent(event);
     }
 
@@ -126,6 +152,12 @@ namespace Server {
         m_impulseContext.Tick();
         // MC ServerPlayer.tick → wardenSpawnTracker.tick().
         m_wardenSpawnTracker.Tick();
+
+        // /gamerule player_step_height onto the own STEP_HEIGHT row, then
+        // the own attributes to this player's client whenever they changed
+        // (MC ServerEntity.sendDirtyEntityData's attribute half).
+        if (g_integratedServer) applyStepHeightRule(g_integratedServer->PlayerStepHeight());
+        syncAttributesToClient();
 
         // ── MC Player.giveExperienceLevels' chime ─────────────────────────
         // Every 5th level reached (amount > 0), at most once per 100 ticks:
@@ -217,6 +249,9 @@ namespace Server {
         } else if (m_sleepCounter > 0) {
             if (++m_sleepCounter >= 110) m_sleepCounter = 0;
         }
+        // MC ServerPlayer.doTick: awardStat(TIME_SINCE_REST) every tick out
+        // of bed (ServerStatsCounter saturates at Integer.MAX_VALUE).
+        if (!isSleeping() && m_timeSinceRest < std::numeric_limits<int>::max()) ++m_timeSinceRest;
 
         // Void damage — MC Entity.checkBelowWorld: 64 blocks below the world
         // floor (minY -64 → threshold -128) deals 4/hit until death. The
@@ -236,8 +271,10 @@ namespace Server {
         bool inWater = false;
         bool inLava  = false;
         if (world && !m_isDead && m_gameMode != GameMode::SPECTATOR) {
-            const double halfW = 0.3 * m_scale - 0.001;
-            const double h     = 1.8 * m_scale;
+            // The body's box: the player's, or the /morph body's.
+            const Game::Morph::Dims body = Game::Morph::DimsOf(m_morph);
+            const double halfW = 0.5 * body.width * m_scale - 0.001;
+            const double h     = body.height * m_scale;
             const double loY   = m_position.y + 0.001;
             const int x0 = static_cast<int>(std::floor(m_position.x - halfW));
             const int x1 = static_cast<int>(std::ceil (m_position.x + halfW)) - 1;
@@ -305,9 +342,9 @@ namespace Server {
         // starve (MC gates via Player.tick's abilities checks — exhaustion
         // sources never fire in creative and food is hidden).
         if (m_gameMode == GameMode::SURVIVAL || m_gameMode == GameMode::ADVENTURE) {
-            const bool peaceful = Server::g_integratedServer &&
-                                  Server::g_integratedServer->GetDifficulty() == 0;
-            m_foodData.tick(*this, peaceful);
+            const int difficulty = Server::g_integratedServer
+                                       ? Server::g_integratedServer->GetDifficulty() : 2;
+            m_foodData.tick(*this, difficulty);
         }
 
         // TODO: Handle portal cooldown
@@ -331,14 +368,20 @@ namespace Server {
                 const int checkFallFlyTicks = m_fallFlyTicks + 1;
                 if (checkFallFlyTicks % 10 == 0) {
                     if ((checkFallFlyTicks / 10) % 2 == 0) {
-                        const int chest = Game::InventoryIndexFor(Game::EquipmentSlot::CHEST);
-                        Game::ItemStack& glider = m_inventory.MutableSlot(chest);
+                        // Util.getRandom(slotsWithGlider, random).
+                        const std::vector<Game::EquipmentSlot> slots = Game::InventoryGliderSlots(m_inventory);
+                        const Game::EquipmentSlot slot = slots[static_cast<size_t>(
+                            soundRandom().NextInt(static_cast<int>(slots.size())))];
+                        const int index = slot == Game::EquipmentSlot::MAINHAND
+                            ? Game::Inventory::HotbarToIndex(m_inventory.GetSelectedSlot())
+                            : Game::InventoryIndexFor(slot);
+                        Game::ItemStack& glider = m_inventory.MutableSlot(index);
                         if (!glider.IsEmpty()) {
                             Game::HurtAndBreak(glider, 1, soundRandom(), isCreative(),
-                                               [this](const Game::ItemStack& broken) {
-                                                   OnEquippedItemBroken(broken, Game::EquipmentSlot::CHEST);
+                                               [this, slot](const Game::ItemStack& broken) {
+                                                   OnEquippedItemBroken(broken, slot);
                                                });
-                            markSlotDirty(chest);
+                            markSlotDirty(index);
                         }
                     }
                     if (Game::LivingEntity* view = effectEntity()) {
@@ -366,12 +409,10 @@ namespace Server {
         if (m_flying || m_onGround || isPassenger() || hasEffect(Game::MobEffectId::Levitation)) {
             return false;
         }
-        // canGlideUsing over every slot: only the elytra glides (GLIDER),
-        // worn in its EQUIPPABLE slot, with wear to spare.
-        const Game::ItemStack& chest = m_inventory.GetSlot(Game::InventoryIndexFor(Game::EquipmentSlot::CHEST));
-        if (chest.IsEmpty() || chest.itemId != Game::Items::Elytra) return false;
-        auto equippable = chest.get(Game::DataComponents::EQUIPPABLE);
-        return equippable && equippable->slot == Game::EquipmentSlot::CHEST && !Game::NextDamageWillBreak(chest);
+        // canGlideUsing over every slot: a GLIDER item worn in its
+        // EQUIPPABLE slot, with wear to spare (the elytra, or anything a
+        // component patch makes one).
+        return !Game::InventoryGliderSlots(m_inventory).empty();
     }
 
     void ServerPlayer::setFallFlyingFromClient(bool fallFlying) {
@@ -450,18 +491,26 @@ namespace Server {
 
     // Mirrors LivingEntity.updateUsingItem (LivingEntity.java:3296-3302).
     void ServerPlayer::updateUsingItem() {
+        // MC ServerPlayer.updateUsingItem: CriteriaTriggers.USING_ITEM on every
+        // tick of use (the spyglass advancements), then the item's tick.
+        if (!m_useItem.IsEmpty()) CriteriaTriggers::UsingItem(*this, m_useItem);
         // :3297 useItem.onUseTick → ItemStack.onUseTick (ItemStack.java:1060-1064)
         // — the item's own Item.onUseTick (the crossbow's loading sounds and
         // load), then the periodic consume-phase eat sound/particle.
         const Game::Item& useItemDef = Game::ItemRegistry::Get(m_useItem.itemId);
-        if (useItemDef.onUseTick) {
+        // A KINETIC_WEAPON's tick (ItemStack.onUseTick → damageEntities) for
+        // a stack whose item has no tick of its own.
+        const auto onUseTick = useItemDef.onUseTick ? useItemDef.onUseTick
+                             : (m_useItem.get(Game::DataComponents::KINETIC_WEAPON) ? &Game::WeaponItems::SpearUseTick
+                                                                                    : nullptr);
+        if (onUseTick) {
             // MC's useItem IS the stack in the hand: the tick writes the
             // live slot (a crossbow's CHARGED_PROJECTILES), not a copy.
             const int slot = handSlotIndex(m_usedItemHand);
             Game::ItemStack& inHand = m_inventory.MutableSlot(slot);
             if (inHand.itemId == m_useItem.itemId && !inHand.IsEmpty()) {
                 const Game::ItemStack before = inHand;
-                useItemDef.onUseTick(*this, inHand, m_useItemRemaining);
+                onUseTick(*this, inHand, m_useItemRemaining);
                 if (!Game::ItemStacksMatch(before, inHand)) markSlotDirty(slot);
                 m_useItem = inHand;
             }
@@ -622,7 +671,19 @@ namespace Server {
         m_position = glm::dvec3(spawnPos);
         m_movePacketBase = m_position;
         m_velocity = glm::vec3(0.0f);
-        m_health = 20.0f;
+        // restoreFrom(old, false): assignBaseValues keeps every attribute
+        // base (/attribute … base set survives death); the permanent
+        // modifiers are NOT carried (assignPermanentModifiers runs only
+        // for restoreAll) — /attribute's modifiers end with the life.
+        for (const Game::AttributeInstance& row : std::vector<Game::AttributeInstance>(m_attributes.All())) {
+            for (const Game::AttributeModifier& mod : row.Modifiers()) {
+                if (mod.permanent) {
+                    m_attributes.RemoveModifier(row.GetAttribute(), static_cast<Game::ModifierId>(mod.id));
+                }
+            }
+        }
+        // setHealth(getMaxHealth()): the fresh player's MAX_HEALTH.
+        m_health = getMaxHealth();
         m_isDead = false;
         m_foodData.setFoodLevel(20);
         m_foodData.setSaturation(5.0f);
@@ -728,9 +789,12 @@ namespace Server {
         const bool inTeleportGrace =
             std::chrono::steady_clock::now() < m_teleportGraceUntil;
         // MC ServerGamePacketListenerImpl.handleMovePlayer: the whole
-        // "moved too quickly" test sits behind the player_movement_check rule.
+        // "moved too quickly" test sits behind the player_movement_check rule
+        // (shouldCheckPlayerMovement), and while gliding also behind
+        // elytra_movement_check.
         if (distance > 600.0 && !inTeleportGrace &&
             Game::Rules::GetBool(Game::Rules::Id::PlayerMovementCheck) &&
+            (!m_fallFlying || Game::Rules::GetBool(Game::Rules::Id::ElytraMovementCheck)) &&
             m_gameMode != GameMode::CREATIVE &&
             m_gameMode != GameMode::SPECTATOR) {
             Log::Warning("ServerPlayer: Player %u moved too fast (%.1f blocks)", m_playerId, distance);
@@ -896,6 +960,10 @@ namespace Server {
             case DamageSource::LIGHTNING_BOLT:     return "minecraft:lightning_bolt";
             case DamageSource::SPEAR:              return "minecraft:spear";
             case DamageSource::TRIDENT:            return "minecraft:trident";
+            case DamageSource::CACTUS:             return "minecraft:cactus";
+            case DamageSource::SWEET_BERRY_BUSH:   return "minecraft:sweet_berry_bush";
+            case DamageSource::HOT_FLOOR:          return "minecraft:hot_floor";
+            case DamageSource::CAMPFIRE:           return "minecraft:campfire";
         }
         return "minecraft:generic";
     }
@@ -936,9 +1004,9 @@ namespace Server {
         }
 
         // MC LivingEntity.hurtServer: FIRE_RESISTANCE refuses every #is_fire
-        // source outright (on_fire, in_fire and lava) — no hurt, no cooldown.
-        if ((source == DamageSource::FIRE || source == DamageSource::LAVA) &&
-            hasEffect(Game::MobEffectId::FireResistance)) {
+        // source outright (on_fire, in_fire, lava, hot_floor and campfire) —
+        // no hurt, no cooldown.
+        if (isFireSource(source) && hasEffect(Game::MobEffectId::FireResistance)) {
             return;
         }
 
@@ -948,10 +1016,12 @@ namespace Server {
         // snow).
         {
             using Game::Rules::Id;
-            if (source == DamageSource::FALL     && !Game::Rules::GetBool(Id::FallDamage))     return;
-            // #is_fire: on_fire, in_fire AND lava all sit behind fire_damage.
-            if ((source == DamageSource::FIRE || source == DamageSource::LAVA)
-                                                 && !Game::Rules::GetBool(Id::FireDamage))     return;
+            // #is_fall: fall and stalagmite (an ender pearl's is FALL here).
+            if ((source == DamageSource::FALL || source == DamageSource::STALAGMITE)
+                                                 && !Game::Rules::GetBool(Id::FallDamage))     return;
+            // #is_fire: on_fire, in_fire, lava, hot_floor and campfire all
+            // sit behind fire_damage.
+            if (isFireSource(source)             && !Game::Rules::GetBool(Id::FireDamage))     return;
             if (source == DamageSource::DROWNING && !Game::Rules::GetBool(Id::DrowningDamage)) return;
         }
 
@@ -976,6 +1046,92 @@ namespace Server {
             return;
         }
         
+        // MC LivingEntity.hurtServer → applyItemBlocking: a raised
+        // BLOCKS_ATTACKS item (past its block delay) absorbs what its damage
+        // reductions cover for a hit from in front — BlocksAttacks.
+        // resolveBlockedDamage over the angle between the facing and the
+        // source — unless the type is in bypassed_by or a piercing arrow
+        // made it; the item wears (hurtBlockingItem), a melee attacker is
+        // pushed (blockUsingItem) and an axe-like weapon disables the block.
+        // ENTITY_HURT_PLAYER's dealt (MC originalDamage) and blocked.
+        const float originalAmount = amount;
+        bool blockedAny = false;
+        if (amount > 0.0f && isBlocking()) {
+            const std::optional<Game::BlocksAttacks> blocks = m_useItem.get(Game::DataComponents::BLOCKS_ATTACKS);
+            const auto* arrow = dynamic_cast<const Game::Arrow*>(info.direct);
+            if (blocks && !Game::BlocksAttacksBypassedBy(*blocks, info.type) &&
+                !(arrow && arrow->GetPierceLevel() > 0)) {
+                double angle = 3.1415927410125732;
+                const Game::Entity* sourceEntity = info.direct ? info.direct : info.causing;
+                if (sourceEntity) {
+                    const float yaw = getYaw() * 0.017453292f;
+                    const glm::dvec3 view(-std::sin(yaw), 0.0, std::cos(yaw));
+                    glm::dvec3 to = sourceEntity->position - m_position;
+                    to.y = 0.0;
+                    const double len = glm::length(to);
+                    to = len > 1.0e-4 ? to / len : glm::dvec3(0.0);
+                    angle = std::acos(std::clamp(glm::dot(to, view), -1.0, 1.0));
+                }
+                const float blocked = Game::ResolveBlockedDamage(*blocks, info.type, amount, angle);
+                if (blocked > 0.0f) {
+                    blockedAny = true;
+                    // hurtBlockingItem: the item in the using hand wears.
+                    const int wear = Game::BlockingItemDamage(*blocks, blocked);
+                    const int slot = handSlotIndex(m_usedItemHand);
+                    if (wear > 0) {
+                        Game::ItemStack& using_ = m_inventory.MutableSlot(slot);
+                        const Game::EquipmentSlot equipSlot = m_usedItemHand == 0 ? Game::EquipmentSlot::MAINHAND
+                                                                                  : Game::EquipmentSlot::OFFHAND;
+                        Game::HurtAndBreak(using_, wear, soundRandom(), isCreative(),
+                                           [this, equipSlot](const Game::ItemStack& broken) {
+                                               OnEquippedItemBroken(broken, equipSlot);
+                                           });
+                        markSlotDirty(slot);
+                        if (using_.IsEmpty()) stopUsingItem();
+                    }
+                    // BlocksAttacks.onBlocked: the block sound.
+                    if (Game::World* w = soundWorld(); w && !blocks->blockSound.empty()) {
+                        w->PlaySound(nullptr, m_position, blocks->blockSound, Game::SoundSource::Players, 1.0f,
+                                     0.8f + soundRandom().NextFloat() * 0.4f);
+                    }
+                    // blockUsingItem(attacker): a non-projectile hit from a
+                    // living attacker — the push, then Player.blockUsingItem's
+                    // disable by the attacker's WEAPON.
+                    auto* attacker = dynamic_cast<Game::LivingEntity*>(info.direct);
+                    if (attacker && !info.Is("#minecraft:is_projectile") && view) {
+                        view->Knockback(0.5, view->position.x - attacker->position.x,
+                                        view->position.z - attacker->position.z);
+                        const Game::ItemStack* weapon = attacker->EquipmentInSlot(Game::EquipmentSlot::MAINHAND);
+                        const auto w = weapon ? weapon->get(Game::DataComponents::WEAPON) : std::nullopt;
+                        const float seconds = w ? w->disableBlockingForSeconds : 0.0f;
+                        if (seconds > 0.0f) {
+                            const int ticks = Game::DisableBlockingForTicks(*blocks, seconds);
+                            if (ticks > 0) {
+                                m_itemCooldowns.AddCooldown(m_useItem, ticks);
+                                stopUsingItem();
+                                if (Game::World* sw = soundWorld(); sw && !blocks->disableSound.empty()) {
+                                    sw->PlaySound(nullptr, m_position, blocks->disableSound, Game::SoundSource::Players,
+                                                  0.8f, 0.8f + soundRandom().NextFloat() * 0.4f);
+                                }
+                            }
+                        }
+                    }
+                    amount -= blocked;
+                    // Fully blocked: no hurt, no knockback, no damage event —
+                    // but the block itself is ENTITY_HURT_PLAYER (the
+                    // shield-a-projectile advancement).
+                    if (amount <= 0.0f) {
+                        CriteriaTriggers::EntityHurtPlayer(*this, info, originalAmount, 0.0f, true);
+                        return;
+                    }
+                }
+            }
+        }
+
+        // MC hurtServer's `damage` after the shield, before armour — what
+        // ENTITY_HURT_PLAYER reports as taken.
+        const float takenAmount = amount;
+
         // MC LivingEntity.hurtServer: a #damages_helmet source (a falling
         // block, anvil or stalactite) wears the helmet and loses a quarter
         // when one is worn.
@@ -1079,6 +1235,10 @@ namespace Server {
             }
         };
 
+        // MC hurtServer: CriteriaTriggers.ENTITY_HURT_PLAYER for every hit
+        // that landed.
+        CriteriaTriggers::EntityHurtPlayer(*this, info, originalAmount, takenAmount, blockedAny);
+
         // MC LivingEntity.hurtServer: `if (isDeadOrDying()) { if
         // (!checkTotemDeathProtection(source)) die(source); }`.
         if (m_health <= 0.0f && checkTotemDeathProtection(source)) {
@@ -1088,8 +1248,12 @@ namespace Server {
             playVoice(Game::SoundEvents::PLAYER_DEATH);
         } else {
             const char* hurt = Game::SoundEvents::PLAYER_HURT;
-            if (source == DamageSource::FIRE || source == DamageSource::LAVA) hurt = Game::SoundEvents::PLAYER_HURT_ON_FIRE;
+            // Player.getHurtSound: the damage type's `effects` — burning
+            // (every #is_fire type here), drowning, thorns, poking (the
+            // sweet berry bush).
+            if (isFireSource(source))                                         hurt = Game::SoundEvents::PLAYER_HURT_ON_FIRE;
             else if (source == DamageSource::DROWNING)                        hurt = Game::SoundEvents::PLAYER_HURT_DROWN;
+            else if (source == DamageSource::SWEET_BERRY_BUSH)                hurt = Game::SoundEvents::PLAYER_HURT_SWEET_BERRY_BUSH;
             else if (source == DamageSource::THORNS)                          hurt = Game::SoundEvents::THORNS_HIT;
             playVoice(hurt);
         }
@@ -1106,6 +1270,7 @@ namespace Server {
             stopUsingItem();
             Log::Info("ServerPlayer: Player %u died (source %d)",
                       m_playerId, static_cast<int>(source));
+            AwardDeathCriteria(*this, info);
         }
     }
 
@@ -1207,29 +1372,39 @@ namespace Server {
         const int hands[2] = {
             Game::Inventory::HotbarToIndex(m_inventory.GetSelectedSlot()),
             Game::Inventory::OFFHAND_BEGIN };
-        bool protectedByTotem = false;
+        std::optional<Game::DeathProtection> protection;
+        Game::ItemStack protectionItem;
         for (const int slot : hands) {
             Game::ItemStack& stack = m_inventory.MutableSlot(slot);
-            if (stack.IsEmpty() || stack.itemId != Game::Items::TotemOfUndying) continue;
+            if (stack.IsEmpty()) continue;
+            protection = stack.get(Game::DataComponents::DEATH_PROTECTION);
+            if (!protection) continue;
+            protectionItem = stack;
+            protectionItem.count = 1;
             // protectionItem = itemStack.copy(), then shrink(1); the copy's
             // causeUseVibration(this, ITEM_INTERACT_FINISH) follows below.
             CauseUseVibration(stack, Game::GameEventId::ItemInteractFinish);
             if (--stack.count <= 0) stack.Clear();   // itemStack.shrink(1)
-            protectedByTotem = true;
+            markSlotDirty(slot);
             break;
         }
-        if (!protectedByTotem) return false;
+        if (!protection) return false;
 
-        // setHealth(1.0F), then DeathProtection.TOTEM_OF_UNDYING's effects:
-        // ClearAllStatusEffects, then REGENERATION II 45 s, ABSORPTION II
-        // 5 s and FIRE_RESISTANCE 40 s. (Stats and the USED_TOTEM trigger
-        // have no systems here.) The slot change reaches the
-        // client through the per-tick inventory diff.
+        // setHealth(1.0F), then the item's DeathProtection.applyEffects —
+        // the totem's TOTEM_OF_UNDYING clears every effect and gives
+        // REGENERATION II 45 s, ABSORPTION II 5 s, FIRE_RESISTANCE 40 s; a
+        // /give'n death_protection runs its own list. (Statistics have no
+        // system here.)
         m_health = 1.0f;
-        removeAllEffects();
-        addEffect(Game::MobEffectInstance(Game::MobEffectId::Regeneration, 900, 1));
-        addEffect(Game::MobEffectInstance(Game::MobEffectId::Absorption, 100, 1));
-        addEffect(Game::MobEffectInstance(Game::MobEffectId::FireResistance, 800, 0));
+        // CriteriaTriggers.USED_TOTEM with the spent item.
+        CriteriaTriggers::UsedTotem(*this, protectionItem);
+        if (Game::LivingEntity* view = effectEntity()) {
+            ServerPlayer* self = this;
+            const auto move = [self](const glm::dvec3& to) { self->teleport(to); };
+            for (const Game::ConsumeEffect& e : protection->deathEffects) {
+                Game::ConsumableBehavior::ApplyConsumeEffect(*view, e, move);
+            }
+        }
         // level.broadcastEntityEvent(this, 35) — the totem animation and
         // particles on every client (drawing them is the client's business).
         if (Game::LivingEntity* view = effectEntity()) {
@@ -1255,6 +1430,11 @@ namespace Server {
         m_isBreaking = false;
         stopUsingItem();
         Log::Info("ServerPlayer: Player %u killed by command", m_playerId);
+        // The generic_kill blow has no entity: the credit is the last mob
+        // to hurt the player, if any (MC getKillCredit).
+        Game::DamageSourceInfo info;
+        info.type = damageTypeId(DamageSource::GENERIC_KILL);
+        AwardDeathCriteria(*this, info);
     }
 
     bool ServerPlayer::bypassesArmor(DamageSource source) {
@@ -1275,36 +1455,33 @@ namespace Server {
             case DamageSource::FALLING_BLOCK:
             case DamageSource::FALLING_ANVIL:
             case DamageSource::FALLING_STALACTITE:
+            // The contact-damage blocks: none is in #bypasses_armor.
+            case DamageSource::CACTUS:
+            case DamageSource::SWEET_BERRY_BUSH:
+            case DamageSource::HOT_FLOOR:
+            case DamageSource::CAMPFIRE:
                 return false;
             default:
                 return true;
         }
     }
 
-    namespace {
-        constexpr Game::EquipmentSlot kArmorSlots[4] = {
-            Game::EquipmentSlot::HEAD, Game::EquipmentSlot::CHEST,
-            Game::EquipmentSlot::LEGS, Game::EquipmentSlot::FEET };
+    bool ServerPlayer::isFireSource(DamageSource source) {
+        // DamageTypeTags.IS_FIRE over this port's player sources.
+        return source == DamageSource::FIRE || source == DamageSource::LAVA ||
+               source == DamageSource::HOT_FLOOR || source == DamageSource::CAMPFIRE;
     }
 
     float ServerPlayer::getArmorValue() const {
-        float total = 0.0f;
-        for (const Game::EquipmentSlot slot : kArmorSlots) {
-            const Game::ItemStack& piece = m_inventory.GetSlot(Game::InventoryIndexFor(slot));
-            if (piece.IsEmpty()) continue;
-            if (const Game::ItemArmorRow* row = Game::GetItemArmorAttributes(piece.itemId)) total += row->armor;
-        }
-        return total;
+        // MC LivingEntity.getArmorValue: Mth.floor(getAttributeValue(ARMOR)) —
+        // every worn piece's ARMOR modifiers (any slot group, so a /give'n
+        // sword with armour in "mainhand" counts too), clamped to 0..30.
+        return static_cast<float>(std::floor(getAttributeValue(Game::Attribute::Armor)));
     }
 
     float ServerPlayer::getArmorToughness() const {
-        float total = 0.0f;
-        for (const Game::EquipmentSlot slot : kArmorSlots) {
-            const Game::ItemStack& piece = m_inventory.GetSlot(Game::InventoryIndexFor(slot));
-            if (piece.IsEmpty()) continue;
-            if (const Game::ItemArmorRow* row = Game::GetItemArmorAttributes(piece.itemId)) total += row->armorToughness;
-        }
-        return total;
+        // MC getAttributeValue(ARMOR_TOUGHNESS) (CombatRules' toughness).
+        return static_cast<float>(getAttributeValue(Game::Attribute::ArmorToughness));
     }
 
     void ServerPlayer::applySharedVitals(float health, int foodLevel, float saturation, float exhaustion,
@@ -1344,17 +1521,79 @@ namespace Server {
         }
     }
 
-    // ── Effect-derived attributes (MC Player.createAttributes + the effect
-    //    templates, over this player's list) ──────────────────────────────
+    // ── Player attributes (MC Player.createAttributes, the worn items'
+    //    ATTRIBUTE_MODIFIERS and enchantment modifiers, the effect
+    //    templates — the fold the client's ClientPlayer runs too) ────────
+
+    double ServerPlayer::getAttributeValue(Game::Attribute attribute) const {
+        return attributeInstance(attribute).GetValue();
+    }
+
+    Game::AttributeInstance ServerPlayer::attributeInstance(Game::Attribute attribute) const {
+        Game::AttributeInstance instance = Game::EnchantmentHelper::PlayerAttributeInstance(
+            attribute, &m_attributes, m_inventory, m_activeEffects);
+        // MC ServerPlayer.updatePlayerAttributes: in creative the two reach
+        // attributes carry CREATIVE_BLOCK_INTERACTION_RANGE_MODIFIER (+0.5)
+        // and CREATIVE_ENTITY_INTERACTION_RANGE_MODIFIER (+2.0), transient
+        // ADD_VALUE. Folded here rather than stored, so a game-mode change
+        // needs no bookkeeping (the client folds the same pair itself).
+        if (m_gameMode == GameMode::CREATIVE) {
+            if (attribute == Game::Attribute::BlockInteractionRange) {
+                static const uint32_t kId = static_cast<uint32_t>(
+                    Game::NamedModifierId(Game::kCreativeBlockRangeModifierName));
+                instance.AddModifier(Game::AttributeModifier{
+                    kId,
+                    Game::kCreativeBlockInteractionRangeBonus, Game::AttributeOperation::AddValue});
+            } else if (attribute == Game::Attribute::EntityInteractionRange) {
+                static const uint32_t kId = static_cast<uint32_t>(
+                    Game::NamedModifierId(Game::kCreativeEntityRangeModifierName));
+                instance.AddModifier(Game::AttributeModifier{
+                    kId,
+                    Game::kCreativeEntityInteractionRangeBonus, Game::AttributeOperation::AddValue});
+            }
+        }
+        return instance;
+    }
+
+    void ServerPlayer::applyStepHeightRule(int tenths) {
+        // An ADD_VALUE that lifts STEP_HEIGHT's 0.6 to the rule's value —
+        // absent at the default, so a vanilla world's players carry nothing.
+        static const Game::ModifierId id = Game::NamedModifierId(Game::kStepHeightRuleModifierName);
+        const double amount = static_cast<double>(std::clamp(tenths, 0, 100)) / 10.0 -
+                              Game::PlayerBaseAttributeValue(Game::Attribute::StepHeight);
+        const Game::AttributeInstance* row = m_attributes.Find(Game::Attribute::StepHeight);
+        const Game::AttributeModifier* current = row ? row->FindModifier(static_cast<uint32_t>(id)) : nullptr;
+        if (std::abs(amount) < 1.0e-9) {
+            if (current) m_attributes.RemoveModifier(Game::Attribute::StepHeight, id);
+            return;
+        }
+        if (current && current->amount == amount) return;
+        m_attributes.AddModifier(Game::Attribute::StepHeight, Game::AttributeModifier{
+            static_cast<uint32_t>(id), amount, Game::AttributeOperation::AddValue});
+    }
 
     float ServerPlayer::getMaxHealth() const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::MaxHealth, 20.0, m_activeEffects));
+        return static_cast<float>(getAttributeValue(Game::Attribute::MaxHealth));
     }
 
     float ServerPlayer::getMaxAbsorption() const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::MaxAbsorption, 0.0, m_activeEffects));
+        return static_cast<float>(getAttributeValue(Game::Attribute::MaxAbsorption));
+    }
+
+    float ServerPlayer::getFallDamageMultiplier() const {
+        return static_cast<float>(getAttributeValue(Game::Attribute::FallDamageMultiplier));
+    }
+
+    float ServerPlayer::getReachDistance() const {
+        // MC Player.blockInteractionRange: BLOCK_INTERACTION_RANGE, with
+        // ServerPlayer's CREATIVE_BLOCK_INTERACTION_RANGE_MODIFIER (+0.5
+        // ADD_VALUE — attributeInstance folds it in).
+        return static_cast<float>(getAttributeValue(Game::Attribute::BlockInteractionRange));
+    }
+
+    double ServerPlayer::entityInteractionRange() const {
+        // MC Player.entityInteractionRange with the creative +2.0.
+        return getAttributeValue(Game::Attribute::EntityInteractionRange);
     }
 
     void ServerPlayer::clampToEffectMaxima() {
@@ -1365,19 +1604,15 @@ namespace Server {
     }
 
     float ServerPlayer::getSafeFallDistance() const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::SafeFallDistance, 3.0, m_activeEffects));
+        return static_cast<float>(getAttributeValue(Game::Attribute::SafeFallDistance));
     }
 
     float ServerPlayer::getLuck() const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::Luck, 0.0, m_activeEffects));
+        return static_cast<float>(getAttributeValue(Game::Attribute::Luck));
     }
 
-    float ServerPlayer::getAttackDamage(float itemDamage) const {
-        return static_cast<float>(Game::ComputeAttributeWithEffects(
-            Game::Attribute::AttackDamage,
-            static_cast<double>(Game::kPlayerBaseAttackDamage + itemDamage), m_activeEffects));
+    float ServerPlayer::getAttackDamage() const {
+        return static_cast<float>(getAttributeValue(Game::Attribute::AttackDamage));
     }
 
     // ── Status effects ─────────────────────────────────────────────────────
@@ -1429,6 +1664,25 @@ namespace Server {
         if (blend)           p.flags |= Network::UpdateMobEffectS2CPacket::kFlagBlend;
         connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UpdateMobEffectS2C),
                                Network::Serialization::Serialize(p));
+    }
+
+    void ServerPlayer::syncAttributesToClient(bool force) {
+        // MC ServerEntity.sendDirtyEntityData → ClientboundUpdateAttributes
+        // Packet(getId(), dirty syncable attributes) — the owner included,
+        // whose LocalPlayer folds them into its prediction (step height,
+        // gravity, jump strength, reach, scale …). The whole syncable set
+        // goes, as UpdateAttributesS2C always sends it.
+        const uint64_t signature = Network::SyncableAttributesSignature(m_attributes);
+        if (!force && m_attributesSent && signature == m_sentAttributesSignature) return;
+        ServerConnection* connection = ConnectionFor(m_playerId);
+        if (!connection) return;
+        Network::UpdateAttributesS2CPacket packet;
+        packet.entityId = static_cast<int32_t>(m_playerId);
+        packet.attributes = Network::SyncableAttributes(m_attributes);
+        connection->SendPacket(static_cast<uint8_t>(Network::PacketId::UpdateAttributesS2C),
+                               Network::Serialization::Serialize(packet));
+        m_sentAttributesSignature = signature;
+        m_attributesSent = true;
     }
 
     void ServerPlayer::sendEffectRemove(Game::MobEffectId id) const {

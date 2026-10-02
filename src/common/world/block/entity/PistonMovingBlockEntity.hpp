@@ -14,6 +14,8 @@
 #include "common/world/block/BlockState.hpp"
 #include "common/world/block/Direction.hpp"
 
+#include <memory>
+
 namespace Game::Nbt { class Writer; }
 
 namespace Game {
@@ -57,6 +59,10 @@ namespace Game {
         // and lives with the gap; here the entity stays "landed" — drawn at
         // rest, never ticked — until the mesh whose version includes the
         // final block has been uploaded (ClientChunkManager retires it).
+        // It is a picture only: through the client level a landed cell
+        // answers with the entity it carries (ClientBlockAccess::
+        // GetBlockEntity / TakeBlockEntity), so a lid event, a partner
+        // chest or the next piston move finds the real entity.
         void     Land(uint32_t sectionVersion, int64_t clientTick) {
             m_landed = true; m_landedVersion = sectionVersion; m_landedTick = clientTick;
             m_progress = 1.0f; m_progressO = 1.0f;
@@ -85,9 +91,25 @@ namespace Game {
         // MC preRemoveSideEffects → finalTick.
         void PreRemoveSideEffects(ILevelWrite& level, const glm::ivec3& pos, BlockState oldState) override;
 
+        // ── The block entity in transit (pistons_move_block_entities) ────
+        //
+        // The entity of the block this cell is carrying, detached from the
+        // cell it left (PistonBlockEntities.hpp). It is re-homed to THIS
+        // cell on arrival, so a renderer drawing it reads the right
+        // position; the landing installs it in the world. Owned here and
+        // nowhere else while the move is in flight.
+        void Carry(std::unique_ptr<BlockEntity> entity) {
+            m_carried = std::move(entity);
+            if (m_carried) m_carried->MoveCarriedTo(GetWorldPos());
+        }
+        BlockEntity* Carried() const { return m_carried.get(); }
+        std::unique_ptr<BlockEntity> TakeCarried() { return std::move(m_carried); }
+
         // Wire form (server → client), and the Anvil form.
         void Save(Network::PacketBuffer& out) const override;
         void Load(Network::PacketReader& in) override;
+        // The vanilla fields only; the carried entity is BlockEntityNbt's
+        // (`obeycraft_carried`, written through the full block-entity codec).
         void WriteNbt(Nbt::Writer& w) const;
         void SetFromNbt(BlockState movedState, Direction direction, float progress,
                         bool extending, bool source) {
@@ -115,6 +137,7 @@ namespace Game {
         bool       m_landed         = false;
         uint32_t   m_landedVersion  = 0;
         int64_t    m_landedTick     = 0;
+        std::unique_ptr<BlockEntity> m_carried;
     };
 
 } // namespace Game

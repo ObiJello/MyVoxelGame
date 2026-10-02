@@ -1,5 +1,6 @@
 // File: src/common/entity/TamableAnimal.cpp
 #include "common/entity/TamableAnimal.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/entity/EntityLevel.hpp"
 #include "common/entity/LivingEntity.hpp"
@@ -40,7 +41,13 @@ namespace Game {
     void TamableAnimal::Tame(const LivingEntity& player) {
         SetTame(true, /*includeSideEffects=*/true);
         SetOwner(&player);
-        // MC also fires CriteriaTriggers.TAME_ANIMAL — no advancements here.
+        // MC TamableAnimal.tame: `if (player instanceof ServerPlayer)
+        // CriteriaTriggers.TAME_ANIMAL.trigger(player, this)`.
+        if (m_tamableSelf && m_tamableSelf->Level() && !m_tamableSelf->Level()->IsClientSide()) {
+            if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(&player)) {
+                Server::CriteriaTriggers::TameAnimal(*sp, *m_tamableSelf);
+            }
+        }
     }
 
     bool TamableAnimal::UnableToMoveToOwner() const {

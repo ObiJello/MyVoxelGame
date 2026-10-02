@@ -106,15 +106,14 @@ namespace Server {
         // The sender's own level may be pinned (DimensionType.fixedTime); the
         // clock they just set is real everywhere else, so say so rather than
         // letting "Set the time to 1000" look like a no-op in the Hush.
+        // MC: the SOURCE's level (`/execute in the_nether run time ...`).
         void NoteFixedTime(const CommandSourceStack& source, ServerConnection& connection) {
-            if (!source.sender) return;
-            const ServerLevel* level = g_integratedServer->GetLevel(
-                Game::DimensionFromRaw(source.sender->getDimensionId()));
+            const ServerLevel* level = g_integratedServer->GetLevel(source.dimension);
             const Game::World* w = level ? level->World() : nullptr;
             if (w && w->HasFixedDayTime()) {
-                connection.SendChatMessage(
-                    std::string(Game::DimensionName(Game::DimensionFromRaw(source.sender->getDimensionId()))) +
-                    " keeps a fixed time of " + std::to_string(w->GetDayTime() % 24000), 1);
+                source.SendSuccess(connection,
+                    std::string(Game::DimensionName(source.dimension)) +
+                    " keeps a fixed time of " + std::to_string(w->GetDayTime() % 24000), false);
             }
         }
 
@@ -135,7 +134,13 @@ namespace Server {
                               const std::vector<std::string>& args,
                               ServerConnection& connection,
                               PlayerSessionManager& /*sessionManager*/) {
-        Game::World* world = g_integratedServer ? g_integratedServer->GetWorld() : nullptr;
+        // MC reads (and reports) the SOURCE's level; setting still moves
+        // every level's clock (AddAllLevels / SetAllLevels).
+        Game::World* world = nullptr;
+        if (g_integratedServer) {
+            if (ServerLevel* level = g_integratedServer->GetLevel(source.dimension)) world = level->World();
+            if (!world) world = g_integratedServer->GetWorld();
+        }
         if (!world) {
             connection.SendChatMessage("Time is unavailable (no world)", 1);
             return;
@@ -166,7 +171,7 @@ namespace Server {
             SetAllLevels(time);
             g_integratedServer->ForceTimeSync();
             // commands.time.set reports the value that was set.
-            connection.SendChatMessage("Set the time to " + std::to_string(time), 1);
+            source.SendSuccess(connection, "Set the time to " + std::to_string(time), true);
             NoteFixedTime(source, connection);
             return;
         }
@@ -180,7 +185,7 @@ namespace Server {
             AddAllLevels(parsed.ticks);
             g_integratedServer->ForceTimeSync();
             // addTime reports the resulting time of day (getDayTime).
-            connection.SendChatMessage("Set the time to " + std::to_string(DayTimeOf(*world)), 1);
+            source.SendSuccess(connection, "Set the time to " + std::to_string(DayTimeOf(*world)), true);
             NoteFixedTime(source, connection);
             return;
         }
@@ -197,7 +202,7 @@ namespace Server {
                 connection.SendChatMessage("Usage: /time query <daytime|gametime|day>", 1);
                 return;
             }
-            connection.SendChatMessage("The time is " + std::to_string(result), 1);
+            source.SendSuccess(connection, "The time is " + std::to_string(result), false);
             return;
         }
 

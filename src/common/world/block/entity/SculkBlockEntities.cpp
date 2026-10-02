@@ -1,5 +1,7 @@
 // File: src/common/world/block/entity/SculkBlockEntities.cpp
 #include "SculkBlockEntities.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -314,7 +316,12 @@ namespace Game {
                 // block the corpse lay in, half a block up.
                 spreader.AddCursors(BlockContaining(sourcePosition + glm::dvec3(0.0, 0.5, 0.0)),
                                     experienceWouldDrop);
-                // (KILL_MOB_NEAR_SCULK_CATALYST: no advancement system.)
+                // The killer, a server player, gets
+                // CriteriaTriggers.KILL_MOB_NEAR_SCULK_CATALYST.
+                if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(killer)) {
+                    Server::CriteriaTriggers::KillMobNearSculkCatalyst(
+                        *player, *mob, DamageSourceInfo::Of(mob->GetLastDamageSource(), killer, nullptr));
+                }
             }
             mob->SkipDropExperience();
             if (const std::optional<glm::dvec3> p = m_source.GetPosition()) Bloom(level, BlockContaining(*p));

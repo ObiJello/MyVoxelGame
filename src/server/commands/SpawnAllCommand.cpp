@@ -23,7 +23,7 @@ namespace Server {
     void SpawnAllCommand::Execute(const CommandSourceStack& source,
                                   const std::vector<std::string>& args,
                                   ServerConnection& connection,
-                                  PlayerSessionManager& sessionManager) {
+                                  PlayerSessionManager& /*sessionManager*/) {
         ServerPlayer& sender = *source.sender;
         bool adults = true, babies = true;
         double spacing = 3.0;
@@ -54,20 +54,14 @@ namespace Server {
             connection.SendChatMessage("No server", 1);
             return;
         }
-        auto session = sessionManager.GetSession(sender.getPlayerId());
-        if (!session) {
-            connection.SendChatMessage("No session", 1);
-            return;
-        }
-
+        // At the source (`/execute at|positioned|in ...`).
         const IntegratedServer::LineupResult r =
-            g_integratedServer->SpawnMobLineup(*session, sender.getPosition(), spacing, adults, babies);
+            g_integratedServer->SpawnMobLineup(source.dimension, source.position, spacing, adults, babies);
 
-        connection.SendChatMessage(
-            "Lined up " + std::to_string(r.adults) + " adults and " +
+        source.SendSuccess(connection, "Lined up " + std::to_string(r.adults) + " adults and " +
             std::to_string(r.babies) + " babies in a 12-wide grid (" +
             std::to_string(r.types) + " types, " +
-            std::to_string(static_cast<int>(spacing)) + " apart)", 1);
+            std::to_string(static_cast<int>(spacing)) + " apart)", true);
         Log::Info("[SpawnAllCommand] %s lined up %d adults / %d babies over %d types",
                   sender.getName().c_str(), r.adults, r.babies, r.types);
     }

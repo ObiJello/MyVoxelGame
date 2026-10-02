@@ -24,7 +24,10 @@ namespace Server {
                                      PlayerSessionManager& /*sessionManager*/) {
         auto* server = g_integratedServer.get();
         if (!server) return;
-        ServerLevel& level = server->Overworld();
+        // The source's level (`/execute in the_nether run entitystats`).
+        ServerLevel* levelPtr = server->GetLevel(source.dimension);
+        if (!levelPtr) levelPtr = &server->Overworld();
+        ServerLevel& level = *levelPtr;
         MobManager* mobs = level.Mobs();
         const ChunkTicketManager* tickets = level.Tickets();
         if (!mobs) return;
@@ -67,7 +70,7 @@ namespace Server {
                  tntOnly ? "tnt" : "all", total, removed, notTicking, belowWorld,
                  lo.x, hi.x, lo.y, hi.y, lo.z, hi.z, maxSpeed, sampleText.c_str());
         Log::Info("%s", line);
-        connection.SendChatMessage(line, 1);
+        source.SendSuccess(connection, line, false);
     }
 
 } // namespace Server

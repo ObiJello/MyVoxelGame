@@ -6,9 +6,8 @@
 // face it clings to. DOWN is deliberately absent: vines never attach downward,
 // they hang from the block above.
 //
-// Everything here is a port of that class; the only behaviour NOT ported is
-// randomTick spreading, which is gated on the `spreadVines` game rule and is a
-// gameplay feature rather than part of making the block work.
+// Everything here is a port of that class, randomTick spreading (gated on the
+// spread_vines game rule) included.
 #pragma once
 
 #include "BlockRegistry.hpp"
@@ -20,6 +19,8 @@
 namespace Game {
 
     struct IBlockAccess;
+    class ILevelWrite;
+    class JavaRandom;
 
     // The `vine` block only. weeping_vines / twisting_vines / cave_vines are
     // different MC classes with different properties, and matching them on the
@@ -62,6 +63,14 @@ namespace Game {
     // survival gate then refuses the placement.
     BlockState VinePlacementState(const IBlockAccess& level, const glm::ivec3& pos,
                                   BlockState state, Direction clickedFace);
+
+    // MC VineBlock.randomTick: with spread_vines on, one tick in four picks a
+    // random direction and grows sideways (onto a new face or into the next
+    // cell), up (a face, or a copy above), or down (random faces copied into
+    // the cell below) — capped by canSpread, at most four vines in the 9x3x9
+    // box around. Server-side (random ticks are).
+    void VineRandomTick(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                        JavaRandom& random);
 
     // MC VineBlock.makeShapes: `Shapes.rotateAll(Block.boxZ(16, 0, 1))` — a
     // 1-pixel slab against each clung face, unioned. A vine with no faces gets

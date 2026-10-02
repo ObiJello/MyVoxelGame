@@ -14,6 +14,7 @@
 #include "common/world/level/GameRules.hpp"
 #include "common/entity/mobs/Animals.hpp"
 #include "common/entity/mobs/Slime.hpp"
+#include "common/entity/mobs/AnimatedMobs.hpp"
 #include "common/entity/raid/Raider.hpp"
 #include "common/data/DataComponents.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -871,13 +872,33 @@ namespace Server {
                 }
             }
 
-            // MC dropCustomDeathLoot — the per-mob non-table drops (an
-            // enderman's carried block).
-            mob.DropCustomDeathLoot(*m_level);
-            // ... and Mob.dropCustomDeathLoot's own half: the worn equipment
-            // (a trial spawner's armoured zombie), by each slot's drop chance.
+            // MC loot_table/entities/magma_cube: when the killing blow's
+            // source entity is a frog (its tongue — ShootTongue.eatEntity),
+            // the pool's one passing entry is the froglight of that frog's
+            // FROG_VARIANT: warm → pearlescent, cold → verdant, temperate →
+            // ochre, count 1. (The magma-cream entry is inverted on the same
+            // condition, and a frog only eats size-1 cubes, which drop no
+            // cream anyway.) The generated table has no frog-variant
+            // predicate, so the entry lives here, like the sheep's wool.
+            if (mob.GetType() == Game::EntityTypeId::MagmaCube && killer &&
+                killer->GetType() == Game::EntityTypeId::Frog) {
+                const auto& frog = static_cast<const Game::Frog&>(*killer);
+                Game::BlockID light = Game::BlockID::OchreFroglight;
+                switch (frog.GetVariant()) {
+                    case Game::Frog::Variant::Warm: light = Game::BlockID::PearlescentFroglight; break;
+                    case Game::Frog::Variant::Cold: light = Game::BlockID::VerdantFroglight;     break;
+                    default: break;
+                }
+                m_level->SpawnItemDrop(mob.position, Game::ItemRegistry::FromBlock(light), 1);
+            }
+
+            // MC dropCustomDeathLoot: every override calls super FIRST —
+            // Mob.dropCustomDeathLoot's worn equipment (a trial spawner's
+            // armoured zombie), by each slot's drop chance — then adds its
+            // own (an enderman's carried block, the wither's star).
             Game::MobEquipment::DropEquipmentOnDeath(mob, killedByPlayer, lootingLevel,
                                                      killer && killer->IsPlayer());
+            mob.DropCustomDeathLoot(*m_level);
         }
         // MC dropAllDeathLoot: dropEquipment(level), ungated.
         mob.DropEquipment(*m_level);

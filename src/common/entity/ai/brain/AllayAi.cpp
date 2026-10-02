@@ -1,5 +1,6 @@
 // File: src/common/entity/ai/brain/AllayAi.cpp
 #include "common/entity/ai/brain/AllayAi.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/EntityLevel.hpp"
@@ -106,7 +107,19 @@ namespace Game {
             glm::dvec3 dir = target - thrower.position;
             const double len = glm::length(dir);
             dir = len < 1.0e-5 ? glm::dvec3(0.0) : dir / len;   // Vec3.normalize
-            level.SpawnThrownItem(from, dir * kThrowVelocity, item, 10);   // setDefaultPickUpDelay
+            // setDefaultPickUpDelay; BehaviorUtils.throwItem makes the allay
+            // the item's owner (THROWN_ITEM_PICKED_UP_BY_PLAYER reads it).
+            level.SpawnThrownItem(from, dir * kThrowVelocity, item, 10, thrower.GetId());
+            // getLikedPlayer(thrower).ifPresent(player →
+            // ALLAY_DROP_ITEM_ON_BLOCK.trigger(player, containing(target).below(), item)).
+            if (!level.IsClientSide()) {
+                if (Server::ServerPlayer* liked = Server::CriteriaTriggers::PlayerOf(thrower.GetLikedPlayer())) {
+                    const glm::ivec3 below(static_cast<int>(std::floor(targetPos.x)),
+                                           static_cast<int>(std::floor(targetPos.y)) - 1,
+                                           static_cast<int>(std::floor(targetPos.z)));
+                    Server::CriteriaTriggers::AllayDropItemOnBlock(*liked, below, item);
+                }
+            }
 
             JavaRandom& rng = level.Random();
             if (level.GetGameTime() % 7 == 0 && rng.NextDouble() < 0.9) {

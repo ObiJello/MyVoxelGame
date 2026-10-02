@@ -8,6 +8,8 @@
 #include "common/core/JavaRandom.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/damagesource/DamageSourceInfo.hpp"
+#include "common/world/tags/DataTags.hpp"
 
 #include <cmath>
 #include <vector>
@@ -359,11 +361,12 @@ namespace Game {
         // MC PanicGoal.shouldPanic: getLastDamageSource() != null and in the
         // DamageTypeTags.PANIC_CAUSES tag — the ATTACKER is irrelevant, which
         // is exactly what lets a mob that walked into fire (no attacker at
-        // all) panic and run for water. Every damage type this engine
-        // produces is in that tag except starvation and drowning, neither of
-        // which mobs can suffer here — so "was hurt recently" is the same
-        // predicate.
-        return m_mob->HasLastDamageSource();
+        // all) panic and run for water; a fall, cramming, drowning or the
+        // void (not in the tag) does not.
+        if (!m_mob->HasLastDamageSource()) return false;
+        const std::string_view type =
+            DamageSourceInfo::TypeIdFor(m_mob->GetLastDamageSource(), nullptr, nullptr);
+        return DataTags::HasTag(DataTags::Registry::DamageType, type, "minecraft:panic_causes");
     }
 
     bool PanicGoal::LookForWater() {

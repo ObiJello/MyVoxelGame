@@ -125,6 +125,11 @@ namespace Server {
         // reconnecting id does not inherit a stale watch set.
         void RemovePlayer(uint32_t connectionId);
 
+        // MC TrackedEntity.seenBy: the connections whose clients track
+        // `entityId` (startSeenByPlayer .. stopSeenByPlayer — a wither's boss
+        // bar follows it). Null when the entity is not tracked.
+        const std::unordered_set<uint32_t>* WatchersOf(int32_t entityId) const;
+
         // An entity is gone. Emits removals to everyone tracking it.
         void RemoveEntity(int32_t entityId, std::vector<EntityPacketOut>& out);
         // Same, for a whole tick's removals: one packet per watcher.

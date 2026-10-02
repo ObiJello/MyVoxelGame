@@ -589,7 +589,10 @@ namespace Game {
         // CopperGolemStatueBlock: `oldState.is(#copper_golem_statues)`.
         const bool keepBlockEntity = (IsCopperChestBlock(blockId) && IsCopperChestBlock(oldBlockId)) ||
                                      (IsCopperGolemStatue(blockId) && IsCopperGolemStatue(oldBlockId));
-        if (blockChanged && !keepBlockEntity && BlockEntityTypes::HasBlockEntity(oldBlockId)) {
+        // MayHaveBlockEntity, not HasBlockEntity: a block whose entity is
+        // attached lazily (a crafting table's stored grid under the
+        // shared_crafting_tables rule) must lose it — and spill it — too.
+        if (blockChanged && !keepBlockEntity && BlockEntityTypes::MayHaveBlockEntity(oldBlockId)) {
             if (auto chunk = m_chunkProvider->GetChunk(chunkPos)) {
                 // MC BlockEntity.preRemoveSideEffects, gated on flag 256. A
                 // container's contents are dropped by whoever is breaking it
@@ -1066,6 +1069,20 @@ namespace Game {
         m_chunkProvider->MarkChunkForSave(cp);
     }
 
+    std::unique_ptr<BlockEntity> World::TakeBlockEntity(const glm::ivec3& pos) {
+        if (!m_chunkProvider || !IsValidPosition(pos.x, pos.y, pos.z)) return nullptr;
+        const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
+        auto chunk = m_chunkProvider->GetLoadedChunk(cp);
+        if (!chunk) return nullptr;
+        std::unique_ptr<BlockEntity> taken = chunk->RemoveBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16);
+        // No BlockEntityRemoveS2C: a client that saw the block event carries
+        // its own copy along (the mirrored move), and one that did not drops
+        // it when the cell's block changes under it. The chunk's saved form
+        // must not keep listing it here.
+        if (taken) m_chunkProvider->MarkChunkForSave(cp);
+        return taken;
+    }
+
     void World::RemoveBlockEntity(const glm::ivec3& pos) {
         if (!m_chunkProvider || !IsValidPosition(pos.x, pos.y, pos.z)) return;
         const auto cp = Math::WorldCoordinates::WorldToChunkPos(pos.x, pos.z);
@@ -1075,6 +1092,11 @@ namespace Game {
         if (!existing) return;
         const bool movingPiston = existing->GetBlockId() == BlockID::MovingPiston;
         chunk->RemoveBlockEntity(pos.x - cp.x * 16, pos.y, pos.z - cp.z * 16);
+        // The chunk's saved form still lists the entity: as SetBlockEntity,
+        // mark it so the next save drops it (a removal with no block write
+        // — a crafting table's idle grid entity — would otherwise come back
+        // on reload).
+        m_chunkProvider->MarkChunkForSave(cp);
         // A moving-piston cell's entity was never sent; the client retires
         // its own copy when the final block arrives.
         if (Server::g_integratedServer && !movingPiston) {

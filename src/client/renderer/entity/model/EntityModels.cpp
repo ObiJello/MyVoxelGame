@@ -371,9 +371,9 @@ namespace Render {
         if (state.ticksUsingItem > 0.0f && (!state.isUsingItem || usedArmRight == right)) {
             const Game::Spear::SpearDefinition* spear = Game::Spear::Find(
                 static_cast<Game::ItemID>(right ? state.rightArmItem : state.leftArmItem));
-            if (spear) {
+            if (spear && spear->kineticWeapon) {
                 const Game::Spear::UseParams p =
-                    Game::Spear::UseParams::FromKineticWeapon(spear->kinetic, state.ticksUsingItem);
+                    Game::Spear::UseParams::FromKineticWeapon(*spear->kineticWeapon, state.ticksUsingItem);
                 constexpr float kDeg = 0.017453292f;
                 arm->yRot += -invert * p.swayScaleFast * kDeg * p.swayIntensity * 1.0f;
                 arm->zRot += -invert * p.swayScaleSlow * kDeg * p.swayIntensity * 0.5f;
@@ -1246,19 +1246,23 @@ namespace Render {
 
         if (m_setup.Valid()) m_setup.Run(state);
 
+        // The walk clips first (see AfterWalkClips).
         for (const Clip& c : m_clips) {
+            if (!c.def->isWalk) continue;
             if (!GuardHolds(c.def->guard, c.def->guardNegate, state, c.def->guardSlot)) continue;
+            // NautilusModel is the only model that does not pass the walk
+            // values straight through; posAgeScale and speedBias are zero
+            // for every other clip, so this is MC's call for all of them.
+            c.anim.ApplyWalk(
+                state.walkAnimationPos + state.ageInTicks * c.def->posAgeScale,
+                state.walkAnimationSpeed + c.def->speedBias,
+                c.def->speedFactor, c.def->scaleFactor);
+        }
+        AfterWalkClips(state);
 
-            if (c.def->isWalk) {
-                // NautilusModel is the only model that does not pass the walk
-                // values straight through; posAgeScale and speedBias are zero
-                // for every other clip, so this is MC's call for all of them.
-                c.anim.ApplyWalk(
-                    state.walkAnimationPos + state.ageInTicks * c.def->posAgeScale,
-                    state.walkAnimationSpeed + c.def->speedBias,
-                    c.def->speedFactor, c.def->scaleFactor);
-                continue;
-            }
+        for (const Clip& c : m_clips) {
+            if (c.def->isWalk) continue;
+            if (!GuardHolds(c.def->guard, c.def->guardNegate, state, c.def->guardSlot)) continue;
 
             // MC KeyframeAnimation.apply(AnimationState, ageInTicks) is
             // `state.ifStarted(...)` — a stopped timer plays nothing at all,
@@ -1279,6 +1283,44 @@ namespace Render {
     }
 
     // ── PufferfishModel (mid/big puff stages) ──────────────────────────────
+
+    // ── CopperGolemModel (the carrying pose) ──────────────────────────────
+
+    CopperGolemModel::CopperGolemModel() : GeneratedModel("copper_golem") {
+        m_rightArm = m_root.Find("right_arm");
+        m_leftArm  = m_root.Find("left_arm");
+    }
+
+    void CopperGolemModel::AfterWalkClips(const EntityRenderState& state) {
+        // MC CopperGolemModel.setupAnim: either hand holding something —
+        // walkWithItemAnimation (the clip guard), then poseHeldItemArmsIfStill.
+        if (!state.isHoldingItem || !m_rightArm || !m_leftArm) return;
+        m_rightArm->xRot = std::min(m_rightArm->xRot, -0.87266463f);
+        m_leftArm->xRot  = std::min(m_leftArm->xRot, -0.87266463f);
+        m_rightArm->yRot = std::min(m_rightArm->yRot, -0.1134464f);
+        m_leftArm->yRot  = std::max(m_leftArm->yRot, 0.1134464f);
+        m_rightArm->zRot = std::min(m_rightArm->zRot, -0.064577185f);
+        m_leftArm->zRot  = std::max(m_leftArm->zRot, 0.064577185f);
+    }
+
+    // ── WitherBossModel (the side heads) ──────────────────────────────────
+
+    WitherBossModel::WitherBossModel(std::string_view slug) : GeneratedModel(slug, "wither") {
+        m_rightHead = m_root.Find("right_head");
+        m_leftHead  = m_root.Find("left_head");
+    }
+
+    void WitherBossModel::SetupAnim(const EntityRenderState& state) {
+        GeneratedModel::SetupAnim(state);
+        // MC WitherBossModel.setupHeadRotation(state, rightHead, 0) and
+        // (state, leftHead, 1).
+        ModelPart* heads[2] = { m_rightHead, m_leftHead };
+        for (int i = 0; i < 2; ++i) {
+            if (!heads[i]) continue;
+            heads[i]->yRot = (state.witherHeadYRots[i] - state.bodyRot) * kDegToRad;
+            heads[i]->xRot = state.witherHeadXRots[i] * kDegToRad;
+        }
+    }
 
     // ── WolfModel (the wet shake) ─────────────────────────────────────────
 

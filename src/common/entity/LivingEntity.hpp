@@ -32,6 +32,7 @@
 #include "common/entity/effect/MobEffects.hpp"
 #include "common/world/damagesource/CombatTracker.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 #include <vector>
@@ -126,6 +127,17 @@ namespace Game {
         // #is_player_attack and #no_knockback: the stab's push is its own
         // causeExtraKnockback, never the hurt's.
         Spear,
+        // The contact-damage blocks (appended — the values are compared, never
+        // reordered). MC DamageTypes.CACTUS (CactusBlock.entityInside),
+        // SWEET_BERRY_BUSH (SweetBerryBushBlock.entityInside), HOT_FLOOR
+        // (MagmaBlock.stepOn) and CAMPFIRE (CampfireBlock.entityInside). All
+        // four are in #no_knockback and none bypasses armour; HOT_FLOOR and
+        // CAMPFIRE are #is_fire (fire-immune mobs and FIRE_RESISTANCE shrug
+        // them off) and #burn_from_stepping (Frost Walker boots).
+        Cactus,
+        SweetBerryBush,
+        HotFloor,
+        Campfire,
     };
 
     // MC's `#minecraft:no_knockback` damage-type tag
@@ -185,6 +197,10 @@ namespace Game {
             case MobDamageSource::FlyIntoWall:
             case MobDamageSource::Lightning:
             case MobDamageSource::Spear:
+            case MobDamageSource::Cactus:
+            case MobDamageSource::SweetBerryBush:
+            case MobDamageSource::HotFloor:
+            case MobDamageSource::Campfire:
                 return true;
             default:
                 return false;
@@ -241,6 +257,20 @@ namespace Game {
         AttributeMap&       Attributes()       { return m_attributes; }
         const AttributeMap& Attributes() const { return m_attributes; }
         double GetAttributeValue(Attribute a) const { return m_attributes.GetValue(a); }
+        // MC LivingEntity.getScale → sanitizeScale, copied into
+        // Entity::attributeScale (the box, eye and model size). Every Tick,
+        // after a load (ApplyMobNbt) and on the client when the attributes
+        // arrive (UpdateAttributesS2C).
+        // Whether something set this entity's attributes apart from its
+        // type's (/attribute, or a load that found such values) — the
+        // tracker then syncs them to every watcher (Mob::ShouldSyncAttributes),
+        // as MC does for every living entity. Sticky for the entity's life.
+        bool AttributesCustomized() const { return m_attributesCustomized; }
+        void MarkAttributesCustomized() { m_attributesCustomized = true; }
+        void RefreshAttributeScale() {
+            const float s = static_cast<float>(GetAttributeValue(Attribute::Scale));
+            attributeScale = (s == s) ? std::clamp(s, 0.0625f, 16.0f) : 1.0f;
+        }
 
         // ── Status effects (MC LivingEntity.activeEffects) ─────────────────
         //
@@ -257,8 +287,9 @@ namespace Game {
 
         // MC LivingEntity.addEffect(effect, source). Returns whether the
         // effect landed or upgraded an existing instance (MobEffectInstance
-        // .update rules). `source` is MC's attribution entity.
-        bool AddEffect(MobEffectInstance effect, Entity* source = nullptr);
+        // .update rules). `source` is MC's attribution entity. Virtual for
+        // MC's overrides (WitherBoss.addEffect refuses everything).
+        virtual bool AddEffect(MobEffectInstance effect, Entity* source = nullptr);
         // MC LivingEntity.forceAddEffect — replaces outright, no upgrade rules
         // (the client's packet handler path; kept for parity).
         void ForceAddEffect(MobEffectInstance effect, Entity* source = nullptr);
@@ -349,15 +380,20 @@ namespace Game {
         // ServerPlayer's inventory and the armor stand from its own six
         // slots. Mutable because effects may wear what they find.
         virtual ItemStack* EquipmentInSlot(EquipmentSlot slot) { (void)slot; return nullptr; }
+        // MC checkTotemDeathProtection for a non-player: a hand item with
+        // DEATH_PROTECTION is spent to survive (health 1, its death
+        // effects, entity event 35). Server side; the player's own is
+        // ServerPlayer::checkTotemDeathProtection.
+        bool CheckDeathProtection(MobDamageSource source);
         // Whether EquipmentInSlot can answer anything at all — lets the hot
         // damage path skip the enchantment walk for the (vast majority of)
         // entities that hold nothing.
         virtual bool HasEquipmentSlots() const { return false; }
         // The MOB_VISIBILITY product over worn equipment, for `targetingEntity`.
-        virtual double GetEquipmentVisibilityFactor(const Entity* targetingEntity) const {
-            (void)targetingEntity;
-            return 1.0;
-        }
+        // MC LivingEntity.getVisibilityPercent's equipment loop: every slot's
+        // stack whose EQUIPPABLE slot is that slot and whose MOB_VISIBILITY
+        // lists the targeter's type multiplies the visibility.
+        virtual double GetEquipmentVisibilityFactor(const Entity* targetingEntity) const;
         // MC Entity.isSwimming (shared flag 4, set by updateSwimming from a
         // sprint under water). Only the player's is read here — the dolphin
         // escorts a swimming player — so mobs answer false.
@@ -545,6 +581,24 @@ namespace Game {
         bool CauseFallDamage(double fallDist, float damageMultiplier) override;
         int  CalculateFallDamage(double fallDist, float damageMultiplier) const;
 
+        // MC causeFallDamage's third argument, the DamageSource — `fall()`
+        // for an ordinary landing, `stalagmite()` for PointedDripstoneBlock
+        // .fallOn. Kept off the virtual's signature (two dozen mob overrides
+        // forward it untouched): Entity::CheckFallDamage opens a scope around
+        // the landing it resolves (the faller AND its riders, as MC's
+        // causeFallDamage passes the source down), and
+        // LivingEntity::CauseFallDamage hurts with whatever is current.
+        class FallDamageSourceScope {
+        public:
+            explicit FallDamageSourceScope(MobDamageSource source);
+            ~FallDamageSourceScope();
+            FallDamageSourceScope(const FallDamageSourceScope&) = delete;
+            FallDamageSourceScope& operator=(const FallDamageSourceScope&) = delete;
+        private:
+            MobDamageSource m_previous;
+        };
+        static MobDamageSource CurrentFallDamageSource();
+
         // ── The current impulse (MC LivingEntity's currentImpulse* fields) ──
         //
         // See ImpulseContext.hpp. A mob keeps its own; a player's view hands
@@ -716,6 +770,10 @@ namespace Game {
         }
 
         virtual void Die(MobDamageSource source, Entity* attacker);
+        // The advancement half of MC's awardKillScore (PLAYER_KILLED_ENTITY /
+        // ENTITY_KILLED_PLAYER), server-side only. Die runs it; a death that
+        // is deferred (the dragon's dive) runs it at the killing blow.
+        void AwardKillCriteria(MobDamageSource source, Entity* attacker);
         virtual void TickDeath();
 
         // MC Entity.killedEntity(level, victim, source): the killing blow's
@@ -1095,6 +1153,7 @@ namespace Game {
         int  GetCurrentSwingDuration() const;
 
         AttributeMap m_attributes;
+        bool         m_attributesCustomized = false;   // see AttributesCustomized
 
         // MC's activeEffects map. A flat vector keyed by linear search: the
         // busiest entity in the game holds three or four effects at once, and

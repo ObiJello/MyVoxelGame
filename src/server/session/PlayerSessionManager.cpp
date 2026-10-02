@@ -23,6 +23,7 @@
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/block/BedBlock.hpp"
+#include "common/world/block/LegacySolid.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -342,6 +343,24 @@ namespace Server {
                         if (auto p = Game::FindBedStandUpPosition(*world, config.pos,
                                                                   Game::BedFacing(state), config.yaw)) {
                             spawnPos = glm::vec3(*p);
+                            spawnDimension = config.dimensionId;
+                        }
+                    } else if (config.forced) {
+                        // findRespawnAndUseSpawnBlock's forced branch (a
+                        // /spawnpoint): no bed needed, only room to stand —
+                        // Block.isPossibleToRespawnInThis (not solid, not a
+                        // liquid) for the cell and the one above; feet at
+                        // (x + 0.5, y + 0.1, z + 0.5).
+                        const auto free = [](Game::BlockState s) {
+                            const Game::BlockID b = s.Block();
+                            return !Game::IsLegacySolid(s) && b != Game::BlockID::Water && b != Game::BlockID::Lava;
+                        };
+                        const Game::BlockState above =
+                            world->GetBlockState(config.pos.x, config.pos.y + 1, config.pos.z);
+                        if (free(state) && free(above)) {
+                            spawnPos = glm::vec3(static_cast<float>(config.pos.x) + 0.5f,
+                                                 static_cast<float>(config.pos.y) + 0.1f,
+                                                 static_cast<float>(config.pos.z) + 0.5f);
                             spawnDimension = config.dimensionId;
                         }
                     }
@@ -700,6 +719,11 @@ namespace Server {
             // The body size, so /scale and a scaled portal show on every
             // other client's copy of this player.
             packet.scale = srcPlayer->getScale();
+            // MC Attributes.SCALE / NAME_TAG_DISTANCE of the player (its
+            // worn items' ATTRIBUTE_MODIFIERS, effects): the body size and
+            // the name tag range the other clients draw with.
+            packet.attributeScale  = static_cast<float>(srcPlayer->getAttributeValue(Game::Attribute::Scale));
+            packet.nameTagDistance = static_cast<float>(srcPlayer->getAttributeValue(Game::Attribute::NameTagDistance));
             // /invisible, or MC Entity.isInvisible via the INVISIBILITY effect
             // (LivingEntity.updateInvisibilityStatus).
             packet.invisible = srcPlayer->isInvisible() ||

@@ -6,10 +6,13 @@
 #include "updater/VersionInfo.hpp"
 #include "updater/GitHubAPI.hpp"
 #include "updater/Downloader.hpp"
+#include "updater/FileOps.hpp"
+#include "updater/GameUpdater.hpp"
 #include "updater/Installer.hpp"
 #include "platform/ProcessLauncher.hpp"
 #include "platform/GameDirectory.hpp"
 #include "net/FriendsServiceClient.hpp"
+#include "appearance/AppearanceSettings.hpp"
 #include "common/core/FriendsServiceConfig.hpp"
 #include "common/core/Log.hpp"
 
@@ -75,6 +78,9 @@ namespace Launcher {
         // from FriendsServiceConfig.hpp. The HOSTING machine should set
         // "127.0.0.1" (routers rarely hairpin their own public IP).
         std::string friendsService;
+        // The player's look (Appearance::Settings::ToJson): mode, skin
+        // source, cape, the painted stick figure.
+        nlohmann::json appearance = nlohmann::json::object();
 
         void Load(const std::string& path) {
             try {
@@ -94,6 +100,9 @@ namespace Launcher {
                 accountName = json.value("account_name", "");
                 accountCreated = json.value("account_created", static_cast<int64_t>(0));
                 friendsService = json.value("friends_service", "");
+                if (json.contains("appearance") && json["appearance"].is_object()) {
+                    appearance = json["appearance"];
+                }
                 if (json.contains("servers") && json["servers"].is_array()) {
                     for (const auto& entry : json["servers"]) {
                         SavedServer sv;
@@ -129,6 +138,7 @@ namespace Launcher {
                 json["account_name"] = accountName;
                 json["account_created"] = accountCreated;
                 json["friends_service"] = friendsService;
+                json["appearance"] = appearance;
                 nlohmann::json arr = nlohmann::json::array();
                 for (const SavedServer& sv : servers) {
                     arr.push_back({{"name", sv.name},
@@ -399,6 +409,7 @@ namespace Launcher {
         uiState.useVulkan = config.useVulkan;
         uiState.playerName = config.playerName;
         uiState.playerColor = config.playerColor;
+        uiState.appearance = Appearance::Settings::FromJson(config.appearance);
         uiState.lastJoinIP = config.lastJoinIP;
         uiState.lastJoinPort = config.lastJoinPort;
         uiState.servers = config.servers;
@@ -427,6 +438,15 @@ namespace Launcher {
 
         if (logoTexture != 0) {
             ui.SetLogoTexture(logoTexture, logoW, logoH);
+        }
+
+        // The Appearance view's files: the obeycraft directory (skins/,
+        // capes/, appearance/) and the bundled Steve/Alex skins
+        // (assets/launcher/skins, copied into the bundle with the logo).
+        {
+            std::string bundledSkins = GetAssetPath("launcher/skins");
+            if (!std::filesystem::exists(bundledSkins)) bundledSkins = "assets/launcher/skins";
+            ui.SetAppearancePaths(Appearance::Paths(gameDir, bundledSkins));
         }
 
         // ── Background worker state ──
@@ -516,6 +536,18 @@ namespace Launcher {
         std::atomic<bool> installComplete{false};
         std::atomic<bool> installSuccess{false};
 
+        // Update-worker progress. uiState's strings and state belong to this
+        // (the UI) thread: the worker publishes here under updateMutex and the
+        // frame loop copies it into uiState before drawing.
+        std::mutex updateMutex;
+        struct {
+            bool dirty = false;
+            LauncherState state = LauncherState::Downloading;
+            std::string statusText;
+            std::string sizeText;
+        } updateStatus;
+        bool launcherVersionSaved = false;
+
         // Launcher self-update state
         std::atomic<bool> launcherUpdateReady{false};
         std::string currentLauncherPath = GetCurrentLauncherPath();
@@ -566,11 +598,10 @@ namespace Launcher {
                             std::string stagingDir = installDir + "/_launcher_update";
                             if (launcherInstaller.InstallLauncher(dlPath, currentLauncherPath, stagingDir)) {
                                 updaterScriptPath = launcherInstaller.GetUpdaterScriptPath();
-                                config.launcherVersion = latestLauncher.ToString();
-                                config.Save(configPath);
                                 // Publish the restart-banner metadata BEFORE the
                                 // flag — the UI only reads these once the atomic
-                                // flag is observed true.
+                                // flag is observed true (and records the version
+                                // in launcher.json then, on its own thread).
                                 uiState.launcherNewVersion = latestLauncher.ToString();
                                 uiState.launcherChangelog = launcherRelease.body;
                                 {
@@ -609,9 +640,6 @@ namespace Launcher {
         checkThread.detach();
 
         // ── UI Callbacks ──
-        Downloader downloader;
-        Installer installer;
-
         ui.SetOnRestartClicked([&]() {
             Log::Info("User requested launcher restart for self-update");
             config.Save(configPath);
@@ -630,6 +658,44 @@ namespace Launcher {
         auto buildColorArg = [&]() -> std::string {
             if (uiState.playerColor.empty() || uiState.playerColor == "default") return "";
             return " --color " + uiState.playerColor;
+        };
+        // ── Appearance args (docs/player-appearance.md) ──
+        // prepareAppearance writes {obeycraft}/appearance/* for the current
+        // look; each build*Arg then emits its flag from what was written.
+        // Paths are quoted: the obeycraft directory has a space on macOS.
+        Appearance::LaunchFiles appearanceFiles;
+        auto prepareAppearance = [&]() {
+            appearanceFiles = Appearance::PrepareLaunchFiles(uiState.appearance,
+                                                             Appearance::Paths(gameDir, std::string()));
+        };
+        // "--skin-mode stick|skin" — always, so the game never guesses.
+        auto buildSkinModeArg = [&]() -> std::string {
+            return std::string(" --skin-mode ") + Game::AppearanceModeSlug(appearanceFiles.mode);
+        };
+        // "--skin-model classic|slim" — the arms of the skin (skin mode).
+        auto buildSkinModelArg = [&]() -> std::string {
+            if (appearanceFiles.mode != Game::AppearanceMode::Skin) return "";
+            return std::string(" --skin-model ") + Game::SkinModelSlug(appearanceFiles.model);
+        };
+        // "--skin <png>" — absent for Steve / Alex (the game's own defaults).
+        auto buildSkinArg = [&]() -> std::string {
+            if (appearanceFiles.skinPath.empty()) return "";
+            return " --skin " + Appearance::QuoteArg(appearanceFiles.skinPath);
+        };
+        // "--cape <png>" — skin mode with a cape picked.
+        auto buildCapeArg = [&]() -> std::string {
+            if (appearanceFiles.capePath.empty()) return "";
+            return " --cape " + Appearance::QuoteArg(appearanceFiles.capePath);
+        };
+        // "--stick-figure <txt>" — a painted stick figure.
+        auto buildStickFigureArg = [&]() -> std::string {
+            if (appearanceFiles.stickFigurePath.empty()) return "";
+            return " --stick-figure " + Appearance::QuoteArg(appearanceFiles.stickFigurePath);
+        };
+        auto buildAppearanceArgs = [&]() -> std::string {
+            prepareAppearance();
+            return buildSkinModeArg() + buildSkinModelArg() + buildSkinArg() + buildCapeArg() +
+                   buildStickFigureArg();
         };
         // Build the friends-service identity args when logged in. The token
         // only grants friends-service access (never sent to game servers).
@@ -651,8 +717,9 @@ namespace Launcher {
             // crash before clean exit still keeps what the user typed/picked.
             config.playerName = uiState.playerName;
             config.playerColor = uiState.playerColor;
+            uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
-            std::string args = buildNameArg() + buildColorArg() + buildSessionArgs();
+            std::string args = buildNameArg() + buildColorArg() + buildAppearanceArgs() + buildSessionArgs();
             if (LaunchGame(gameExePath, uiState.useVulkan, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -674,9 +741,11 @@ namespace Launcher {
             config.lastJoinIP = uiState.lastJoinIP;
             config.lastJoinPort = uiState.lastJoinPort;
             config.servers = uiState.servers;
+            uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
             std::string serverArg = "--server " + host + ":" + std::to_string(port)
-                                  + buildNameArg() + buildColorArg() + buildSessionArgs();
+                                  + buildNameArg() + buildColorArg() + buildAppearanceArgs()
+                                  + buildSessionArgs();
             if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -796,41 +865,53 @@ namespace Launcher {
             uiState.state = LauncherState::Downloading;
             uiState.statusText = "Downloading update...";
             uiState.downloadProgress = 0.0f;
+            uiState.downloadSizeText.clear();
+            {
+                std::lock_guard<std::mutex> lock(updateMutex);
+                updateStatus.dirty = false;
+                updateStatus.state = LauncherState::Downloading;
+                updateStatus.statusText.clear();
+                updateStatus.sizeText.clear();
+            }
 
             std::thread dlThread([&]() {
                 workerRunning = true;
-                std::string downloadUrl;
-                std::string assetName;
+                ReleaseInfo release;
                 {
                     std::lock_guard<std::mutex> lock(resultMutex);
-                    downloadUrl = latestRelease.platformAsset.downloadUrl;
-                    assetName = latestRelease.platformAsset.name;
+                    release = latestRelease;
                 }
 
-                std::string downloadPath = installDir + "/" + assetName;
+                auto publish = [&](auto&& change) {
+                    std::lock_guard<std::mutex> lock(updateMutex);
+                    change();
+                    updateStatus.dirty = true;
+                };
+                // The size text changes on every curl callback (tens of thousands
+                // per download); the UI needs it a few times a second.
+                auto lastSizeText = std::chrono::steady_clock::now() - std::chrono::seconds(1);
 
-                bool success = downloader.Download(downloadUrl, downloadPath,
-                    [&](size_t downloaded, size_t total) {
-                        if (total > 0) {
-                            uiState.downloadProgress = static_cast<float>(downloaded) / static_cast<float>(total);
-                            double dlMB = static_cast<double>(downloaded) / (1024.0 * 1024.0);
-                            double totalMB = static_cast<double>(total) / (1024.0 * 1024.0);
-                            char buf[64];
-                            snprintf(buf, sizeof(buf), "%.1f / %.1f MB", dlMB, totalMB);
-                            uiState.downloadSizeText = buf;
-                        }
-                    });
+                GameUpdater::Callbacks callbacks;
+                callbacks.status = [&](const std::string& text) {
+                    publish([&] { updateStatus.statusText = text; });
+                };
+                callbacks.progress = [&](uint64_t done, uint64_t total) {
+                    if (total == 0) return;
+                    uiState.downloadProgress = static_cast<float>(static_cast<double>(done) / static_cast<double>(total));
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - lastSizeText < std::chrono::milliseconds(100) && done < total) return;
+                    lastSizeText = now;
+                    char buf[64];
+                    std::snprintf(buf, sizeof(buf), "%.1f / %.1f MB", static_cast<double>(done) / (1024.0 * 1024.0),
+                                  static_cast<double>(total) / (1024.0 * 1024.0));
+                    publish([&] { updateStatus.sizeText = buf; });
+                };
+                callbacks.installing = [&]() {
+                    publish([&] { updateStatus.state = LauncherState::Installing; });
+                };
 
-                if (success) {
-                    // Install
-                    uiState.state = LauncherState::Installing;
-                    uiState.statusText = "Installing...";
-
-                    success = installer.Install(downloadPath, installDir,
-                        [&](const std::string& status) {
-                            uiState.statusText = status;
-                        });
-                }
+                GameUpdater updater;
+                const bool success = updater.Update(release, installDir, callbacks);
 
                 downloadSuccess = success;
                 installSuccess = success;
@@ -936,6 +1017,14 @@ namespace Launcher {
                 }
             }
 
+            // ── Persist appearance edits (colour, skin, cape, paint) ──
+            if (uiState.appearanceDirty) {
+                uiState.appearanceDirty = false;
+                config.playerColor = uiState.playerColor;
+                uiState.appearance.ToJson(config.appearance);
+                config.Save(configPath);
+            }
+
             // ── Persist saved-server edits + drain ping results ──
             if (uiState.serversDirty) {
                 uiState.serversDirty = false;
@@ -974,6 +1063,26 @@ namespace Launcher {
                         status == "invalid"   ? NC::Invalid :
                                                 NC::Idle;   // network → no claim
                 }
+            }
+
+            // ── Drain update-worker progress ──
+            {
+                std::lock_guard<std::mutex> lock(updateMutex);
+                if (updateStatus.dirty) {
+                    updateStatus.dirty = false;
+                    if (uiState.state == LauncherState::Downloading || uiState.state == LauncherState::Installing) {
+                        uiState.state = updateStatus.state;
+                        if (!updateStatus.statusText.empty()) uiState.statusText = updateStatus.statusText;
+                        uiState.downloadSizeText = updateStatus.sizeText;
+                    }
+                }
+            }
+
+            // ── Record a finished launcher self-update in launcher.json ──
+            if (launcherUpdateReady.load() && !launcherVersionSaved) {
+                launcherVersionSaved = true;
+                config.launcherVersion = uiState.launcherNewVersion;
+                config.Save(configPath);
             }
 
             // Process background results
@@ -1082,7 +1191,11 @@ namespace Launcher {
         config.accountId = uiState.accountId;
         config.accountName = uiState.accountName;
         config.accountCreated = uiState.accountCreated;
+        uiState.appearance.ToJson(config.appearance);
         config.Save(configPath);
+
+        // The UI's GL objects go while the context still exists.
+        ui.Shutdown();
 
         if (logoTexture != 0) {
             glDeleteTextures(1, &logoTexture);
@@ -1094,6 +1207,9 @@ namespace Launcher {
 
         glfwDestroyWindow(window);
         glfwTerminate();
+
+        // An old install still being deleted is left for the next launch's sweep.
+        FileOps::ShutdownDeleter();
 
         Platform::ShutdownGameDirectorySystem();
 

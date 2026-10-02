@@ -59,6 +59,7 @@
 #include "client/renderer/entity/FishingHookRenderer.hpp"
 #include "client/renderer/entity/model/EntityModels.hpp"
 #include "client/renderer/entity/model/HumanoidArmorModel.hpp"
+#include "client/renderer/entity/model/PlayerModel.hpp"
 #include "client/renderer/entity/ItemDisplayTransforms.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/EquipmentSlot.hpp"
@@ -284,11 +285,88 @@ namespace Render {
             bool  glint = false;
             int   packedLight = 0;
             bool  glowing = false;
+            // MC WingsLayer's texture choice: the skin's elytra, else the
+            // CAPE when one is worn and shown, else the elytra asset — a
+            // player's cape texture here; INVALID = the elytra asset.
+            TextureHandle texture = INVALID_TEXTURE;
         };
         void DrawElytras(const glm::mat4& projection, const glm::mat4& view,
                          const glm::vec3& cameraPos, const std::vector<ElytraDraw>& draws);
 
-        // ── An entity in a GUI box (MC GuiEntityRenderer) ─────────────────
+        // ── Players drawn with the Minecraft player model (skins) ──────────
+        //
+        // MC AvatarRenderer for a player whose look is a skin
+        // (Game::PlayerAppearance, Client::PlayerSkins — PlayerSkinRenderer.cpp):
+        // PlayerModel (classic or slim) in the player's own skin, with the
+        // layers AvatarRenderer adds — HumanoidArmorLayer, PlayerItemInHand
+        // Layer, CapeLayer (PlayerCapeModel swayed by the cape physics),
+        // CustomHeadLayer, WingsLayer (the cape's texture on the elytra when a
+        // cape is worn) and SpinAttackEffectLayer. The pose stack is
+        // LivingEntityRenderer.submit's with AvatarRenderer.setupRotations:
+        // the glide tip and its flying yaw, the swim tilt, the bed, the death
+        // topple, the riptide spin. The stick figure stays PlayerRenderer's.
+        struct SkinnedPlayerPose {
+            uint32_t   playerId = 0;
+            glm::dvec3 position{0.0};   // feet, world space
+            float bodyYaw   = 0.0f;     // degrees
+            float headYaw   = 0.0f;
+            float pitch     = 0.0f;
+            float walkPos   = 0.0f;     // WalkAnimationState::PositionAt / SpeedAt
+            float walkSpeed = 0.0f;
+            float ageTicks  = 0.0f;
+            float scale     = 1.0f;     // the SCALE attribute (/scale)
+            int   hurtTime  = 0;
+            int   deathTime = 0;
+            bool  crouching = false;
+            bool  passenger = false;
+            // The arms: the swing and the held-item poses (MorphPose's).
+            float attackTime     = 0.0f;
+            uint8_t rightArmPose = 0;
+            uint8_t leftArmPose  = 0;
+            bool  usingItem      = false;
+            int   useItemHand    = 0;
+            float ticksUsingItem = 0.0f;
+            float maxCrossbowCharge = 25.0f;
+            bool  autoSpinAttack = false;
+            float ticksSinceKineticHitFeedback = 0.0f;
+            // Flight (AvatarRenderer.extractFlightData): the glide's age in
+            // ticks with the partial (0 when not gliding), the flying yaw
+            // (radians) when the body moves off its look, and the limb-swing
+            // damping (HumanoidMobRenderer's speedValue, ≥ 1).
+            bool  fallFlying = false;
+            float fallFlyTicks = 0.0f;
+            bool  applyFlyingYRot = false;
+            float flyingYRot = 0.0f;
+            float speedValue = 1.0f;
+            // Swimming (LivingEntity.getSwimAmount, isVisuallySwimming,
+            // isInWater).
+            float swimAmount = 0.0f;
+            bool  visuallySwimming = false;
+            bool  inWater = false;
+            // In a bed: its FACING (Game::Direction ordinal), < 0 when not.
+            int   bedFacing = -1;
+            // The look.
+            TextureHandle skin = INVALID_TEXTURE;
+            bool    slim = false;
+            uint8_t modelParts = 0x7F;   // Game::ModelPartBits
+            TextureHandle cape = INVALID_TEXTURE;
+            float capeFlap = 0.0f, capeLean = 0.0f, capeLean2 = 0.0f;
+            // The elytra (ElytraAnimationState flags and angles).
+            uint8_t elytraFlags = 0;
+            float elytraRotX = 0.2617994f, elytraRotY = 0.0f, elytraRotZ = -0.2617994f;
+            // Visibility: INVISIBILITY, GLOWING, burning, a spectator (the
+            // translucent floating head).
+            bool  invisible = false;
+            bool  glowing   = false;
+            bool  onFire    = false;
+            bool  spectator = false;
+            // What the player holds and wears, by Game::EquipmentSlot.
+            Game::ItemStack equipment[6];
+        };
+        void RenderPlayerSkins(const glm::mat4& projection, const glm::mat4& view,
+                               const glm::vec3& cameraPos, const Frustum& frustum,
+                               const std::vector<SkinnedPlayerPose>& poses, float partialTick);
+
         // InventoryScreen.extractEntityInInventoryFollowsMouse overrides the
         // render state's rotations (bodyRot = 180 + xAngle·20, yRot = the
         // head's yaw off the body, xRot = −yAngle·20) and draws the entity
@@ -316,6 +394,16 @@ namespace Render {
         };
         bool CaptureForGui(const Client::ClientMobManager& mobs, int32_t entityId,
                            const GuiEntityPose& pose, std::vector<GuiEntityBatch>& out);
+        // The same body for a GUI box (the inventory's player,
+        // PlayerInventoryPreview), CaptureForGui's contract: render-space
+        // blocks with the feet at the origin, one triangle list per texture,
+        // lit with ENTITY_IN_UI's two lights (already carried into render
+        // space by the caller). The pose's own bodyYaw / headYaw / pitch are
+        // the GUI's (InventoryScreen's overrides); no culling, no cape
+        // physics beyond what the pose carries.
+        bool CapturePlayerSkinForGui(const SkinnedPlayerPose& pose,
+                                     const glm::vec3& light0, const glm::vec3& light1,
+                                     std::vector<GuiEntityBatch>& out);
         // The renderer the frame loop owns (set by Initialize, cleared by
         // Shutdown); null before the world renderer is up.
         static MobRenderer* Instance();
@@ -350,6 +438,10 @@ namespace Render {
             // MC WolfArmorLayer's adultModel (ModelLayers.WOLF_ARMOR): the
             // mesh the BODY slot's armour is drawn on. Adults only, as MC.
             std::unique_ptr<EntityModel> bodyArmorModel;
+            // MC EnergySwirlLayer's model: WitherArmorLayer's WITHER_ARMOR
+            // (the wither mesh at CubeDeformation(0.5)), CreeperPowerLayer's
+            // CREEPER_ARMOR (the creeper mesh at CubeDeformation(2.0)).
+            std::unique_ptr<EntityModel> energySwirlModel;
             // MC AgeableMobRenderer's babyModel — the separate baby MESH
             // (big head, half body), not a shrunken adult. Built on the
             // first baby seen; null means MC has no baby mesh for this mob
@@ -424,6 +516,10 @@ namespace Render {
         // entity sheets normally get — for a texture the shader scrolls
         // across its edge (the breeze's wind). Cached separately.
         TextureHandle LoadTexture(const std::string& relativePath, bool repeatWrap = false);
+        // The armour trim layer's texture for a worn piece (its TRIM on the
+        // layer — humanoid / humanoid_leggings — of `equipmentAsset`);
+        // INVALID_TEXTURE without a trim.
+        TextureHandle TrimTexture(const Game::ItemStack& piece, const std::string& equipmentAsset, bool leggings);
 
         // The entity's MC transform chain, mapping model-space PIXELS to
         // RENDER space (world minus the view's integer origin, see
@@ -462,7 +558,11 @@ namespace Render {
                                       // fishLandRoll / fishLandOffset).
                                       float fishYawDeg = 0.0f,
                                       bool fishLandRoll = false,
-                                      const glm::vec3& fishLandOffset = glm::vec3(0.0f));
+                                      const glm::vec3& fishLandOffset = glm::vec3(0.0f),
+                                      // A renderer's own setupRotations roll
+                                      // after the base ones (the iron
+                                      // golem's sway): degrees about Z.
+                                      float setupRollDeg = 0.0f);
 
         // Build one mob's posed geometry into `verts`/`idx`, already in world
         // space. Returns the matrix it used.
@@ -574,6 +674,11 @@ namespace Render {
         struct HeadTransforms {
             float yOffset = 0.0f, skullYOffset = 0.0f;
             float horizontalScale = 1.0f, verticalScale = 1.0f;
+            // The model's own HeadedModel.translateToHead tail after the
+            // head part's pose (blocks): CopperGolemModel translates
+            // (0, 0.125, 0) and scales 1.0625; every humanoid head model
+            // adds nothing.
+            float modelHeadYOffset = 0.0f, modelHeadScale = 1.0f;
         };
         static HeadTransforms HeadTransformsFor(Game::EntityTypeId type);
         // MC CustomHeadLayer.submit for the head slot's stack: a mob head
@@ -593,10 +698,15 @@ namespace Render {
         // family's mesh (the 26.x baby mesh when `babyMesh`), posed from
         // `wearer`, in its asset's sheet (dyed leather under its overlay).
         // `equipment` is indexed by Game::EquipmentSlot ordinal (6).
+        // `rootOverride`: build on that root (pixels → render space) instead
+        // of the entity chain from `renderPos` / `bodyRot` — a player model
+        // whose pose stack carries more than EntityMatrix knows (the glide,
+        // the swim tilt, the bed).
         void AppendHumanoidArmor(ArmorFamily family, bool babyMesh,
                                  const Game::ItemStack* equipment, EntityModel& wearer,
                                  const EntityRenderState& state, const glm::dvec3& renderPos,
-                                 float bodyRot, const glm::vec3& cameraPos, const EmitFn& emit);
+                                 float bodyRot, const glm::vec3& cameraPos, const EmitFn& emit,
+                                 const glm::mat4* rootOverride = nullptr);
         // The layers above for one mob of the mob pass, gated per renderer
         // as MC's are (the vindicator's axe only while aggressive…); the
         // held and head layers only — the armour is AppendMobArmorLayer.
@@ -616,6 +726,11 @@ namespace Render {
         // The item lookups MobRenderer.cpp keeps (EquipmentAssets, the
         // stack's sprite, the block a block item shows as).
         static const char* EquipmentAssetFor(Game::ItemID id);
+        // The equipment asset a worn stack draws with: its EQUIPPABLE
+        // asset_id's path (so a component patch re-skins the piece — MC
+        // HumanoidArmorLayer reads equippable.assetId()), else the item's
+        // own material; "" when it has none (nothing is drawn).
+        static std::string EquipmentAssetOf(const Game::ItemStack& stack);
         static std::string ItemSpriteName(Game::ItemID id);
         static Game::BlockID ItemBlockShown(Game::ItemID id);
     private:
@@ -695,6 +810,24 @@ namespace Render {
         // Morph::Kind::Player: the wide player model (HumanoidModel, 64×64
         // skin), built on first use.
         std::unique_ptr<EntityModel> m_playerMorphModel;
+        // Skinned players (PlayerSkinRenderer.cpp): the classic and slim
+        // PlayerModel and the cape's PlayerCapeModel, built on first use.
+        std::unique_ptr<PlayerModel> m_skinModels[2];
+        std::unique_ptr<PlayerCapeModel> m_capeModel;
+        PlayerModel& PlayerSkinModel(bool slim);
+        // LivingEntityRenderer.submit + AvatarRenderer.setupRotations for a
+        // skinned player: the model root, pixels → render space.
+        // `renderFeet`: the feet in render space (the origin for a GUI box).
+        static glm::mat4 SkinnedPlayerRoot(const SkinnedPlayerPose& pose, const glm::vec3& renderFeet,
+                                           float partialTick);
+        // One skinned body and its layers onto m_verts / m_indices; `emit`
+        // closes a batch (texture, first index, cull, part: 0 body,
+        // 1 layer, 2 cape). Returns the root for the elytra and swirl.
+        glm::mat4 AppendSkinnedPlayer(const SkinnedPlayerPose& pose, const glm::vec3& renderFeet,
+                                      float partialTick, const glm::vec3& cameraPos,
+                                      const std::function<void(TextureHandle, size_t, bool, int)>& emit);
+        // The pose's EntityRenderState (what PlayerModel.setupAnim reads).
+        static EntityRenderState SkinnedPlayerState(const SkinnedPlayerPose& pose, float partialTick);
         // A chicken morph's wing state, MC Chicken.aiStep's flap fields
         // stepped per tick from "airborne" (the morph's anim byte), one per
         // morphed player.

@@ -11,6 +11,7 @@
 // registration and this one about behaviour, and gives new interactive blocks
 // (chest, furnace, doors) an obvious home.
 #include "BlockRegistry.hpp"
+#include "common/data/DataComponents.hpp"
 #include "common/entity/vehicle/VehicleEntity.hpp"
 #include "common/sound/LevelEventSounds.hpp"
 #include "BlockInteraction.hpp"
@@ -29,6 +30,7 @@
 #include "DecoratedPotBlock.hpp"
 #include "CopperGolemStatueBlock.hpp"
 #include "ChiseledBookShelfBlock.hpp"
+#include "FlowerPotBlock.hpp"
 #include "TrialChamberBlocks.hpp"
 #include "FallingBlock.hpp"
 #include "RedstoneSignal.hpp"      // HasNeighborSignal — enchanted gravitite
@@ -44,7 +46,10 @@
 #include "CandleBlocks.hpp"
 #include "PlantBlocks.hpp"
 #include "TurtleEggBlock.hpp"
+#include "ContactDamageBlocks.hpp"
 #include "CopperChestBlock.hpp"
+#include "CarvedPumpkinBlock.hpp"
+#include "WitherSkullBlock.hpp"
 #include "SculkBlocks.hpp"
 #include "entity/ChestBlockEntity.hpp"
 #include "entity/SpawnerBlockEntity.hpp"
@@ -687,6 +692,31 @@ namespace Game {
             return true;
         }
 
+        // MC ChorusFlowerBlock.onProjectileHit: a projectile that may interact
+        // here and may break blocks (Projectile.mayBreak — #impact_projectiles
+        // and the projectiles_can_break_blocks rule) destroys the flower with
+        // its drops.
+        void ChorusFlowerOnProjectileHit(ILevelWrite& level, const glm::ivec3& pos, BlockState /*state*/,
+                                         const glm::dvec3& /*hitPos*/, Direction /*face*/, Entity& projectile) {
+            if (level.IsClientSide()) return;
+            auto* shot = dynamic_cast<Projectile*>(&projectile);
+            if (!shot || !shot->MayInteract() || !shot->MayBreak()) return;
+            level.DestroyBlock(pos, true);
+        }
+
+        // MC SpeleothemBlock.onProjectileHit (pointed dripstone, sulfur spike):
+        // only a thrown trident moving faster than 0.6 blocks a tick snaps
+        // it, and only when it may interact and may break blocks.
+        void SpeleothemOnProjectileHit(ILevelWrite& level, const glm::ivec3& pos, BlockState /*state*/,
+                                       const glm::dvec3& /*hitPos*/, Direction /*face*/, Entity& projectile) {
+            if (level.IsClientSide()) return;
+            auto* shot = dynamic_cast<Projectile*>(&projectile);
+            if (!shot || !shot->MayInteract() || !shot->MayBreak()) return;
+            if (shot->GetType() != EntityTypeId::Trident) return;
+            if (glm::length(glm::dvec3(shot->velocity)) <= 0.6) return;
+            level.DestroyBlock(pos, true);
+        }
+
         // MC VineBlock.updateShape — re-derive which faces still have support.
         // A vine that loses its last face returns AIR, and World turns that into
         // a destroy-with-drops, which is how a vine curtain falls when the wall
@@ -944,9 +974,10 @@ namespace Game {
             if (!world || !player) return UseResult::Pass;
             if (!IsSignBlock(world->GetBlock(pos.x, pos.y, pos.z))) return UseResult::Pass;
             const ItemID id = stack.itemId;
+            // SignApplicator: ink sacs, honeycomb and the DyeItems (by DYE).
             const bool applicator =
                 id == Items::InkSac || id == Items::GlowInkSac || id == Items::Honeycomb ||
-                (id >= Items::WhiteDye && id <= Items::BlackDye);
+                (id >= Items::WhiteDye && id <= Items::BlackDye && DyeColorOf(stack) >= 0);
             if (!applicator) return UseResult::TryEmptyHandInteraction;
             player->ApplySignItem(pos, hand);
             return UseResult::SuccessServer;
@@ -1269,6 +1300,9 @@ namespace Game {
         if (Block* portal = forSlug("nether_portal")) {
             portal->updateShape  = &FamilyPortalUpdateShape;
             portal->entityInside = &PortalEntityInside;
+            // Engine rule (MC's nether portal takes the whole cell): only the
+            // 4/16 sheet itself is "in the portal" — see EntityInsideShape.
+            portal->entityInsideShape = EntityInsideShape::Outline;
         } else {
             Log::Warning("[BlockBehaviors] no block with registrySlug "
                          "'nether_portal' — portals will not close when their "
@@ -1284,6 +1318,7 @@ namespace Game {
         if (Block* portal = forSlug("hush_portal")) {
             portal->updateShape  = &FamilyPortalUpdateShape;
             portal->entityInside = &PortalEntityInside;
+            portal->entityInsideShape = EntityInsideShape::Outline;
             portal->animateTick  = &HushPortalAnimateTick;
         } else {
             Log::Warning("[BlockBehaviors] no block with registrySlug "
@@ -1302,6 +1337,7 @@ namespace Game {
             if (FamilyOfPortalBlock(BlockID::AetherPortal)) {
                 portal->entityInside = &PortalEntityInside;
             }
+            portal->entityInsideShape = EntityInsideShape::Outline;
         }
 
         // ── Frosted ice (MC FrostedIceBlock — Frost Walker's ice) ─────────
@@ -1356,6 +1392,8 @@ namespace Game {
         // nothing for onPlace or neighborChanged to do.
         if (Block* endPortal = forSlug("end_portal")) {
             endPortal->entityInside = &PortalEntityInside;
+            // MC EndPortalBlock.getEntityInsideCollisionShape → getShape.
+            endPortal->entityInsideShape = EntityInsideShape::Outline;
         } else {
             Log::Warning("[BlockBehaviors] no block with registrySlug "
                          "'end_portal' — the End is unreachable");
@@ -1380,9 +1418,19 @@ namespace Game {
         // behind it is mined.
         if (Block* vine = forSlug("vine")) {
             vine->updateShape = &VineUpdateShape;
+            // MC VineBlock.randomTick — spreading, behind spread_vines.
+            vine->isRandomlyTicking = [](BlockState) { return true; };
+            vine->randomTick        = &VineRandomTick;
         }
         for (const char* slug : { "glow_lichen", "sculk_vein", "resin_clump" }) {
             if (Block* b = forSlug(slug)) b->updateShape = &MultifaceUpdateShape;
+        }
+
+        // ── Projectile-breakable blocks (Projectile.mayBreak) ─────────────
+        // The decorated pot wires its own (DecoratedPotBlock.cpp).
+        if (Block* b = forSlug("chorus_flower")) b->onProjectileHit = &ChorusFlowerOnProjectileHit;
+        for (const char* slug : { "pointed_dripstone", "sulfur_spike" }) {
+            if (Block* b = forSlug(slug)) b->onProjectileHit = &SpeleothemOnProjectileHit;
         }
 
         // ── Amethyst clusters (and The Hush's resonant cluster) ───────────
@@ -1684,6 +1732,9 @@ namespace Game {
         // The chiseled bookshelf: books in and out by slot, the comparator
         // (ChiseledBookShelfBlock.cpp).
         RegisterChiseledBookShelfBehaviors(blocks);
+        // Flower pots: a plant in, a plant out, for the empty pot and every
+        // potted_* block (FlowerPotBlock.cpp, MC POTTED_BY_CONTENT).
+        RegisterFlowerPotBehaviors(blocks);
         // The vault's key slot (TrialChamberBlocks.cpp; the trial spawner
         // and the vault themselves run in their block entities).
         RegisterTrialChamberBlockBehaviors(blocks);
@@ -1693,15 +1744,31 @@ namespace Game {
         // Candles, candle cakes and cake: lighting, putting out, stacking a
         // candle onto a cake and eating it (CandleBlocks.cpp).
         RegisterCandleBehaviors(blocks);
+        // The composter: composting, ripening, bone meal
+        // (ComposterBlock.cpp).
+        RegisterComposterBehaviors(blocks);
+        // Beehives and bee nests: honey harvest, the comparator and the fire
+        // release (BeehiveBlock.cpp; the bees are BeehiveBlockEntity's).
+        RegisterBeehiveBehaviors(blocks);
         // Sea pickles, lily pads, frogspawn and the small mushrooms:
         // survival, spread and bone meal (PlantBlocks.cpp).
         RegisterPlantBehaviors(blocks);
         // Turtle eggs: hatching, trampling and the sand sparkle
         // (TurtleEggBlock.cpp).
         RegisterTurtleEggBehaviors(blocks);
-        // Copper chests: the pair sharing one oxidation, and the weathering
-        // of the unwaxed four (CopperChestBlock.cpp).
+        // Cactus, sweet berry bush, campfires (entityInside) and the magma
+        // block (stepOn) — the contact-damage blocks (ContactDamageBlocks.cpp).
+        RegisterContactDamageBehaviors(blocks);
+        // Chests: ChestBlock.updateShape (the pair's TYPE in step) on every
+        // ChestBlock; copper chests: the pair sharing one oxidation, and the
+        // weathering of the unwaxed four (CopperChestBlock.cpp).
         RegisterCopperChestBehaviors(blocks);
+        // The carved pumpkin and the jack o'lantern: a head placed on a body
+        // builds a snow, iron or copper golem (CarvedPumpkinBlock.cpp).
+        RegisterCarvedPumpkinBehaviors(blocks);
+        // The wither skeleton skull and its wall twin: placed by a player, it
+        // finishes the soul-sand ritual (WitherSkullBlock.cpp setPlacedBy).
+        RegisterWitherSkullBehaviors(blocks);
         // Fire: the scheduled tick (age, burn, spread, rain) and survival
         // (FireBlock.cpp).
         RegisterFireBehaviors(blocks);

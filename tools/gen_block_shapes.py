@@ -396,7 +396,19 @@ def main():
                                  ("holystone_pressure_plate", "stone_pressure_plate"),
                                  ("skyroot_button", "oak_button"), ("holystone_button", "stone_button"),
                                  # Twilight Forest, pass two: HugeWaterLilyBlock is a LilyPadBlock.
-                                 ("huge_water_lily", "lily_pad")):
+                                 ("huge_water_lily", "lily_pad"),
+                                 # Flower pots for the engine dimensions' plants (2026-10-02):
+                                 # FlowerPotBlock's column(6, 0, 6), like every vanilla pot.
+                                 ("potted_resonance_bloom", "potted_dandelion"),
+                                 ("potted_whisperwood_sapling", "potted_dandelion"),
+                                 ("potted_twilight_oak_sapling", "potted_dandelion"),
+                                 ("potted_canopy_sapling", "potted_dandelion"),
+                                 ("potted_tf_mangrove_sapling", "potted_dandelion"),
+                                 ("potted_darkwood_sapling", "potted_dandelion"),
+                                 ("potted_skyroot_sapling", "potted_dandelion"),
+                                 ("potted_golden_oak_sapling", "potted_dandelion"),
+                                 ("potted_white_flower", "potted_dandelion"),
+                                 ("potted_purple_flower", "potted_dandelion")):
         if vanilla in slug2cls: slug2cls[engine_slug] = slug2cls[vanilla]
 
     cache, rows, skipped = {}, [], {}

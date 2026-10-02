@@ -64,6 +64,7 @@
 // elsewhere in the project, the same way ChestRenderer includes it.
 #include "client/map/ClientMaps.hpp"
 #include "stb_image.h"
+#include "client/renderer/texture/PalettedPermutations.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/constants.hpp>
@@ -447,6 +448,43 @@ namespace Render {
                     return variant == 2 ? std::make_unique<PigModel>(true) : nullptr;
                 case Game::EntityTypeId::Chicken:
                     return variant == 2 ? std::make_unique<ChickenModel>(true) : nullptr;
+                case Game::EntityTypeId::ZombieNautilus: {
+                    // MC ZombieNautilusCoralModel (ZombieNautilusVariant WARM):
+                    // the nautilus mesh with four coral clusters on the shell.
+                    if (variant != 1 || !FindGenModel("zombie_nautilus")) return nullptr;
+                    auto model = std::make_unique<GeneratedModel>("zombie_nautilus");
+                    ModelPart* shell = model->Root().Find("shell");
+                    if (!shell) return nullptr;
+                    const auto cube = [](ModelPart* part, float tx, float ty, float ox, float oy, float oz,
+                                         float sx, float sy, float sz) {
+                        CubeDefinition c{};
+                        c.originX = ox; c.originY = oy; c.originZ = oz;
+                        c.sizeX = sx; c.sizeY = sy; c.sizeZ = sz;
+                        c.texOffsX = tx; c.texOffsY = ty;
+                        part->cubes.push_back(c);
+                    };
+                    ModelPart* corals = shell->AddChild("corals", PartPose::Offset(8.0f, 4.5f, -8.0f));
+                    ModelPart* yellow = corals->AddChild("yellow_coral", PartPose::Offset(0.0f, -11.0f, 11.0f));
+                    cube(yellow->AddChild("yellow_coral_second", PartPose::OffsetAndRotation(0.0f, 0.0f, 2.0f, 0.0f, -0.7854f, 0.0f)),
+                         0, 85, -4.5f, -3.5f, 0.0f, 6.0f, 8.0f, 0.0f);
+                    cube(yellow->AddChild("yellow_coral_first", PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f, 0.0f, 0.7854f, 0.0f)),
+                         0, 85, -4.5f, -3.5f, 0.0f, 6.0f, 8.0f, 0.0f);
+                    ModelPart* pink = corals->AddChild("pink_coral", PartPose::Offset(-12.5f, -18.0f, 11.0f));
+                    cube(pink, -8, 94, -4.5f, 4.5f, 0.0f, 6.0f, 0.0f, 8.0f);
+                    cube(pink->AddChild("pink_coral_second", PartPose::OffsetAndRotation(-1.5f, 4.5f, 4.0f, 0.0f, 0.0f, 1.5708f)),
+                         -8, 94, -3.0f, 0.0f, -4.0f, 6.0f, 0.0f, 8.0f);
+                    ModelPart* blue = corals->AddChild("blue_coral", PartPose::Offset(-14.0f, 0.0f, 5.5f));
+                    cube(blue->AddChild("blue_second", PartPose::OffsetAndRotation(0.0f, 0.0f, -2.0f, 0.0f, 0.7854f, 0.0f)),
+                         0, 102, -3.5f, -5.5f, 0.0f, 5.0f, 10.0f, 0.0f);
+                    cube(blue->AddChild("blue_first", PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f, 0.0f, -0.7854f, 0.0f)),
+                         0, 102, -3.5f, -5.5f, 0.0f, 5.0f, 10.0f, 0.0f);
+                    ModelPart* red = corals->AddChild("red_coral", PartPose::Offset(0.0f, 0.0f, 0.0f));
+                    cube(red->AddChild("red_coral_second", PartPose::OffsetAndRotation(-0.5f, -1.0f, 1.5f, 0.0f, -0.829f, 0.0f)),
+                         0, 112, -2.5f, -5.5f, 0.0f, 4.0f, 10.0f, 0.0f);
+                    cube(red->AddChild("red_coral_first", PartPose::OffsetAndRotation(0.0f, 0.0f, 0.0f, 0.0f, 0.7854f, 0.0f)),
+                         0, 112, -4.5f, -5.5f, 0.0f, 6.0f, 10.0f, 0.0f);
+                    return model;
+                }
                 default:
                     return nullptr;
             }
@@ -502,6 +540,15 @@ namespace Render {
                     break;
                 case Game::EntityTypeId::SilentWarden:
                     if (FindGenModel("warden")) return std::make_unique<GeneratedModel>("warden");
+                    break;
+                // MC WitherBossModel — the generated mesh plus the side
+                // heads' setupHeadRotation (WitherBossModel).
+                case Game::EntityTypeId::Wither:
+                    if (FindGenModel("wither")) return std::make_unique<WitherBossModel>("wither");
+                    break;
+                // MC CopperGolemModel — the carrying pose's clamp.
+                case Game::EntityTypeId::CopperGolem:
+                    if (FindGenModel("copper_golem")) return std::make_unique<CopperGolemModel>();
                     break;
                 // MC AdultWolfModel — the generated mesh plus the wet-shake
                 // roll its compiled setupAnim cannot carry (WolfModel).
@@ -1291,6 +1338,40 @@ namespace Render {
         return tex;
     }
 
+    TextureHandle MobRenderer::TrimTexture(const Game::ItemStack& piece, const std::string& equipmentAsset,
+                                           bool leggings) {
+        // EquipmentLayerRenderer's trim lookup (TrimTextureKey): the
+        // pattern's sheet for the layer type (trims/entity/humanoid or
+        // humanoid_leggings), recoloured to the material's palette — its
+        // override for this armour asset when it has one (iron on iron
+        // armour is iron_darker).
+        const auto trim = piece.get(Game::DataComponents::TRIM);
+        if (!trim) return INVALID_TEXTURE;
+        const std::string pattern = Game::TrimPatternAsset(trim->pattern);
+        const std::string material = Game::TrimMaterialAssetFor(trim->material, equipmentAsset);
+        if (pattern.empty() || material.empty()) return INVALID_TEXTURE;
+        const std::string layer = leggings ? "humanoid_leggings" : "humanoid";
+        const std::string cacheKey = "trim|" + layer + "|" + pattern + "|" + material;
+        const auto it = m_textureCache.find(cacheKey);
+        if (it != m_textureCache.end()) return it->second;
+
+        const std::string base = PlatformMain::GetAssetPath("assets/textures/trims/entity/" + layer + "/" + pattern + ".png");
+        const std::string key = PlatformMain::GetAssetPath("assets/textures/trims/color_palettes/trim_palette.png");
+        const std::string target = PlatformMain::GetAssetPath("assets/textures/trims/color_palettes/" + material + ".png");
+        int w = 0, h = 0;
+        std::vector<unsigned char> rgba;
+        TextureHandle tex = INVALID_TEXTURE;
+        if (PalettedPermutations::Build(base, key, target, w, h, rgba)) {
+            tex = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, rgba.data());
+            g_renderBackend->SetTextureFilter(tex, TextureFilter::Nearest, TextureFilter::Nearest);
+            g_renderBackend->SetTextureWrap(tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+        } else {
+            Log::Warning("[MobRenderer] no trim texture %s / %s", (layer + "/" + pattern).c_str(), material.c_str());
+        }
+        m_textureCache[cacheKey] = tex;
+        return tex;
+    }
+
     void SetBabyModelLook(BabyModelLook look) {
         if (s_babyLook == look) return;
         s_babyLook = look;
@@ -1358,6 +1439,23 @@ namespace Render {
                     entry.bodyArmorModel = std::move(armor);
                 }
                 break;
+            // MC WitherArmorLayer — ModelLayers.WITHER_ARMOR,
+            // WitherBossModel.createBodyLayer(new CubeDeformation(0.5F)).
+            case Game::EntityTypeId::Wither:
+                if (FindGenModel("wither")) {
+                    auto armor = std::make_unique<WitherBossModel>("wither");
+                    InflateCubes(armor->Root(), 0.5f);
+                    entry.energySwirlModel = std::move(armor);
+                }
+                break;
+            // MC CreeperPowerLayer — ModelLayers.CREEPER_ARMOR,
+            // CreeperModel.createBodyLayer(new CubeDeformation(2.0F)).
+            case Game::EntityTypeId::Creeper: {
+                auto armor = std::make_unique<CreeperModel>();
+                InflateCubes(armor->Root(), 2.0f);
+                entry.energySwirlModel = std::move(armor);
+                break;
+            }
             // MC TropicalFishRenderer's largeModel + TropicalFishPatternLayer's
             // modelSmall / modelLarge (the *_PATTERN rows, inflated 0.008).
             case Game::EntityTypeId::TropicalFish:
@@ -1469,7 +1567,8 @@ namespace Render {
                                         float spinAgeInTicks,
                                         float fishYawDeg,
                                         bool fishLandRoll,
-                                        const glm::vec3& fishLandOffset) {
+                                        const glm::vec3& fishLandOffset,
+                                        float setupRollDeg) {
         // The MC transform chain — see the header. The translation is RENDER
         // space (RenderOrigin.hpp): the entity's double position minus the
         // view's INTEGER origin, subtracted in double. That keeps float
@@ -1502,6 +1601,10 @@ namespace Render {
         if (upsideDown) {
             m = glm::translate(m, glm::vec3(0.0f, boundingBoxHeight + 0.1f, 0.0f));
             m = glm::rotate(m, glm::radians(180.0f), glm::vec3(0.0f, 0.0f, 1.0f));
+        }
+        // MC IronGolemRenderer.setupRotations: after super, the sway roll.
+        if (setupRollDeg != 0.0f) {
+            m = glm::rotate(m, glm::radians(setupRollDeg), glm::vec3(0.0f, 0.0f, 1.0f));
         }
         // MC DrownedRenderer.setupRotations:33-42 — the swim tilt: after the
         // base rotations (super.setupRotations, death flip included) and
@@ -1557,7 +1660,8 @@ namespace Render {
                                          state.modelOffset,
                                          state.isUpsideDown, state.boundingBoxHeight,
                                          state.isAutoSpinAttack, state.xRot, state.ageInTicks,
-                                         state.fishYawDeg, state.fishLandRoll, state.fishLandOffset);
+                                         state.fishYawDeg, state.fishLandRoll, state.fishLandOffset,
+                                         state.setupRollDeg);
         model.Root().Build(m, model.TexWidth(), model.TexHeight(), verts, idx,
                            model.CullBackFaces());
         return m;
@@ -1682,6 +1786,19 @@ namespace Render {
     // The three item lookups above, for the equipment layers
     // (MobEquipmentLayers.cpp).
     const char* MobRenderer::EquipmentAssetFor(Game::ItemID id) { return ArmorMaterialFor(id); }
+
+    std::string MobRenderer::EquipmentAssetOf(const Game::ItemStack& stack) {
+        if (stack.IsEmpty()) return {};
+        std::string asset = Game::EquipmentAssetPath(stack);
+        if (!asset.empty()) {
+            // The engine's textures are one flat tree: a foreign namespace's
+            // equipment ("aether:zanite") lives beside vanilla's.
+            if (const size_t colon = asset.find(':'); colon != std::string::npos) asset = asset.substr(colon + 1);
+            return asset;
+        }
+        const char* material = ArmorMaterialFor(stack.itemId);
+        return material ? std::string(material) : std::string();
+    }
     std::string MobRenderer::ItemSpriteName(Game::ItemID id) { return SpriteNameFor(id); }
     Game::BlockID MobRenderer::ItemBlockShown(Game::ItemID id) { return BlockShownBy(id); }
 
@@ -1879,6 +1996,13 @@ namespace Render {
                 const size_t overlayFirst = m_indices.size();
                 AppendMob(armor, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
                 emit(LoadTexture(dir + "leather_overlay.png"), overlayFirst, false);
+            }
+            // The piece's TRIM layer (EquipmentLayerRenderer).
+            const TextureHandle trimTex = TrimTexture(piece, material, inner);
+            if (trimTex != INVALID_TEXTURE) {
+                const size_t trimFirst = m_indices.size();
+                AppendMob(armor, state, renderPos, bodyRot, cameraPos, m_verts, m_indices);
+                emit(trimTex, trimFirst, false);
             }
         }
 
@@ -2098,6 +2222,10 @@ namespace Render {
             // *_GLINT pipelines): additive SRC_COLOR / ONE, depth EQUAL, no
             // depth write, no lightmap — a foil thrown trident.
             bool          glint = false;
+            // MC RenderPipelines.ENERGY_SWIRL (a powered wither's armour, a
+            // charged creeper's aura): ADDITIVE ONE / ONE, no cull, the
+            // default depth test and write — emissive, no overlay.
+            bool          additive = false;
         };
         std::vector<Batch> batches;
 
@@ -2600,6 +2728,20 @@ namespace Render {
             // ── The variant MESH — MC CowRenderer/PigRenderer/ChickenRenderer
             //    .submit picks the AdultAndBabyModelPair for the variant's
             //    ModelType; the texture follows below.
+            // ZombieNautilusRenderer: the warm variant's coral mesh, its
+            // corals hidden under body armour (ZombieNautilusCoralModel).
+            if (type == Game::EntityTypeId::ZombieNautilus && mob.GetVariantByte() == 1) {
+                if (!modelEntry->variantTried[1]) {
+                    modelEntry->variantTried[1] = true;
+                    modelEntry->variantModels[1] = CreateVariantModelFor(type, 1);
+                }
+                if (EntityModel* coral = modelEntry->variantModels[1].get()) {
+                    if (ModelPart* corals = coral->Root().Find("corals")) {
+                        corals->visible = mob.GetEquipment(Game::EquipmentSlot::BODY).IsEmpty();
+                    }
+                    model = coral;
+                }
+            }
             if (type == Game::EntityTypeId::Cow || type == Game::EntityTypeId::Pig ||
                 type == Game::EntityTypeId::Chicken) {
                 const uint8_t variant = std::min<uint8_t>(mob.GetVariantByte(), 2);
@@ -2623,10 +2765,12 @@ namespace Render {
             }
             // The entity's own size (scaled portals, /scale) on top of the
             // type's — the box follows it too (Entity::GetBbWidth).
-            state.scale *= mob.scale;
+            // MC LivingEntityRenderer: state.scale = entity.getScale() — the
+            // SCALE attribute (Entity::attributeScale) on top.
+            state.scale *= mob.scale * mob.attributeScale;
             // The GUI box draws the entity at its unscaled size
-            // (extractEntityInInventoryFollowsMouse: scale = 1).
-            if (guiCapture && mob.scale > 0.0f) state.scale /= mob.scale;
+            // (extractEntityInInventoryFollowsMouse divides getScale() out).
+            if (guiCapture && mob.scale * mob.attributeScale > 0.0f) state.scale /= mob.scale * mob.attributeScale;
             // MC ArmorStandRenderer.extractRenderState / setupRotations: the
             // six poses, the yaw the plate squares itself against, the two
             // visibility flags, and the hit wobble — a ±3° yaw sway for the
@@ -2794,7 +2938,7 @@ namespace Render {
                     state.ticksUsingItem = static_cast<float>(mob.GetTicksUsingItem()) + partialTick;
                 }
                 state.ticksSinceKineticHitFeedback = mob.GetTicksSinceLastKineticHitFeedback(partialTick);
-                if (Game::Spear::IsSpear(mainItem.itemId)) state.swingAnimType = 2.0f;
+                if (Game::Spear::IsStabSwing(mainItem)) state.swingAnimType = 2.0f;
                 const bool skeletonFamily = type == Game::EntityTypeId::Skeleton ||
                                             type == Game::EntityTypeId::Stray ||
                                             type == Game::EntityTypeId::Bogged ||
@@ -3235,14 +3379,22 @@ namespace Render {
                 state.flap = parrot->GetFlapAngle(partialTick);
             }
             // MC IronGolemRenderer.extractRenderState: the attack clock minus
-            // the partial tick, and the offer-flower clock raw. (crackiness
-            // has no render-state field yet.)
+            // the partial tick, and the offer-flower clock raw. (Crackiness
+            // is read off the health by the crack layer below.)
             if (const auto* golem = MobAs<Game::IronGolem>(mob, type, Game::EntityTypeId::IronGolem)) {
                 state.attackTicksRemaining =
                     golem->GetAttackAnimationTick() > 0
                         ? static_cast<float>(golem->GetAttackAnimationTick()) - partialTick
                         : 0.0f;
                 state.offerFlowerTick = static_cast<float>(golem->GetOfferFlowerTick());
+                // IronGolemRenderer.setupRotations: walking (speed >= 0.01),
+                // the body sways ±6.5° with the stride — wp = pos + 6,
+                // (|wp % 13 - 6.5| - 3.25) / 3.25.
+                if (!(state.walkAnimationSpeed < 0.01f)) {
+                    const float wp = state.walkAnimationPos + 6.0f;
+                    const float triangleWave = (std::abs(std::fmod(wp, 13.0f) - 6.5f) - 3.25f) / 3.25f;
+                    state.setupRollDeg = 6.5f * triangleWave;
+                }
             }
             // MC RavagerRenderer.extractRenderState: stun and attack clocks
             // minus the partial tick; the roar is normalised 0..1 across its
@@ -3516,24 +3668,32 @@ namespace Render {
             // 5-tick band over the last 80 ticks (getTextureLocation:
             // `ticks > 80 || ticks / 5 % 2 != 1`). The tick count rides the
             // anim byte at exactly the flicker's own 5-tick grain — see
-            // Wither::GetAnimStateByte. (The half-health armor OVERLAY is a
-            // second model layer — skipped with the armor visual.)
+            // Wither::GetAnimStateByte, counted on per tick between steps.
+            // (The half-health armour is the energy swirl layer below.)
             if (const auto* wither = MobAs<Game::Wither>(mob, type, Game::EntityTypeId::Wither)) {
-                const int invTicks = wither->GetClientInvulnerableTicks();
-                if (wither->IsInvulnerablePhaseClient() &&
-                    (invTicks > 80 || (invTicks / 5) % 2 != 1)) {
+                // WitherBossRenderer.getTextureLocation: `int ticks =
+                // Mth.floor(state.invulnerableTicks)`.
+                const float invulnerableTicks = wither->GetClientInvulnerableTicks(partialTick);
+                const int invTicks = static_cast<int>(std::floor(invulnerableTicks));
+                if (invTicks > 0 && (invTicks > 80 || (invTicks / 5) % 2 != 1)) {
                     batchTexture = MobTex(
                         "assets/textures/entity/wither/wither_invulnerable.png");
                 }
                 // MC WitherBossRenderer.scale: 2.0 always, ramping up from
-                // 1.5 as the 220-tick spawn charge runs out. This hook was
-                // missing outright — the boss drew at HALF size.
+                // 1.5 as the 220-tick spawn charge runs out.
                 float witherScale = 2.0f;
-                if (wither->IsInvulnerablePhaseClient()) {
-                    witherScale -=
-                        static_cast<float>(invTicks) / 220.0f * 0.5f;
+                if (invulnerableTicks > 0.0f) {
+                    witherScale -= invulnerableTicks / 220.0f * 0.5f;
                 }
                 state.modelScale = glm::vec3(witherScale);
+                // WitherBossRenderer.extractRenderState: the side heads'
+                // looks (getHeadYRots / getHeadXRots) and the body yaw
+                // setupHeadRotation turns them against.
+                for (int i = 0; i < 2; ++i) {
+                    state.witherHeadYRots[i] = wither->GetHeadYRot(i);
+                    state.witherHeadXRots[i] = wither->GetHeadXRot(i);
+                }
+                state.bodyRot = bodyRot;
             }
             // Variant-byte texture tables — MC picks these in each renderer
             // from the entity's variant registry entry; the wire's variant
@@ -3574,6 +3734,25 @@ namespace Render {
                     batchTexture = MobTex(Game::Horse::VariantTexture(mob.GetVariantByte() & 0x0F));
                     break;
                 }
+                case Game::EntityTypeId::CopperGolem: {
+                    // CopperGolemRenderer.getTextureLocation: the weather
+                    // stage's sheet (CopperGolemOxidationLevels — the
+                    // variant byte is DATA_WEATHER_STATE's ordinal).
+                    static const char* const kCopperGolem[4] = {
+                        "assets/textures/entity/copper_golem/copper_golem.png",
+                        "assets/textures/entity/copper_golem/copper_golem_exposed.png",
+                        "assets/textures/entity/copper_golem/copper_golem_weathered.png",
+                        "assets/textures/entity/copper_golem/copper_golem_oxidized.png"};
+                    batchTexture = MobTex(kCopperGolem[std::min<uint8_t>(mob.GetVariantByte(), 3)]);
+                    break;
+                }
+                case Game::EntityTypeId::Frog:
+                    // FrogRenderer.getTextureLocation: the variant's asset
+                    // (FrogVariants: frog_temperate / frog_warm / frog_cold).
+                    if (const auto* frog = MobAs<Game::Frog>(mob, type, Game::EntityTypeId::Frog)) {
+                        batchTexture = MobTex(Game::Frog::VariantTexture(frog->GetVariant()));
+                    }
+                    break;
                 case Game::EntityTypeId::Cow: {
                     // CowRenderer.getTextureLocation: the variant's asset
                     // (CowVariants: temperate_cow / warm_cow / cold_cow).
@@ -3680,6 +3859,46 @@ namespace Render {
                     if (v < 11) batchTexture = MobTex(kCatTextures[v]);
                     break;
                 }
+                case Game::EntityTypeId::ZombieNautilus:
+                    // ZombieNautilusVariant asset: zombie_nautilus_coral for warm.
+                    if (mob.GetVariantByte() == 1) {
+                        batchTexture = MobTex("assets/textures/entity/nautilus/zombie_nautilus_coral.png");
+                    }
+                    break;
+                case Game::EntityTypeId::Rabbit: {
+                    // RabbitRenderer.getTextureLocation: "Toast" by name, else
+                    // the variant's sheet (the killer bunny's caerbannog).
+                    std::string_view sheet;
+                    const auto& name = mob.GetCustomName();
+                    if (name && *name == "Toast") {
+                        sheet = "toast";
+                    } else {
+                        switch (mob.GetVariantByte()) {
+                            case 1:  sheet = "white"; break;
+                            case 2:  sheet = "black"; break;
+                            case 3:  sheet = "white_splotched"; break;
+                            case 4:  sheet = "gold"; break;
+                            case 5:  sheet = "salt"; break;
+                            case 99: sheet = "caerbannog"; break;
+                            default: sheet = "brown"; break;
+                        }
+                    }
+                    batchTexture = MobTex(std::string("assets/textures/entity/rabbit/") + std::string(sheet) + ".png");
+                    break;
+                }
+                case Game::EntityTypeId::Shulker: {
+                    // ShulkerRenderer.getTextureLocation: the colour's sheet,
+                    // the default shulker.png without one.
+                    static constexpr const char* kShulkerColors[16] = {
+                        "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+                        "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"};
+                    const uint8_t color = static_cast<uint8_t>(mob.GetVariantByte() >> 3);
+                    if (color < 16) {
+                        batchTexture = MobTex(std::string("assets/textures/entity/shulker/shulker_") +
+                                              kShulkerColors[color] + ".png");
+                    }
+                    break;
+                }
                 case Game::EntityTypeId::TropicalFish: {
                     // MC TropicalFishRenderer.getTextureLocation: by the
                     // pattern's base — tropical_a (SMALL) / tropical_b (LARGE).
@@ -3769,7 +3988,8 @@ namespace Render {
                                             state.modelOffset,
                                             state.isUpsideDown, state.boundingBoxHeight,
                                             state.isAutoSpinAttack, state.xRot, state.ageInTicks,
-                                            state.fishYawDeg, state.fishLandRoll, state.fishLandOffset);
+                                            state.fishYawDeg, state.fishLandRoll, state.fishLandOffset,
+                                            state.setupRollDeg);
             } else {
                 entityMatrix =
                     AppendMob(*model, state, renderPos, bodyRot,
@@ -4001,7 +4221,23 @@ namespace Render {
             // shaded that way.)
             {
                 const char* eyesTex = nullptr;
+                // MC LivingEntityEmissiveLayer(…, alwaysVisible=false) skips
+                // an invisible body; the EyesLayers draw regardless.
+                bool eyesAlwaysVisible = true;
                 switch (type) {
+                    // MC CopperGolemRenderer's LivingEntityEmissiveLayer: the
+                    // weather stage's eye sheet over a second CopperGolemModel
+                    // (the same mesh), RenderTypes.eyes, alpha 1.
+                    case Game::EntityTypeId::CopperGolem: {
+                        static const char* const kCopperGolemEyes[4] = {
+                            "assets/textures/entity/copper_golem/copper_golem_eyes.png",
+                            "assets/textures/entity/copper_golem/copper_golem_eyes_exposed.png",
+                            "assets/textures/entity/copper_golem/copper_golem_eyes_weathered.png",
+                            "assets/textures/entity/copper_golem/copper_golem_eyes_oxidized.png"};
+                        eyesTex = kCopperGolemEyes[std::min<uint8_t>(mob.GetVariantByte(), 3)];
+                        eyesAlwaysVisible = false;
+                        break;
+                    }
                     // MC SpiderEyesLayer — CaveSpiderRenderer derives
                     // SpiderRenderer, so both wear it.
                     case Game::EntityTypeId::Spider:
@@ -4027,8 +4263,65 @@ namespace Render {
                         batches.push_back({ tex, glm::vec4(0.0f), firstIndex,
                                             bodyIndexCount });
                         // RenderTypes.eyes: EMISSIVE — full bright at night,
-                        // still fogged; drawn even when the body is invisible.
+                        // still fogged; the EyesLayers drawn even when the
+                        // body is invisible.
                         batches.back().light = BatchLight::Emissive;
+                        if (!eyesAlwaysVisible) batches.back().part = BatchPart::BodyCopy;
+                    }
+                }
+            }
+
+            // ── Energy swirl — MC EnergySwirlLayer (WitherArmorLayer,
+            //    CreeperPowerLayer) ──────────────────────────────────────────
+            //
+            // While powered (the wither at half health, a charged creeper)
+            // the inflated second model, posed by the same state, through
+            // RenderTypes.energySwirl(texture, xOffset(t) % 1, t * 0.01 % 1):
+            // the texture matrix's offset scrolls the REPEAT-wrapped sheet
+            // (ModelVertex uv is normalised, so the offset is a fraction of
+            // it), NO_CARDINAL_LIGHTING, tinted -8355712 (0xFF808080),
+            // additive, emissive, NO_OVERLAY. MC's layer has no invisibility
+            // test — it shows on an invisible body too.
+            if (modelEntry->energySwirlModel) {
+                const char* swirlTex = nullptr;
+                float uOffset = 0.0f;
+                const float t = state.ageInTicks;
+                if (type == Game::EntityTypeId::Wither) {
+                    const auto& wither = static_cast<const Game::Wither&>(mob);
+                    if (wither.IsPoweredClient()) {
+                        swirlTex = "assets/textures/entity/wither/wither_armor.png";
+                        uOffset = std::cos(t * 0.02f) * 3.0f;   // WitherArmorLayer.xOffset
+                    }
+                } else if (type == Game::EntityTypeId::Creeper) {
+                    if (static_cast<const Game::Creeper&>(mob).IsPowered()) {
+                        swirlTex = "assets/textures/entity/creeper/creeper_armor.png";
+                        uOffset = t * 0.01f;                    // CreeperPowerLayer.xOffset
+                    }
+                }
+                if (swirlTex) {
+                    const TextureHandle tex = LoadTexture(swirlTex, /*repeatWrap=*/true);
+                    if (tex != INVALID_TEXTURE) {
+                        const float u = std::fmod(uOffset, 1.0f);
+                        const float v = std::fmod(t * 0.01f, 1.0f);
+                        const size_t f = m_indices.size();
+                        const size_t vf = m_verts.size();
+                        AppendMob(*modelEntry->energySwirlModel, state, renderPos,
+                                  bodyRot, cameraPos, m_verts, m_indices);
+                        for (size_t i = vf; i < m_verts.size(); ++i) {
+                            ModelVertex& vert = m_verts[i];
+                            vert.u += u;
+                            vert.v += v;
+                            vert.r = vert.g = vert.b = 0x80;   // white × 0xFF808080
+                        }
+                        if (m_indices.size() > f) {
+                            Batch swirl;
+                            swirl.texture = tex;
+                            swirl.firstIndex = f;
+                            swirl.indexCount = m_indices.size() - f;
+                            swirl.additive = true;
+                            swirl.light = BatchLight::Emissive;
+                            batches.push_back(swirl);
+                        }
                     }
                 }
             }
@@ -4836,8 +5129,10 @@ namespace Render {
         if (guiCapture) {
             // CaptureForGui: the drawn batches as triangle lists.
             for (const Batch& batch : batches) {
-                if (batch.hidden || batch.depthOnly || batch.glint || batch.texture == INVALID_TEXTURE ||
-                    batch.indexCount == 0) continue;
+                // (The glint and the energy swirl's additive pass have no
+                // GUI pipeline here.)
+                if (batch.hidden || batch.depthOnly || batch.glint || batch.additive ||
+                    batch.texture == INVALID_TEXTURE || batch.indexCount == 0) continue;
                 GuiEntityBatch out;
                 out.texture = batch.texture;
                 out.blend = batch.blend;
@@ -4956,6 +5251,7 @@ namespace Render {
         bool cullOn = false;
         bool depthOnlyOn = false;
         bool glintOn = false;
+        bool additiveOn = false;
         for (const Batch& batch : batches) {
             // A glowing mob's geometry goes to the outline pass whether or
             // not it is drawn (an invisible glowing body is outline only).
@@ -4972,11 +5268,12 @@ namespace Render {
             // ON the body surface and batches draw in mob order.
             // Culling follows the model's MC render type the same way.
             if (batch.blend != blendOn || batch.cull != cullOn || batch.depthOnly != depthOnlyOn ||
-                batch.glint != glintOn) {
+                batch.glint != glintOn || batch.additive != additiveOn) {
                 blendOn = batch.blend;
                 cullOn = batch.cull;
                 depthOnlyOn = batch.depthOnly;
                 glintOn = batch.glint;
+                additiveOn = batch.additive;
                 PipelineState state = pipeline;
                 state.blendEnabled = blendOn;
                 state.cullMode = cullOn ? CullMode::Back : CullMode::None;
@@ -4988,6 +5285,14 @@ namespace Render {
                     state.dstBlendFactor = BlendFactor::One;
                     state.depthWriteEnabled = false;
                     state.depthCompareOp = CompareOp::Equal;
+                }
+                if (additiveOn) {
+                    // RenderPipelines.ENERGY_SWIRL: BlendFunction.ADDITIVE,
+                    // no cull, DepthStencilState.DEFAULT.
+                    state.blendEnabled = true;
+                    state.srcBlendFactor = BlendFactor::One;
+                    state.dstBlendFactor = BlendFactor::One;
+                    state.cullMode = CullMode::None;
                 }
                 g_renderBackend->SetPipelineState(state);
             }
@@ -5304,6 +5609,21 @@ namespace Render {
             }
 
             const auto type = static_cast<Game::EntityTypeId>(Game::Morph::MobTypeOf(pose.code));
+            // A thrown item's body (MC ThrownItemRenderer / Firework-
+            // EntityRenderer): no model, its item sprite facing the camera
+            // at the box's middle — as the mob pass draws one.
+            if (const char* sprite = type == Game::EntityTypeId::FireworkRocket ? "firework_rocket"
+                                                                                : SpriteNameForProjectile(type)) {
+                const size_t f = m_indices.size();
+                const TextureHandle tex = AppendSpriteProjectile(sprite, pose.position, height * 0.5f, cameraPos,
+                                                                 m_verts, m_indices);
+                if (tex != INVALID_TEXTURE && m_indices.size() > f) {
+                    ++EntityCulling::g_renderedThisFrame;
+                    batches.push_back({ tex, overlay, f, m_indices.size() - f, false });
+                }
+                if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
+                continue;
+            }
             ModelEntry* modelEntry = GetModelFor(type);
             if (!modelEntry || !modelEntry->model || modelEntry->texture == INVALID_TEXTURE) continue;
             ++EntityCulling::g_renderedThisFrame;
@@ -5361,6 +5681,19 @@ namespace Render {
             TextureHandle bodyTexture = remodelTex ? MorphTex(TexturePathFor(type))
                                                    : modelEntry->texture;
             if (bodyTexture == INVALID_TEXTURE) continue;
+            // The sheets the morph's own data picks, as the type's renderer
+            // picks them off the mob: ParrotRenderer.getTextureLocation by
+            // the variant; SulfurCubeRenderer's small sheet for the baby.
+            if (type == Game::EntityTypeId::Parrot) {
+                const TextureHandle tex = MorphTex(Game::Parrot::VariantTexture(
+                    Game::Parrot::VariantById(pose.variant)));
+                if (tex != INVALID_TEXTURE) bodyTexture = tex;
+            } else if (type == Game::EntityTypeId::SulfurCube) {
+                const TextureHandle tex = MorphTex(state.isBaby
+                    ? "assets/textures/entity/sulfur_cube/sulfur_cube_outer_small.png"
+                    : "assets/textures/entity/sulfur_cube/sulfur_cube_outer.png");
+                if (tex != INVALID_TEXTURE) bodyTexture = tex;
+            }
             float flipDegrees = 90.0f;
             switch (type) {
                 case Game::EntityTypeId::Spider:
@@ -5379,6 +5712,7 @@ namespace Render {
                     break;
             }
             state.deathFlipDeg = DeathFlipDegrees(pose.deathTime, partialTick, flipDegrees);
+            state.boundingBoxHeight = dims.height * pose.scale;
             state.entityId = static_cast<float>(pose.seed);
             state.yHeadRotAbs = pose.headYaw;
             state.yBodyRotAbs = pose.bodyYaw;
@@ -5498,8 +5832,20 @@ namespace Render {
                 state.isOnGround = false;
                 state.isResting  = false;
                 state.flapTime   = static_cast<float>(pose.seed) * 3.0f + state.ageInTicks;   // phantom
-                state.flap       = state.ageInTicks * 2.0f;   // parrot: Parrot.flap += flapping*2 aloft
+                // The birds' wing clock: Parrot.calculateFlapping aloft holds
+                // flapping at 0.9 (reset to 1, then ×0.9 each tick), so flap
+                // runs 1.8 a tick at flapSpeed 1. The TF birds read the raw
+                // clock (TwilightCreatureRender: sin(flap) · flapSpeed); the
+                // parrot's program reads ParrotRenderState.flapAngle, MC's
+                // already-folded (sin(flap) + 1) · flapSpeed — handing it the
+                // raw clock bobbed every part flap · 0.3 px, an unbounded
+                // offset that carried the bird out of sight within seconds.
                 state.flapSpeed  = 1.0f;
+                state.flap       = state.ageInTicks * 1.8f;
+                if (type == Game::EntityTypeId::Parrot) {
+                    state.flap    = (std::sin(state.flap) + 1.0f) * state.flapSpeed;
+                    state.mobPose = 0.0f;   // ParrotModel.Pose.FLYING (Parrot.isFlying)
+                }
                 // (Not rollAmount: for the bee that is the dying roll after a
                 // sting — BeeModel lerps the body to 177° on it — so a morph
                 // keeps it at 0 like any live bee.)
@@ -5557,11 +5903,183 @@ namespace Render {
             }
             SetupFishRotations(state, type);
 
+            // ── What the type's renderer reads off a mob, from the morph ──
+            // The size the code carries (Game::Morph::MobSizeOf) scales the
+            // model as the renderer's scale() hook does, so the drawn body
+            // is the box DimsOf gives; the rest are the extractRenderState
+            // inputs a morph has no mob for, at the values a live mob of the
+            // type shows in the same situation.
+            glm::dvec3 bodyPos = pose.position;
+            switch (type) {
+                case Game::EntityTypeId::Slime:
+                case Game::EntityTypeId::MagmaCube:
+                case Game::EntityTypeId::MazeSlime: {
+                    // SlimeRenderer / MazeSlimeRenderer.scale: 0.999 × size;
+                    // MagmaCubeRenderer the size alone (no squish at rest).
+                    const float size = static_cast<float>(Game::Morph::MobSizeOf(pose.code));
+                    state.modelScale = glm::vec3((type == Game::EntityTypeId::MagmaCube ? 1.0f : 0.999f) * size);
+                    break;
+                }
+                case Game::EntityTypeId::Phantom:
+                    // PhantomRenderer.scale: 1 + 0.15 × size.
+                    state.modelScale = glm::vec3(1.0f + 0.15f * static_cast<float>(Game::Morph::MobSizeOf(pose.code)));
+                    break;
+                case Game::EntityTypeId::Pufferfish:
+                    // PufferfishRenderer.submit: the mesh by the puff state;
+                    // setupRotations' bob, cos(ageInTicks · 0.05) · 0.08.
+                    switch (Game::Morph::MobSizeOf(pose.code)) {
+                        case 0:  break;
+                        case 1:  if (modelEntry->pufferMid) bodyModel = modelEntry->pufferMid.get(); break;
+                        default: if (modelEntry->pufferBig) bodyModel = modelEntry->pufferBig.get(); break;
+                    }
+                    bodyPos.y += std::cos(state.ageInTicks * 0.05f) * 0.08 * pose.scale;
+                    break;
+                case Game::EntityTypeId::SulfurCube: {
+                    // SulfurCubeRenderer.scale at rest: 0.999 × size (1 baby,
+                    // 2 grown), the grown cube's extra 0.5, and the translate
+                    // that seats it — vOffset 0.98 / 1.24 less a pixel.
+                    const float size = state.isBaby ? 1.0f : 2.0f;
+                    state.modelScale  = glm::vec3(0.999f * size * (state.isBaby ? 1.0f : 0.5f));
+                    state.modelOffset = glm::vec3(0.0f, (state.isBaby ? 1.24f : 0.98f) - 1.0f / 16.0f, 0.0f);
+                    break;
+                }
+                case Game::EntityTypeId::Wither:
+                    // WitherBossRenderer.scale: 2.0 (out of the spawn charge).
+                    state.modelScale = glm::vec3(2.0f);
+                    break;
+                case Game::EntityTypeId::Wolf:
+                    state.tailAngle = 0.62831855f;   // WolfRenderState's default (a calm wild wolf)
+                    break;
+                case Game::EntityTypeId::Turtle:
+                    state.isOnLand = !state.isInWater;   // TurtleRenderer: !isInWater && onGround
+                    break;
+                case Game::EntityTypeId::Dolphin:
+                    state.isMoving = pose.walkSpeed > 0.01f;   // DolphinRenderer: moving horizontally
+                    break;
+                case Game::EntityTypeId::Axolotl:
+                    // AxolotlRenderer's animator factors, settled: in water or
+                    // on land, moving or not.
+                    state.inWaterFactor  = state.isInWater ? 1.0f : 0.0f;
+                    state.onGroundFactor = state.isInWater ? 0.0f : 1.0f;
+                    state.movingFactor   = std::clamp(pose.walkSpeed * 2.0f, 0.0f, 1.0f);
+                    break;
+                case Game::EntityTypeId::Squid:
+                case Game::EntityTypeId::GlowSquid: {
+                    // Squid.aiStep's tentacle stroke on its mean clock
+                    // (tentacleSpeed ≈ 0.14 a tick): in water a pull then a
+                    // glide; out of water the limp flail.
+                    const float movement = std::fmod(state.ageInTicks * 0.14f, 2.0f * Game::Mth::kPi);
+                    if (state.isInWater) {
+                        const float t = movement / Game::Mth::kPi;
+                        state.tentacleAngle = movement < Game::Mth::kPi
+                            ? std::sin(t * t * Game::Mth::kPi) * Game::Mth::kPi * 0.25f : 0.0f;
+                    } else {
+                        state.tentacleAngle = std::fabs(std::sin(movement)) * Game::Mth::kPi * 0.25f;
+                    }
+                    break;
+                }
+                // The mod renderers' constant scale() hooks (ModMobRender.hpp
+                // ExtractRenderState), at a resting instance's values.
+                case Game::EntityTypeId::MistWolf:
+                case Game::EntityTypeId::WinterWolf:
+                case Game::EntityTypeId::KingSpider:
+                    state.modelScale = glm::vec3(1.9f);
+                    break;
+                case Game::EntityTypeId::SwarmSpider:
+                    state.modelScale = glm::vec3(0.5f);
+                    break;
+                case Game::EntityTypeId::Cockatrice:
+                    state.modelScale = glm::vec3(1.8f);
+                    break;
+                case Game::EntityTypeId::Moa:
+                    state.modelScale = glm::vec3(state.isBaby ? 1.0f : 1.8f);
+                    break;
+                case Game::EntityTypeId::Zephyr:
+                    // ZephyrRenderer.scale with no charge: (8 + 1) / 2 every way.
+                    state.modelScale  = glm::vec3(4.5f);
+                    state.modelOffset = glm::vec3(0.0f, 0.5f, 0.0f);
+                    break;
+                case Game::EntityTypeId::Aerbunny:
+                    state.modelScale  = glm::vec3(state.isBaby ? 0.5f : 1.0f);
+                    state.modelOffset = glm::vec3(0.0f, 0.2f, 0.0f);
+                    break;
+                case Game::EntityTypeId::Aerwhale:
+                    state.modelScale   = glm::vec3(2.0f);
+                    state.modelOffset  = glm::vec3(0.0f, -0.25f, 0.0f);
+                    state.swimPitchDeg = state.xRot;
+                    state.swimPivotY   = 0.0f;
+                    break;
+                case Game::EntityTypeId::BlueSwet:
+                case Game::EntityTypeId::GoldenSwet:
+                    state.modelScale = glm::vec3(1.5f);
+                    break;
+                case Game::EntityTypeId::AechorPlant:
+                    state.modelScale  = glm::vec3(0.625f);   // 0.625 + size / 6, size 0
+                    state.modelOffset = glm::vec3(0.0f, 1.2f, 0.0f);
+                    break;
+                case Game::EntityTypeId::Sentry:
+                    state.modelScale = glm::vec3(0.879f * 2.0f);
+                    break;
+                case Game::EntityTypeId::FireMinion:
+                    state.modelOffset = glm::vec3(0.0f, 0.35f, 0.0f);
+                    break;
+                case Game::EntityTypeId::HushLeviathan:
+                    state.modelScale   = glm::vec3(2.0f);
+                    state.swimPitchDeg = state.xRot;
+                    state.swimPivotY   = 1.5f;
+                    break;
+                case Game::EntityTypeId::ChoirMother:
+                    state.modelScale = glm::vec3(1.5f);
+                    state.squish     = 1.0f;   // its first phase
+                    break;
+                case Game::EntityTypeId::TheUnsung:
+                    state.modelScale = glm::vec3(1.6f);
+                    break;
+                default:
+                    break;
+            }
+
             EntityModel& model = *bodyModel;
             const size_t firstIndex = m_indices.size();
             const size_t firstVert  = m_verts.size();
             glm::mat4 entityMatrix(1.0f);
-            if (type == Game::EntityTypeId::EndCrystal) {
+            if (type == Game::EntityTypeId::EnderDragon) {
+                // MC EnderDragonRenderer.submit's chain (the mob pass's):
+                // Y by -yr, then the one-block forward shift before the flip.
+                // The dragon's yRot is 180° off a normal entity's (it flies
+                // along (sin yr, -cos yr)), so -yr == 180 - facing, where
+                // facing = yr + 180 is the ordinary-convention heading the mob
+                // pass computes as bodyRot. A morph's bodyYaw already IS that
+                // ordinary heading — no +180 here, or it flies tail-first.
+                // A morph has no flight history: no climb pitch, the hover pose.
+                model.SetupAnim(state);
+                const glm::vec3 relative = Render::ToRender(bodyPos);
+                glm::mat4 m = glm::translate(glm::mat4(1.0f), relative);
+                m = glm::rotate(m, glm::radians(180.0f - pose.bodyYaw), glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::scale(m, glm::vec3(pose.scale));
+                m = glm::translate(m, glm::vec3(0.0f, 0.0f, 1.0f));
+                m = glm::scale(m, glm::vec3(-1.0f, -1.0f, 1.0f));
+                m = glm::scale(m, glm::vec3(1.0f / 16.0f));
+                m = glm::translate(m, glm::vec3(0.0f, kModelYOffset * 16.0f, 0.0f));
+                model.Root().Build(m, model.TexWidth(), model.TexHeight(), m_verts, m_indices,
+                                   model.CullBackFaces());
+                entityMatrix = m;
+            } else if (type == Game::EntityTypeId::Arrow) {
+                // MC ArrowRenderer.submit (the mob pass's chain): Y by
+                // (yRot − 90), Z by xRot, no flip. A projectile's yRot/xRot
+                // are atan2(x, z) / atan2(y, horizontal) of its flight —
+                // the negated look angles — so the arrow points where the
+                // morph looks.
+                model.SetupAnim(state);
+                const glm::vec3 relative = Render::ToRender(bodyPos);
+                glm::mat4 m = glm::translate(glm::mat4(1.0f), relative);
+                m = glm::rotate(m, glm::radians(-pose.headYaw - 90.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                m = glm::rotate(m, glm::radians(-pose.pitch), glm::vec3(0.0f, 0.0f, 1.0f));
+                m = glm::scale(m, glm::vec3(pose.scale / 16.0f));
+                model.Root().Build(m, model.TexWidth(), model.TexHeight(), m_verts, m_indices,
+                                   model.CullBackFaces());
+                entityMatrix = m;
+            } else if (type == Game::EntityTypeId::EndCrystal) {
                 // MC EndCrystalRenderer.submit: scale(2,2,2), translate
                 // (0,-0.5,0), no yaw and no living-entity flip — the model's
                 // +y is up as authored (same chain as the mob pass; the
@@ -5577,7 +6095,7 @@ namespace Render {
                 model.Root().Build(m, model.TexWidth(), model.TexHeight(), m_verts, m_indices,
                                    model.CullBackFaces());
             } else {
-                entityMatrix = AppendMob(model, state, pose.position, pose.bodyYaw, cameraPos, m_verts, m_indices);
+                entityMatrix = AppendMob(model, state, bodyPos, pose.bodyYaw, cameraPos, m_verts, m_indices);
             }
             const size_t bodyIndexCount = m_indices.size() - firstIndex;
             // MC WingsLayer — HumanoidMobRenderer's (the zombie, skeleton and
@@ -5671,6 +6189,42 @@ namespace Render {
                         put(kFaceUp | kFaceDown, "assets/textures/block/pumpkin_top.png");
                         put(kFaceNorth,          "assets/textures/block/carved_pumpkin.png");
                         put(kFaceSouth | kFaceWest | kFaceEast, "assets/textures/block/pumpkin_side.png");
+                    }
+                }
+                // The mooshroom's red mushrooms — MC MushroomCowMushroomLayer,
+                // the mob pass's three seats (two on the back, one on the
+                // head), adults only.
+                if (type == Game::EntityTypeId::Mooshroom && !state.isBaby) {
+                    const TextureHandle tex = LoadTexture("assets/textures/block/red_mushroom.png");
+                    if (tex != INVALID_TEXTURE) {
+                        const glm::mat4 block = glm::scale(entityMatrix, glm::vec3(16.0f));
+                        const auto putMushroom = [&](const glm::mat4& m) {
+                            const size_t f = m_indices.size();
+                            AppendCrossBlock(m, m_verts, m_indices);
+                            batches.push_back({ tex, overlay, f, m_indices.size() - f });
+                            batches.back().part = BatchPart::BodyCopy;
+                        };
+                        glm::mat4 m = glm::translate(block, glm::vec3(0.2f, -0.35f, 0.5f));
+                        m = glm::rotate(m, glm::radians(-48.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                        m = glm::scale(m, glm::vec3(-1.0f, -1.0f, 1.0f));
+                        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
+                        putMushroom(m);
+                        m = glm::translate(block, glm::vec3(0.2f, -0.35f, 0.5f));
+                        m = glm::rotate(m, glm::radians(42.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                        m = glm::translate(m, glm::vec3(0.1f, 0.0f, -0.6f));
+                        m = glm::rotate(m, glm::radians(-48.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                        m = glm::scale(m, glm::vec3(-1.0f, -1.0f, 1.0f));
+                        m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
+                        putMushroom(m);
+                        glm::mat4 head(1.0f);
+                        if (PartChainMatrix(model.Root(), "head", head)) {
+                            m = glm::scale(entityMatrix * head, glm::vec3(16.0f));
+                            m = glm::translate(m, glm::vec3(0.0f, -0.7f, -0.2f));
+                            m = glm::rotate(m, glm::radians(-78.0f), glm::vec3(0.0f, 1.0f, 0.0f));
+                            m = glm::scale(m, glm::vec3(-1.0f, -1.0f, 1.0f));
+                            m = glm::translate(m, glm::vec3(-0.5f, -0.5f, -0.5f));
+                            putMushroom(m);
+                        }
                     }
                 }
             }

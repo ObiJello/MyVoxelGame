@@ -2,11 +2,13 @@
 #include "PauseScreen.hpp"
 #include "OptionsScreens.hpp"
 #include "FriendsScreen.hpp"
+#include "AdvancementsScreen.hpp"
 #include "WorldOptionsScreen.hpp"
 #include "TitleScreen.hpp"   // TitleAction (quit signal to the host loop)
 #include <GLFW/glfw3.h>
 
 #include "../GuiGraphics.hpp"
+#include "common/text/Language.hpp"
 
 namespace Render {
 
@@ -23,9 +25,16 @@ namespace Render {
         y += 24;
 
         {
-            // Vanilla's Advancements slot → Friends (see FriendsScreen).
+            // MC PauseScreen: Advancements in the left half (gui.advancements
+            // → AdvancementsScreen, back here on Done). Vanilla's Statistics
+            // slot holds Friends (see FriendsScreen) — the engine has no
+            // statistics screen.
+            AddWidget(new Button(fullX, y, 98, WidgetDims::BUTTON_HEIGHT,
+                Game::Language::GetOrDefault("gui.advancements", "Advancements"), [this] {
+                    m_manager->Push(std::make_unique<AdvancementsScreen>());
+                }));
             const bool loggedIn = Client::g_friendsClient != nullptr;
-            Button* friendsBtn = AddWidget(new Button(fullX, y, 98,
+            Button* friendsBtn = AddWidget(new Button(cx + 2, y, 98,
                 WidgetDims::BUTTON_HEIGHT, "Friends",
                 loggedIn ? Button::OnPress([this] {
                     m_manager->Push(std::make_unique<FriendsScreen>());
@@ -35,10 +44,6 @@ namespace Render {
                 friendsBtn->SetTooltip({"Log in from the ObeyCraft",
                                         "launcher to use friends."});
             }
-            Button* stats = AddWidget(new Button(cx + 2, y, 98, WidgetDims::BUTTON_HEIGHT,
-                "Statistics", nullptr));
-            stats->active = false;
-            stats->SetTooltip({"Not available."});
         }
         y += 24;
 

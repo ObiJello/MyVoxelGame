@@ -29,6 +29,7 @@
 #include <glm/gtc/quaternion.hpp>
 #endif
 #include "server/level/ServerLevel.hpp"
+#include "server/world/storage/anvil/PlayerUuid.hpp"
 #include <nlohmann/json.hpp>
 #include <cstdio>
 #include <filesystem>
@@ -231,6 +232,121 @@ namespace Game::Portal {
                 && IsValidPortalSurface(world, c.wallB)
                 && IsAirSpace(world, c.airA)
                 && IsAirSpace(world, c.airB);
+        }
+
+        // ── Footprint (grid and free placement alike) ───────────────────
+        // The wall cells behind a portal's 1×2 opening: every cell of the
+        // wall layer its rectangle (±0.5 along right, ±1.0 along up)
+        // overlaps. A grid-aligned portal covers exactly wallA and wallB; a
+        // free one (/gamerule portal_gun_free_placement) up to 2×3. The air
+        // cells in front are these + normal. Returns the count (≤ 6).
+        int AxisOf(const glm::ivec3& v) { return v.x != 0 ? 0 : (v.y != 0 ? 1 : 2); }
+        int FootprintWallCells(const Portal& p, glm::ivec3 out[6]) {
+            const glm::ivec3 n = glm::ivec3(glm::round(p.normal));
+            const glm::ivec3 r = glm::ivec3(glm::round(p.right));
+            const glm::ivec3 u = glm::ivec3(glm::round(p.upDir));
+            const int na = AxisOf(n), ra = AxisOf(r), ua = AxisOf(u);
+            if (na == ra || na == ua || ra == ua) return 0;
+            constexpr double kEps = 1e-4;
+            const int r0 = static_cast<int>(std::floor(p.origin[ra] - 0.5 + kEps));
+            const int r1 = static_cast<int>(std::floor(p.origin[ra] + 0.5 - kEps));
+            const int u0 = static_cast<int>(std::floor(p.origin[ua] - 1.0 + kEps));
+            const int u1 = static_cast<int>(std::floor(p.origin[ua] + 1.0 - kEps));
+            const int nc = static_cast<int>(std::floor(p.origin[na] - 0.5 * n[na]));
+            int count = 0;
+            for (int a = r0; a <= r1 && count < 6; ++a) {
+                for (int b = u0; b <= u1 && count < 6; ++b) {
+                    glm::ivec3 c(0);
+                    c[ra] = a; c[ua] = b; c[na] = nc;
+                    out[count++] = c;
+                }
+            }
+            return count;
+        }
+        bool FootprintContains(const Portal& p, const glm::ivec3& pos) {
+            glm::ivec3 cells[6];
+            const int n = FootprintWallCells(p, cells);
+            for (int i = 0; i < n; ++i) if (cells[i] == pos) return true;
+            return false;
+        }
+        // Solid full blocks behind the whole footprint, air in front of it.
+        // The cell that fails, for the caller's message.
+        bool FootprintFits(Game::World* world, const Portal& p, glm::ivec3* failCell = nullptr,
+                           bool* failIsWall = nullptr) {
+            glm::ivec3 cells[6];
+            const int n = FootprintWallCells(p, cells);
+            if (n == 0) return false;
+            const glm::ivec3 normalI = glm::ivec3(glm::round(p.normal));
+            for (int i = 0; i < n; ++i) {
+                if (!IsValidPortalSurface(world, cells[i])) {
+                    if (failCell) *failCell = cells[i];
+                    if (failIsWall) *failIsWall = true;
+                    return false;
+                }
+                if (!IsAirSpace(world, cells[i] + normalI)) {
+                    if (failCell) *failCell = cells[i] + normalI;
+                    if (failIsWall) *failIsWall = false;
+                    return false;
+                }
+            }
+            return true;
+        }
+        // Two portals on the same wall plane whose rectangles overlap.
+        bool PortalsOverlap(const Portal& a, const Portal& b) {
+            if (!a.active || !b.active || a.dimension != b.dimension) return false;
+            const glm::ivec3 na = glm::ivec3(glm::round(a.normal));
+            if (na != glm::ivec3(glm::round(b.normal))) return false;
+            const int ax = AxisOf(na);
+            if (std::abs(a.origin[ax] - b.origin[ax]) > 0.01) return false;
+            auto extent = [](const Portal& p, int axis) {
+                return std::abs(static_cast<double>(p.right[axis])) * 0.5 +
+                       std::abs(static_cast<double>(p.upDir[axis])) * 1.0;
+            };
+            for (int axis = 0; axis < 3; ++axis) {
+                if (axis == ax) continue;
+                const double gap = std::abs(a.origin[axis] - b.origin[axis]);
+                if (gap >= extent(a, axis) + extent(b, axis) - 1e-4) return false;
+            }
+            return true;
+        }
+        // Keep wallA/wallB (saved, and read by older builds) meaningful for a
+        // free portal: the first and last cell of its footprint.
+        void SetLegacyWallCells(Portal& p) {
+            glm::ivec3 cells[6];
+            const int n = FootprintWallCells(p, cells);
+            if (n == 0) return;
+            p.wallA = cells[0];
+            p.wallB = cells[n - 1];
+        }
+
+        // /gamerule portal_gun_free_placement (IntegratedServer).
+        bool FreePlacementEnabled() {
+            return Server::g_integratedServer && Server::g_integratedServer->PortalGunFreePlacement();
+        }
+
+        // Free placement's nudge (Portal's UTIL_TestForOrientationVolumes /
+        // FindClosestPassableSpace idea, on this engine's voxels): offsets
+        // in the surface plane, 1/16 block apart, nearest first, out to half
+        // the portal's own size each way — the least move that seats the
+        // whole portal on solid backing with air in front.
+        const std::vector<glm::dvec2>& NudgeOffsets() {
+            static const std::vector<glm::dvec2> offsets = [] {
+                std::vector<glm::dvec2> v;
+                constexpr double kStep = 1.0 / 16.0;
+                // At least the portal's own size each way (±1 across, ±1.5
+                // along its length), so a shot near an edge still finds the
+                // nearest seat that fits.
+                for (int i = -16; i <= 16; ++i) {          // along right: ±1.0
+                    for (int j = -24; j <= 24; ++j) {      // along up: ±1.5
+                        v.emplace_back(i * kStep, j * kStep);
+                    }
+                }
+                std::stable_sort(v.begin(), v.end(), [](const glm::dvec2& a, const glm::dvec2& b) {
+                    return glm::dot(a, a) < glm::dot(b, b);
+                });
+                return v;
+            }();
+            return offsets;
         }
 
         // ── Network broadcast helpers ───────────────────────────────────────
@@ -465,6 +581,16 @@ namespace Game::Portal {
         return (it == m_pairs.end()) ? nullptr : &it->second;
     }
 
+    void PortalRegistry::NotePlayerName(const std::string& name) {
+        if (name.empty()) return;
+        m_playerNames[Game::Anvil::UuidToString(Game::Anvil::OfflinePlayerUuid(name))] = name;
+    }
+
+    std::string PortalRegistry::PlayerNameFor(const std::string& uuidOrName) const {
+        auto it = m_playerNames.find(uuidOrName);
+        return it != m_playerNames.end() ? it->second : uuidOrName;
+    }
+
     PortalPair* PortalRegistry::TryGetPairMutable(uint64_t gunId) {
         auto it = m_pairs.find(gunId);
         return (it == m_pairs.end()) ? nullptr : &it->second;
@@ -606,6 +732,9 @@ namespace Game::Portal {
                 pairs.push_back(std::move(pj));
             }
             j["pairs"] = std::move(pairs);
+            nlohmann::json players = nlohmann::json::object();
+            for (const auto& [uuid, name] : m_playerNames) players[uuid] = name;
+            j["players"] = std::move(players);
             const std::string tmp = path + ".tmp";
             {
                 std::ofstream f(tmp, std::ios::trunc);
@@ -629,6 +758,7 @@ namespace Game::Portal {
         m_prevPlayerPos.clear();
         m_teleportCooldown.clear();
         m_orphanSweepDone = false;
+        m_playerNames.clear();
         const std::string path = GunSavePath();
         if (path.empty()) return false;
         std::error_code ec;
@@ -654,6 +784,11 @@ namespace Game::Portal {
             }
             m_nextId = std::max(m_nextId, j.value("nextId", uint64_t{1}));
             m_orphanSweepDone = j.value("orphanSweep", 0) >= 1;
+            if (j.contains("players") && j["players"].is_object()) {
+                for (const auto& [uuid, name] : j["players"].items()) {
+                    if (name.is_string()) m_playerNames[uuid] = name.get<std::string>();
+                }
+            }
             Log::Info("[PortalGun] Loaded %zu pair(s) from %s", m_pairs.size(), path.c_str());
             return true;
         } catch (const std::exception& e) {
@@ -690,7 +825,9 @@ namespace Game::Portal {
             auto destroy = [&](Portal& portal, PortalColor color) {
                 if (!portal.active) return;
                 if (portal.dimension != dimension) return;
-                if (portal.wallA != pos && portal.wallB != pos) return;
+                // Any wall cell behind the opening (2 on the grid, up to 6
+                // for a free-placed portal).
+                if (!FootprintContains(portal, pos)) return;
                 // Snapshot pose before clearing so the close burst lands
                 // at the doomed portal's actual location.
                 const glm::dvec3 burstOrigin = portal.origin;
@@ -751,7 +888,8 @@ namespace Game::Portal {
     PlaceResult PortalRegistry::PlacePortal(uint64_t gunId, Game::World* world,
                                             const BlockHitResult& hit,
                                             PortalColor color,
-                                            Server::ServerPlayer* player) {
+                                            Server::ServerPlayer* player,
+                                            float facingYaw) {
         if (!world) return PlaceResult::Fizzled;
 
         const glm::ivec3 normalI = FaceNormal(hit.face);
@@ -780,7 +918,8 @@ namespace Game::Portal {
             upI = glm::ivec3(0, 1, 0);
         } else if (IsFloor(hit.face) || IsCeiling(hit.face)) {
             // The player's primary facing snapped to NESW...
-            const float yaw = player ? player->getYaw() : 0.0f;
+            const float yaw = !std::isnan(facingYaw) ? facingYaw
+                            : (player ? player->getYaw() : 0.0f);
             upI = PlayerFacingHorizontal(yaw);
             // ...unless the other portal of this gun is a floor or ceiling
             // portal too: then this one takes ITS facing. The link maps one
@@ -803,6 +942,48 @@ namespace Game::Portal {
                                   kFizzleBadSurface);
             return PlaceResult::Fizzled;
         }
+        Portal p;
+        p.dimension = world->GetDimension();
+        const char* placementLabel = "free";
+        bool placedFree = false;
+        if (FreePlacementEnabled()) {
+            // /gamerule portal_gun_free_placement: the portal's centre is
+            // the exact hit point on the face, then nudged as little as
+            // needed to fit (NudgeOffsets) — same orientation rules as the
+            // grid, no snapping. Never onto its partner.
+            p.normal = glm::vec3(normalI);
+            p.upDir  = glm::vec3(upI);
+            p.right  = glm::cross(p.upDir, p.normal);
+            p.active = true;
+            const int na = AxisOf(normalI);
+            glm::dvec3 onFace = hit.hitPoint;
+            onFace[na] = static_cast<double>(hit.blockPos[na] + (normalI[na] > 0 ? 1 : 0));
+            const Portal* partner = nullptr;
+            if (auto pairIt = m_pairs.find(gunId); pairIt != m_pairs.end()) {
+                const Portal& other = color == PortalColor::Blue ? pairIt->second.orange : pairIt->second.blue;
+                if (other.active) partner = &other;
+            }
+            bool fitted = false;
+            for (const glm::dvec2& off : NudgeOffsets()) {
+                p.origin = onFace + glm::dvec3(p.right) * off.x + glm::dvec3(p.upDir) * off.y +
+                           glm::dvec3(p.normal) * kSurfaceOffset;
+                if (!FootprintFits(world, p)) continue;
+                if (partner && PortalsOverlap(p, *partner)) continue;
+                fitted = true;
+                break;
+            }
+            if (fitted) {
+                SetLegacyWallCells(p);
+                placedFree = true;
+            } else {
+                // Nothing off the grid fits (an exactly 1×2 recess, a
+                // wall's edge): the grid placement below, exactly as with
+                // the rule off, and only if THAT fails too does it fizzle.
+                Log::Info("[PortalGun] no free placement fits near (%.2f,%.2f,%.2f) face=%d - trying the grid",
+                          hit.hitPoint.x, hit.hitPoint.y, hit.hitPoint.z, hit.face);
+            }
+        }
+        if (!placedFree) {
         candidates.push_back(MakeCandidate(hit.blockPos,       normalI, upI, "hit-is-bottom"));
         candidates.push_back(MakeCandidate(hit.blockPos - upI, normalI, upI, "hit-is-top (bumped)"));
 
@@ -824,8 +1005,6 @@ namespace Game::Portal {
             return PlaceResult::Fizzled;
         }
 
-        Portal p;
-        p.dimension = world->GetDimension();
         p.origin = chosen->origin;
         p.normal = chosen->normal;
         p.upDir  = chosen->upDir;
@@ -833,6 +1012,8 @@ namespace Game::Portal {
         p.wallA  = chosen->wallA;
         p.wallB  = chosen->wallB;
         p.active = true;
+        placementLabel = chosen->label;
+        }
 
         // Replace the same color on this gun. Auto-creates the pair entry.
         PortalPair& pair = m_pairs[gunId];
@@ -872,7 +1053,7 @@ namespace Game::Portal {
                   static_cast<unsigned long long>(gunId),
                   p.origin.x, p.origin.y, p.origin.z,
                   p.normal.x, p.normal.y, p.normal.z,
-                  chosen->label);
+                  placementLabel);
 
         // Broadcast the placement (or move) to every connected client. The
         // firing client also receives this — it's how the local renderer
@@ -917,23 +1098,17 @@ namespace Game::Portal {
                     error = std::string("the ") + name + " portal's dimension is not loaded";
                     return false;
                 }
-                const glm::ivec3 n = glm::ivec3(glm::round(p.normal));
-                for (const glm::ivec3& wall : {p.wallA, p.wallB}) {
-                    if (!IsValidPortalSurface(world, wall)) {
-                        std::snprintf(buf, sizeof(buf),
-                                      "the %s portal would need a solid full block at %d %d %d behind it",
-                                      name, wall.x, wall.y, wall.z);
-                        error = buf;
-                        return false;
-                    }
-                    const glm::ivec3 front = wall + n;
-                    if (!IsAirSpace(world, front)) {
-                        std::snprintf(buf, sizeof(buf),
-                                      "the %s portal would need free space at %d %d %d in front of it",
-                                      name, front.x, front.y, front.z);
-                        error = buf;
-                        return false;
-                    }
+                // The whole footprint: 2 cells on the grid, up to 6 for a
+                // free-placed portal (offsets keep it off-grid; no re-snap).
+                glm::ivec3 cell(0);
+                bool isWall = true;
+                if (!FootprintFits(world, p, &cell, &isWall)) {
+                    std::snprintf(buf, sizeof(buf),
+                                  isWall ? "the %s portal would need a solid full block at %d %d %d behind it"
+                                         : "the %s portal would need free space at %d %d %d in front of it",
+                                  name, cell.x, cell.y, cell.z);
+                    error = buf;
+                    return false;
                 }
                 return true;
             };
@@ -941,14 +1116,9 @@ namespace Game::Portal {
             if (moveOrange && !validate(newOrange, "orange")) return false;
             // Two portals on one wall cell (same wall, same side) would be
             // one opening leading into itself.
-            if (newBlue.active && newOrange.active && newBlue.dimension == newOrange.dimension &&
-                glm::ivec3(glm::round(newBlue.normal)) == glm::ivec3(glm::round(newOrange.normal))) {
-                for (const glm::ivec3& a : {newBlue.wallA, newBlue.wallB}) {
-                    if (a == newOrange.wallA || a == newOrange.wallB) {
-                        error = "the blue and orange portals would overlap";
-                        return false;
-                    }
-                }
+            if (PortalsOverlap(newBlue, newOrange)) {
+                error = "the blue and orange portals would overlap";
+                return false;
             }
         }
 

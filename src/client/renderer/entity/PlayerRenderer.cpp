@@ -1,6 +1,7 @@
 // File: src/client/renderer/entity/PlayerRenderer.cpp
 #include "PlayerRenderer.hpp"
 #include "client/world/ClientBlockAccess.hpp"
+#include "client/entity/PlayerSkins.hpp"
 #include "common/world/block/BedBlock.hpp"
 #include "StickFigureGeometry.hpp"
 #include "EntityCulling.hpp"
@@ -300,6 +301,20 @@ void main() {
         // applied to the figure's colour after the hurt flash (entity.fsh
         // mixes the overlay in before the lightmap). All figures share one
         // draw, so each carries its own light in its vertex colour.
+        // MC's hurt flash. The overlay texture's red row is 0xB2FF0000 and
+        // the entity shader does `mix(overlay.rgb, color.rgb, overlay.a)`,
+        // so the red contributes 1 - 178/255 = 0.302 — NOT the alpha
+        // itself. Stick figures have no texture to overlay, so the same
+        // blend is applied to the vertex colour and comes out identical.
+        PlayerColor HurtFlash(PlayerColor color, bool hurt) {
+            if (!hurt) return color;
+            constexpr float kMix = 178.0f / 255.0f;   // how much survives
+            color.r = static_cast<uint8_t>(255.0f * (1.0f - kMix) + color.r * kMix);
+            color.g = static_cast<uint8_t>(color.g * kMix);
+            color.b = static_cast<uint8_t>(color.b * kMix);
+            return color;
+        }
+
         PlayerColor LightFigureColor(PlayerColor c, const glm::dvec3& feetWorld,
                                      float scale, bool crouching) {
             const double eye = (crouching ? 1.27 : 1.62) * static_cast<double>(scale);
@@ -451,6 +466,8 @@ void main() {
             if (!Client::IsRemotePlayerInBoundLevel(rp)) continue;
             if (rp.invisible) continue;   // /invisible
             if (rp.IsMorphed()) continue; // /morph: the mob renderer draws them
+            // A Minecraft skin: the player model (MobRenderer::RenderPlayerSkins).
+            if (Client::PlayerSkins::Get().IsSkinned(id)) continue;
             if (skipIds && skipIds->count(id)) continue;
             // MC LivingEntityRenderer.submit: an INVISIBLE body is not drawn
             // (the stick figure has no layers to keep) — unless it GLOWS,
@@ -538,19 +555,7 @@ void main() {
             ++m_tally.drawn;
 
             const auto& colorEntry = Game::LookupPlayerColor(rp.color);
-            PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
-
-            // MC's hurt flash. The overlay texture's red row is 0xB2FF0000 and
-            // the entity shader does `mix(overlay.rgb, color.rgb, overlay.a)`,
-            // so the red contributes 1 - 178/255 = 0.302 — NOT the alpha
-            // itself. Stick figures have no texture to overlay, so the same
-            // blend is applied to the vertex colour and comes out identical.
-            if (rp.hurtTime > 0) {
-                constexpr float kMix = 178.0f / 255.0f;   // how much survives
-                color.r = static_cast<uint8_t>(255.0f * (1.0f - kMix) + color.r * kMix);
-                color.g = static_cast<uint8_t>(color.g * kMix);
-                color.b = static_cast<uint8_t>(color.b * kMix);
-            }
+            const PlayerColor baseColor{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
             // GLOWING is MC's entity outline, not a tint (EntityOutline.hpp;
             // the glowing batches above).
             // Append ring + disc into one shared list — both render with the
@@ -595,10 +600,20 @@ void main() {
             // MC HumanoidModel's isPassenger pose while seated (a cushion).
             const bool sitting = rp.vehicleId != 0 && !rp.sleepingPos;
             if (sitting) crouching = false;
-            color = LightFigureColor(color, renderPos, rp.scale, crouching);
-            if (translucent) color.a = 38;   // ARGB 0x26FFFFFF, MC's forceTransparent tint
+            // Every colour of the figure — its one colour, or each of a
+            // painted figure's palette colours — through the hurt flash, the
+            // light at the eye and the spectator's translucency.
+            const auto shade = [&](PlayerColor c) {
+                c = HurtFlash(c, rp.hurtTime > 0);
+                c = LightFigureColor(c, renderPos, rp.scale, crouching);
+                if (translucent) c.a = 38;   // ARGB 0x26FFFFFF, MC's forceTransparent tint
+                return c;
+            };
+            const Game::StickFigurePaint* paint = Client::PlayerSkins::Get().RemotePaint(id);
+            const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
+                                                   : StickFigureColors::Uniform(shade(baseColor));
             BuildStickFigure(lineOut, triOut, triOut, renderFeet,
-                             headYaw, bodyYaw, pitch, crouching, color, sitting);
+                             headYaw, bodyYaw, pitch, crouching, colors, sitting);
 
             // An elytra glide lays the figure along its flight — unless it
             // riptides, whose spin takes over (AvatarRenderer).
@@ -676,9 +691,21 @@ void main() {
                                       bool isSitting,
                                       bool spectatorHead,
                                       float fallFlyTicks,
-                                      float spinAttackAgeTicks) {
+                                      float spinAttackAgeTicks,
+                                      uint32_t subjectId) {
         PROFILE_ZONE_N("PlayerRenderSingle");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
+        // The subject's look: a skin is the player model's to draw.
+        const Client::PlayerSkins& skins = Client::PlayerSkins::Get();
+        const bool local = subjectId == kLocalPlayer;
+        if (local ? skins.LocalSkinned() : skins.IsSkinned(subjectId)) return;
+        const Game::StickFigurePaint* paint = nullptr;
+        if (local) {
+            const Game::PlayerAppearance& own = skins.Local();
+            if (own.hasPaint) paint = &own.paint;
+        } else {
+            paint = skins.RemotePaint(subjectId);
+        }
 
         m_lineVerts.clear();
         m_triVerts.clear();
@@ -696,17 +723,23 @@ void main() {
         const glm::vec4 clipPlane = Render::PlaneToRender(worldClipPlane);
 
         const auto& colorEntry = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(colorId));
-        PlayerColor color{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
+        const PlayerColor baseColor{ colorEntry.r, colorEntry.g, colorEntry.b, 255 };
         // The light where the body stands — the caller's `position`, not
         // where a portal model carries it (MC lights a ghost by its entity).
         if (isSitting) isCrouching = false;
-        color = LightFigureColor(color, position, 1.0f, isCrouching);
-        // A spectator's own body in third person: the translucent head alone
-        // (PlayerModel with isSpectator, drawn with forceTransparent — the
-        // viewer is a spectator too).
-        if (spectatorHead) color.a = 38;
+        const auto shade = [&](PlayerColor c) {
+            c = LightFigureColor(c, position, 1.0f, isCrouching);
+            // A spectator's own body in third person: the translucent head
+            // alone (PlayerModel with isSpectator, drawn with
+            // forceTransparent — the viewer is a spectator too).
+            if (spectatorHead) c.a = 38;
+            return c;
+        };
+        // The painted figure (the launcher's painter), if the subject has one.
+        const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
+                                               : StickFigureColors::Uniform(shade(baseColor));
         BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderFeet,
-                         headYaw, bodyYaw, pitch, isCrouching, color, isSitting);
+                         headYaw, bodyYaw, pitch, isCrouching, colors, isSitting);
         if (spectatorHead) m_lineVerts.clear();
         if (fallFlyTicks > 0.0f && spinAttackAgeTicks < 0.0f) {
             GlideStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, pitch, fallFlyTicks);

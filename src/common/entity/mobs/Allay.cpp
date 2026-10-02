@@ -96,7 +96,7 @@ namespace Game {
             const ItemStack& slot = m_inventory.GetItem(i);
             if (slot.IsEmpty()) return true;
             if (IsSameItemSameComponents(slot, stack) &&
-                slot.count < ItemRegistry::Get(slot.itemId).maxStackSize) {
+                slot.count < Game::GetMaxStackSize(slot)) {
                 return true;
             }
         }
@@ -109,7 +109,7 @@ namespace Game {
         if (stack.IsEmpty()) return {};
         ItemStack rest = stack;
         const int maxStack = std::min(m_inventory.GetMaxStackSize(rest),
-                                      ItemRegistry::Get(rest.itemId).maxStackSize);
+                                      Game::GetMaxStackSize(rest));
         for (int i = 0; i < m_inventory.GetContainerSize() && !rest.IsEmpty(); ++i) {
             ItemStack& slot = m_inventory.GetItem(i);
             if (slot.IsEmpty() || !IsSameItemSameComponents(slot, rest)) continue;

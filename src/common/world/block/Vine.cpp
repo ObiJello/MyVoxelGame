@@ -2,6 +2,10 @@
 #include "Vine.hpp"
 #include "BlockPlacement.hpp"
 #include "../chunk/IBlockAccess.hpp"
+#include "common/core/JavaRandom.hpp"
+#include "common/world/level/GameRules.hpp"
+#include "common/world/level/ILevelWrite.hpp"
+#include "common/world/level/World.hpp"
 
 namespace Game {
 
@@ -133,6 +137,143 @@ namespace Game {
             }
         }
         return state;                                  // nothing holds it; caller refuses
+    }
+
+    namespace {
+
+        bool HasHorizontalConnection(BlockState state) {
+            for (Direction d : kHorizontal) if (VineFaceOf(state, d)) return true;
+            return false;
+        }
+
+        bool IsEmptyCell(const IBlockAccess& level, const glm::ivec3& p) {
+            return level.GetBlock(p.x, p.y, p.z) == BlockID::Air;
+        }
+
+        // MC VineBlock.canSpread: at most four vines in the box from
+        // pos - (4, 1, 4) to pos + (4, 1, 4) (BlockMatcher.atMostMatched(4)).
+        bool CanSpread(const IBlockAccess& level, const glm::ivec3& pos) {
+            int found = 0;
+            for (int x = pos.x - 4; x <= pos.x + 4; ++x) {
+                for (int y = pos.y - 1; y <= pos.y + 1; ++y) {
+                    for (int z = pos.z - 4; z <= pos.z + 4; ++z) {
+                        if (IsVineBlock(level.GetBlock(x, y, z)) && ++found > 4) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // MC VineBlock.copyRandomFaces: each horizontal face `from` has is
+        // copied onto `to` on a coin flip (the flip is drawn for every face).
+        BlockState CopyRandomFaces(BlockState from, BlockState to, JavaRandom& random) {
+            for (Direction d : kHorizontal) {
+                if (random.NextBool() && VineFaceOf(from, d)) {
+                    to = VineStateWithFace(to, d, true);
+                }
+            }
+            return to;
+        }
+
+        // MC Direction.getRandom: VALUES[nextInt(6)] — DOWN, UP, NORTH,
+        // SOUTH, WEST, EAST, the engine's enum order.
+        Direction RandomDirection(JavaRandom& random) {
+            return static_cast<Direction>(random.NextInt(6));
+        }
+
+    } // namespace
+
+    void VineRandomTick(ILevelWrite& level, const glm::ivec3& pos, BlockState state,
+                        JavaRandom& random) {
+        if (!Rules::GetBool(Rules::Id::SpreadVines)) return;
+        if (random.NextInt(4) != 0) return;
+
+        constexpr uint32_t kFlags = World::UpdateFlags::UpdateClients;   // MC flag 2
+        const BlockState vine = BlockStates::Default(BlockID::Vine);
+        const Direction testDirection = RandomDirection(random);
+        const glm::ivec3 abovePos{ pos.x, pos.y + 1, pos.z };
+
+        if (AxisOf(testDirection) != Axis::Y && !VineFaceOf(state, testDirection)) {
+            if (!CanSpread(level, pos)) return;
+            const glm::ivec3 testPos = Step(pos, testDirection);
+            if (IsEmptyCell(level, testPos)) {
+                // Into the open cell beside: wrap round a corner, or hang
+                // from the block above it.
+                const Direction cw  = ClockWise(testDirection);
+                const Direction ccw = CounterClockWise(testDirection);
+                const bool cwHasConnectingFace  = VineFaceOf(state, cw);
+                const bool ccwHasConnectingFace = VineFaceOf(state, ccw);
+                const glm::ivec3 cwTestPos  = Step(testPos, cw);
+                const glm::ivec3 ccwTestPos = Step(testPos, ccw);
+                if (cwHasConnectingFace && AcceptableNeighbour(level, testPos, cw)) {
+                    level.SetBlock(testPos.x, testPos.y, testPos.z,
+                                   VineStateWithFace(vine, cw, true), kFlags);
+                } else if (ccwHasConnectingFace && AcceptableNeighbour(level, testPos, ccw)) {
+                    level.SetBlock(testPos.x, testPos.y, testPos.z,
+                                   VineStateWithFace(vine, ccw, true), kFlags);
+                } else {
+                    const Direction opposite = Opposite(testDirection);
+                    // isAcceptableNeighbour(level, pos.relative(cw), opposite)
+                    // — the block beside us, seen from the corner cell.
+                    if (cwHasConnectingFace && IsEmptyCell(level, cwTestPos) &&
+                        AcceptableNeighbour(level, cwTestPos, opposite)) {
+                        level.SetBlock(cwTestPos.x, cwTestPos.y, cwTestPos.z,
+                                       VineStateWithFace(vine, opposite, true), kFlags);
+                    } else if (ccwHasConnectingFace && IsEmptyCell(level, ccwTestPos) &&
+                               AcceptableNeighbour(level, ccwTestPos, opposite)) {
+                        level.SetBlock(ccwTestPos.x, ccwTestPos.y, ccwTestPos.z,
+                                       VineStateWithFace(vine, opposite, true), kFlags);
+                    } else if (static_cast<double>(random.NextFloat()) < 0.05 &&
+                               AcceptableNeighbour(level, testPos, Direction::Up)) {
+                        level.SetBlock(testPos.x, testPos.y, testPos.z,
+                                       VineStateWithFace(vine, Direction::Up, true), kFlags);
+                    }
+                }
+            } else if (AcceptableNeighbour(level, pos, testDirection)) {
+                // A solid face beside: cling to it too.
+                level.SetBlock(pos.x, pos.y, pos.z,
+                               VineStateWithFace(state, testDirection, true), kFlags);
+            }
+            return;
+        }
+
+        // pos.getY() < level.getMaxY(): there is a cell above inside the world.
+        if (testDirection == Direction::Up && level.IsValidPosition(abovePos.x, abovePos.y, abovePos.z)) {
+            if (VineCanSupportAtFace(level, pos, state, Direction::Up)) {
+                level.SetBlock(pos.x, pos.y, pos.z,
+                               VineStateWithFace(state, Direction::Up, true), kFlags);
+                return;
+            }
+            if (IsEmptyCell(level, abovePos)) {
+                if (!CanSpread(level, pos)) return;
+                // Grow upward: a copy of this vine, each horizontal face kept
+                // only on a losing coin flip and where it has support above.
+                BlockState aboveState = state;
+                for (Direction d : kHorizontal) {
+                    if (random.NextBool() || !AcceptableNeighbour(level, abovePos, d)) {
+                        aboveState = VineStateWithFace(aboveState, d, false);
+                    }
+                }
+                if (HasHorizontalConnection(aboveState)) {
+                    level.SetBlock(abovePos.x, abovePos.y, abovePos.z, aboveState, kFlags);
+                }
+                return;
+            }
+        }
+
+        // pos.getY() > level.getMinY(): grow down into air, or add faces to
+        // the vine below.
+        const glm::ivec3 belowPos{ pos.x, pos.y - 1, pos.z };
+        if (!level.IsValidPosition(belowPos.x, belowPos.y, belowPos.z)) return;
+        const BlockState belowState = level.GetBlockState(belowPos.x, belowPos.y, belowPos.z);
+        const bool belowAir = belowState.Block() == BlockID::Air;
+        if (belowAir || IsVineBlock(belowState.Block())) {
+            const BlockState before = belowAir ? vine : belowState;
+            const BlockState after  = CopyRandomFaces(state, before, random);
+            if (before != after && HasHorizontalConnection(after)) {
+                level.SetBlock(belowPos.x, belowPos.y, belowPos.z, after, kFlags);
+            }
+        }
     }
 
     BlockRegistry::BlockShapeSet VineShapeBoxes(BlockState state) {

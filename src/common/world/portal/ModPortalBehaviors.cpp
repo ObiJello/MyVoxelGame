@@ -497,6 +497,7 @@ namespace Game {
             portal.updateShape  = &AetherPortalUpdateShape;
             portal.entityInside = &AetherPortalEntityInside;
             portal.animateTick  = &AetherPortalAnimateTick;
+            portal.entityInsideShape = EntityInsideShape::Outline;
         }
 
         // twilight_portal — TFPortalBlock. Lit by a diamond thrown into the
@@ -506,6 +507,9 @@ namespace Game {
             portal.neighborChanged = &TwilightPortalNeighborChanged;
             portal.entityInside    = &TwilightPortalEntityInside;
             portal.animateTick     = &TwilightPortalAnimateTick;
+            // The pool's sheet, not its whole cell (as before the
+            // EntityInsideShape split — the portal is a thin layer).
+            portal.entityInsideShape = EntityInsideShape::Outline;
         }
 
         Log::Info("[ModPortalBehaviors] aether_portal and twilight_portal wired");

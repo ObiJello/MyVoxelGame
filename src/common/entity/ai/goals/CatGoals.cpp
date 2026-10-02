@@ -148,17 +148,21 @@ namespace Game {
         }
         EntityLevel* level = m_mob->Level();
         if (!level) return false;
-        // MC NearestAttackableTargetGoal's default 1-in-10 poll.
-        if (level->Random().NextInt(10) != 0) return false;
+        // MC NearestAttackableTargetGoal's default poll: randomInterval 10,
+        // stored as reducedTickDelay(10).
+        if (level->Random().NextInt(ReducedTickDelay(10)) != 0) return false;
 
         const double follow = GetFollowDistance();
-        TargetingConditions conditions =
+        // MC NearestAttackableTargetGoal.targetConditions: forCombat over the
+        // follow range — line of sight always tested; mustSee only governs
+        // TargetGoal.canContinueToUse, which this goal overrides anyway.
+        const TargetingConditions conditions =
             TargetingConditions::ForCombat().Range(follow);
-        if (!m_mustSee) conditions.IgnoreLineOfSight();
 
+        // MC 26.3 getTargetSearchArea: the follow range on ALL axes.
         AABB box = m_mob->GetAABB();
-        box.min -= glm::vec3(follow, 4.0, follow);
-        box.max += glm::vec3(follow, 4.0, follow);
+        box.min -= glm::vec3(follow, follow, follow);
+        box.max += glm::vec3(follow, follow, follow);
 
         std::vector<Entity*> nearby;
         level->GetEntitiesInBox(box, m_mob, nearby);
@@ -183,9 +187,27 @@ namespace Game {
         return m_found != nullptr;
     }
 
+    bool NonTameRandomTargetGoal::CanContinueToUse() {
+        // MC NonTameRandomTargetGoal.canContinueToUse:
+        // targetConditions.test(level, mob, target) — the goal's OWN target
+        // (NearestAttackableTargetGoal.target) re-tested with the conditions
+        // it was found under, selector included. Unlike TargetGoal's version
+        // it never calls setTarget: once Wolf.tryToTame or the owner's sit
+        // order clears the mob's target, the hunt does not come back — the
+        // goal just idles until its prey leaves the conditions.
+        if (!m_found || !m_found->IsAlive()) return false;
+        if (m_babyOnLandOnly && !Turtle::IsBabyOnLand(*m_found)) return false;
+        const TargetingConditions conditions =
+            TargetingConditions::ForCombat().Range(GetFollowDistance());
+        return conditions.Test(m_mob, *m_found);
+    }
+
     void NonTameRandomTargetGoal::Start() {
+        // MC NearestAttackableTargetGoal.start: setTarget + super only. Not
+        // cached into m_targetMob — TargetGoal::CanContinueToUse would then
+        // resurrect the prey after taming cleared it (a tamed wolf chasing
+        // sheep).
         m_mob->SetTarget(m_found);
-        m_targetMob = m_found;
         TargetGoal::Start();
     }
 

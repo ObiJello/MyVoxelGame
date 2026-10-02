@@ -21,6 +21,14 @@ namespace Game {
         return type == id;
     }
 
+    bool DamageSourceInfo::ScalesWithDifficulty() const {
+        if (IsType("minecraft:explosion") || IsType("minecraft:player_explosion") ||
+            IsType("minecraft:sonic_boom") || IsType("minecraft:bad_respawn_point")) {
+            return true;
+        }
+        return causing && !causing->IsPlayer() && dynamic_cast<const LivingEntity*>(causing) != nullptr;
+    }
+
     ItemStack* DamageSourceInfo::GetWeaponItem() const {
         return direct ? direct->GetWeaponItem() : nullptr;
     }
@@ -73,6 +81,12 @@ namespace Game {
             case MobDamageSource::Lightning:         return "minecraft:lightning_bolt";
             // The spears' DAMAGE_TYPE component (ItemStack.getDamageSource).
             case MobDamageSource::Spear:             return "minecraft:spear";
+            // The contact-damage blocks (DamageSources.cactus / sweetBerryBush
+            // / hotFloor / campfire).
+            case MobDamageSource::Cactus:            return "minecraft:cactus";
+            case MobDamageSource::SweetBerryBush:    return "minecraft:sweet_berry_bush";
+            case MobDamageSource::HotFloor:          return "minecraft:hot_floor";
+            case MobDamageSource::Campfire:          return "minecraft:campfire";
             case MobDamageSource::Projectile:
                 break;
         }

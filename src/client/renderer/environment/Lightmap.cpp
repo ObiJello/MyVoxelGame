@@ -151,7 +151,7 @@ namespace Render {
         const float darknessScale = fx.darknessLightmap;          // calculateDarknessScale * option
         const float nightVision = fx.nightVisionIntensity;
         const glm::vec3 nightVisionColor(0x99 / 255.0f);          // NIGHT_VISION_COLOR default
-        const float bossDarkening = 0.0f;                         // no darken-screen boss bars yet
+        const float bossDarkening = frame.bossOverlayWorldDarkening;   // a wither's darken-screen bar
 
         // core/lightmap.fsh, per texel.
         for (int sky = 0; sky < 16; ++sky) {

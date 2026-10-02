@@ -250,7 +250,7 @@ namespace Render {
         const int index = (r + m_startRow) * PATTERN_COLUMNS + c;
         if (index >= static_cast<int>(m_patterns.size()) || index == menu->SelectedPatternIndex()) return;
         // DataComponents.DYE of the dye stack, WHITE without one.
-        const int dye = Game::DyeColorOfItem(menu->DyeInput().itemId);
+        const int dye = Game::DyeColorOf(menu->DyeInput());
         const Game::DyeColor color = dye >= 0 ? static_cast<Game::DyeColor>(dye) : Game::DyeColor::White;
         const std::string key = Game::BannerPatterns::TranslationKeyOf(m_patterns[static_cast<size_t>(index)]) +
                                 "." + Game::DyeColorName(color);

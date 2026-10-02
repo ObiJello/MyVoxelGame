@@ -1,10 +1,10 @@
 // File: src/common/entity/SpearItem.cpp
 #include "common/entity/SpearItem.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/Ease.hpp"
 #include "common/core/Mth.hpp"
 #include "common/entity/EntityLevel.hpp"
-#include "common/entity/GeneratedItemAttributes.hpp"
 #include "common/entity/LivingEntity.hpp"
 #include "common/entity/Mob.hpp"
 #include "common/entity/mobs/Monsters.hpp"
@@ -20,59 +20,12 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <unordered_map>
 
 namespace Game {
 namespace Spear {
 
     namespace {
-
-        // Item.Properties.spear(material, attackDuration, damageMultiplier,
-        // delay, dismountTime, dismountThreshold, knockbackTime,
-        // knockbackThreshold, damageTime, damageThreshold). The seconds
-        // become ticks as Java does it — (int)(x * 20.0F) in float.
-        SpearDefinition MakeSpear(ItemID id, bool wood, float attackDuration, float damageMultiplier,
-                                  float delay, float dismountTime, float dismountThreshold,
-                                  float knockbackTime, float knockbackThreshold,
-                                  float damageTime, float damageThreshold) {
-            const auto ticks = [](float seconds) { return static_cast<int>(seconds * 20.0f); };
-            SpearDefinition d;
-            d.item = id;
-            KineticWeapon& k = d.kinetic;
-            k.contactCooldownTicks = 10;
-            k.delayTicks = ticks(delay);
-            // Condition.ofAttackerSpeed(until, min) / ofRelativeSpeed(until, min).
-            k.dismountConditions  = KineticCondition{ ticks(dismountTime), dismountThreshold, 0.0f };
-            k.knockbackConditions = KineticCondition{ ticks(knockbackTime), knockbackThreshold, 0.0f };
-            k.damageConditions    = KineticCondition{ ticks(damageTime), 0.0f, damageThreshold };
-            k.forwardMovement  = 0.38f;
-            k.damageMultiplier = damageMultiplier;
-            k.sound    = wood ? SoundEvents::SPEAR_WOOD_USE : SoundEvents::SPEAR_USE;
-            k.hitSound = wood ? SoundEvents::SPEAR_WOOD_HIT : SoundEvents::SPEAR_HIT;
-            // PiercingWeapon(true, false, ATTACK sound, HIT sound).
-            d.piercing.dealsKnockback = true;
-            d.piercing.dismounts = false;
-            d.piercing.sound    = wood ? SoundEvents::SPEAR_WOOD_ATTACK : SoundEvents::SPEAR_ATTACK;
-            d.piercing.hitSound = wood ? SoundEvents::SPEAR_WOOD_HIT : SoundEvents::SPEAR_HIT;
-            // AttackRange(2.0, 4.5, 2.0, 6.5, 0.125, 0.5).
-            d.range = AttackRange{ 2.0f, 4.5f, 2.0f, 6.5f, 0.125f, 0.5f };
-            // SwingAnimation(STAB, (int)(attackDuration * 20)).
-            d.stabDurationTicks = ticks(attackDuration);
-            return d;
-        }
-
-        const std::array<SpearDefinition, 7>& Table() {
-            // Items.java: the seven spear(...) registrations, number for number.
-            static const std::array<SpearDefinition, 7> table = {
-                MakeSpear(Items::WoodenSpear,    true,  0.65f, 0.7f,   0.75f, 5.0f, 14.0f, 10.0f,  5.1f, 15.0f,  4.6f),
-                MakeSpear(Items::StoneSpear,     false, 0.75f, 0.82f,  0.7f,  4.5f, 13.0f, 9.0f,   5.1f, 13.75f, 4.6f),
-                MakeSpear(Items::CopperSpear,    false, 0.85f, 0.82f,  0.65f, 4.0f, 12.0f, 8.25f,  5.1f, 12.5f,  4.6f),
-                MakeSpear(Items::IronSpear,      false, 0.95f, 0.95f,  0.6f,  2.5f, 11.0f, 6.75f,  5.1f, 11.25f, 4.6f),
-                MakeSpear(Items::GoldenSpear,    false, 0.95f, 0.7f,   0.7f,  3.5f, 13.0f, 8.5f,   5.1f, 13.75f, 4.6f),
-                MakeSpear(Items::DiamondSpear,   false, 1.05f, 1.075f, 0.5f,  3.0f, 10.0f, 6.5f,   5.1f, 10.0f,  4.6f),
-                MakeSpear(Items::NetheriteSpear, false, 1.15f, 1.2f,   0.4f,  2.5f, 9.0f,  5.5f,   5.1f, 8.75f,  4.6f),
-            };
-            return table;
-        }
 
         // ── Geometry (ProjectileUtil / AABB.clip) ─────────────────────────
 
@@ -176,6 +129,16 @@ namespace Spear {
             return glm::dvec3(Mth::ViewVector(e.xRot, living ? living->yHeadRot : e.yRot));
         }
 
+        // The ATTACK_RANGE a jab / charge reaches with: the weapon's, else
+        // AttackRange.defaultFor(user) — the user's ENTITY_INTERACTION_RANGE
+        // with no margin.
+        AttackRange RangeFor(LivingEntity& user, const ItemStack* stack) {
+            if (stack && !stack->IsEmpty()) {
+                if (auto range = stack->get(DataComponents::ATTACK_RANGE)) return *range;
+            }
+            return AttackRange::DefaultFor(user.GetAttributeValue(Attribute::EntityInteractionRange));
+        }
+
         Entity* RootVehicle(Entity& e) {
             Entity* root = &e;
             while (root->GetVehicle()) root = root->GetVehicle();
@@ -186,36 +149,77 @@ namespace Spear {
 
     // ── Definitions ──────────────────────────────────────────────────────
 
+    std::optional<SpearDefinition> ForStack(const ItemStack& stack) {
+        if (stack.IsEmpty()) return std::nullopt;
+        SpearDefinition d;
+        d.item = stack.itemId;
+        d.kineticWeapon = stack.get(DataComponents::KINETIC_WEAPON);
+        d.piercingWeapon = stack.get(DataComponents::PIERCING_WEAPON);
+        if (!d.kineticWeapon && !d.piercingWeapon) return std::nullopt;
+        // AttackRange.defaultFor(user) stands in when the stack names none;
+        // GetHitEntitiesAlong reads the attacker's own range then.
+        d.range = stack.get(DataComponents::ATTACK_RANGE).value_or(AttackRange{});
+        const SwingAnimation swing = GetAttackAnimation(stack);
+        d.stabDurationTicks = swing.duration;
+        d.stab = swing.type == SwingAnimationType::Stab;
+        return d;
+    }
+
     const SpearDefinition* Find(ItemID id) {
-        for (const SpearDefinition& d : Table()) {
-            if (d.item == id) return &d;
-        }
-        return nullptr;
+        // The prototypes' definitions, built once (every thread reads the
+        // same immutable table afterwards).
+        static const std::unordered_map<ItemID, SpearDefinition> table = [] {
+            std::unordered_map<ItemID, SpearDefinition> out;
+            ItemRegistry::ForEachPureItem([&out](ItemID item, const Item&) {
+                if (auto d = ForStack(ItemStack(item, 1))) out.emplace(item, std::move(*d));
+            });
+            return out;
+        }();
+        const auto it = table.find(id);
+        return it == table.end() ? nullptr : &it->second;
+    }
+
+    bool IsPiercing(const ItemStack& stack) {
+        return !stack.IsEmpty() && stack.has(DataComponents::PIERCING_WEAPON);
+    }
+
+    std::optional<KineticWeapon> Kinetic(const ItemStack& stack) {
+        if (stack.IsEmpty()) return std::nullopt;
+        return stack.get(DataComponents::KINETIC_WEAPON);
+    }
+
+    std::optional<PiercingWeapon> Piercing(const ItemStack& stack) {
+        if (stack.IsEmpty()) return std::nullopt;
+        return stack.get(DataComponents::PIERCING_WEAPON);
     }
 
     int AttackAnimationDuration(ItemID id) {
-        const SpearDefinition* d = Find(id);
-        return d ? d->stabDurationTicks : 6;
+        return GetAttackAnimation(id).duration;
+    }
+
+    int AttackAnimationDuration(const ItemStack& stack) {
+        return GetAttackAnimation(stack).duration;
+    }
+
+    bool IsStabSwing(ItemID id) {
+        return GetAttackAnimation(id).type == SwingAnimationType::Stab;
+    }
+
+    bool IsStabSwing(const ItemStack& stack) {
+        return GetAttackAnimation(stack).type == SwingAnimationType::Stab;
+    }
+
+    bool CannotAttackWithItem(const ItemStack& stack, int attackStrengthTicker, float attackStrengthDelay,
+                              int tolerance) {
+        // Player.cannotAttackWithItem: MINIMUM_ATTACK_CHARGE (0 by default)
+        // against the optimistic (ticker + tolerance) / delay.
+        const float optimistic = static_cast<float>(attackStrengthTicker + tolerance) / attackStrengthDelay;
+        return Game::CannotAttackWithItem(stack, optimistic);
     }
 
     bool CannotAttackWithItem(ItemID id, int attackStrengthTicker, float attackStrengthDelay,
                               int tolerance) {
-        // requiredStrength = MINIMUM_ATTACK_CHARGE (0 unless a spear);
-        // optimistic = (ticker + tolerance) / delay.
-        const float required = IsSpear(id) ? kMinimumAttackCharge : 0.0f;
-        if (required <= 0.0f) return false;
-        const float optimistic = static_cast<float>(attackStrengthTicker + tolerance) / attackStrengthDelay;
-        return optimistic < required;
-    }
-
-    float AttackRange::EffectiveMinRange(const Entity& entity) const {
-        if (entity.IsPlayer()) return entity.IsCreative() ? minCreativeReach : minReach;
-        return minReach * mobFactor;
-    }
-
-    float AttackRange::EffectiveMaxRange(const Entity& entity) const {
-        if (entity.IsPlayer()) return entity.IsCreative() ? maxCreativeReach : maxReach;
-        return maxReach * mobFactor;
+        return CannotAttackWithItem(ItemStack(id, 1), attackStrengthTicker, attackStrengthDelay, tolerance);
     }
 
     // ── SpearAnimations ──────────────────────────────────────────────────
@@ -347,16 +351,17 @@ namespace Spear {
         ticksUsed -= weapon.delayTicks;
 
         const ItemStack* stack = user.EquipmentInSlot(slot);
-        const SpearDefinition* def = stack && !stack->IsEmpty() ? Find(stack->itemId) : nullptr;
-        const AttackRange range = def ? def->range : AttackRange{};
+        const AttackRange range = RangeFor(user, stack);
 
         const glm::dvec3 look = LookAngle(user);
         const double attackerSpeedProjection = glm::dot(look, GetMotion(user));
         const double actionFactor = user.IsPlayer() ? 1.0 : 0.2;
         // getAttributeBaseValue(ATTACK_DAMAGE): the entity's own, without
         // the spear's modifier — a player's 1, a zombie's 3.
-        const double baseMobDamage = user.IsPlayer()
-            ? static_cast<double>(kPlayerBaseAttackDamage)
+        // (A player's server view mirrors the player's own base — /attribute
+        // … attack_damage base set — so its row is read when it has one.)
+        const double baseMobDamage = user.IsPlayer() && !user.Attributes().Has(Attribute::AttackDamage)
+            ? PlayerBaseAttributeValue(Attribute::AttackDamage)
             : user.Attributes().GetBaseValue(Attribute::AttackDamage);
 
         std::vector<EntityHit> hits;
@@ -381,8 +386,14 @@ namespace Spear {
             affected |= user.StabAttack(slot, other, damageDealt, dealsDamage, dealsKnockback, dealsDismount);
         }
         // broadcastEntityEvent(user, 2): the hit sound and the hand's recoil
-        // on every client.
-        if (affected) level->BroadcastEntityEvent(user, kEntityEventKineticHit);
+        // on every client — and for a player, CriteriaTriggers.SPEAR_MOBS
+        // with the living entities this charge has stabbed.
+        if (affected) {
+            level->BroadcastEntityEvent(user, kEntityEventKineticHit);
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(&user)) {
+                Server::CriteriaTriggers::SpearMobs(*player, user.StabbedLivingEntityCount());
+            }
+        }
     }
 
     void PiercingAttack(const PiercingWeapon& weapon, LivingEntity& attacker, EquipmentSlot hand) {
@@ -392,8 +403,7 @@ namespace Spear {
         // modifier included (the player's view answers its ServerPlayer's).
         const float damage = attacker.GetJabAttackDamage();
         const ItemStack* stack = attacker.EquipmentInSlot(hand);
-        const SpearDefinition* def = stack && !stack->IsEmpty() ? Find(stack->itemId) : nullptr;
-        const AttackRange range = def ? def->range : AttackRange{};
+        const AttackRange range = RangeFor(attacker, stack);
 
         std::vector<EntityHit> hits;
         GetHitEntitiesAlong(attacker, range, [&attacker](Entity& e) { return CanHitEntity(attacker, e); }, hits);
@@ -412,7 +422,7 @@ namespace Spear {
         attacker.OnAttack();
         attacker.PostPiercingAttack();
         // makeHitSound: level.playSound(null, …) — everyone.
-        if (hitSomething && weapon.hitSound) {
+        if (hitSomething && !weapon.hitSound.empty()) {
             level->PlaySound(nullptr, attacker.position, weapon.hitSound, attacker.GetSoundSource(), 1.0f, 1.0f);
         }
         PlayWeaponSound(attacker, weapon.sound);
@@ -421,9 +431,9 @@ namespace Spear {
         attacker.Swing();
     }
 
-    void PlayWeaponSound(LivingEntity& causer, const char* sound) {
+    void PlayWeaponSound(LivingEntity& causer, std::string_view sound) {
         EntityLevel* level = causer.Level();
-        if (!sound || !level || level->IsClientSide()) return;
+        if (sound.empty() || !level || level->IsClientSide()) return;
         level->PlaySound(&causer, causer.position, sound, causer.GetSoundSource(), 1.0f, 1.0f);
     }
 
@@ -445,9 +455,9 @@ namespace Spear {
         m_useItemDuration = GetUseDuration(*stack);
         m_useItemRemaining = m_useItemDuration;
         if (m_level && !m_level->IsClientSide()) {
-            // useItem.causeUseVibration(this, ITEM_INTERACT_START) — every
-            // item but the spears (UseEffects without interact vibrations).
-            if (!Spear::IsSpear(stack->itemId)) GameEvent(GameEventId::ItemInteractStart);
+            // useItem.causeUseVibration(this, ITEM_INTERACT_START) — unless
+            // its USE_EFFECTS turn the vibrations off (the spears).
+            if (GetUseEffects(*stack).interactVibrations) GameEvent(GameEventId::ItemInteractStart);
             if (Spear::Kinetic(*stack)) BeginKineticContacts();
         }
     }
@@ -475,7 +485,7 @@ namespace Spear {
         // a finished hold completes on the server (no spear gets there:
         // 72000 ticks).
         if (m_level && !m_level->IsClientSide()) {
-            if (const Spear::KineticWeapon* kinetic = Spear::Kinetic(*stack)) {
+            if (const auto kinetic = Spear::Kinetic(*stack)) {
                 Spear::DamageEntities(*kinetic, m_useItemDuration, m_useItemRemaining, *this, m_usedItemHand);
             }
         }
@@ -591,9 +601,10 @@ namespace Spear {
         // kineticWeapon.makeLocalHitSound(this): the used weapon's hit sound,
         // locally, at this entity.
         if (!m_usingItem) return;
-        const Spear::SpearDefinition* def = Spear::Find(m_useItemId);
-        if (def && def->kinetic.hitSound && !IsSilent()) {
-            m_level->PlayLocalSound(position, def->kinetic.hitSound, GetSoundSource(), 1.0f, 1.0f, false);
+        const ItemStack* used = EquipmentInSlot(m_usedItemHand);
+        const auto kinetic = used && used->itemId == m_useItemId ? Spear::Kinetic(*used) : std::nullopt;
+        if (kinetic && !kinetic->hitSound.empty() && !IsSilent()) {
+            m_level->PlayLocalSound(position, kinetic->hitSound, GetSoundSource(), 1.0f, 1.0f, false);
         }
     }
 

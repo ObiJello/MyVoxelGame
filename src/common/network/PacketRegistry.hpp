@@ -203,6 +203,7 @@
             // ── End dragon fight ───────────────────────────────────────────
             BossEventS2C           = 0x48, // MC ClientboundBossEventPacket (reduced)
             EndCrystalBeamS2C      = 0x49, // crystal beam target (MC DATA_BEAM_TARGET)
+            WitherHeadTargetsS2C   = 0x76, // a wither's side-head targets (MC DATA_TARGET_B / _C)
             ArmorStandDataS2C      = 0x59, // armor stand poses + equipment — see ArmorStandDataS2CPacket.hpp
             ItemFrameDataS2C       = 0x65, // an item frame's framed item (MC DATA_ITEM) — see ItemFrameDataS2CPacket.hpp
             FishingHookDataS2C     = 0x67, // a fishing bobber's owner / hooked entity / bite (MC DATA_HOOKED_ENTITY, DATA_BITING) — see FishingHookDataS2CPacket.hpp
@@ -296,6 +297,21 @@
             MoveVehicleC2S          = 0xA5,  // MC ServerboundMoveVehiclePacket: where the driving client moved its vehicle
             PaddleBoatC2S           = 0xA6,  // MC ServerboundPaddleBoatPacket: which paddles row
             RidingCommandC2S        = 0xA7,  // MC ServerboundPlayerCommandPacket START/STOP_RIDING_JUMP
+            // How a player looks — stick figure / skin / cape, see
+            // PlayerAppearancePackets.hpp (docs/player-appearance.md).
+            // 0xC8/0xC9, the player-appearance range (0xC8..0xCF).
+            PlayerAppearanceC2S     = 0xC8,
+            PlayerAppearanceS2C     = 0xC9,
+            // Advancements — MC ClientboundUpdateAdvancementsPacket,
+            // ClientboundSelectAdvancementsTabPacket and
+            // ServerboundSeenAdvancementsPacket, see AdvancementPackets.hpp.
+            // The advancement range (0xC0..0xC7).
+            UpdateAdvancementsS2C     = 0xC0,
+            SelectAdvancementsTabS2C  = 0xC1,
+            SeenAdvancementsC2S       = 0xC2,
+            // /title — MC's set-title / set-subtitle / titles-animation /
+            // clear-titles packets as one, see TitlesS2CPacket.hpp.
+            TitlesS2C               = 0xD8,
         };
 
         // Convert PacketId to string for logging
@@ -336,6 +352,7 @@
                 case PacketId::ChangeDimensionS2C: return "ChangeDimensionS2C";
                 case PacketId::BossEventS2C: return "BossEventS2C";
                 case PacketId::EndCrystalBeamS2C: return "EndCrystalBeamS2C";
+                case PacketId::WitherHeadTargetsS2C: return "WitherHeadTargetsS2C";
                 case PacketId::ArmorStandDataS2C: return "ArmorStandDataS2C";
                 case PacketId::ItemFrameDataS2C: return "ItemFrameDataS2C";
                 case PacketId::FishingHookDataS2C: return "FishingHookDataS2C";
@@ -378,6 +395,7 @@
                 case PacketId::MoveVehicleC2S:   return "MoveVehicleC2S";
                 case PacketId::PaddleBoatC2S:    return "PaddleBoatC2S";
                 case PacketId::RidingCommandC2S:   return "RidingCommandC2S";
+                case PacketId::TitlesS2C:          return "TitlesS2C";
                 case PacketId::MountScreenOpenS2C: return "MountScreenOpenS2C";
                 case PacketId::UpdateAttributesS2C: return "UpdateAttributesS2C";
                 case PacketId::PlayerSwingS2C: return "PlayerSwingS2C";
@@ -460,7 +478,12 @@
                 case PacketId::ContainerButtonClickC2S: return "ContainerButtonClickC2S";
                 case PacketId::SelectTradeC2S: return "SelectTradeC2S";
                 case PacketId::RenameItemC2S: return "RenameItemC2S";
+                case PacketId::PlayerAppearanceC2S: return "PlayerAppearanceC2S";
+                case PacketId::PlayerAppearanceS2C: return "PlayerAppearanceS2C";
 #endif
+                case PacketId::UpdateAdvancementsS2C:    return "UpdateAdvancementsS2C";
+                case PacketId::SelectAdvancementsTabS2C: return "SelectAdvancementsTabS2C";
+                case PacketId::SeenAdvancementsC2S:      return "SeenAdvancementsC2S";
 
                 default: return "Unknown";
             }

@@ -39,9 +39,37 @@ namespace Render::BlockEntityShader {
         SetLight(shader, glm::vec3(light));
     }
 
+    // A block entity a piston is carrying (PistonRenderer::RenderCarried)
+    // sits at its moving cell but is lit the way MC lights the moving block
+    // it rides with: from the cell it is leaving while in flight, from its
+    // own once at rest. For the length of the scope a light query for
+    // `cell` reads `lightCell`'s light (the emission stays `cell`'s block —
+    // the carried one, under ClientBlockAccess::CarriedViewScope). A chest
+    // then looks the same the frame it starts to move as the frame before.
+    struct CarriedLight {
+        glm::ivec3 cell{0};
+        glm::ivec3 lightCell{0};
+        bool       active = false;
+    };
+    inline CarriedLight g_carriedLight;
+    class CarriedLightScope {
+    public:
+        CarriedLightScope(const glm::ivec3& cell, const glm::ivec3& lightCell) : m_prev(g_carriedLight) {
+            g_carriedLight = CarriedLight{cell, lightCell, true};
+        }
+        ~CarriedLightScope() { g_carriedLight = m_prev; }
+        CarriedLightScope(const CarriedLightScope&) = delete;
+        CarriedLightScope& operator=(const CarriedLightScope&) = delete;
+    private:
+        CarriedLight m_prev;
+    };
+
     // MC's block-entity light: LevelRenderer.getLightCoords at the block
     // entity's own cell (EntityEnvironment::LevelLightCoordsAt) — packed.
     inline int PackedLightAt(const glm::ivec3& blockPos) {
+        if (g_carriedLight.active && blockPos == g_carriedLight.cell && blockPos != g_carriedLight.lightCell) {
+            return EntityEnvironment::LevelLightCoordsAt(blockPos, g_carriedLight.lightCell);
+        }
         return EntityEnvironment::LevelLightCoordsAt(blockPos);
     }
     inline glm::vec3 LightAt(const glm::ivec3& blockPos) {

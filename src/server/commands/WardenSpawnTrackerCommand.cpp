@@ -39,7 +39,7 @@ namespace Server {
         if (!args.empty() && args[0] == "clear" && args.size() == 1) {
             // MC resetTracker: WardenSpawnTracker.reset.
             player->getWardenSpawnTracker().Reset();
-            connection.SendChatMessage("Cleared warden spawn tracker for " + name, 1);
+            source.SendSuccess(connection, "Cleared warden spawn tracker for " + name, true);
             return;
         }
         if (args.size() == 2 && args[0] == "set") {
@@ -56,8 +56,8 @@ namespace Server {
             }
             // MC setWarningLevel: WardenSpawnTracker.setWarningLevel.
             player->getWardenSpawnTracker().SetWarningLevel(static_cast<int>(level));
-            connection.SendChatMessage("Set warden spawn tracker warning level to " + std::to_string(level) +
-                                       " for " + name, 1);
+            source.SendSuccess(connection, "Set warden spawn tracker warning level to " + std::to_string(level) +
+                                       " for " + name, true);
             return;
         }
         connection.SendChatMessage("Usage: /warden_spawn_tracker clear | set <warning_level>", 1);

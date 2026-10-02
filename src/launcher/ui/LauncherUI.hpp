@@ -1,6 +1,9 @@
 // File: src/launcher/ui/LauncherUI.hpp
 #pragma once
 
+#include "launcher/appearance/AppearanceSettings.hpp"
+#include "launcher/appearance/AppearanceView.hpp"
+
 #include <string>
 #include <atomic>
 #include <cstdint>
@@ -61,6 +64,13 @@ namespace Launcher {
         std::string lastJoinIP;             // Pre-fills the quick-connect host field
         std::string lastJoinPort = "25565"; // Pre-fills the quick-connect port field
 
+        // ── Appearance (the Appearance view) ──
+        // The persisted look: stick figure (playerColor + optional paint) or
+        // a Minecraft skin and cape. The UI edits it in place and raises
+        // `appearanceDirty`; the app saves launcher.json and clears it.
+        Appearance::Settings appearance;
+        bool appearanceDirty = false;
+
         // ── Saved servers ──
         // UI mutates `servers` directly and raises `serversDirty`; the app
         // persists the list and refreshes pings on the next frame.
@@ -110,12 +120,20 @@ namespace Launcher {
 
         void SetLogoTexture(GLuint textureId, int width, int height);
 
+        // Where the Appearance view keeps and finds its files (the obeycraft
+        // directory, the bundled default skins).
+        void SetAppearancePaths(const Appearance::Paths& paths) { m_appearanceView.SetPaths(paths); }
+
+        // Frees the UI's GL objects (the 3D previews, skin and cape
+        // textures). Call while the GL context is still current, before the
+        // ImGui backend and the window are torn down.
+        void Shutdown() { m_appearanceView.ReleaseGpu(); }
+
         // Render the full launcher UI. Call once per frame between ImGui::NewFrame and ImGui::Render.
         void Render(LauncherUIState& state);
 
     private:
-        enum class View { Play, Servers, Settings };
-        enum class SettingsTab { General, Character };
+        enum class View { Play, Servers, Appearance, Settings };
         enum class AccountPane { Out, SignIn, SignUp, In, ChangePw };
 
         // ── Views ──
@@ -124,7 +142,6 @@ namespace Launcher {
         void DrawServersView(LauncherUIState& state);
         void DrawSettingsView(LauncherUIState& state);
         void DrawSettingsGeneral(LauncherUIState& state);
-        void DrawSettingsCharacter(LauncherUIState& state);
 
         // ── Settings/General pieces ──
         void DrawAccountSection(LauncherUIState& state);
@@ -152,12 +169,14 @@ namespace Launcher {
         NameCallback m_onCheckName;
         PasswordChangeCallback m_onChangePassword;
 
+        // The Appearance view (stick figure, skin, capes) and its skin editor.
+        Appearance::AppearanceView m_appearanceView;
+
         GLuint m_logoTexture = 0;
         int m_logoWidth = 0;
         int m_logoHeight = 0;
 
         View m_view = View::Play;
-        SettingsTab m_tab = SettingsTab::General;
         AccountPane m_acctPane = AccountPane::Out;
         bool m_acctPaneInit = false;   // seed m_acctPane from login state once
 

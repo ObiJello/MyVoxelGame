@@ -509,6 +509,9 @@ namespace Render {
         // frame looks different from the frames around it.
         enum class PrepareSource : uint8_t { Exact = 0, Fallback = 1, ColdSync = 2, FrustumOnly = 3 };
         PrepareSource LastPrepareSource() const { return m_lastPrepareSource; }
+        // Of the sections the LAST prepared view listed: how many, and how
+        // many are compiled (built or resolved empty). Portal diagnostics.
+        void CountLastViewMeshed(int& visible, int& meshed) const;
         bool IsGreedyMeshDebug() const { return m_greedyMeshDebug; }
         void SetShowSectionBounds(bool enable) { m_showSectionBounds = enable; }
         void SetDebugLayer(int layer) { m_debugLayer = layer; } // -1 = all, 0 = opaque, 1 = cutout, 2 = translucent
@@ -761,6 +764,10 @@ namespace Render {
             int renderDistance = 0;
             // m_propagationEpoch when the list's snapshot was taken.
             uint64_t propagationEpoch = 0;
+            // When the list was adopted. A portal view's slot is never
+            // extended by partial updates (only the main view's is), so its
+            // age is how far behind the far side's meshing it can be.
+            std::chrono::steady_clock::time_point builtAt{};
         };
         // A slot describes the world as it is now: no world-version bump
         // since its snapshot, and either the live graph is anchored to it
@@ -788,6 +795,21 @@ namespace Render {
         // (one BFS is in flight at a time, and the player's own world comes
         // first).
         bool m_mainViewAwaitingBfs = false;
+        // Rebuild fairness between the main view and the portal views (one
+        // BFS worker, one 250 ms floor, and the main view asks first every
+        // frame): a portal view that wanted a refresh and did not get one
+        // sets this, and the main view's next NON-urgent refresh yields
+        // once. Without it, streaming kept the main view stale — every
+        // upload bumps the world version — and it took every refresh, so a
+        // portal view's reachable set stayed the one it had first: a far
+        // side barely meshed, its BFS stopped at the first unmeshed ring
+        // (unmeshed sections block it), and nothing beyond that ring was
+        // drawn or admitted for meshing until the player's own area was done.
+        bool m_portalRebuildStarved = false;
+        bool m_lastRebuildWasMain   = false;
+        // True when a portal view's reachable slot `s` is the stalest of the
+        // portal views drawn recently — the one that gets the next refresh.
+        bool IsStalestRecentPortalSlot(const ReachableCacheSlot& s, int renderDistance) const;
         uint32_t m_prepareCounter = 0;  // Monotonic, for LRU slot eviction
 
         // Async BFS bookkeeping. m_worldVersion advances only on the events

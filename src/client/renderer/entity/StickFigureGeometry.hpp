@@ -4,11 +4,21 @@
 //   - PlayerRenderer (renders remote players in the world via GPU lines/triangles)
 //   - PlayerInventoryPreview (renders the local player in the inventory's preview
 //     box via CPU-projected QuadCommands)
+//   - the launcher's stick-figure painter (src/launcher/appearance — the
+//     launcher compiles this file; it depends on glm and common/ only)
+//
+// A figure is one colour or painted per cell (Game::StickFigurePaint; the
+// launcher's painter, docs/player-appearance.md).
 //
 // Vertex layout matches the block vertex layout (pos3 + uv2 + color4 ubyte = 24 B)
 // so the world renderer can stream it straight into a GPU buffer without copies.
-// The UV slots are unused but kept for layout compatibility.
+// The UV slots carry no texture coordinates: the world renderer writes the
+// body scale into a line's `u` (the strip width), and the builder writes each
+// vertex's paint cell into `v` (the launcher's painter picks by it).
 #pragma once
+
+#include "common/entity/PlayerAppearance.hpp"
+#include "common/entity/PlayerColors.hpp"
 
 #include <glm/glm.hpp>
 #include <vector>
@@ -34,6 +44,38 @@ namespace Render {
     };
     inline constexpr PlayerColor kDefaultPlayerColor{0, 255, 60, 255};
 
+    // A painted figure's colours, one per Game::StickFigurePaint cell (already
+    // lit / tinted by the caller). `uniform` builds the plain one-colour
+    // figure from cell[0] with the classic geometry (whole limbs, no
+    // per-cell splits) — what every unpainted player draws.
+    struct StickFigureColors {
+        PlayerColor cell[Game::StickFigurePaint::kCellCount];
+        bool uniform = true;
+
+        static StickFigureColors Uniform(PlayerColor c) {
+            StickFigureColors s;
+            for (PlayerColor& p : s.cell) p = c;
+            s.uniform = true;
+            return s;
+        }
+        // `paint`'s palette colours, each passed through `shade` (the
+        // caller's light, hurt flash and translucency).
+        template <class Shade>
+        static StickFigureColors FromPaint(const Game::StickFigurePaint& paint, Shade&& shade) {
+            StickFigureColors s;
+            PlayerColor byId[static_cast<int>(Game::PlayerColorId::Count)];
+            for (int i = 0; i < static_cast<int>(Game::PlayerColorId::Count); ++i) {
+                const auto& e = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(i));
+                byId[i] = shade(PlayerColor{ e.r, e.g, e.b, 255 });
+            }
+            for (int c = 0; c < Game::StickFigurePaint::kCellCount; ++c) {
+                s.cell[c] = byId[static_cast<int>(paint.At(c))];
+            }
+            s.uniform = paint.IsUniform();
+            return s;
+        }
+    };
+
     // Build geometry for a stick-figure player at the given pose. Output goes
     // into three lists:
     //
@@ -57,6 +99,18 @@ namespace Render {
                           float headYawDeg, float bodyYawDeg,
                           float pitchDeg, bool isCrouching,
                           PlayerColor color = kDefaultPlayerColor,
+                          bool isSitting = false);
+    // The painted figure: every vertex takes its cell's colour, and carries
+    // the cell index in its (otherwise unused) `v` — the launcher's painter
+    // picks cells by it. A non-uniform figure splits each limb and arc into
+    // its cells; a uniform one is the classic geometry above exactly.
+    void BuildStickFigure(std::vector<StickVertex>& lineVerts,
+                          std::vector<StickVertex>& ringTris,
+                          std::vector<StickVertex>& discTris,
+                          const glm::vec3& feetPos,
+                          float headYawDeg, float bodyYawDeg,
+                          float pitchDeg, bool isCrouching,
+                          const StickFigureColors& colors,
                           bool isSitting = false);
     // `isSitting`: MC HumanoidModel.setupAnim's isPassenger pose — the legs
     // from their pivots (±1.9 px, 12 px up) thrust forward (xRot −1.4137167,

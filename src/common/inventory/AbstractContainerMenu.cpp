@@ -23,7 +23,7 @@ namespace Game {
                                     bool ignoreSize) {
         if (slotStack.IsEmpty()) return true;
         if (!IsSameItemSameComponents(carried, slotStack)) return false;
-        const int maxStack = ItemRegistry::Get(carried.itemId).maxStackSize;
+        const int maxStack = Game::GetMaxStackSize(carried);
         return slotStack.count + (ignoreSize ? 0 : carried.count) <= maxStack;
     }
 
@@ -57,8 +57,8 @@ namespace Game {
         bool anythingChanged = false;
 
         // Pass 1 — merge into existing stacks of the same item AND components.
-        const int itemMax = ItemRegistry::Get(stack.itemId).maxStackSize;
-        if (itemMax > 1) {
+        // MC `if (itemStack.isStackable())`.
+        if (IsStackable(stack)) {
             int i = backwards ? end - 1 : begin;
             while (!stack.IsEmpty() && (backwards ? i >= begin : i < end)) {
                 Slot& slot = GetSlot(i);
@@ -217,7 +217,7 @@ namespace Game {
             // square) still tops the cursor up with its contents — the whole
             // stack, when it fits (tryRemove's allowModification rule).
             if (!IsSameItemSameComponents(slot, m_carried)) return result;
-            const int room = ItemRegistry::Get(m_carried.itemId).maxStackSize - m_carried.count;
+            const int room = Game::GetMaxStackSize(m_carried) - m_carried.count;
             const ItemStack taken = s.SafeTake(slot.count, room);
             if (taken.IsEmpty()) return result;
             m_carried.count += taken.count;
@@ -361,7 +361,7 @@ namespace Game {
         // Component-preserving copy — a cloned enchanted book keeps its
         // enchantments (MC clones the full stack).
         m_carried = src;
-        m_carried.count = ItemRegistry::Get(src.itemId).maxStackSize;
+        m_carried.count = Game::GetMaxStackSize(src);
         result.carriedChanged = true;
         return result;
     }
@@ -439,7 +439,7 @@ namespace Game {
 
             const int dragType     = m_quickcraftType;
             const int totalCarried = m_carried.count;
-            const int itemMaxStack = ItemRegistry::Get(m_carried.itemId).maxStackSize;
+            const int itemMaxStack = Game::GetMaxStackSize(m_carried);
             const int slotCount    = (int)m_quickcraftSlots.size();
             int remaining = totalCarried;
 
@@ -509,7 +509,7 @@ namespace Game {
             if (clicked.HasItem() && clicked.MayPickup()) return result;
         }
 
-        const int maxStack = ItemRegistry::Get(m_carried.itemId).maxStackSize;
+        const int maxStack = Game::GetMaxStackSize(m_carried);
 
         // Two-pass collect: partial stacks first (so full stacks survive), then
         // full ones. MC walks the whole menu; we skip slots that refuse to give
@@ -538,7 +538,7 @@ namespace Game {
                                                                      uint8_t button) {
         ContainerClickResult result;
         if (source.itemId == Items::Air) return result;
-        const int maxStack = ItemRegistry::Get(source.itemId).maxStackSize;
+        const int maxStack = Game::GetMaxStackSize(source);
 
         // Holding something else? Clicking the grid discards it and does NOT
         // pick the new item up — two clicks to swap. This makes the search grid
@@ -579,15 +579,31 @@ namespace Game {
         ContainerClickResult result;
         if (source.itemId == Items::Air) return result;
         ItemStack stack = source;
-        stack.count = ItemRegistry::Get(source.itemId).maxStackSize;
+        stack.count = Game::GetMaxStackSize(source);
         MoveItemStackTo(stack, 0, SlotCount(), false, result);
         return result;
     }
 
     // Shift-click on the destroy_item slot — mirrors
     // CreativeModeInventoryScreen.slotClicked() lines 189-193.
-    ContainerClickResult AbstractContainerMenu::HandleCreativeDestroyAll() {
+    ContainerClickResult AbstractContainerMenu::HandleCreativeDestroyAll(uint8_t button) {
         ContainerClickResult result;
+        // ENGINE DEVIATION (not MC): shift-click on the bin while carrying a
+        // stack deletes that stack and every slot of the same item — the
+        // server decides from its own cursor, so a stale client cannot
+        // widen it. Same slot range as the full clear below.
+        if (button == 1 && !m_carried.IsEmpty()) {
+            const ItemID doomed = m_carried.itemId;
+            for (int i = 0; i < SlotCount(); ++i) {
+                Slot& s = GetSlot(i);
+                if (!s.HasItem() || s.GetItem().itemId != doomed) continue;
+                s.Set(ItemStack{});
+                MarkChanged(result, i);
+            }
+            m_carried.Clear();
+            result.carriedChanged = true;
+            return result;
+        }
         // Mark EVERY slot changed, not just the ones the server thought were
         // occupied: the client may hold predicted pickups the server never
         // recorded, and those would otherwise leave ghost stacks with no delta
@@ -695,7 +711,7 @@ namespace Game {
                 case Network::ContainerInput::QUICK_CRAFT: result = HandleQuickCraft(slot, click.button); break;
                 case Network::ContainerInput::PICKUP_ALL:  result = HandlePickupAll (slot); break;
                 case Network::ContainerInput::CREATIVE_DESTROY_ALL:
-                    result = HandleCreativeDestroyAll(); break;
+                    result = HandleCreativeDestroyAll(click.button); break;
                 case Network::ContainerInput::CREATIVE_DELETE_CARRIED:
                     result = HandleCreativeDeleteCarried(click.button); break;
                 case Network::ContainerInput::CREATIVE_FILL_SLOT:

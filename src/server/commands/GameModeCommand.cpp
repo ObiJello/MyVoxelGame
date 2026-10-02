@@ -1,11 +1,13 @@
 // File: src/server/commands/GameModeCommand.cpp
 #include "GameModeCommand.hpp"
+#include "EntitySelector.hpp"
 #include "../network/ServerConnection.hpp"
 #include "../session/PlayerSessionManager.hpp"
 #include "../session/PlayerSession.hpp"
 #include "../player/ServerPlayer.hpp"
 #include "../player/SpectatorMode.hpp"
 #include "common/core/Log.hpp"
+#include "common/world/level/GameRules.hpp"
 #include <cctype>
 #include <optional>
 #include <string>
@@ -14,26 +16,13 @@ namespace Server {
 
     void GameModeCommand::Register(CommandDispatcher& dispatcher) {
         namespace Cmd = Game::Cmd;
-        // MC GameModeCommand: <gamemode> [<target>] — the target a player
-        // name here (PlayerList.getPlayerByName).
+        // MC GameModeCommand: <gamemode> [<target>] — EntityArgument.players().
         dispatcher.RegisterCommand("gamemode", GameModeCommand::Execute,
             Cmd::Root().Then(Cmd::Argument("gamemode", Cmd::Arg::GameMode).Executes()
-                .Then(Cmd::Argument("target", Cmd::Arg::PlayerName).Executes())));
+                .Then(Cmd::Argument("target", Cmd::Arg::Players).Executes())));
     }
 
     namespace {
-
-        bool CaseInsensitiveEquals(const std::string& a, const std::string& b) {
-            if (a.size() != b.size()) return false;
-            for (size_t i = 0; i < a.size(); i++) {
-                if (std::tolower(static_cast<unsigned char>(a[i])) !=
-                    std::tolower(static_cast<unsigned char>(b[i]))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
 
         // MC's gameMode.<name> display strings ("Creative Mode", …).
         const char* GameModeDisplayName(GameMode mode) {
@@ -78,65 +67,80 @@ namespace Server {
             return;
         }
 
-        // Resolve target: sender by default, named player with args[1]
-        // (PlayerList.getPlayerByName, same walk as KickCommand).
-        ServerPlayer*     target     = &sender;
-        ServerConnection* targetConn = &connection;
-        std::shared_ptr<PlayerSession> targetSession;
+        // MC GameModeCommand: `targets` is EntityArgument.players(); without
+        // it the target is source.getPlayerOrException() — the EXECUTOR, so
+        // `/execute as Steve run gamemode creative` changes Steve.
+        std::vector<SelectedEntity> targets;
+        std::string error;
         if (args.size() > 1) {
-            for (const auto& session : sessionManager.GetAllSessions()) {
-                if (session && session->GetPlayer() &&
-                    CaseInsensitiveEquals(session->GetPlayer()->getName(), args[1])) {
-                    targetSession = session;
-                    break;
-                }
-            }
-            if (!targetSession || !targetSession->GetPlayer() || !targetSession->GetConnection()) {
-                connection.SendChatMessage("Player not found: " + args[1], 1);
+            if (!ResolveSelector(args[1], SelectorKind::Players, source, targets, error)) {
+                connection.SendChatMessage(error, 1);
                 return;
             }
-            target     = targetSession->GetPlayer();
-            targetConn = targetSession->GetConnection();
-        }
-
-        // MC ServerPlayer.setGameMode returns false when already in that
-        // mode and sends nothing; keep the same short-circuit.
-        if (target->getGameMode() == *mode) {
-            connection.SendChatMessage(
-                std::string("Nothing changed. ") + target->getName() +
-                " is already in " + GameModeDisplayName(*mode), 1);
+        } else if (!ResolveSelector("@s", SelectorKind::Player, source, targets, error)) {
+            connection.SendChatMessage("A player is required to run this command here", 1);
             return;
         }
 
-        // MC ServerPlayer.setGameMode: the change plus its consequences — the
-        // spectator camera, the abilities packet, UPDATE_GAME_MODE for every
-        // tab list.
-        if (!targetSession) targetSession = sessionManager.GetSession(target->getPlayerId());
-        if (targetSession) {
-            Spectator::ChangeGameMode(*targetSession, *mode);
-        } else {
-            target->setGameMode(*mode);
-            targetConn->SendPlayerAbilities(*target);
-            Spectator::BroadcastGameMode(*target);
-        }
+        const ServerPlayer* executor =
+            source.entity ? (source.entity->kind == SelectedEntity::Kind::Player ? source.entity->player : nullptr)
+                          : &sender;
+        int changed = 0;
+        for (const SelectedEntity& t : targets) {
+            ServerPlayer* target = t.player;
+            if (!target) continue;
+            std::shared_ptr<PlayerSession> targetSession = t.session ? t.session
+                                                                     : sessionManager.GetSession(target->getPlayerId());
+            ServerConnection* targetConn = targetSession ? targetSession->GetConnection() : nullptr;
 
-        Log::Info("[GameModeCommand] %s set %s to game mode %d",
-                  sender.getName().c_str(), target->getName().c_str(),
-                  static_cast<int>(*mode));
+            // MC ServerPlayer.setGameMode returns false when already in that
+            // mode and nothing is sent for that player.
+            if (target->getGameMode() == *mode) {
+                if (targets.size() == 1) {
+                    connection.SendChatMessage(
+                        std::string("Nothing changed. ") + target->getName() +
+                        " is already in " + GameModeDisplayName(*mode), 1);
+                }
+                continue;
+            }
 
-        // commands.gamemode.success.self / .other
-        if (target == &sender) {
-            connection.SendChatMessage(
-                std::string("Set own game mode to ") + GameModeDisplayName(*mode), 1);
-        } else {
-            connection.SendChatMessage(
-                std::string("Set ") + target->getName() + "'s game mode to " +
-                GameModeDisplayName(*mode), 1);
-            // gameMode.changed — tell the target too (MC sends this when
-            // someone else changes your mode).
-            targetConn->SendChatMessage(
-                std::string("Your game mode has been updated to ") + GameModeDisplayName(*mode), 1);
+            // MC ServerPlayer.setGameMode: the change plus its consequences —
+            // the spectator camera, the abilities packet, UPDATE_GAME_MODE for
+            // every tab list.
+            if (targetSession) {
+                Spectator::ChangeGameMode(*targetSession, *mode);
+            } else {
+                target->setGameMode(*mode);
+                if (targetConn) targetConn->SendPlayerAbilities(*target);
+                Spectator::BroadcastGameMode(*target);
+            }
+            ++changed;
+
+            Log::Info("[GameModeCommand] %s set %s to game mode %d",
+                      sender.getName().c_str(), target->getName().c_str(),
+                      static_cast<int>(*mode));
+
+            // MC logGamemodeChange: commands.gamemode.success.self when the
+            // target is the source's entity, else .other to the source and
+            // gameMode.changed to the target. Feedback goes to the player who
+            // typed the command.
+            if (target == executor) {
+                source.SendSuccess(connection,
+                    std::string("Set own game mode to ") + GameModeDisplayName(*mode), true);
+            } else {
+                // MC: gameMode.changed to the target only under
+                // send_command_feedback, before the source's success line.
+                if (targetConn && targetConn != &connection &&
+                    Game::Rules::GetBool(Game::Rules::Id::SendCommandFeedback)) {
+                    targetConn->SendChatMessage(
+                        std::string("Your game mode has been updated to ") + GameModeDisplayName(*mode), 1);
+                }
+                source.SendSuccess(connection,
+                    std::string("Set ") + target->getName() + "'s game mode to " +
+                    GameModeDisplayName(*mode), true);
+            }
         }
+        (void)changed;
     }
 
 } // namespace Server

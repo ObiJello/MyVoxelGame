@@ -6,6 +6,7 @@
 #include "ClientBiomeZoom.hpp"
 #include "ClientChunkManager.hpp"
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/entity/PistonMovingBlockEntity.hpp"   // CarriedViewScope
 #include "common/world/math/WorldCoordinates.hpp"
 #include "common/core/Config.hpp"
 
@@ -30,7 +31,14 @@ namespace Client {
 
         int localX = worldX - (chunkPos.x * Game::Math::CHUNK_SIZE_X);
         int localZ = worldZ - (chunkPos.z * Game::Math::CHUNK_SIZE_Z);
-        return chunk->chunkData->GetBlock(localX, worldY, localZ);
+        const Game::BlockID id = chunk->chunkData->GetBlock(localX, worldY, localZ);
+        if (m_carriedView && id == Game::BlockID::MovingPiston) {
+            if (const auto* piston = static_cast<const Game::PistonMovingBlockEntity*>(
+                    CarryingPistonAt(worldX, worldY, worldZ))) {
+                return piston->GetMovedState().Block();
+            }
+        }
+        return id;
     }
 
     uint16_t ClientBlockAccess::GetBiome(int worldX, int worldY, int worldZ) const {
@@ -65,6 +73,45 @@ namespace Client {
         return chunk->chunkData->light.Get(layer, worldX & 15, worldY, worldZ & 15);
     }
 
+    void ClientBlockAccess::GetLightCube(int x, int y, int z, uint8_t (&out)[27]) const {
+        namespace L = Game::Lighting;
+        // At most two chunk columns along x and two along z: look each up
+        // once. A missing chunk reads as GetBrightness answers: sky 15,
+        // block 0.
+        const ClientChunk* columns[2][2] = {{nullptr, nullptr}, {nullptr, nullptr}};
+        bool looked[2][2] = {{false, false}, {false, false}};
+        const int baseCx = (x - 1) >> 4, baseCz = (z - 1) >> 4;
+        for (int dx = -1; dx <= 1; ++dx) {
+            const int wx = x + dx;
+            const int ix = (wx >> 4) - baseCx;
+            for (int dz = -1; dz <= 1; ++dz) {
+                const int wz = z + dz;
+                const int iz = (wz >> 4) - baseCz;
+                if (!looked[ix][iz]) {
+                    looked[ix][iz] = true;
+                    if (m_chunks) {
+                        const ClientChunk* chunk = m_chunks->GetChunk(Game::Math::ChunkPos{wx >> 4, wz >> 4});
+                        if (chunk && chunk->IsLoaded() && chunk->chunkData) columns[ix][iz] = chunk;
+                    }
+                }
+                const ClientChunk* chunk = columns[ix][iz];
+                for (int dy = -1; dy <= 1; ++dy) {
+                    int block = 0, sky = 15;
+                    if (chunk) {
+                        const L::ChunkLight& light = chunk->chunkData->light;
+                        block = light.Get(L::LightLayer::Block, wx & 15, y + dy, wz & 15);
+                        sky   = light.Get(L::LightLayer::Sky,   wx & 15, y + dy, wz & 15);
+                    }
+                    out[(dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)] = static_cast<uint8_t>(block | (sky << 4));
+                }
+            }
+        }
+    }
+
+    uint64_t ClientBlockAccess::LightVersion() const {
+        return m_chunks ? m_chunks->LightVersion() : 0;
+    }
+
     Game::BlockState ClientBlockAccess::GetBlockState(int worldX, int worldY, int worldZ) const {
         if (!IsValidPosition(worldX, worldY, worldZ) || !m_chunks) {
             return Game::BlockState{};
@@ -78,7 +125,14 @@ namespace Client {
 
         int localX = worldX - (chunkPos.x * Game::Math::CHUNK_SIZE_X);
         int localZ = worldZ - (chunkPos.z * Game::Math::CHUNK_SIZE_Z);
-        return chunk->chunkData->StateAt(localX, worldY, localZ);
+        const Game::BlockState state = chunk->chunkData->StateAt(localX, worldY, localZ);
+        if (m_carriedView && state.Block() == Game::BlockID::MovingPiston) {
+            if (const auto* piston = static_cast<const Game::PistonMovingBlockEntity*>(
+                    CarryingPistonAt(worldX, worldY, worldZ))) {
+                return piston->GetMovedState();
+            }
+        }
+        return state;
     }
 
     bool ClientBlockAccess::IsRegionAllAir(const glm::ivec3& min, const glm::ivec3& max,
@@ -278,7 +332,45 @@ namespace Client {
     Game::BlockEntity* ClientBlockAccess::GetBlockEntity(const glm::ivec3& pos) {
         int lx, lz;
         Game::Chunk* chunk = ChunkDataAt(m_chunks, pos, lx, lz);
-        return chunk ? chunk->GetBlockEntity(lx, pos.y, lz) : nullptr;
+        Game::BlockEntity* be = chunk ? chunk->GetBlockEntity(lx, pos.y, lz) : nullptr;
+        if (auto* piston = dynamic_cast<Game::PistonMovingBlockEntity*>(be)) {
+            // A LANDED moving piston is only this client's bridge frame: the
+            // block is in the cell already and the entity draws it until the
+            // section mesh does (ClientChunkManager::RetireLandedBlockEntities).
+            // For everything else the cell's entity is the one it carries —
+            // a chest's lid event, its partner's lid, the next piston move
+            // lifting it — or none. Answering with the bridge made a move
+            // that came before the retirement find no chest to carry, and
+            // the client dropped it for the length of that move.
+            if (piston->IsLanded()) return piston->Carried();
+            // CarriedViewScope: a cell in flight answers with what it carries.
+            if (m_carriedView && piston->Carried()) return piston->Carried();
+        }
+        return be;
+    }
+
+    std::unique_ptr<Game::BlockEntity> ClientBlockAccess::TakeBlockEntity(const glm::ivec3& pos) {
+        int lx, lz;
+        Game::Chunk* chunk = ChunkDataAt(m_chunks, pos, lx, lz);
+        if (!chunk) return nullptr;
+        // A landed bridge (see GetBlockEntity) hands over the entity it
+        // carries; the bridge itself goes, since the cell's block is leaving
+        // and the move's own cell draws it from here on.
+        if (auto* piston = dynamic_cast<Game::PistonMovingBlockEntity*>(chunk->GetBlockEntity(lx, pos.y, lz));
+            piston && piston->IsLanded()) {
+            std::unique_ptr<Game::BlockEntity> carried = piston->TakeCarried();
+            chunk->RemoveBlockEntity(lx, pos.y, lz);   // `piston` is dead
+            return carried;
+        }
+        return chunk->RemoveBlockEntity(lx, pos.y, lz);
+    }
+
+    const Game::BlockEntity* ClientBlockAccess::CarryingPistonAt(int worldX, int worldY, int worldZ) const {
+        int lx, lz;
+        Game::Chunk* chunk = ChunkDataAt(m_chunks, glm::ivec3(worldX, worldY, worldZ), lx, lz);
+        if (!chunk) return nullptr;
+        const auto* piston = dynamic_cast<const Game::PistonMovingBlockEntity*>(chunk->GetBlockEntity(lx, worldY, lz));
+        return piston && piston->Carried() ? piston : nullptr;
     }
 
     void ClientBlockAccess::SetBlockEntity(const glm::ivec3& pos, std::unique_ptr<Game::BlockEntity> entity) {
@@ -320,8 +412,9 @@ namespace Client {
     bool ClientBlockAccess::GetLocalPlayerBox(glm::dvec3& outMin, glm::dvec3& outMax) const {
         if (!m_player) return false;
         const auto& ph = m_player->physics;
-        const double hw = Game::PlayerPhysics::WIDTH * 0.5;
-        const double h  = ph.isSneaking ? Game::PlayerPhysics::HEIGHT_SNEAKING : Game::PlayerPhysics::HEIGHT_STANDING;
+        // The body's live box: its pose, its size, a /morph body's own.
+        const double hw = ph.GetWidth() * 0.5;
+        const double h  = ph.GetCurrentHeight();
         outMin = glm::dvec3(ph.position.x - hw, ph.position.y,     ph.position.z - hw);
         outMax = glm::dvec3(ph.position.x + hw, ph.position.y + h, ph.position.z + hw);
         return true;
@@ -349,8 +442,7 @@ namespace Client {
             if (!self.empty() && UuidOfName(self) == uuid) {
                 const auto& ph = m_player->physics;
                 outPos = ph.position;
-                outBbHeight = ph.isSneaking ? Game::PlayerPhysics::HEIGHT_SNEAKING
-                                            : Game::PlayerPhysics::HEIGHT_STANDING;
+                outBbHeight = ph.GetCurrentHeight();
                 return true;
             }
         }
@@ -360,8 +452,10 @@ namespace Client {
                 if (!rp.positionInitialized || rp.name.empty() || rp.dimension != GetDimension()) continue;
                 if (UuidOfName(rp.name) != uuid) continue;
                 outPos = rp.position;
-                outBbHeight = (rp.isCrouching ? Game::PlayerPhysics::HEIGHT_SNEAKING
-                                              : Game::PlayerPhysics::HEIGHT_STANDING) * rp.scale;
+                // A /morph body's own height (a mob has no sneak pose).
+                outBbHeight = (rp.IsMorphed() ? Game::Morph::DimsOf(rp.morph).height
+                               : rp.isCrouching ? Game::PlayerPhysics::HEIGHT_SNEAKING
+                                                : Game::PlayerPhysics::HEIGHT_STANDING) * rp.scale;
                 return true;
             }
         }

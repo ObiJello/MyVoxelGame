@@ -37,6 +37,7 @@
 #include "common/inventory/Container.hpp"
 
 #include <glm/glm.hpp>
+#include <nlohmann/json_fwd.hpp>
 
 #include <cstdint>
 #include <optional>
@@ -82,6 +83,15 @@ namespace Game {
                             std::vector<ItemStack>& out, const LootLevelContext* level = nullptr);
 
         bool Exists(const std::string& key);
+
+        // MC LootItemFunction.apply for an item modifier (`/item modify`,
+        // `/item replace … from … <modifier>`): `modifier` is one function
+        // object or a list of them (data/<ns>/item_modifier/*.json, or the
+        // inline SNBT a command carries, as JSON). Runs each in order with
+        // the same functions the container tables support; false, with
+        // `error`, when one names a function this engine does not model.
+        bool ApplyItemModifier(const nlohmann::json& modifier, ItemStack& stack, JavaRandom& random,
+                               std::string& error, const LootLevelContext* level = nullptr);
 
         // Forget every parsed table; the next Fill re-reads the data pack.
         void Reload();

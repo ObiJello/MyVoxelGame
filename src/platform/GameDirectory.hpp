@@ -189,6 +189,28 @@ namespace Platform {
         bool GetReducedPortalRendering() const { return GetBool("reducedPortalRendering", false); }
         void SetReducedPortalRendering(bool reduced) { SetBool("reducedPortalRendering", reduced); }
 
+        // Render Resolution (engine option; MC has none — it is OptiFine's /
+        // Sodium's render scale): the world view's size as a percentage of
+        // the window's on each axis, 25..200 in steps of 5. Below or above
+        // 100 the level (sky, terrain, entities, particles, hand, portals,
+        // post effects) is drawn offscreen at that size and stretched
+        // bilinearly over the window before the GUI, which stays at the
+        // window's resolution; 100 draws straight into the window with no
+        // extra pass. Above 100 is supersampling. Read every frame
+        // (RenderBackend::RequestScaledScene); applies live. A preset puts
+        // it back to 100.
+        static constexpr int kMinRenderScale = 25;
+        static constexpr int kMaxRenderScale = 200;
+        int GetRenderScalePercent() const {
+            const int v = std::clamp(GetInt("renderScale", 100), kMinRenderScale, kMaxRenderScale);
+            return (v + 2) / 5 * 5;
+        }
+        void SetRenderScalePercent(int percent) {
+            const int v = std::clamp(percent, kMinRenderScale, kMaxRenderScale);
+            SetInt("renderScale", (v + 2) / 5 * 5);
+            NoteGraphicsOptionChanged();
+        }
+
         // macOS only: render at the display's native (Retina) pixel density.
         // GLFW_COCOA_RETINA_FRAMEBUFFER is a window-creation hint, so this
         // takes effect on the next launch. Default OFF on Intel Macs — the

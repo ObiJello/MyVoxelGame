@@ -1,32 +1,54 @@
 // File: src/client/renderer/entity/StickFigureGeometry.cpp
 #include "StickFigureGeometry.hpp"
 #include "common/core/Mth.hpp"
+#include <algorithm>
 #include <cmath>
 
 namespace Render {
 
     namespace {
 
-        void PushLine(std::vector<StickVertex>& out,
-                      const glm::vec3& a, const glm::vec3& b,
-                      uint8_t r, uint8_t g, uint8_t bl, uint8_t al) {
-            out.push_back({a.x, a.y, a.z, 0.0f, 0.0f, r, g, bl, al});
-            out.push_back({b.x, b.y, b.z, 0.0f, 0.0f, r, g, bl, al});
+        using Paint = Game::StickFigurePaint;
+
+        // One vertex. `cell` rides the vertex's unused `v` (the launcher's
+        // painter reads it back to pick a cell); `u` stays 0 — the world
+        // renderer writes the body scale there for the strip width.
+        StickVertex Vert(const glm::vec3& p, const PlayerColor& c, int cell) {
+            return StickVertex{ p.x, p.y, p.z, 0.0f, static_cast<float>(cell), c.r, c.g, c.b, c.a };
         }
 
-        void PushCircle(std::vector<StickVertex>& out,
-                        const glm::vec3& center, const glm::vec3& right,
-                        const glm::vec3& up, float radius, int segments,
-                        float startAngle, float endAngle,
-                        uint8_t r, uint8_t g, uint8_t bl, uint8_t al) {
-            float step = (endAngle - startAngle) / static_cast<float>(segments);
-            for (int i = 0; i < segments; ++i) {
-                float a0 = startAngle + step * static_cast<float>(i);
-                float a1 = startAngle + step * static_cast<float>(i + 1);
-                glm::vec3 p0 = center + right * (std::cos(a0) * radius) + up * (std::sin(a0) * radius);
-                glm::vec3 p1 = center + right * (std::cos(a1) * radius) + up * (std::sin(a1) * radius);
-                PushLine(out, p0, p1, r, g, bl, al);
+        void PushLine(std::vector<StickVertex>& out,
+                      const glm::vec3& a, const glm::vec3& b,
+                      const PlayerColor& c, int cell) {
+            out.push_back(Vert(a, c, cell));
+            out.push_back(Vert(b, c, cell));
+        }
+
+        // A limb from `a` to `b`, as the part's cells: one line per cell for
+        // a painted figure (cell 0 at `a`), one whole line for a uniform one.
+        void PushPartLine(std::vector<StickVertex>& out,
+                          const glm::vec3& a, const glm::vec3& b,
+                          const StickFigureColors& colors, Paint::Part part) {
+            const int first = Paint::FirstCell(part);
+            if (colors.uniform) {
+                PushLine(out, a, b, colors.cell[first], first);
+                return;
             }
+            const int n = Paint::CellCount(part);
+            for (int i = 0; i < n; ++i) {
+                const glm::vec3 p0 = glm::mix(a, b, static_cast<float>(i) / static_cast<float>(n));
+                const glm::vec3 p1 = glm::mix(a, b, static_cast<float>(i + 1) / static_cast<float>(n));
+                PushLine(out, p0, p1, colors.cell[first + i], first + i);
+            }
+        }
+
+        // The cell of segment `i` of `segments` when a part's cells divide
+        // the arc evenly (a uniform figure: always the part's first cell).
+        int ArcCell(const StickFigureColors& colors, Paint::Part part, int i, int segments) {
+            const int first = Paint::FirstCell(part);
+            if (colors.uniform) return first;
+            const int n = Paint::CellCount(part);
+            return first + std::min(n - 1, (i * n) / segments);
         }
 
         // Push a filled annular ring (or arc) as triangle pairs. Two triangles
@@ -38,11 +60,14 @@ namespace Render {
         // This replaces the old N-line-segment "stroke" approach for circles.
         // Because there are no separate quads, there are no per-segment joins
         // and no possible gaps regardless of view angle.
+        //
+        // `cellOf(i)` names segment i's paint cell.
+        template <class CellOf>
         void PushArcRing(std::vector<StickVertex>& out,
                          const glm::vec3& center, const glm::vec3& right,
                          const glm::vec3& up, float radius, float halfWidth,
                          int segments, float startAngle, float endAngle,
-                         uint8_t r, uint8_t g, uint8_t bl, uint8_t al) {
+                         const StickFigureColors& colors, CellOf&& cellOf) {
             if (segments < 1) return;
             const float rIn  = radius - halfWidth;
             const float rOut = radius + halfWidth;
@@ -50,10 +75,9 @@ namespace Render {
             auto vertAt = [&](float angle, float rad) -> glm::vec3 {
                 return center + right * (std::cos(angle) * rad) + up * (std::sin(angle) * rad);
             };
-            auto push = [&](const glm::vec3& p) {
-                out.push_back({p.x, p.y, p.z, 0.0f, 0.0f, r, g, bl, al});
-            };
             for (int i = 0; i < segments; ++i) {
+                const int cell = cellOf(i);
+                const PlayerColor& c = colors.cell[cell];
                 float a0 = startAngle + step * static_cast<float>(i);
                 float a1 = startAngle + step * static_cast<float>(i + 1);
                 glm::vec3 i0 = vertAt(a0, rIn);
@@ -66,29 +90,32 @@ namespace Render {
                 // from in FRONT of the player, so wind the triangles the other
                 // way: CCW when viewed from +lookDir, which means each triangle
                 // gets reversed compared to the natural cross(right, up) side.
-                push(i0); push(o1); push(o0);
-                push(i0); push(i1); push(o1);
+                out.push_back(Vert(i0, c, cell)); out.push_back(Vert(o1, c, cell)); out.push_back(Vert(o0, c, cell));
+                out.push_back(Vert(i0, c, cell)); out.push_back(Vert(i1, c, cell)); out.push_back(Vert(o1, c, cell));
             }
         }
 
         // Push a filled disc as a triangle fan. The disc normal faces along `normal`.
         // With CullMode::Back, the disc is only visible from the side `normal` points at.
+        template <class CellOf>
         void PushDisc(std::vector<StickVertex>& out,
                       const glm::vec3& center, const glm::vec3& right,
                       const glm::vec3& up, const glm::vec3& /*normal*/,
                       float radius, int segments,
-                      uint8_t r, uint8_t g, uint8_t bl, uint8_t al) {
+                      const StickFigureColors& colors, CellOf&& cellOf) {
             constexpr float TWO_PI = 2.0f * 3.14159265f;
             float step = TWO_PI / static_cast<float>(segments);
             for (int i = 0; i < segments; ++i) {
+                const int cell = cellOf(i);
+                const PlayerColor& c = colors.cell[cell];
                 float a0 = step * static_cast<float>(i);
                 float a1 = step * static_cast<float>(i + 1);
                 glm::vec3 p0 = center + right * (std::cos(a0) * radius) + up * (std::sin(a0) * radius);
                 glm::vec3 p1 = center + right * (std::cos(a1) * radius) + up * (std::sin(a1) * radius);
                 // Triangle: center, p0, p1 (CCW when viewed from normal direction)
-                out.push_back({center.x, center.y, center.z, 0.0f, 0.0f, r, g, bl, al});
-                out.push_back({p0.x, p0.y, p0.z, 0.0f, 0.0f, r, g, bl, al});
-                out.push_back({p1.x, p1.y, p1.z, 0.0f, 0.0f, r, g, bl, al});
+                out.push_back(Vert(center, c, cell));
+                out.push_back(Vert(p0, c, cell));
+                out.push_back(Vert(p1, c, cell));
             }
         }
 
@@ -204,39 +231,46 @@ namespace Render {
                           std::vector<StickVertex>& discTris,
                           const glm::vec3& entityFeetPos,
                           float headYawDeg, float bodyYawDeg,
-                          float /*pitchDeg*/, bool isCrouching,
+                          float pitchDeg, bool isCrouching,
                           PlayerColor color, bool isSitting) {
-        const uint8_t cr = color.r, cg = color.g, cb = color.b, ca = color.a;
+        BuildStickFigure(lineVerts, ringTris, discTris, entityFeetPos, headYawDeg, bodyYawDeg,
+                         pitchDeg, isCrouching, StickFigureColors::Uniform(color), isSitting);
+    }
+
+    void BuildStickFigure(std::vector<StickVertex>& lineVerts,
+                          std::vector<StickVertex>& ringTris,
+                          std::vector<StickVertex>& discTris,
+                          const glm::vec3& entityFeetPos,
+                          float headYawDeg, float bodyYawDeg,
+                          float /*pitchDeg*/, bool isCrouching,
+                          const StickFigureColors& colors, bool isSitting) {
+        using Part = Paint::Part;
         constexpr float PI = 3.14159265f;
         const glm::vec3 worldUp{0.0f, 1.0f, 0.0f};
 
         // The joints — shared with StickFigureHand (a lead held in the hand).
         const StickFigureSkeleton sk =
             ComputeStickFigureSkeleton(entityFeetPos, headYawDeg, bodyYawDeg, isCrouching, isSitting);
-        isCrouching = sk.isCrouching;
-        const glm::vec3 bodyFwd = sk.bodyFwd, bodyRight = sk.bodyRight;
         const glm::vec3 lookDir = sk.lookDir, faceRight = sk.faceRight;
-        const glm::vec3 feetPos = sk.feetPos;
         const glm::vec3 neck = sk.neck, hip = sk.hip, headC = sk.headC;
         const glm::vec3 footL = sk.footL, footR = sk.footR;
         const glm::vec3 shoulderL = sk.shoulderL, shoulderR = sk.shoulderR;
         const glm::vec3 handL = sk.handL, handR = sk.handR;
         const glm::vec3 legTopL = sk.legTopL, legTopR = sk.legTopR;
-        const float hipY = sk.hipY;
-        (void)bodyFwd; (void)bodyRight; (void)lookDir; (void)faceRight; (void)feetPos;
-        (void)neck; (void)hip; (void)headC; (void)footL; (void)footR; (void)hipY;
-        (void)legTopL; (void)legTopR; (void)handL; (void)handR; (void)shoulderL; (void)shoulderR;
 
         // --- LINES: Body, legs, arms ---
-        PushLine(lineVerts, neck, hip, cr, cg, cb, ca);
+        PushPartLine(lineVerts, neck, hip, colors, Part::Torso);
         if (isSitting) {
-            // The pelvis between the two leg pivots, then each leg.
-            PushLine(lineVerts, legTopL, legTopR, cr, cg, cb, ca);
+            // The pelvis between the two leg pivots, then each leg. It is the
+            // torso's continuation, so it takes the torso's last cell.
+            const int pelvis = Paint::FirstCell(Part::Torso) +
+                               (colors.uniform ? 0 : Paint::CellCount(Part::Torso) - 1);
+            PushLine(lineVerts, legTopL, legTopR, colors.cell[pelvis], pelvis);
         }
-        PushLine(lineVerts, legTopL, footL, cr, cg, cb, ca);
-        PushLine(lineVerts, legTopR, footR, cr, cg, cb, ca);
-        PushLine(lineVerts, shoulderL, handL, cr, cg, cb, ca);
-        PushLine(lineVerts, shoulderR, handR, cr, cg, cb, ca);
+        PushPartLine(lineVerts, legTopL, footL, colors, Part::LeftLeg);
+        PushPartLine(lineVerts, legTopR, footR, colors, Part::RightLeg);
+        PushPartLine(lineVerts, shoulderL, handL, colors, Part::LeftArm);
+        PushPartLine(lineVerts, shoulderR, handR, colors, Part::RightArm);
 
         // --- RING TRIANGLES: head outline + smile arc ---
         // Built as flat annular rings in the head's local plane, NOT as N
@@ -253,15 +287,20 @@ namespace Render {
         const float headRadius = 0.18f;
         const glm::vec3 frontC = headC;
 
+        // Angle 0 is +faceRight — the player's right — and the angle grows
+        // toward worldUp: up over the crown, the HeadRing cells' order.
         PushArcRing(ringTris, frontC, faceRight, worldUp,
                     headRadius, kRingHalfWidth, kHeadCircleSegments,
-                    0.0f, 2.0f * PI, cr, cg, cb, ca);
+                    0.0f, 2.0f * PI, colors,
+                    [&](int i) { return ArcCell(colors, Part::HeadRing, i, kHeadCircleSegments); });
 
-        // Smile (lower half of a small circle)
+        // Smile (lower half of a small circle): π (the player's left) down
+        // through the chin to 2π (their right).
         const glm::vec3 mouthC = frontC - worldUp * 0.04f;
         PushArcRing(ringTris, mouthC, faceRight, worldUp,
                     0.07f, kRingHalfWidth, kSmileSegments,
-                    PI, 2.0f * PI, cr, cg, cb, ca);
+                    PI, 2.0f * PI, colors,
+                    [&](int i) { return ArcCell(colors, Part::Smile, i, kSmileSegments); });
 
         // --- RING TRIANGLES: Eyes as tiny flat rings in the head's local plane ---
         // Eyes were originally 3D line segments along faceRight, but in the world
@@ -274,18 +313,24 @@ namespace Render {
         const float eyeOffY = 0.04f, eyeOffX = 0.06f, eyeRad = 0.025f;
         glm::vec3 eyeL = frontC + worldUp * eyeOffY + faceRight * (-eyeOffX);
         glm::vec3 eyeR = frontC + worldUp * eyeOffY + faceRight * ( eyeOffX);
+        const int eyeCellL = Paint::FirstCell(Part::Eyes);
+        const int eyeCellR = eyeCellL + (colors.uniform ? 0 : 1);
         PushArcRing(ringTris, eyeL, faceRight, worldUp,
-                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, cr, cg, cb, ca);
+                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, colors,
+                    [&](int) { return eyeCellL; });
         PushArcRing(ringTris, eyeR, faceRight, worldUp,
-                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, cr, cg, cb, ca);
+                    eyeRad, eyeRad, /*segments*/12, 0.0f, 2.0f * PI, colors,
+                    [&](int) { return eyeCellR; });
 
         // --- TRIANGLES: Back-of-head filled disc (GPU face-culled) ---
         // Placed at headC (no offset) so it lines up with the neck/body connection.
         // Front features are offset forward, so they still render in front of this disc.
         // Match the front ring's 64-segment smoothness — the old 16-segment disc
         // showed visible polygonal sides next to the smooth front circle.
+        constexpr int kDiscSegments = 64;
         PushDisc(discTris, headC, faceRight, worldUp, -lookDir,
-                 headRadius, 64, cr, cg, cb, ca);
+                 headRadius, kDiscSegments, colors,
+                 [&](int i) { return ArcCell(colors, Part::BackOfHead, i, kDiscSegments); });
     }
 
     glm::vec3 StickFigureHand(const glm::vec3& feetPos, float bodyYawDeg,

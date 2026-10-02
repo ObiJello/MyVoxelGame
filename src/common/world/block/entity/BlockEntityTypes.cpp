@@ -32,10 +32,12 @@
 #include "BellBlockEntity.hpp"
 #include "CopperGolemStatueBlockEntity.hpp"
 #include "ChiseledBookShelfBlockEntity.hpp"
+#include "BeehiveBlockEntity.hpp"
 #include "PotentSulfurBlockEntity.hpp"
 #include "SculkBlockEntities.hpp"
 #include "AurelithBlockEntities.hpp"
 #include "HushLighthouseLampBlockEntity.hpp"
+#include "CraftingTableBlockEntity.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "../../../core/Log.hpp"
 #include <memory>
@@ -55,6 +57,8 @@ namespace Game {
         // populated once at startup and never mutated thereafter.
         std::vector<std::unique_ptr<BlockEntityType>> g_typeStorage;
         std::unordered_map<std::string, const BlockEntityType*> g_byStringId;
+        // Per-BlockID lazy types (LazyForBlock): never created by SetBlock.
+        std::vector<const BlockEntityType*> g_lazyByBlockId;
 
         const BlockEntityType* RegisterType(
                 uint16_t typeId, std::string stringId,
@@ -482,6 +486,10 @@ namespace Game {
             [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
                 return std::make_unique<ChiseledBookShelfBlockEntity>(t, pos, id);
             });
+        registerMany(BlockEntityTypeIds::BEEHIVE, "beehive", { BlockID::BeeNest, BlockID::Beehive },
+            [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                return std::make_unique<BeehiveBlockEntity>(t, pos, id);
+            });
 
         // ── Potent sulfur ─────────────────────────────────────────────────
         // MC BlockEntityTypes.POTENT_SULFUR ("minecraft:potent_sulfur"): the
@@ -565,6 +573,25 @@ namespace Game {
                 return std::make_unique<ChoirCabinetBlockEntity>(t, pos, id);
             });
 
+        // ── Engine: shared crafting tables ────────────────────────────────
+        // The stored grid of a crafting table under the shared_crafting_tables
+        // rule (CraftingTableBlockEntity). Valid for the crafting table (the
+        // Anvil loader's IsValidFor check) but LAZY: kept out of s_byBlockId
+        // so SetBlock never creates one and nothing that asks HasBlockEntity
+        // (the mesher, pistons, placement) sees a vanilla table differently.
+        {
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::OBEY_CRAFTING_TABLE, "obeycraft:crafting_table",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<CraftingTableBlockEntity>(t, pos, id);
+                },
+                { BlockID::CraftingTable });
+            s_byId[BlockEntityTypeIds::OBEY_CRAFTING_TABLE] = type;
+            g_byStringId[type->StringId()] = type;
+            g_lazyByBlockId.assign(static_cast<size_t>(BlockID::Count), nullptr);
+            g_lazyByBlockId[static_cast<size_t>(BlockID::CraftingTable)] = type;
+        }
+
         Log::Info("[BlockEntityTypes] initialised with %zu type(s)", g_typeStorage.size());
     }
 
@@ -598,6 +625,14 @@ namespace Game {
 
     void BaseContainerBlockEntity::ApplyItemComponents(const DataComponentMap& components) {
         if (auto name = components.get(DataComponents::CUSTOM_NAME)) m_customName = *name;
+        // LOCK — BaseContainerBlockEntity.applyImplicitComponents.
+        if (auto lock = components.get(DataComponents::LOCK)) m_lock = lock->predicate;
+        // CONTAINER_LOOT — RandomizableContainerBlockEntity.applyImplicit-
+        // Components: the table (and seed) rolled when first opened.
+        if (auto loot = components.get(DataComponents::CONTAINER_LOOT)) {
+            SetLootTable(loot->lootTable, loot->seed);
+            SetChanged();
+        }
         if (auto contents = components.get(DataComponents::CONTAINER)) {
             // ItemContainerContents.copyInto: slot by slot, the rest emptied.
             for (size_t i = 0; i < m_items.size(); ++i) {
@@ -607,8 +642,14 @@ namespace Game {
         }
     }
 
+    bool BaseContainerBlockEntity::CanUnlockWith(const ItemStack& held) const {
+        return m_lock.IsEmpty() || BlockData::LockUnlocksWith(LockCode{m_lock}, held);
+    }
+
     void BaseContainerBlockEntity::CollectComponents(DataComponentMap& out) const {
         if (!m_customName.empty()) out.set(DataComponents::CUSTOM_NAME, m_customName);
+        if (!m_lock.IsEmpty()) out.set(DataComponents::LOCK, LockCode{m_lock});
+        if (HasLootTable()) out.set(DataComponents::CONTAINER_LOOT, SeededContainerLoot{m_lootTable, m_lootTableSeed});
         // ItemContainerContents.fromItems: trailing empties dropped; nothing
         // at all for an empty container (its patch would equal the default).
         ItemContainerContents contents;
@@ -646,6 +687,15 @@ namespace Game {
                          GetWorldPos().x, GetWorldPos().y, GetWorldPos().z, key.c_str());
         }
         MarkDirty();
+    }
+
+    const BlockEntityType* BlockEntityTypes::LazyForBlock(BlockID id) {
+        const auto idx = static_cast<size_t>(id);
+        return (idx < g_lazyByBlockId.size()) ? g_lazyByBlockId[idx] : nullptr;
+    }
+
+    bool BlockEntityTypes::MayHaveBlockEntity(BlockID id) {
+        return HasBlockEntity(id) || LazyForBlock(id) != nullptr;
     }
 
     bool BlockEntityTypes::HasBlockEntity(BlockID id) {

@@ -6,6 +6,8 @@
 #include "../FontRenderer.hpp"
 #include <GLFW/glfw3.h>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <memory>
 
 namespace Render {
@@ -35,9 +37,34 @@ namespace Render {
 
         uint32_t color = active ? WidgetDims::TEXT_COLOR_ACTIVE
                                 : WidgetDims::TEXT_COLOR_INACTIVE;
-        g.DrawCenteredString(label, m_x + m_width / 2,
-                             m_y + (m_height - FontRenderer::LINE_HEIGHT) / 2 + 1,
-                             ApplyAlpha(color, m_alpha));
+        RenderScrollingString(g, label, 2, ApplyAlpha(color, m_alpha));
+    }
+
+    void AbstractWidget::RenderScrollingString(GuiGraphics& g, const std::string& label,
+                                               int margin, uint32_t color) const {
+        const int left   = m_x + margin;
+        const int right  = m_x + m_width - margin;
+        const int top    = m_y;
+        const int bottom = m_y + m_height;
+        const int textTop = (top + bottom - FontRenderer::LINE_HEIGHT) / 2 + 1;
+        const int available = right - left;
+        const int lineWidth = g.GetStringWidth(label);
+        if (lineWidth > available) {
+            const int maxPosition = lineWidth - available;
+            const double time = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            const double period = std::max(static_cast<double>(maxPosition) * 0.5, 3.0);
+            const double alpha = std::sin(1.5707963267948966 *
+                                          std::cos(6.283185307179586 * time / period)) / 2.0 + 0.5;
+            const double pos = alpha * static_cast<double>(maxPosition);
+            g.EnableScissor(left, top, right, bottom);
+            g.DrawString(label, left - static_cast<int>(pos), textTop, color);
+            g.DisableScissor();
+        } else {
+            const int centerX = (left + right) / 2;
+            const int x = std::clamp(centerX, left + lineWidth / 2, right - lineWidth / 2);
+            g.DrawCenteredString(label, x, textTop, color);
+        }
     }
 
     void AbstractWidget::PlayDownSound() {
@@ -79,9 +106,7 @@ namespace Render {
 
         uint32_t color = active ? WidgetDims::TEXT_COLOR_ACTIVE
                                 : WidgetDims::TEXT_COLOR_INACTIVE;
-        g.DrawCenteredString(m_message, m_x + m_width / 2,
-                             m_y + (m_height - FontRenderer::LINE_HEIGHT) / 2 + 1,
-                             ApplyAlpha(color, m_alpha));
+        RenderScrollingString(g, m_message, 2, ApplyAlpha(color, m_alpha));
     }
 
     void SliderButton::SetValue(double v) {

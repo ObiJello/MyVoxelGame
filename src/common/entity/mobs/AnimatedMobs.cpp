@@ -7,6 +7,7 @@
 #include "common/particle/ParticleOptions.hpp"
 
 #include "common/core/JavaRandom.hpp"
+#include "common/world/biome/Biomes.hpp"
 #include "common/core/Log.hpp"
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/SoundType.hpp"
@@ -17,6 +18,8 @@
 #include "common/entity/ai/goals/AttackGoals.hpp"
 #include "common/entity/ai/goals/TargetGoals.hpp"
 #include "common/entity/ai/goals/BeeGoals.hpp"
+#include "common/world/block/entity/BeehiveBlockEntity.hpp"
+#include "common/world/level/ILevelWrite.hpp"
 #include "common/entity/mobs/Fish.hpp"
 #include "common/entity/ai/goals/LongJumpGoal.hpp"
 #include "common/entity/ai/goals/HappyGhastGoals.hpp"
@@ -60,9 +63,16 @@
 #include "common/world/damagesource/DamageSourceInfo.hpp"
 #include "common/world/level/WorldDrops.hpp"
 #include "common/world/tags/DataTags.hpp"
+#include "common/entity/MobEquipment.hpp"
+#include "common/sound/LevelEventSounds.hpp"
+#include "common/world/block/Direction.hpp"
+#include "common/world/block/RedstoneStateUtil.hpp"
+#include "common/world/block/entity/CopperGolemStatueBlockEntity.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
+#include <string_view>
 
 namespace Game {
 
@@ -91,6 +101,90 @@ namespace Game {
         m_brain = std::make_unique<Brain>();
         FrogAi::InitBrain(*this, *m_brain);
         FrogAi::InitMemories(*this);
+    }
+
+    namespace {
+        // data/minecraft/tags/worldgen/biome/spawns_{warm,cold}_variant_frogs
+        // .json, the nested tags (#is_jungle, #is_savanna, #is_nether,
+        // #is_badlands, #is_end) flattened — this engine has no biome-tag
+        // resolver.
+        constexpr std::string_view kWarmFrogBiomes[] = {
+            "desert", "warm_ocean",
+            "bamboo_jungle", "jungle", "sparse_jungle",
+            "savanna", "savanna_plateau", "windswept_savanna",
+            "nether_wastes", "soul_sand_valley", "crimson_forest", "warped_forest", "basalt_deltas",
+            "badlands", "eroded_badlands", "wooded_badlands",
+            "mangrove_swamp",
+        };
+        constexpr std::string_view kColdFrogBiomes[] = {
+            "snowy_plains", "ice_spikes", "frozen_peaks", "jagged_peaks", "snowy_slopes",
+            "frozen_ocean", "deep_frozen_ocean", "grove", "deep_dark", "frozen_river",
+            "snowy_taiga", "snowy_beach",
+            "the_end", "end_highlands", "end_midlands", "small_end_islands", "end_barrens",
+        };
+        bool FrogBiomeIn(std::string_view biome, const std::string_view* list, size_t n) {
+            for (size_t i = 0; i < n; ++i) if (list[i] == biome) return true;
+            return false;
+        }
+        std::string_view StripMinecraftNs(std::string_view id) {
+            constexpr std::string_view kNs = "minecraft:";
+            if (id.substr(0, kNs.size()) == kNs) id.remove_prefix(kNs.size());
+            return id;
+        }
+    } // namespace
+
+    const char* Frog::VariantName(Variant v) {
+        switch (v) {
+            case Variant::Warm: return "warm";
+            case Variant::Cold: return "cold";
+            default:            return "temperate";
+        }
+    }
+
+    bool Frog::VariantFromName(std::string_view id, Variant& out) {
+        id = StripMinecraftNs(id);
+        if (id == "temperate") { out = Variant::Temperate; return true; }
+        if (id == "warm")      { out = Variant::Warm;      return true; }
+        if (id == "cold")      { out = Variant::Cold;      return true; }
+        return false;
+    }
+
+    const char* Frog::VariantTexture(Variant v) {
+        // FrogVariants.bootstrap's asset ids (26.3: entity/frog/frog_<name>).
+        switch (v) {
+            case Variant::Warm: return "assets/textures/entity/frog/frog_warm.png";
+            case Variant::Cold: return "assets/textures/entity/frog/frog_cold.png";
+            default:            return "assets/textures/entity/frog/frog_temperate.png";
+        }
+    }
+
+    Frog::Variant Frog::SelectVariantToSpawn(std::string_view biome, JavaRandom& random) {
+        // PriorityProvider.pick: the highest matched priority's entries, in
+        // the registry's listing (cold, temperate, warm — identifier order),
+        // then Util.getRandomSafe's nextInt(size). The warm and cold tags do
+        // not overlap, so one entry survives — the draw still happens.
+        biome = StripMinecraftNs(biome);
+        Variant pick = Variant::Temperate;
+        if (FrogBiomeIn(biome, kColdFrogBiomes, std::size(kColdFrogBiomes))) {
+            pick = Variant::Cold;
+        } else if (FrogBiomeIn(biome, kWarmFrogBiomes, std::size(kWarmFrogBiomes))) {
+            pick = Variant::Warm;
+        }
+        (void)random.NextInt(1);
+        return pick;
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    Frog::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        if (m_level) {
+            std::string_view biome = "plains";
+            if (const IBlockAccess* blocks = m_level->Blocks()) {
+                const glm::ivec3 p = BlockPosition();
+                biome = BiomeRegistry::Get(blocks->GetBiome(p.x, p.y, p.z)).name;
+            }
+            SetVariant(SelectVariantToSpawn(biome, m_level->Random()));
+        }
+        return GenericAnimal::FinalizeSpawn(reason, std::move(groupData));
     }
 
     void Frog::PlayEatingSound() {
@@ -1490,18 +1584,17 @@ namespace Game {
 
     void Piglin::PerformRangedAttack(LivingEntity& target, float power) {
         (void)power;
-        // AbstractPiglin.getTarget: the brain's ATTACK_TARGET.
+        // MC performCrossbowAttack aims at getTarget() — AbstractPiglin's
+        // brain target (GetTarget override).
         LivingEntity* aim = &target;
-        if (const Brain* brain = GetBrain()) {
-            if (auto* t = dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AttackTarget))) aim = t;
-        }
+        if (LivingEntity* t = GetTarget()) aim = t;
         MobCrossbow::PerformCrossbowAttack(*this, *this, aim, MobCrossbow::kMobArrowPower);
     }
 
     bool Piglin::CanUseNonMeleeWeapon(const ItemStack& stack) const {
         // MC Piglin.canUseNonMeleeWeapon: the crossbow, or a KINETIC_WEAPON
         // (a spear — its charge is the brain's SpearAttack, not a melee).
-        return stack.itemId == Items::Crossbow || Spear::Kinetic(stack) != nullptr;
+        return stack.itemId == Items::Crossbow || Spear::Kinetic(stack).has_value();
     }
 
     bool Piglin::WantsToPickUp(const ItemStack& stack) const {
@@ -2043,10 +2136,99 @@ namespace Game {
             m_flowerState->remainingCooldownBeforeLocatingNewFlower =
                 m_level->Random().NextInt(20, 60);
         }
+        // The hive cycle (BeehiveBlockEntity) at MC's priorities, in MC's
+        // registration order.
+        m_goalSelector.AddGoal(1, std::make_unique<BeeEnterHiveGoal>(this, m_flowerState));
+        m_goalSelector.AddGoal(3, std::make_unique<ValidateHiveGoal>(this, m_flowerState));
         m_goalSelector.AddGoal(3, std::make_unique<ValidateFlowerGoal>(this, m_flowerState));
-        m_goalSelector.AddGoal(4, std::make_unique<BeePollinateGoal>(this, m_flowerState));
+        auto pollinate = std::make_unique<BeePollinateGoal>(this, m_flowerState);
+        m_pollinateGoal = pollinate.get();
+        m_goalSelector.AddGoal(4, std::move(pollinate));
+        m_goalSelector.AddGoal(5, std::make_unique<BeeLocateHiveGoal>(this, m_flowerState));
+        auto goToHive = std::make_unique<BeeGoToHiveGoal>(this, m_flowerState);
+        m_goToHiveGoal = goToHive.get();
+        m_goalSelector.AddGoal(5, std::move(goToHive));
+        m_goalSelector.AddGoal(6, std::make_unique<BeeGoToKnownFlowerGoal>(this, m_flowerState));
         m_goalSelector.AddGoal(7, std::make_unique<BeeGrowCropGoal>(this, m_flowerState));
         m_goalSelector.AddGoal(8, std::make_unique<BeeWanderGoal>(this, m_flowerState));
+    }
+
+    // ── Bee hive cycle ─────────────────────────────────────────────────────
+
+    bool Bee::WantsToEnterHive() const {
+        // MC wantsToEnterHive: not kept out, not pollinating, not stung, no
+        // target; then nectar, tired of looking (3600 ticks), or
+        // BEES_STAY_IN_HIVE — and never into a hive by a fire.
+        if (m_stayOutOfHiveCountdown > 0) return false;
+        if (m_pollinateGoal && m_pollinateGoal->IsPollinating()) return false;
+        if (m_hasStung || GetTarget() != nullptr) return false;
+        bool wants = HasNectar() || GetTicksWithoutNectar() > 3600;
+        if (!wants && m_level) {
+            if (ILevelWrite* write = m_level->MutableBlocks()) {
+                wants = BeesStayInHive(*write, BlockPosition());
+            }
+        }
+        if (!wants) return false;
+        BeehiveBlockEntity* hive = GetBeehive();
+        if (hive && m_level) {
+            if (ILevelWrite* write = m_level->MutableBlocks(); write && hive->IsFireNearby(*write)) return false;
+        }
+        return true;
+    }
+
+    bool Bee::CloserThan(const glm::ivec3& pos, int distance) const {
+        // MC Vec3i.closerThan: distSqr between block positions < d².
+        const glm::dvec3 d = glm::dvec3(pos - BlockPosition());
+        return glm::dot(d, d) < static_cast<double>(distance) * distance;
+    }
+
+    BeehiveBlockEntity* Bee::GetBeehive() const {
+        if (!m_hivePos || IsTooFarAway(*m_hivePos) || !m_level) return nullptr;
+        ILevelWrite* write = m_level->MutableBlocks();
+        if (!write) return nullptr;
+        return dynamic_cast<BeehiveBlockEntity*>(write->GetBlockEntity(*m_hivePos));
+    }
+
+    bool Bee::DoesHiveHaveSpace(const glm::ivec3& pos) const {
+        ILevelWrite* write = m_level ? m_level->MutableBlocks() : nullptr;
+        auto* hive = write ? dynamic_cast<BeehiveBlockEntity*>(write->GetBlockEntity(pos)) : nullptr;
+        return hive && !hive->IsFull();
+    }
+
+    void Bee::DropOffNectar() {
+        SetHasNectar(false);
+        SetCropsGrownSincePollination(0);
+    }
+
+    void Bee::PathfindRandomlyTowards(const glm::ivec3& target) {
+        // MC pathfindRandomlyTowards: a hop of 6/8 (half the Manhattan
+        // distance under 15), lifted ±4 toward a target more than 2 above or
+        // below, within 0.314 rad of the target's direction — an air cell
+        // that is not water (AirRandomPos.getPosTowards).
+        const glm::dvec3 targetVec(target.x + 0.5, static_cast<double>(target.y), target.z + 0.5);
+        const glm::ivec3 beePos = BlockPosition();
+        int yAdjust = 0;
+        const int yDelta = static_cast<int>(targetVec.y) - beePos.y;
+        if (yDelta > 2) yAdjust = 4;
+        else if (yDelta < -2) yAdjust = -4;
+        int xzDist = 6;
+        int yDist = 8;
+        const int dist = std::abs(beePos.x - target.x) + std::abs(beePos.y - target.y) + std::abs(beePos.z - target.z);
+        if (dist < 15) {
+            xzDist = dist / 2;
+            yDist = dist / 2;
+        }
+        const glm::dvec3 dir = targetVec - position;
+        std::optional<glm::dvec3> next = RandomPos::GetAirAndWaterPos(*this, xzDist, yDist, yAdjust, dir.x, dir.z,
+                                                                      0.3141592741012573);
+        if (!next) return;
+        if (const IBlockAccess* blocks = m_level ? m_level->Blocks() : nullptr) {
+            const glm::ivec3 cell(static_cast<int>(std::floor(next->x)), static_cast<int>(std::floor(next->y)),
+                                  static_cast<int>(std::floor(next->z)));
+            const BlockID id = blocks->GetBlock(cell.x, cell.y, cell.z);
+            if (id == BlockID::Water) return;
+        }
+        GetNavigation().MoveTo(next->x, next->y, next->z, 1.0);
     }
 
     uint8_t Bee::GetAnimStateByte() const {
@@ -2069,7 +2251,9 @@ namespace Game {
     // the load path can reach a bee whose goals have not been built yet.
 
     bool Bee::HasNectar() const {
-        return m_flowerState ? m_flowerState->hasNectar : m_clientHasNectar;
+        // The client's flower state is never written (the goals run on the
+        // server); its nectar bit arrives on the anim byte — so either.
+        return (m_flowerState && m_flowerState->hasNectar) || m_clientHasNectar;
     }
 
     void Bee::SetHasNectar(bool v) {
@@ -2171,11 +2355,15 @@ namespace Game {
                 target != nullptr && target->DistanceToSqr(*this) < 4.0;
             m_rolling = shouldRoll;
 
-            // MC Bee.aiStep: the new-flower search cooldown ticks down here.
+            // MC Bee.aiStep: the hive and new-flower cooldowns tick down
+            // here, and every 20 ticks an invalid hive is forgotten.
+            if (m_stayOutOfHiveCountdown > 0) --m_stayOutOfHiveCountdown;
+            if (m_remainingCooldownBeforeLocatingNewHive > 0) --m_remainingCooldownBeforeLocatingNewHive;
             if (m_flowerState &&
                 m_flowerState->remainingCooldownBeforeLocatingNewFlower > 0) {
                 --m_flowerState->remainingCooldownBeforeLocatingNewFlower;
             }
+            if (tickCount % 20 == 0 && !IsHiveValid()) m_hivePos.reset();
         }
     }
 
@@ -2250,9 +2438,8 @@ namespace Game {
     void Breeze::UpdateBrainActivity() { BreezeAi::UpdateActivity(*this); }
 
     void Breeze::PlayAmbientSound() {
-        const Brain* brain = GetBrain();
-        const bool hasTarget = brain && brain->HasMemoryValue(MemoryModule::AttackTarget);
-        if ((!hasTarget || !onGround) && m_level) {
+        // MC Breeze.playAmbientSound: getTarget() == null || !onGround().
+        if ((GetTarget() == nullptr || !onGround) && m_level) {
             m_level->PlayLocalSoundFromEntity(*this, GetAmbientSound(), GetSoundSource(), 1.0f, 1.0f);
         }
     }
@@ -2614,8 +2801,8 @@ namespace Game {
         WardenAi::SetDigCooldown(*this);
 
         Brain* brain = GetBrain();
-        Entity* currentTarget = brain ? brain->GetEntity(MemoryModule::AttackTarget)
-                                      : nullptr;
+        // MC: !(getTarget() instanceof Player) — the validated brain target.
+        const LivingEntity* currentTarget = GetTarget();
         const bool maybeSwitchTarget = !(currentTarget && currentTarget->IsPlayer());
 
         // MC AngerManagement.increaseAnger — clamp at 150.
@@ -2662,9 +2849,7 @@ namespace Game {
     int Warden::GetActiveAnger() const {
         // MC AngerManagement.getActiveAnger(getTarget()): with a target its
         // anger, without one the highest on the books.
-        const Brain* brain = GetBrain();
-        const Entity* target = brain ? brain->GetEntity(MemoryModule::AttackTarget)
-                                     : nullptr;
+        const Entity* target = GetTarget();
         if (target) {
             for (const AngerEntry& e : m_anger) {
                 if (e.entity == target) return e.anger;
@@ -3376,6 +3561,73 @@ namespace Game {
 
     // ══ CopperGolem ════════════════════════════════════════════════════════
 
+    namespace {
+        // MC CopperGolemOxidationLevels: UNAFFECTED and EXPOSED share the
+        // plain voice, WEATHERED and OXIDIZED each have their own.
+        struct CopperGolemVoice {
+            const char* spinHead;
+            const char* hurt;
+            const char* death;
+            const char* step;
+        };
+
+        const CopperGolemVoice& CopperGolemVoiceOf(CopperGolem::WeatherState state) {
+            static const CopperGolemVoice kPlain{
+                SoundEvents::COPPER_GOLEM_SPIN, SoundEvents::COPPER_GOLEM_HURT,
+                SoundEvents::COPPER_GOLEM_DEATH, SoundEvents::COPPER_GOLEM_STEP};
+            static const CopperGolemVoice kWeathered{
+                SoundEvents::COPPER_GOLEM_WEATHERED_SPIN, SoundEvents::COPPER_GOLEM_WEATHERED_HURT,
+                SoundEvents::COPPER_GOLEM_WEATHERED_DEATH, SoundEvents::COPPER_GOLEM_WEATHERED_STEP};
+            static const CopperGolemVoice kOxidized{
+                SoundEvents::COPPER_GOLEM_OXIDIZED_SPIN, SoundEvents::COPPER_GOLEM_OXIDIZED_HURT,
+                SoundEvents::COPPER_GOLEM_OXIDIZED_DEATH, SoundEvents::COPPER_GOLEM_OXIDIZED_STEP};
+            switch (state) {
+                case CopperGolem::WeatherState::Weathered: return kWeathered;
+                case CopperGolem::WeatherState::Oxidized:  return kOxidized;
+                default:                                   return kPlain;
+            }
+        }
+
+        // WeatheringCopper.WeatherState.next / previous (ordinal ± 1,
+        // clamped at the ends).
+        CopperGolem::WeatherState NextWeatherState(CopperGolem::WeatherState s) {
+            return s == CopperGolem::WeatherState::Oxidized
+                       ? s : static_cast<CopperGolem::WeatherState>(static_cast<uint8_t>(s) + 1);
+        }
+        CopperGolem::WeatherState PreviousWeatherState(CopperGolem::WeatherState s) {
+            return s == CopperGolem::WeatherState::Unaffected
+                       ? s : static_cast<CopperGolem::WeatherState>(static_cast<uint8_t>(s) - 1);
+        }
+
+        // RandomSource.nextIntBetweenInclusive(WEATHERING_TICK_FROM,
+        // WEATHERING_TICK_TO).
+        int64_t RollWeatheringDelay(JavaRandom& random) {
+            return random.NextInt(CopperGolem::kWeatheringTickFrom, CopperGolem::kWeatheringTickTo);
+        }
+
+        bool IsAxe(const ItemStack& stack) {
+            return !stack.IsEmpty() &&
+                   DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(stack.itemId), "minecraft:axes");
+        }
+    } // namespace
+
+    const char* CopperGolem::WeatherStateName(WeatherState state) {
+        // WeatheringCopper.WeatherState.CODEC (StringRepresentable).
+        switch (state) {
+            case WeatherState::Exposed:   return "exposed";
+            case WeatherState::Weathered: return "weathered";
+            case WeatherState::Oxidized:  return "oxidized";
+            default:                      return "unaffected";
+        }
+    }
+
+    CopperGolem::WeatherState CopperGolem::WeatherStateFromName(std::string_view name) {
+        if (name == "exposed")   return WeatherState::Exposed;
+        if (name == "weathered") return WeatherState::Weathered;
+        if (name == "oxidized")  return WeatherState::Oxidized;
+        return WeatherState::Unaffected;
+    }
+
     CopperGolem::CopperGolem(EntityLevel* level)
         : GenericPathfinderMob(EntityTypeId::CopperGolem, level) {
         // NO GOALS — MC's CopperGolem is all brain (AbstractGolem registers
@@ -3383,8 +3635,8 @@ namespace Game {
         m_goalSelector.Clear();
         m_targetSelector.Clear();
 
-        // MC CopperGolem's constructor, line for line. (The IGNORE/UNSET
-        // weathering tick setup is skipped — no weathering system.)
+        // MC CopperGolem's constructor, line for line (nextWeatheringTick
+        // starts UNSET — the first server tick rolls the deadline).
         GetNavigation().SetRequiredPathLength(48.0f);
         GetNavigation().SetCanOpenDoors(true);
         SetPersistenceRequired(true);
@@ -3397,24 +3649,126 @@ namespace Game {
         CopperGolemAi::InitBrain(*this, *m_brain);
         // MC: getBrain().setMemory(TRANSPORT_ITEMS_COOLDOWN_TICKS,
         // random.nextInt(60, 100)) — the first trip waits out the spawn
-        // cooldown.
+        // cooldown. RandomSource.nextInt(origin, bound) excludes the bound.
         if (m_level) {
             m_brain->SetMemory(MemoryModule::TransportItemsCooldownTicks,
-                               m_level->Random().NextInt(kSpawnCooldownMin,
-                                                         kSpawnCooldownMax));
+                               kSpawnCooldownMin +
+                                   m_level->Random().NextInt(kSpawnCooldownMax - kSpawnCooldownMin));
         }
     }
 
     void CopperGolem::UpdateBrainActivity() { CopperGolemAi::UpdateActivity(*this); }
 
-    bool CopperGolem::IsHoldingItem() const {
-        return m_level && m_level->IsClientSide() ? m_clientHoldingItem
-                                                  : !m_handItem.IsEmpty();
+    const char* CopperGolem::GetHurtSound(MobDamageSource) const {
+        return CopperGolemVoiceOf(m_weatherState).hurt;
+    }
+
+    const char* CopperGolem::GetDeathSound() const {
+        return CopperGolemVoiceOf(m_weatherState).death;
+    }
+
+    void CopperGolem::PlayStepSound(const glm::ivec3&, BlockState) {
+        PlaySound(CopperGolemVoiceOf(m_weatherState).step, 1.0f, 1.0f);
+    }
+
+    const char* CopperGolem::GetSpinHeadSound() const {
+        return CopperGolemVoiceOf(m_weatherState).spinHead;
+    }
+
+    void CopperGolem::Spawn(WeatherState weatherState) {
+        SetWeatherState(weatherState);
+        PlaySpawnSound();
+    }
+
+    void CopperGolem::PlaySpawnSound() {
+        PlaySound(SoundEvents::COPPER_GOLEM_SPAWN);
+    }
+
+    std::shared_ptr<SpawnGroupData>
+    CopperGolem::FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) {
+        PlaySpawnSound();
+        return GenericPathfinderMob::FinalizeSpawn(reason, std::move(groupData));
+    }
+
+    void CopperGolem::Tick() {
+        // MC CopperGolem.tick: super (whose client half runs
+        // setupAnimationStates — Mob::Tick), then the server's weathering.
+        GenericPathfinderMob::Tick();
+        if (m_level && !m_level->IsClientSide() && !IsRemoved()) {
+            UpdateWeathering();
+        }
+    }
+
+    void CopperGolem::UpdateWeathering() {
+        // MC CopperGolem.updateWeathering(level, level.getRandom(),
+        // level.getGameTime()).
+        if (m_nextWeatheringTick == kIgnoreWeatheringTick) return;   // waxed
+        JavaRandom& random = m_level->Random();
+        const int64_t gameTime = m_level->GetGameTime();
+        if (m_nextWeatheringTick == kUnsetWeatheringTick) {
+            m_nextWeatheringTick = gameTime + RollWeatheringDelay(random);
+            return;
+        }
+        const WeatherState weatherState = m_weatherState;
+        const bool isFullyOxidized = weatherState == WeatherState::Oxidized;
+        if (gameTime >= m_nextWeatheringTick && !isFullyOxidized) {
+            const WeatherState newState = NextWeatherState(weatherState);
+            const bool isNewStateFullyOxidized = newState == WeatherState::Oxidized;
+            SetWeatherState(newState);
+            m_nextWeatheringTick = isNewStateFullyOxidized ? 0 : m_nextWeatheringTick + RollWeatheringDelay(random);
+        }
+        // The state read BEFORE this tick's step: a golem that oxidized this
+        // tick waits a tick before it can set.
+        if (isFullyOxidized && CanTurnToStatue()) {
+            TurnToStatue();
+        }
+    }
+
+    bool CopperGolem::CanTurnToStatue() {
+        // MC: level.getBlockState(blockPosition()).isAir() &&
+        // level.getRandom().nextFloat() <= TURN_TO_STATUE_CHANCE.
+        const IBlockAccess* blocks = m_level->Blocks();
+        if (!blocks) return false;
+        const glm::ivec3 pos = BlockPosition();
+        return blocks->GetBlock(pos.x, pos.y, pos.z) == BlockID::Air &&
+               m_level->Random().NextFloat() <= kTurnToStatueChance;
+    }
+
+    void CopperGolem::TurnToStatue() {
+        // MC CopperGolem.turnToStatue: the OXIDIZED statue (Blocks.
+        // COPPER_GOLEM_STATUE.weathering().oxidized()) in a random pose,
+        // facing the golem's yaw, written with setBlockAndUpdate.
+        ILevelWrite* blocks = m_level->MutableBlocks();
+        if (!blocks) return;
+        const glm::ivec3 pos = BlockPosition();
+        // CopperGolemStatueBlock.Pose.values()[random.nextInt(0, 4)].
+        const int pose = m_level->Random().NextInt(4);
+        BlockState statue = BlockStates::Default(BlockID::OxidizedCopperGolemStatue)
+                                .SetIndex(PropertyId::COPPER_GOLEM_POSE, pose);
+        statue = WithHorizontalFacing(statue, FromYRot(yRot));
+        blocks->SetBlock(pos.x, pos.y, pos.z, statue, World::UpdateFlags::All);
+
+        // `if (level.getBlockEntity(pos) instanceof
+        // CopperGolemStatueBlockEntity statue)` — the rest only once the
+        // statue really stands there.
+        auto* statueEntity = dynamic_cast<CopperGolemStatueBlockEntity*>(blocks->GetBlockEntity(pos));
+        if (!statueEntity) return;
+        statueEntity->CreateStatue(*this);
+        blocks->BlockEntityChanged(pos);
+        MobEquipment::DropPreservedEquipment(*this);
+        Discard();
+        PlaySound(SoundEvents::COPPER_GOLEM_BECOME_STATUE);
+        if (IsLeashed()) {
+            if (m_level->DoEntityDrops()) {
+                DropLeash();
+            } else {
+                RemoveLeash();
+            }
+        }
     }
 
     uint8_t CopperGolem::GetAnimStateByte() const {
-        return static_cast<uint8_t>((static_cast<uint8_t>(m_state) & 0x7)
-                                    | (IsHoldingItem() ? 0x8 : 0));
+        return static_cast<uint8_t>(static_cast<uint8_t>(m_state) & 0x7);
     }
 
     void CopperGolem::SetAnimStateByte(uint8_t v) {
@@ -3423,7 +3777,6 @@ namespace Game {
         // them from the state, exactly as MC's does.
         const uint8_t id = v & 0x7;
         m_state = id <= 4 ? static_cast<State>(id) : State::Idle;
-        m_clientHoldingItem = (v & 0x8) != 0;
     }
 
     void CopperGolem::SetupAnimationStates() {
@@ -3437,16 +3790,17 @@ namespace Game {
                 if (m_idleAnimationStartTick == tickCount) {
                     Anim(MobAnim::Idle).Start(tickCount);
                 } else if (m_idleAnimationStartTick == 0) {
+                    // random.nextInt(200, 240) — the bound is exclusive.
                     m_idleAnimationStartTick =
-                        tickCount + m_level->Random().NextInt(kSpinAnimationMinCooldown,
-                                                              kSpinAnimationMaxCooldown);
+                        tickCount + kSpinAnimationMinCooldown +
+                        m_level->Random().NextInt(kSpinAnimationMaxCooldown - kSpinAnimationMinCooldown);
                 }
                 // MC: SPIN_SOUND_TIME_INTERVAL_OFFSET ticks into the spin,
-                // playHeadSpinSound (a local COPPER_GOLEM_SPIN) and the re-arm
-                // that keeps the spin periodic.
+                // playHeadSpinSound (a local spin sound of the golem's weather
+                // stage) and the re-arm that keeps the spin periodic.
                 if (tickCount == m_idleAnimationStartTick + 10) {
                     if (m_level && !IsSilent()) {
-                        m_level->PlayLocalSound(position, SoundEvents::COPPER_GOLEM_SPIN, GetSoundSource(), 1.0f, 1.0f, false);
+                        m_level->PlayLocalSound(position, GetSpinHeadSound(), GetSoundSource(), 1.0f, 1.0f, false);
                     }
                     m_idleAnimationStartTick = 0;
                 }
@@ -3487,25 +3841,109 @@ namespace Game {
     }
 
     UseResult CopperGolem::MobInteract(LivingEntity& player, ItemStack& held) {
-        // MC CopperGolem.mobInteract's first branch: an empty player hand
-        // takes what the golem carries. The remaining branches are skipped,
-        // each waiting on its system: shears → the antenna equipment slot,
-        // honeycomb waxing and the two axe scrapes → the weathering ladder.
-        if (held.IsEmpty() && !GetMainHandItem().IsEmpty()) {
-            if (m_level && m_level->IsClientSide()) return UseResult::Success;
-            // MC BehaviorUtils.throwItem(this, equippedItem, player.position())
-            // — no thrown-toward-a-point drop exists, so it pops at the golem.
+        // MC CopperGolem.mobInteract, in its order.
+        // 1. An empty hand takes what the golem carries:
+        //    BehaviorUtils.throwItem(this, equippedItem, player.position()).
+        if (held.IsEmpty()) {
             const ItemStack equipped = GetMainHandItem();
-            if (m_level) {
-                m_level->SpawnItemDrop(position + glm::dvec3(0.0, 0.5, 0.0),
-                                       static_cast<uint32_t>(equipped.itemId),
-                                       equipped.count);
+            if (!equipped.IsEmpty()) {
+                if (m_level && !m_level->IsClientSide()) {
+                    const glm::dvec3 from(position.x, GetEyeY() - 0.30000001192092896, position.z);
+                    glm::dvec3 dir = player.position - position;
+                    const double len = glm::length(dir);
+                    dir = len < 1.0e-5 ? glm::dvec3(0.0) : dir / len;
+                    // setThrower(golem).
+                    m_level->SpawnThrownItem(from, dir * 0.30000001192092896, equipped, 10, GetId());
+                    SetItemInHand(ItemStack{});
+                }
+                return UseResult::Success;
             }
-            SetItemInHand(ItemStack{});
-            (void)player;
+        }
+
+        // 2. Shears on a golem wearing a flower: shear(PLAYERS), SHEAR, wear.
+        if (held.itemId == Items::Shears && !held.IsEmpty() && ReadyForShearing()) {
+            if (m_level && !m_level->IsClientSide()) {
+                Shear(SoundSource::Players);
+                GameEvent(GameEventId::Shear, &player);
+                HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
+            }
             return UseResult::Success;
         }
+        if (!m_level || m_level->IsClientSide()) return UseResult::Pass;
+
+        const glm::ivec3 pos = BlockPosition();
+        // 3. Honeycomb on an unwaxed golem: level event 3003 (wax-on
+        //    sparkles), HONEYCOMB_WAX_ON, waxed for good.
+        if (held.itemId == Items::Honeycomb && !held.IsEmpty() &&
+            m_nextWeatheringTick != kIgnoreWeatheringTick) {
+            m_level->PlayLevelEvent(SoundExcept(static_cast<const Entity*>(this)),
+                                    LevelEvent::PARTICLES_WAX_ON, pos, 0);
+            m_level->PlaySound(nullptr, pos, SoundEvents::HONEYCOMB_WAX_ON,
+                               SoundSource::Blocks, 1.0f, 1.0f);
+            m_nextWeatheringTick = kIgnoreWeatheringTick;
+            Animal::UsePlayerItem(held);   // usePlayerItem(player, hand, stack)
+            return UseResult::SuccessServer;
+        }
+
+        // 4. An axe on a waxed golem takes the wax off: AXE_SCRAPE at the
+        //    golem, level event 3004 (wax-off), the deadline unset.
+        if (IsAxe(held) && m_nextWeatheringTick == kIgnoreWeatheringTick) {
+            m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::AXE_SCRAPE, GetSoundSource(), 1.0f, 1.0f);
+            m_level->PlayLevelEvent(SoundExcept(static_cast<const Entity*>(this)),
+                                    LevelEvent::PARTICLES_WAX_OFF, pos, 0);
+            m_nextWeatheringTick = kUnsetWeatheringTick;
+            HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
+            return UseResult::SuccessServer;
+        }
+
+        // 5. An axe on a weathered golem scrapes one stage back: level event
+        //    3005 (scrape), the deadline unset.
+        if (IsAxe(held) && m_weatherState != WeatherState::Unaffected) {
+            m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::AXE_SCRAPE, GetSoundSource(), 1.0f, 1.0f);
+            m_level->PlayLevelEvent(SoundExcept(static_cast<const Entity*>(this)),
+                                    LevelEvent::PARTICLES_SCRAPE, pos, 0);
+            m_nextWeatheringTick = kUnsetWeatheringTick;
+            SetWeatherState(PreviousWeatherState(m_weatherState));
+            HurtAndBreak(held, 1, player, EquipmentSlot::MAINHAND);
+            return UseResult::SuccessServer;
+        }
+
         return GenericPathfinderMob::MobInteract(player, held);
+    }
+
+    bool CopperGolem::ReadyForShearing() const {
+        // getItemBySlot(ANTENNA).is(ItemTags.SHEARABLE_FROM_COPPER_GOLEM).
+        const ItemStack& antenna = GetEquipment(kAntennaSlot);
+        return !antenna.IsEmpty() &&
+               DataTags::HasTag(DataTags::Registry::Item, ItemRegistry::Slug(antenna.itemId),
+                                "minecraft:shearable_from_copper_golem");
+    }
+
+    void CopperGolem::Shear(SoundSource soundSource) {
+        // MC CopperGolem.shear: COPPER_GOLEM_SHEAR at the golem, the antenna
+        // emptied, its item spawnAtLocation(level, stack, 1.5F).
+        if (!m_level || m_level->IsClientSide()) return;
+        m_level->PlaySoundFromEntity(nullptr, *this, SoundEvents::COPPER_GOLEM_SHEAR, soundSource, 1.0f, 1.0f);
+        const ItemStack antenna = GetEquipment(kAntennaSlot);
+        SetEquipment(kAntennaSlot, ItemStack{});
+        if (!antenna.IsEmpty()) {
+            DropItemStackAt(m_level->Dimension(), position + glm::dvec3(0.0, 1.5, 0.0), antenna);
+        }
+    }
+
+    void CopperGolem::ThunderHit(Entity* bolt) {
+        // MC CopperGolem.thunderHit: super first (the fire and the 5
+        // lightning damage), then one stage back per distinct bolt.
+        GenericPathfinderMob::ThunderHit(bolt);
+        if (!m_level || m_level->IsClientSide()) return;
+        const Uuid boltUuid = bolt ? bolt->GetUuid() : Uuid{};
+        if (m_hasLastLightningBolt && boltUuid == m_lastLightningBoltUuid) return;
+        m_lastLightningBoltUuid = boltUuid;
+        m_hasLastLightningBolt = true;
+        if (m_weatherState != WeatherState::Unaffected) {
+            m_nextWeatheringTick = kUnsetWeatheringTick;
+            SetWeatherState(PreviousWeatherState(m_weatherState));
+        }
     }
 
     void CopperGolem::ActuallyHurt(MobDamageSource source, float amount,
@@ -3515,17 +3953,12 @@ namespace Game {
         SetState(State::Idle);
     }
 
-    void CopperGolem::Die(MobDamageSource source, Entity* attacker) {
-        // MC dropEquipment → dropPreservedEquipment: the carried stack is a
-        // guaranteed drop (pickUpItems calls setGuaranteedDrop). The antenna
-        // slot's drop is skipped — no equipment system.
-        if (m_level && !m_level->IsClientSide() && !m_handItem.IsEmpty()) {
-            m_level->SpawnItemDrop(position + glm::dvec3(0.0, 0.5, 0.0),
-                                   static_cast<uint32_t>(m_handItem.itemId),
-                                   m_handItem.count);
-            m_handItem.Clear();
-        }
-        GenericPathfinderMob::Die(source, attacker);
+    void CopperGolem::DropEquipment(EntityLevel& level) {
+        // MC CopperGolem.dropEquipment: super (nothing), then
+        // dropPreservedEquipment — the carried stack (TransportItems'
+        // setGuaranteedDrop) and the antenna's flower (OfferFlowerGoal's).
+        GenericPathfinderMob::DropEquipment(level);
+        MobEquipment::DropPreservedEquipment(*this);
     }
 
     // ══ Armadillo ══════════════════════════════════════════════════════════

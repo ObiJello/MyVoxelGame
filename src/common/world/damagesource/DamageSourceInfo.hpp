@@ -36,6 +36,14 @@ namespace Game {
         // MC DamageSource.is(ResourceKey<DamageType>).
         bool IsType(std::string_view id) const;
 
+        // MC DamageSource.scalesWithDifficulty — the damage type's `scaling`
+        // (data/minecraft/damage_type/*.json): ALWAYS for explosion,
+        // player_explosion, sonic_boom and bad_respawn_point; every other
+        // vanilla type is WHEN_CAUSED_BY_LIVING_NON_PLAYER — a causing
+        // LivingEntity that is not a player (a zombie's blow, a skeleton's
+        // arrow). Read by the player's hurt path (Player.hurtServer).
+        bool ScalesWithDifficulty() const;
+
         // MC DamageSource.isDirect: causingEntity == directEntity (true for a
         // melee blow and for environmental damage, where both are null).
         bool IsDirect() const { return causing == direct; }

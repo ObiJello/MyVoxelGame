@@ -32,13 +32,13 @@
 // Both sides run this tick independently from their own entity random — MC
 // does not sync the seed or the flash count, and neither does this.
 //
-// Not modelled: the LIGHTNING_STRIKE / CHANNELED_LIGHTNING advancement
-// triggers, the `cause` player (trident channeling) and the hitEntities set
-// that only feeds them; the copper golem's weather-state step back (the
+// The LIGHTNING_STRIKE / CHANNELED_LIGHTNING advancement triggers run from
+// Tick (server). Not modelled: the copper golem's weather-state step back (the
 // golem has no weathering here); dropped items and XP orbs are not Entities,
 // so the sweep never burns them (MC's ItemEntity takes the base hit).
 #pragma once
 
+#include <vector>
 #include "common/core/JavaRandom.hpp"
 #include "common/entity/projectile/Projectile.hpp"
 
@@ -72,6 +72,10 @@ namespace Game {
 
         // MC getBlocksSetOnFire.
         int GetBlocksSetOnFire() const { return m_blocksSetOnFire; }
+        // MC setCause(ServerPlayer): the player whose channeling called the
+        // bolt down (its entity id; 0 = none) — told what it struck
+        // (CHANNELED_LIGHTNING).
+        void SetCauseId(int32_t entityId) { m_causeId = entityId; }
 
         // MC Entity.thunderHit — the base behaviour, applied to `victim`:
         // one more fire tick, a full 8-second ignition when that lands on
@@ -116,6 +120,10 @@ namespace Game {
         int     m_flashes = 0;
         bool    m_visualOnly = false;
         int     m_blocksSetOnFire = 0;
+        // MC cause / hitEntities (the advancement triggers' half): the
+        // channeling player, and every entity a strike has hit so far.
+        int32_t m_causeId = 0;
+        std::vector<int32_t> m_hitEntityIds;
     };
 
 } // namespace Game

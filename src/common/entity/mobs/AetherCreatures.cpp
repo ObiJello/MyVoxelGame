@@ -1240,20 +1240,18 @@ namespace Game {
             Sentry* m_sentry;
         };
 
-        // The sentry's target: players within 4 blocks vertically.
+        // The sentry's target: NearestAttackableTargetGoal(Player, 10, true,
+        // false, |entity.y - y| <= 4) — the Y test is the candidate SELECTOR,
+        // so a player out of the band never masks one inside it, and a held
+        // target is not re-tested.
         class SentryTargetGoal : public NearestAttackableTargetGoal {
         public:
             explicit SentryTargetGoal(Sentry* sentry)
-                : NearestAttackableTargetGoal(sentry, true, false, 10), m_sentry(sentry) {}
-            void Start() override {
-                NearestAttackableTargetGoal::Start();
-                LivingEntity* t = m_sentry->GetTarget();
-                if (t && std::abs(t->position.y - m_sentry->position.y) > 4.0) {
-                    m_sentry->SetTarget(nullptr);
-                }
+                : NearestAttackableTargetGoal(sentry, true, false, 10) {
+                SetSelector([](Mob& mob, const LivingEntity& target) {
+                    return std::abs(target.position.y - mob.position.y) <= 4.0;
+                });
             }
-        private:
-            Sentry* m_sentry;
         };
     } // namespace
 

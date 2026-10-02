@@ -131,11 +131,13 @@ namespace Game {
         if (m_causes == Causes::All) return PanicGoal::ShouldPanic();
         // MC shouldPanic against #panic_environmental_causes. Of that tag
         // (cactus, freeze, hot_floor, in_fire, lava, lightning_bolt,
-        // on_fire) this engine's damage sources name fire and lava; it has no
-        // cactus, freeze, hot-floor or lightning damage type of its own.
+        // on_fire) this engine's damage sources name fire, lava, cactus, the
+        // hot floor and lightning; it has no freeze damage of its own.
         if (!m_mob->HasLastDamageSource()) return false;
         const MobDamageSource source = m_mob->GetLastDamageSource();
-        return source == MobDamageSource::Fire || source == MobDamageSource::Lava;
+        return source == MobDamageSource::Fire || source == MobDamageSource::Lava ||
+               source == MobDamageSource::Cactus || source == MobDamageSource::HotFloor ||
+               source == MobDamageSource::Lightning;
     }
 
     void TamableAnimalPanicGoal::Tick() {
@@ -157,7 +159,10 @@ namespace Game {
         // and the owner's timestamp is spent either way.
         bool CanAttackOwnerFoe(Mob* mob, LivingEntity* target) {
             if (!target || !target->IsAlive()) return false;
-            return TargetingConditions::ForCombat().Test(mob, *target);
+            // MC TargetGoal.canAttack(target, DEFAULT): the conditions, then
+            // the home restriction (mustReach is false).
+            return TargetingConditions::ForCombat().Test(mob, *target) &&
+                   mob->IsWithinHome(target->BlockPosition());
         }
 
     } // namespace
@@ -189,8 +194,10 @@ namespace Game {
     }
 
     void OwnerHurtByTargetGoal::Start() {
+        // MC start(): setTarget only — targetMob stays unset, so a target
+        // the sit order (or anything else) clears is not resurrected by
+        // TargetGoal::CanContinueToUse.
         m_mob->SetTarget(m_ownerLastHurtBy);
-        m_targetMob = m_ownerLastHurtBy;
         if (LivingEntity* owner = m_tamable->GetOwner()) {
             m_timestamp = owner->GetLastHurtByMobTimestamp();
         }
@@ -219,8 +226,10 @@ namespace Game {
     }
 
     void OwnerHurtTargetGoal::Start() {
+        // MC start(): setTarget only — targetMob stays unset, so a target
+        // the sit order (or anything else) clears is not resurrected by
+        // TargetGoal::CanContinueToUse.
         m_mob->SetTarget(m_ownerLastHurt);
-        m_targetMob = m_ownerLastHurt;
         if (LivingEntity* owner = m_tamable->GetOwner()) {
             m_timestamp = owner->GetLastHurtMobTimestamp();
         }

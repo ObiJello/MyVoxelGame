@@ -558,6 +558,8 @@ namespace Client::LevelEvents {
                         q.hasOptions = true;
                         q.overrideLimiter = true;
                         q.options = particle;
+                        q.hasBlockPos = true;   // TerrainParticle(..., blockState, pos)
+                        q.blockPos = pos;
                         level->QueueParticle(std::move(q));
                     }
                 }
@@ -618,6 +620,8 @@ namespace Client::LevelEvents {
         q.hasOptions = true;
         q.overrideLimiter = true;
         q.options = ParticleOptions::Block(state);
+        q.hasBlockPos = true;   // TerrainParticle(..., state, pos)
+        q.blockPos = pos;
         q.power = 0.2f;
         q.scale = 0.6f;
         level->QueueParticle(std::move(q));

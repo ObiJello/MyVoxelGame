@@ -98,7 +98,7 @@ cmake --build "$PROJECT_DIR/cmake-build-universal" \
 ZIP_NAME="ObeyCraft-${TAG}-macos-universal.zip"
 cd "$PROJECT_DIR/cmake-build-universal/bin"
 rm -f "$ZIP_NAME"
-zip -r "$ZIP_NAME" MyVoxelGame.app/ > /dev/null
+zip -r -n .ogg:.png:.jpg:.zip "$ZIP_NAME" MyVoxelGame.app/ > /dev/null
 ZIP_SIZE=$(du -sh "$ZIP_NAME" | cut -f1)
 echo ""
 echo ">>> Packaged: $ZIP_NAME ($ZIP_SIZE)"

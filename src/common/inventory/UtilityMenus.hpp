@@ -213,6 +213,7 @@ namespace Game {
     class SmithingMenu : public ItemCombinerMenu {
     public:
         explicit SmithingMenu(Inventory* playerInventory);
+        void OnTakeResult(const ItemStack& taken, ContainerClickResult& result) override;
     protected:
         void ComputeResult() override;
         void PlaceInputSlots() override;

@@ -133,15 +133,10 @@ namespace Render {
         // <name>_pottery_sherd provides <name>_pottery_pattern); the blank
         // side for a brick, an unknown item or no item at all.
         std::string SideStem(Game::ItemID item) {
-            if (item != Game::Items::Air) {
-                const std::string_view slug = Game::ItemRegistry::Slug(item);
-                constexpr std::string_view kSuffix = "_pottery_sherd";
-                if (slug.size() > kSuffix.size() &&
-                    slug.compare(slug.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0) {
-                    return std::string(slug.substr(0, slug.size() - kSuffix.size())) + "_pottery_pattern";
-                }
-            }
-            return "decorated_pot_side";
+            // DecoratedPotRenderer.getSideMaterial: the item's
+            // PROVIDES_POTTERY_PATTERN, else the blank side.
+            std::string stem = Game::PotteryPatternStem(item);
+            return stem.empty() ? std::string("decorated_pot_side") : stem;
         }
 
         int Facing2DOf(Game::BlockState state) {

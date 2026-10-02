@@ -62,6 +62,9 @@ namespace Client {
         // Body size (server-broadcast on every position update): the stick
         // figure, its name tag and its culling box all take it.
         float scale = 1.0f;
+        // MC Attributes.NAME_TAG_DISTANCE of that player (PlayerUpdateS2C):
+        // how far away its name tag still shows.
+        float nameTagDistance = 64.0f;
         // /invisible on the server: no body, no name tag, no chat bubble,
         // no portal ghost — the copy is tracked but never drawn.
         bool invisible = false;
@@ -334,6 +337,9 @@ namespace Client {
 
         void SetScale(uint32_t id, float scale) {
             m_players[id].scale = scale;   // the update that follows fills the rest
+        }
+        void SetNameTagDistance(uint32_t id, float distance) {
+            m_players[id].nameTagDistance = distance;
         }
         void SetInvisible(uint32_t id, bool invisible) {
             m_players[id].invisible = invisible;

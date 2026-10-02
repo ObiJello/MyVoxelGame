@@ -41,6 +41,8 @@ namespace Game {
     // BREWING_FUEL: uses per fuel item (0 = not a fuel) and the speed
     // multiplier it brews at.
     int   GetBrewingFuelUses(const ItemStack& stack);
+    // MC: itemStack.has(BREWING_FUEL) — the fuel slot's and hopper's test.
+    bool  IsBrewingFuel(const ItemStack& stack);
     float GetBrewingFuelSpeedMultiplier(const ItemStack& stack);
 
 } // namespace Game

@@ -1,5 +1,6 @@
 // File: src/common/entity/npc/Villager.cpp
 #include "common/entity/npc/Villager.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
@@ -102,11 +103,17 @@ namespace Game {
     }
 
     void AbstractVillager::NotifyTrade(MerchantOffer& offer) {
-        // MC AbstractVillager.notifyTrade (the TRADE criterion is skipped —
-        // no advancements).
+        // MC AbstractVillager.notifyTrade.
         offer.IncreaseUses();
         ResetAmbientSoundTime();
         RewardTradeXp(offer);
+        // `if (tradingPlayer instanceof ServerPlayer) CriteriaTriggers.TRADE
+        // .trigger(player, this, offer.getResult())`.
+        if (m_level && !m_level->IsClientSide()) {
+            if (Server::ServerPlayer* player = Server::CriteriaTriggers::PlayerOf(GetTradingPlayer())) {
+                Server::CriteriaTriggers::VillagerTrade(*player, *this, offer.GetResult());
+            }
+        }
     }
 
     void AbstractVillager::NotifyTradeUpdated(const ItemStack& result) {
@@ -159,7 +166,7 @@ namespace Game {
         if (stack.IsEmpty()) return {};
         ItemStack rest = stack;
         const int maxStack = std::min(m_inventory.GetMaxStackSize(rest),
-                                      ItemRegistry::Get(rest.itemId).maxStackSize);
+                                      Game::GetMaxStackSize(rest));
         for (int i = 0; i < m_inventory.GetContainerSize() && !rest.IsEmpty(); ++i) {
             ItemStack& slot = m_inventory.GetItem(i);
             if (slot.IsEmpty() || !IsSameItemSameComponents(slot, rest)) continue;
@@ -184,7 +191,7 @@ namespace Game {
             const ItemStack& slot = m_inventory.GetItem(i);
             if (slot.IsEmpty()) return true;
             if (IsSameItemSameComponents(slot, stack) &&
-                slot.count < ItemRegistry::Get(slot.itemId).maxStackSize) {
+                slot.count < Game::GetMaxStackSize(slot)) {
                 return true;
             }
         }
@@ -810,7 +817,7 @@ namespace Game {
         int points = 0;
         for (int i = 0; i < m_inventory.GetContainerSize(); ++i) {
             const ItemStack& s = m_inventory.GetItem(i);
-            points += s.count * VillagerFoodNutrition(s.itemId);
+            points += s.count * VillagerFoodNutrition(s);
         }
         return points;
     }
@@ -834,7 +841,7 @@ namespace Game {
         if (m_foodLevel >= kBreedingFoodThreshold) return;
         for (int slot = 0; slot < m_inventory.GetContainerSize(); ++slot) {
             ItemStack& s = m_inventory.GetItem(slot);
-            const int nutrition = VillagerFoodNutrition(s.itemId);
+            const int nutrition = VillagerFoodNutrition(s);
             if (s.IsEmpty() || nutrition <= 0) continue;
             int toRemove = 0;
             for (int count = s.count; count > 0; --count) {
@@ -857,7 +864,7 @@ namespace Game {
     bool Villager::WantsToPickUp(const ItemStack& stack) const {
         // MC wantsToPickUp: #villager_picks_up, villager food, or what the
         // profession requests — and room for it.
-        return (IsVillagerPicksUp(stack.itemId) || VillagerFoodNutrition(stack.itemId) > 0 ||
+        return (IsVillagerPicksUp(stack.itemId) || VillagerFoodNutrition(stack) > 0 ||
                 ProfessionRequestsItem(m_data.profession, stack.itemId)) &&
                CanAddToInventory(stack);
     }

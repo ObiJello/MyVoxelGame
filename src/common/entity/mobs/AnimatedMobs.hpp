@@ -42,6 +42,9 @@
 namespace Game {
 
     struct BucketEntityData;
+    class BeehiveBlockEntity;
+    class BeePollinateGoal;
+    class BeeGoToHiveGoal;
 
     // ── Frog ───────────────────────────────────────────────────────────────
 
@@ -55,6 +58,10 @@ namespace Game {
     public:
         explicit Frog(EntityLevel* level);
 
+        // MC Frog.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
+
         // MC Frog.isBaby is hardcoded false — frogs hatch from tadpoles, they
         // are never baby frogs, and the baby scale would shrink an adult.
         bool IsBaby() const override { return false; }
@@ -67,11 +74,43 @@ namespace Game {
         // MC Frog.customServerAiStep's second half — FrogAi.updateActivity.
         void UpdateBrainActivity() override;
 
+        // ── Variant (MC FrogVariant / FrogVariants, DATA_VARIANT_ID) ──────
+        // temperate / warm / cold (FrogVariants.bootstrap order, the wire's
+        // variant byte), saved as "variant", default TEMPERATE. Picked by the
+        // biome in finalizeSpawn — every reason: natural, spawn egg,
+        // /summon, and a tadpole growing up (Tadpole.ageUp finalizes the new
+        // frog with CONVERSION where it matured).
+        enum class Variant : uint8_t { Temperate = 0, Warm = 1, Cold = 2 };
+        Variant GetVariant() const { return m_variant; }
+        void    SetVariant(Variant v) { m_variant = v; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_variant); }
+        void    SetVariantByte(uint8_t v) override {
+            m_variant = v <= 2 ? static_cast<Variant>(v) : Variant::Temperate;
+        }
+        // "temperate" / "warm" / "cold".
+        static const char* VariantName(Variant v);
+        // Accepts "minecraft:warm" or "warm"; false for anything else.
+        static bool VariantFromName(std::string_view id, Variant& out);
+        // FrogVariant.assetInfo: textures/entity/frog/frog_<name>.png.
+        static const char* VariantTexture(Variant v);
+        // VariantUtils.selectVariantToSpawn over the three FrogVariants for
+        // `biome` (no namespace): #spawns_warm_variant_frogs → warm,
+        // #spawns_cold_variant_frogs → cold (both priority 1), else the
+        // priority-0 temperate fallback; one nextInt(size) of the survivors.
+        static Variant SelectVariantToSpawn(std::string_view biome, JavaRandom& random);
+
+        // MC Frog.finalizeSpawn: the variant for the biome here, then super.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
     protected:
         // MC Frog.updateWalkAnimation — the base multiplier is 25, not 4, AND
         // it drops to zero mid-jump so the frog holds the jump pose instead of
         // running the walk cycle through it.
         void UpdateWalkAnimation(float distance) override;
+
+    private:
+        Variant m_variant = Variant::Temperate;   // MC DEFAULT_VARIANT
     };
 
     // ── Camel ──────────────────────────────────────────────────────────────
@@ -464,6 +503,10 @@ namespace Game {
     class Hoglin : public GenericAnimal {
     public:
         explicit Hoglin(EntityLevel* level);
+
+        // MC Hoglin.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
         void UpdateBrainActivity() override;
         // MC Hoglin.getAmbientSound → HoglinAi.getSoundForCurrentActivity
         // (server only): RETREAT while avoiding or converting, ANGRY while
@@ -558,6 +601,10 @@ namespace Game {
     class Zoglin : public GenericMonster {
     public:
         explicit Zoglin(EntityLevel* level);
+
+        // MC Zoglin.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
         // MC Zoglin.getAmbientSound: ANGRY with a target, else AMBIENT
         // (server only).
         const char* GetAmbientSound() const override;
@@ -612,6 +659,10 @@ namespace Game {
         static constexpr int kInventorySize = 8;   // MC Piglin.INVENTORY_SIZE
 
         explicit Piglin(EntityLevel* level);
+
+        // MC AbstractPiglin.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
         // MC Piglin.getAmbientSound → PiglinAi.getSoundForCurrentActivity.
         const char* GetAmbientSound() const override;
 
@@ -765,6 +816,10 @@ namespace Game {
     public:
         explicit PiglinBrute(EntityLevel* level);
 
+        // MC AbstractPiglin.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
+
         void UpdateBrainActivity() override;
 
         bool IsImmuneToZombification() const { return m_immuneToZombification; }
@@ -833,6 +888,10 @@ namespace Game {
         static constexpr int kMaxAirSupply = 6000;       // MC AXOLOTL_TOTAL_AIR_SUPPLY
 
         explicit Axolotl(EntityLevel* level);
+
+        // MC Axolotl.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
 
         Variant GetVariant() const { return m_variant; }
         void    SetVariant(Variant v) { m_variant = v; }
@@ -1032,6 +1091,33 @@ namespace Game {
         uint8_t GetAnimStateByte() const override;
         void SetAnimStateByte(uint8_t v) override;
 
+        // ── The hive (MC Bee.hivePos & co.) ──────────────────────────────
+        bool HasHive() const { return m_hivePos.has_value(); }
+        const std::optional<glm::ivec3>& GetHivePos() const { return m_hivePos; }
+        void SetHivePos(const glm::ivec3& pos) { m_hivePos = pos; }
+        void ClearHivePos() { m_hivePos.reset(); }
+        // MC dropHive: forget the hive, 200 ticks before the next search.
+        void DropHive() { m_hivePos.reset(); m_remainingCooldownBeforeLocatingNewHive = 200; }
+        // MC wantsToEnterHive.
+        bool WantsToEnterHive() const;
+        // MC closerThan(pos, d): the bee's block within `distance` of pos.
+        bool CloserThan(const glm::ivec3& pos, int distance) const;
+        // MC isTooFarAway: 48 blocks or more.
+        bool IsTooFarAway(const glm::ivec3& pos) const { return !CloserThan(pos, 48); }
+        // MC getBeehiveBlockEntity / isHiveValid / doesHiveHaveSpace.
+        BeehiveBlockEntity* GetBeehive() const;
+        bool IsHiveValid() const { return GetBeehive() != nullptr; }
+        bool DoesHiveHaveSpace(const glm::ivec3& pos) const;
+        int  GetStayOutOfHiveCountdown() const { return m_stayOutOfHiveCountdown; }
+        void SetStayOutOfHiveCountdown(int ticks) { m_stayOutOfHiveCountdown = ticks; }
+        int  GetRemainingCooldownBeforeLocatingNewHive() const { return m_remainingCooldownBeforeLocatingNewHive; }
+        void SetRemainingCooldownBeforeLocatingNewHive(int ticks) { m_remainingCooldownBeforeLocatingNewHive = ticks; }
+        // MC dropOffNectar: nectar delivered, the crop count restarts.
+        void DropOffNectar();
+        // MC pathfindRandomlyTowards: a hop toward a far target.
+        void PathfindRandomlyTowards(const glm::ivec3& target);
+        BeeGoToHiveGoal* GoToHiveGoal() const { return m_goToHiveGoal; }
+
     protected:
         // MC Bee.customServerAiStep — the underwater drown clock (20 ticks
         // submerged, then 1.0 drown damage per tick: bees are the one land
@@ -1058,6 +1144,12 @@ namespace Game {
         std::shared_ptr<struct BeeFlowerState> m_flowerState;
         // Client mirror of the nectar bit (the client has no flower state).
         bool m_clientHasNectar = false;
+
+        std::optional<glm::ivec3> m_hivePos;
+        int m_stayOutOfHiveCountdown = 0;
+        int m_remainingCooldownBeforeLocatingNewHive = 0;
+        BeePollinateGoal* m_pollinateGoal = nullptr;
+        BeeGoToHiveGoal*  m_goToHiveGoal = nullptr;
     };
 
     // ── Breeze ─────────────────────────────────────────────────────────────
@@ -1069,6 +1161,10 @@ namespace Game {
     class Breeze : public GenericMonster {
     public:
         explicit Breeze(EntityLevel* level);
+
+        // MC Breeze.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
 
         void Tick() override;
         void OnPoseUpdated() override;
@@ -1132,6 +1228,10 @@ namespace Game {
         // `type` lets a subclass register under its own id (SilentWarden,
         // HushMobs.hpp) — the CamelHusk-on-Camel precedent.
         explicit Warden(EntityLevel* level, EntityTypeId type = EntityTypeId::Warden);
+
+        // MC Warden.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
 
         // MC Warden.checkSpawnObstruction: the base test plus no block
         // collision for the type's standing box at the spawn position.
@@ -1252,6 +1352,10 @@ namespace Game {
     class Creaking : public GenericMonster {
     public:
         explicit Creaking(EntityLevel* level);
+
+        // MC Creaking.getTarget: the brain's ATTACK_TARGET (getTargetFromBrain),
+        // not the goal-system field — the brain never writes that.
+        LivingEntity* GetTarget() const override { return GetTargetFromBrain(); }
 
         bool CanMove() const { return m_canMove; }
         bool IsActive() const { return m_isActive; }
@@ -1463,10 +1567,17 @@ namespace Game {
     // interaction, and ferries up to 16 items of one stack per trip (empty
     // hand = collecting, full hand = delivering). One synched CopperGolemState
     // picks the four interaction clips at tick 1 of that window; IDLE re-arms
-    // the 200-240-tick head-spin between trips. Skipped MC systems, each
-    // named at its slot in the .cpp: the weathering/oxidation ladder (and the
-    // oxidized-statue conversion), lightning de-oxidation and honeycomb
-    // waxing, the antenna equipment slot + shearing, and sounds.
+    // the 200-240-tick head-spin between trips.
+    //
+    // Weathering (MC DATA_WEATHER_STATE + nextWeatheringTick): an unwaxed
+    // golem ages one WeatheringCopper stage every 504000-552000 ticks, and a
+    // fully oxidized one standing in air turns, 0.58% a tick, into an
+    // oxidized copper golem statue (CopperGolemStatueBlockEntity keeps its
+    // name). Honeycomb waxes it (nextWeatheringTick = IGNORE), an axe takes
+    // the wax off, else scrapes one stage back; a lightning bolt scrapes one
+    // stage back too. The stage picks the textures (CopperGolemOxidationLevels)
+    // and the voice. The antenna is MC's EQUIPMENT_SLOT_ANTENNA (SADDLE) — the
+    // poppy an iron golem offers it (OfferFlowerGoal), shorn off with shears.
     class CopperGolem : public GenericPathfinderMob {
     public:
         // MC CopperGolemState. The ids are MC's and they are the wire encoding
@@ -1476,40 +1587,102 @@ namespace Game {
             DroppingItem = 3, DroppingNoItem = 4,
         };
 
+        // MC WeatheringCopper.WeatherState, by ordinal — the wire's variant
+        // byte and the "weather_state" NBT name (WeatherStateName).
+        enum class WeatherState : uint8_t {
+            Unaffected = 0, Exposed = 1, Weathered = 2, Oxidized = 3,
+        };
+        static const char* WeatherStateName(WeatherState state);
+        static WeatherState WeatherStateFromName(std::string_view name);
+
+        // MC CopperGolem.IGNORE_WEATHERING_TICK (waxed) and
+        // UNSET_WEATHERING_TICK (the next tick rolls a fresh deadline).
+        static constexpr int64_t kIgnoreWeatheringTick = -2;
+        static constexpr int64_t kUnsetWeatheringTick  = -1;
+        // MC CopperGolem.WEATHERING_TICK_FROM / _TO.
+        static constexpr int kWeatheringTickFrom = 504000;
+        static constexpr int kWeatheringTickTo   = 552000;
+        // MC CopperGolem.TURN_TO_STATUE_CHANCE.
+        static constexpr float kTurnToStatueChance = 0.0058f;
+        // MC CopperGolem.EQUIPMENT_SLOT_ANTENNA.
+        static constexpr EquipmentSlot kAntennaSlot = EquipmentSlot::SADDLE;
+
         // MC CopperGolem.SPIN_ANIMATION_{MIN,MAX}_COOLDOWN — the idle
-        // head-spin re-arm window.
+        // head-spin re-arm window (RandomSource.nextInt(min, max): max
+        // exclusive).
         static constexpr int kSpinAnimationMinCooldown = 200;
         static constexpr int kSpinAnimationMaxCooldown = 240;
         // MC CopperGolem.SPAWN_COOLDOWN_{MIN,MAX} — the first transport trip
-        // waits this long after spawn.
+        // waits this long after spawn (max exclusive, as above).
         static constexpr int kSpawnCooldownMin = 60;
         static constexpr int kSpawnCooldownMax = 100;
 
         explicit CopperGolem(EntityLevel* level);
 
+        // MC AbstractGolem: no ambient sound, the 120-tick cadence, and never
+        // a distance despawn (the constructor also pins it persistent).
+        const char* GetAmbientSound() const override { return ""; }
+        int GetAmbientSoundInterval() const override { return 120; }
+        bool RemoveWhenFarAway(double) const override { return false; }
+
         // MC CopperGolemOxidationLevels — the voice of the golem's weather
-        // stage. This port has no weathering, so it is always UNAFFECTED.
-        const char* GetHurtSound(MobDamageSource) const override { return "entity.copper_golem.hurt"; }
-        const char* GetDeathSound() const override { return "entity.copper_golem.death"; }
-        void PlayStepSound(const glm::ivec3&, BlockState) override { PlaySound("entity.copper_golem.step", 1.0f, 1.0f); }
+        // stage: UNAFFECTED and EXPOSED share the plain set, WEATHERED and
+        // OXIDIZED have their own.
+        const char* GetHurtSound(MobDamageSource) const override;
+        const char* GetDeathSound() const override;
+        void PlayStepSound(const glm::ivec3& pos, BlockState state) override;
+        // ... and its head-spin sound (CopperGolemOxidationLevel.spinHeadSound).
+        const char* GetSpinHeadSound() const;
 
         State GetState() const { return m_state; }
         // MC CopperGolem.setState — a synched accessor in MC; here the tracker
         // polls the anim byte, so a plain write is the whole job.
         void SetState(State state) { m_state = state; }
 
-        // MC CopperGolem.getMainHandItem / setItemInHand(MAIN_HAND, …) — the
-        // one stack it carries between chests. No equipment system exists, so
-        // the stack lives on the class and the wire carries only the holding
-        // BIT (bit 3 of the anim byte), which is all the WALK_ITEM clip gate
-        // reads.
-        const ItemStack& GetMainHandItem() const { return m_handItem; }
-        void SetItemInHand(const ItemStack& stack) { m_handItem = stack; }
+        // MC CopperGolem.getWeatherState / setWeatherState (DATA_WEATHER_STATE,
+        // carried to the client in the variant byte, saved as
+        // "weather_state").
+        WeatherState GetWeatherState() const { return m_weatherState; }
+        void SetWeatherState(WeatherState state) { m_weatherState = state; }
+        uint8_t GetVariantByte() const override { return static_cast<uint8_t>(m_weatherState); }
+        void    SetVariantByte(uint8_t v) override {
+            m_weatherState = v <= 3 ? static_cast<WeatherState>(v) : WeatherState::Unaffected;
+        }
 
-        // What MobRenderer reads into state.isHoldingItem. The server side
-        // has the real stack; the client has the synched bit. Out-of-line:
-        // EntityLevel is incomplete here.
-        bool IsHoldingItem() const;
+        // MC CopperGolem.nextWeatheringTick ("next_weather_age"): the game
+        // time of the next stage, UNSET (-1) or IGNORE (-2, waxed); 0 once
+        // fully oxidized.
+        int64_t GetNextWeatheringTick() const { return m_nextWeatheringTick; }
+        void    SetNextWeatheringTick(int64_t tick) { m_nextWeatheringTick = tick; }
+
+        // MC CopperGolem.spawn(weatherState): the stage of the copper block it
+        // was built from (CarvedPumpkinBlock.getWeatherStateFromPattern), then
+        // the spawn sound.
+        void Spawn(WeatherState weatherState);
+        // MC CopperGolem.playSpawnSound.
+        void PlaySpawnSound();
+
+        // MC CopperGolem.finalizeSpawn: the spawn sound, then super.
+        std::shared_ptr<SpawnGroupData>
+        FinalizeSpawn(SpawnReason reason, std::shared_ptr<SpawnGroupData> groupData) override;
+
+        // MC CopperGolem.tick: super, then the client's clip machine (in
+        // SetupAnimationStates, which the mob tick calls) or the server's
+        // updateWeathering.
+        void Tick() override;
+
+        // MC CopperGolem.getMainHandItem / setItemInHand(MAIN_HAND, …) — the
+        // one stack it carries between chests, in its MAINHAND equipment slot
+        // (synced like any mob's held item; saved in "equipment").
+        const ItemStack& GetMainHandItem() const { return GetMainHandEquipment(); }
+        void SetItemInHand(const ItemStack& stack) { SetEquipment(EquipmentSlot::MAINHAND, stack); }
+
+        // What MobRenderer reads into state.isHoldingItem — the WALK vs
+        // WALK_ITEM clip gate and the carrying pose: either hand non-empty
+        // (CopperGolemModel reads both hand item states).
+        bool IsHoldingItem() const {
+            return !GetMainHandItem().IsEmpty() || !GetOffhandEquipment().IsEmpty();
+        }
 
         // MC CopperGolem.setOpenedChestPos / clearOpenedChestPos. The reader
         // is hasContainerOpen — the chest lid's opener recheck counts a golem
@@ -1517,6 +1690,13 @@ namespace Game {
         void SetOpenedChestPos(const glm::ivec3& pos) { m_openedChestPos = pos; }
         void ClearOpenedChestPos() { m_openedChestPos.reset(); }
         const std::optional<glm::ivec3>& OpenedChestPos() const { return m_openedChestPos; }
+
+        // MC CopperGolem.getContainerInteractionRange (ContainerUser).
+        static constexpr double kContainerInteractionRange = 3.0;
+
+        // MC's DOORS_TO_CLOSE memory — the doors InteractWithDoor opened
+        // (CommonBehaviors.hpp).
+        std::vector<glm::ivec3>& DoorsToClose() { return m_doorsToClose; }
 
         uint8_t GetAnimStateByte() const override;
         void    SetAnimStateByte(uint8_t v) override;
@@ -1527,14 +1707,24 @@ namespace Game {
         // MC CopperGolem.customServerAiStep's second half.
         void UpdateBrainActivity() override;
 
-        // MC CopperGolem.mobInteract's empty-hand branch: take what the golem
-        // carries. (The shears, honeycomb and axe branches are skipped — no
-        // antenna equipment slot, no weathering.)
+        // MC CopperGolem.mobInteract, branch for branch: an empty hand takes
+        // what the golem carries; shears take the antenna's poppy off;
+        // honeycomb waxes; an axe takes the wax off, else scrapes one stage.
         UseResult MobInteract(LivingEntity& player, ItemStack& held) override;
 
+        // MC Shearable: readyForShearing — a SHEARABLE_FROM_COPPER_GOLEM
+        // item on the antenna — and shear: COPPER_GOLEM_SHEAR, the antenna
+        // emptied and its item dropped 1.5 up.
+        bool ReadyForShearing() const;
+        void Shear(SoundSource soundSource);
+
+        // MC CopperGolem.thunderHit: super (fire, damage), then — once per
+        // bolt — one weathering stage back and the deadline unset.
+        void ThunderHit(Entity* bolt) override;
+
         // MC CopperGolem.dropEquipment → dropPreservedEquipment: the carried
-        // stack drops on death (setGuaranteedDrop's whole point).
-        void Die(MobDamageSource source, Entity* attacker) override;
+        // stack (setGuaranteedDrop) and the antenna's flower always drop.
+        void DropEquipment(EntityLevel& level) override;
 
     protected:
         // MC CopperGolem.actuallyHurt — a hit knocks it out of the chest
@@ -1543,12 +1733,21 @@ namespace Game {
                           Entity* attacker) override;
 
     private:
-        State     m_state = State::Idle;
-        ItemStack m_handItem;
-        // Client mirror of the holding bit (the client has no hand stack).
-        bool      m_clientHoldingItem = false;
+        // MC CopperGolem.updateWeathering / canTurnToStatue / turnToStatue.
+        void UpdateWeathering();
+        bool CanTurnToStatue();
+        void TurnToStatue();
+
+        State        m_state = State::Idle;
+        WeatherState m_weatherState = WeatherState::Unaffected;
+        int64_t      m_nextWeatheringTick = kUnsetWeatheringTick;
+        // MC CopperGolem.lastLightningBoltUUID — one stage per bolt, however
+        // many ticks the bolt's sweep touches the golem.
+        Uuid         m_lastLightningBoltUuid{};
+        bool         m_hasLastLightningBolt = false;
         // MC CopperGolem.openedChestPos.
         std::optional<glm::ivec3> m_openedChestPos;
+        std::vector<glm::ivec3>   m_doorsToClose;
         // MC CopperGolem.idleAnimationStartTick — client-only, like the timer
         // it arms.
         int m_idleAnimationStartTick = 0;

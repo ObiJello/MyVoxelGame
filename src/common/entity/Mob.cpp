@@ -75,7 +75,30 @@ namespace Game {
     }
 
     bool Mob::CanAttack(const LivingEntity& target) const {
-        return target.IsAttackable() && target.IsAlive();
+        // MC Mob.canAttack: `!target.is(GHAST) && super.canAttack(target)`.
+        if (target.GetType() == EntityTypeId::Ghast) return false;
+        // MC LivingEntity.canAttack: no player on Peaceful ...
+        if (target.IsPlayer() && m_level &&
+            m_level->GetDifficulty() == Difficulty::Peaceful) {
+            return false;
+        }
+        // ... else target.canBeSeenAsEnemy(): !isInvulnerable() &&
+        // canBeSeenByAnyone() (alive, not a spectator). IsAttackable carries
+        // the player's abilities.invulnerable (creative) and the engine's
+        // never-attackable entities.
+        return !target.IsInvulnerable() && target.IsAttackable() &&
+               !target.IsSpectator() && target.IsAlive();
+    }
+
+    LivingEntity* Mob::GetTargetFromBrain() const {
+        // MC: asValidTarget(getBrain().getMemory(ATTACK_TARGET).orElse(null)).
+        // The memory is typed LivingEntity in MC; the engine's brain keeps
+        // every entity memory as Entity*, so AsLiving narrows it (a virtual
+        // call, not a dynamic_cast — this sits under every GetTarget).
+        const Brain* brain = GetBrain();
+        if (!brain) return nullptr;
+        Entity* entity = brain->GetEntity(MemoryModule::AttackTarget);
+        return entity ? AsValidTarget(entity->AsLiving()) : nullptr;
     }
 
     void Mob::StopInPlace() {

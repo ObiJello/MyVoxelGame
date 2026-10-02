@@ -406,12 +406,22 @@ namespace Launcher {
         ImGui::Begin("##launcher", nullptr, flags);
         ImGui::PopStyleVar();
 
+        if (m_appearanceView.EditorOpen()) {
+            // The skin editor takes the whole window; nothing else is
+            // submitted, so nothing underneath can take its clicks.
+            m_appearanceView.DrawEditor(state.appearance, state.appearanceDirty);
+            ImGui::End();
+            return;
+        }
+
         DrawRail(state);
 
         switch (m_view) {
-            case View::Play:     DrawPlayView(state); break;
-            case View::Servers:  DrawServersView(state); break;
-            case View::Settings: DrawSettingsView(state); break;
+            case View::Play:       DrawPlayView(state); break;
+            case View::Servers:    DrawServersView(state); break;
+            case View::Appearance: m_appearanceView.Draw(state.appearance, state.playerColor,
+                                                         state.appearanceDirty); break;
+            case View::Settings:   DrawSettingsView(state); break;
         }
 
         // One ping refresh per visit to the Servers view.
@@ -468,8 +478,9 @@ namespace Launcher {
         struct NavDef { const char* label; View view; };
         const NavDef items[] = {
             { "Play",     View::Play },
-            { "Servers",  View::Servers },
-            { "Settings", View::Settings },
+            { "Servers",    View::Servers },
+            { "Appearance", View::Appearance },
+            { "Settings",   View::Settings },
         };
 
         for (const NavDef& item : items) {
@@ -523,8 +534,8 @@ namespace Launcher {
             if (hovered) dl->AddRectFilled(p, p + size, BgHover, 11.0f);
             dl->AddRect(p, p + size, Border, 11.0f);
 
-            dl->AddRectFilled(p + ImVec2(10, 10), p + ImVec2(10 + 32, 10 + 32),
-                              PlayerColorU32(state.playerColor), 9.0f);
+            m_appearanceView.DrawAvatar(dl, p + ImVec2(10, 10), p + ImVec2(10 + 32, 10 + 32),
+                                        state.appearance, PlayerColorU32(state.playerColor), 9.0f);
 
             const bool loggedIn = !state.sessionToken.empty();
             std::string name = !state.playerName.empty() ? state.playerName
@@ -535,10 +546,7 @@ namespace Launcher {
                        loggedIn ? TextSynced : TextFaint,
                        loggedIn ? "SYNCED" : "LOCAL PROFILE", 0.76f);
 
-            if (clicked) {
-                m_view = View::Settings;
-                m_tab = SettingsTab::General;
-            }
+            if (clicked) m_view = View::Settings;
         }
     }
 
@@ -1015,52 +1023,11 @@ namespace Launcher {
         const float x0 = ContentX();
         const float x1 = ContentRight();
 
-        // ── Header + tab pills ──
-        // Header column: 10px label line (13.2) + 6px gap + 22px title.
+        // ── Header ──
+        // Header column: 10px label line (13.2) + 6px gap + 22px title. (The
+        // Character tab that sat on the right moved to the Appearance view.)
         TxtTracked(dl, g_fontMono10, ImVec2(x0, kPadY), TextFaint, "SETTINGS", 2.0f);
         Txt(dl, g_fontH2, ImVec2(x0, kPadY + 19.2f), TextPrimary, "Your setup");
-
-        {
-            struct TabDef { const char* label; SettingsTab tab; };
-            const TabDef tabs[] = {
-                { "General",   SettingsTab::General },
-                { "Character", SettingsTab::Character },
-            };
-            // Tabs: 7/14 padding; container: 3px padding + 1px border (CSS
-            // content-box) with a 2px gap, bottom-aligned with the title.
-            const float tabH = Measure(g_fontSmallMed, "G").y + 14.0f;
-            float tabsW = 0;
-            for (const TabDef& t : tabs) tabsW += Measure(g_fontSmallMed, t.label).x + 28;
-            tabsW += 2.0f;   // gap between the two tabs
-            ImVec2 boxSize(tabsW + 8, tabH + 8);
-            ImVec2 boxPos(x1 - boxSize.x, kPadY + 43.1f - boxSize.y);
-            dl->AddRectFilled(boxPos, boxPos + boxSize, Rail, 10.0f);
-            dl->AddRect(boxPos, boxPos + boxSize, Border, 10.0f);
-
-            float tx = boxPos.x + 4;
-            for (const TabDef& t : tabs) {
-                ImVec2 ts = Measure(g_fontSmallMed, t.label);
-                ImVec2 size(ts.x + 28, tabH);
-                ImGui::SetCursorScreenPos(ImVec2(tx, boxPos.y + 4));
-                ImGui::PushID(t.label);
-                bool clicked = ImGui::InvisibleButton("##tab", size);
-                bool hovered = ImGui::IsItemHovered();
-                ImGui::PopID();
-                if (m_tab == t.tab) {
-                    dl->AddRectFilled(ImVec2(tx, boxPos.y + 4),
-                                      ImVec2(tx + size.x, boxPos.y + 4 + size.y),
-                                      BgActive, 7.0f);
-                } else if (hovered) {
-                    dl->AddRectFilled(ImVec2(tx, boxPos.y + 4),
-                                      ImVec2(tx + size.x, boxPos.y + 4 + size.y),
-                                      BgHover, 7.0f);
-                }
-                Txt(dl, g_fontSmallMed, ImVec2(tx + 14, boxPos.y + 4 + (size.y - ts.y) * 0.5f),
-                    TextBody, t.label);
-                if (clicked) m_tab = t.tab;
-                tx += size.x + 2.0f;
-            }
-        }
 
         // ── Footer geometry ──
         const float doneH = 34.0f;   // 10px padding × 2 + 12.5px label line
@@ -1069,15 +1036,11 @@ namespace Launcher {
         const float scrollTop = kPadY + 43.1f + 18.0f;   // header column + 18px margin
         const float scrollBottom = footerLineY - 14.0f;
 
-        // ── Scrollable tab content ──
+        // ── Scrollable content ──
         ImGui::SetCursorScreenPos(ImVec2(x0, scrollTop));
         ImGui::BeginChild("##settingsScroll", ImVec2(x1 - x0, scrollBottom - scrollTop),
                           ImGuiChildFlags_None, ImGuiWindowFlags_NoBackground);
-        if (m_tab == SettingsTab::General) {
-            DrawSettingsGeneral(state);
-        } else {
-            DrawSettingsCharacter(state);
-        }
+        DrawSettingsGeneral(state);
         ImGui::EndChild();
 
         // ── Footer ──
@@ -1280,8 +1243,8 @@ namespace Launcher {
         const float cardH = 74.0f;   // content-box: 40 avatar + 16px padding + border
 
         dl->AddRect(p, p + ImVec2(w, cardH), Border, 12.0f);
-        dl->AddRectFilled(p + ImVec2(17, 17), p + ImVec2(17 + 40, 17 + 40),
-                          PlayerColorU32(state.playerColor), 11.0f);
+        m_appearanceView.DrawAvatar(dl, p + ImVec2(17, 17), p + ImVec2(17 + 40, 17 + 40),
+                                    state.appearance, PlayerColorU32(state.playerColor), 11.0f);
 
         Txt(dl, g_fontName15, p + ImVec2(70, 19.9f), TextPrimary, state.accountName.c_str());
         std::string since = state.accountCreated > 0
@@ -1564,133 +1527,6 @@ namespace Launcher {
 
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
         dl->AddLine(ImVec2(p.x, p.y + rowH), ImVec2(p.x + w, p.y + rowH), BorderSoft);
-        ImGui::Dummy(ImVec2(0, 0));
-    }
-
-    // ── Settings / Character ────────────────────────────────────────────────
-
-    void LauncherUI::DrawSettingsCharacter(LauncherUIState& state) {
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        ImVec2 origin = ImGui::GetCursorScreenPos();
-        float w = ImGui::GetContentRegionAvail().x;
-
-        const auto& selected = ColorBySlug(state.playerColor);
-        const ImU32 col = IM_COL32(selected.r, selected.g, selected.b, 255);
-
-        // ── Preview panel (left) ──
-        {
-            const ImVec2 p = origin;
-            const ImVec2 size(132, 188);
-            // Diagonal stripe fill, clipped to the rounded panel.
-            dl->AddRectFilled(p, p + size, BgStripeA, 12.0f);
-            dl->PushClipRect(p + ImVec2(1, 1), p + size - ImVec2(1, 1), true);
-            for (float s = -size.y; s < size.x + size.y; s += 14.0f) {
-                dl->AddLine(ImVec2(p.x + s, p.y + size.y), ImVec2(p.x + s + size.y, p.y),
-                            BgStripeB, 7.0f);
-            }
-            // Stick figure in the selected colour (matches the in-game player).
-            {
-                ImVec2 c(p.x + size.x * 0.5f, p.y + 74);
-                const float t = 3.0f;
-                dl->AddCircle(ImVec2(c.x, c.y - 26), 9.0f, col, 0, t);      // head
-                dl->AddLine(ImVec2(c.x, c.y - 17), ImVec2(c.x, c.y + 14), col, t);   // torso
-                dl->AddLine(ImVec2(c.x, c.y - 10), ImVec2(c.x - 14, c.y + 2), col, t); // arms
-                dl->AddLine(ImVec2(c.x, c.y - 10), ImVec2(c.x + 14, c.y + 2), col, t);
-                dl->AddLine(ImVec2(c.x, c.y + 14), ImVec2(c.x - 11, c.y + 34), col, t); // legs
-                dl->AddLine(ImVec2(c.x, c.y + 14), ImVec2(c.x + 11, c.y + 34), col, t);
-            }
-            {
-                constexpr float kTracking = 1.26f;   // 0.14em at 9px
-                const char* cap1 = "PLAYER";
-                const char* cap2 = "PREVIEW";
-                float w1 = MeasureTracked(g_fontMono9, cap1, kTracking);
-                float w2 = MeasureTracked(g_fontMono9, cap2, kTracking);
-                TxtTracked(dl, g_fontMono9, ImVec2(p.x + (size.x - w1) * 0.5f, p.y + 138),
-                           TextGhost, cap1, kTracking);
-                TxtTracked(dl, g_fontMono9, ImVec2(p.x + (size.x - w2) * 0.5f, p.y + 152),
-                           TextGhost, cap2, kTracking);
-            }
-            dl->PopClipRect();
-            dl->AddRect(p, p + size, Border, 12.0f);
-        }
-
-        // ── Colour picker (right) ──
-        const float colX = origin.x + 132 + 22;
-        const float colW = w - 132 - 22;
-        float y = origin.y;
-
-        Txt(dl, g_fontLabel12, ImVec2(colX, y), TextMuted, "Colour");
-        {
-            std::string hint = "--color ";
-            hint += state.playerColor.empty() ? "default" : state.playerColor;
-            ImVec2 ts = Measure(g_fontMono10, hint.c_str());
-            Txt(dl, g_fontMono10, ImVec2(colX + colW - ts.x, y + 2), TextFaint, hint.c_str());
-        }
-        y += 26;
-
-        // Swatch grid: 5 columns, 34px cells, 9px gap.
-        {
-            constexpr float kCell = 34.0f, kGap = 9.0f;
-            const size_t count = sizeof(Game::kPlayerColorTable) / sizeof(Game::kPlayerColorTable[0]);
-            for (size_t i = 0; i < count; ++i) {
-                const auto& entry = Game::kPlayerColorTable[i];
-                const size_t row = i / 5, colIdx = i % 5;
-                const float cx = colX + static_cast<float>(colIdx) * (kCell + kGap);
-                const float cy = y + static_cast<float>(row) * (kCell + kGap);
-                ImGui::SetCursorScreenPos(ImVec2(cx, cy));
-                ImGui::PushID(entry.slug);
-                bool clicked = ImGui::InvisibleButton("##swatch", ImVec2(kCell, kCell));
-                bool hovered = ImGui::IsItemHovered();
-                ImGui::PopID();
-
-                ImU32 c = IM_COL32(entry.r, entry.g, entry.b, 255);
-                dl->AddRectFilled(ImVec2(cx, cy), ImVec2(cx + kCell, cy + kCell), c, 9.0f);
-                const bool isSelected = (state.playerColor == entry.slug) ||
-                    (state.playerColor.empty() && entry.id == Game::PlayerColorId::Default);
-                if (isSelected) {
-                    dl->AddRect(ImVec2(cx - 2, cy - 2), ImVec2(cx + kCell + 2, cy + kCell + 2),
-                                TextPrimary, 11.0f, 0, 2.0f);
-                } else if (hovered) {
-                    dl->AddRect(ImVec2(cx - 2, cy - 2), ImVec2(cx + kCell + 2, cy + kCell + 2),
-                                BorderHover, 11.0f, 0, 2.0f);
-                }
-                if (hovered && ImGui::BeginTooltip()) {
-                    {
-                        // Pop the font BEFORE EndTooltip — End() asserts on
-                        // fonts still pushed within the window.
-                        Font f(g_fontSmall);
-                        ImGui::TextUnformatted(entry.name);
-                    }
-                    ImGui::EndTooltip();
-                }
-                if (clicked) {
-                    // Default entry → store empty (lets a future renumber not break configs).
-                    state.playerColor = (entry.id == Game::PlayerColorId::Default)
-                                        ? std::string() : entry.slug;
-                }
-            }
-            y += 2.0f * kCell + kGap + 12.0f;
-        }
-
-        Txt(dl, g_fontSmall, ImVec2(colX, y), TextBody, selected.name);
-        y += 30;
-
-        // ── Next slots (placeholders) ──
-        TxtTracked(dl, g_fontMono95, ImVec2(colX, y), TextGhost, "NEXT SLOTS", 1.9f);
-        y += 20;
-        const char* slots[] = { "Capes", "Accessories" };
-        for (const char* slot : slots) {
-            dl->AddRect(ImVec2(colX, y), ImVec2(colX + colW, y + 40), BorderDashed, 10.0f);
-            Txt(dl, g_fontSmall, ImVec2(colX + 13, y + 12), TextDim, slot);
-            float soonW = MeasureTracked(g_fontMono95, "SOON", 1.33f);
-            TxtTracked(dl, g_fontMono95, ImVec2(colX + colW - 13 - soonW, y + 14),
-                       TextGhost, "SOON", 1.33f);
-            y += 40 + 10;
-        }
-
-        // Reserve the drawn height so the scroll child sizes correctly.
-        float bottom = std::max(origin.y + 188.0f + 12.0f, y);
-        ImGui::SetCursorScreenPos(ImVec2(origin.x, bottom));
         ImGui::Dummy(ImVec2(0, 0));
     }
 

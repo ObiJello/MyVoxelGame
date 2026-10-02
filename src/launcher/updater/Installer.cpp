@@ -1,5 +1,7 @@
 // File: src/launcher/updater/Installer.cpp
 #include "Installer.hpp"
+#include "Extractor.hpp"
+#include "FileOps.hpp"
 #include "common/core/Log.hpp"
 #include "common/core/ZipArchive.hpp"
 #include <filesystem>
@@ -14,151 +16,6 @@
 
 namespace Launcher {
 
-    bool Installer::Install(const std::string& zipPath, const std::string& installDir, StatusCallback status) {
-        namespace fs = std::filesystem;
-
-        if (status) status("Preparing installation...");
-        Log::Info("Installing from: %s to: %s", zipPath.c_str(), installDir.c_str());
-
-        std::string tempDir = installDir + "/_update_tmp";
-        std::string oldDir = installDir + "/_old";
-
-        // Clean up any previous failed update
-        std::error_code ec;
-        fs::remove_all(tempDir, ec);
-        fs::remove_all(oldDir, ec);
-        fs::create_directories(tempDir, ec);
-        if (ec) {
-            Log::Error("Failed to create temp directory: %s", ec.message().c_str());
-            return false;
-        }
-
-        // Extract zip to temp directory
-        if (status) status("Extracting files...");
-        if (!ExtractZip(zipPath, tempDir, status)) {
-            fs::remove_all(tempDir, ec);
-            return false;
-        }
-
-        // Find the actual content root (might be nested in a folder inside the zip)
-        std::string contentRoot = tempDir;
-        std::vector<fs::directory_entry> topEntries;
-        for (const auto& entry : fs::directory_iterator(tempDir)) {
-            topEntries.push_back(entry);
-        }
-
-        // If zip contains a single non-.app directory, use that as content root
-        // (Don't enter .app bundles - they ARE the content on macOS)
-        if (topEntries.size() == 1 && topEntries[0].is_directory()) {
-            std::string dirName = topEntries[0].path().filename().string();
-            if (dirName.find(".app") == std::string::npos) {
-                contentRoot = topEntries[0].path().string();
-                Log::Info("Zip contains single directory, using as root: %s", contentRoot.c_str());
-            }
-        }
-
-        // Swap: move existing game dir to _old, move new content to game dir
-        if (status) status("Installing update...");
-
-        std::string gameDir = installDir + "/game";
-
-        if (fs::exists(gameDir)) {
-            fs::rename(gameDir, oldDir, ec);
-            if (ec) {
-                Log::Error("Failed to move old game directory: %s", ec.message().c_str());
-                fs::remove_all(tempDir, ec);
-                return false;
-            }
-        }
-
-        fs::create_directories(fs::path(gameDir).parent_path(), ec);
-        fs::rename(contentRoot, gameDir, ec);
-        if (ec) {
-            Log::Error("Failed to move new game files: %s", ec.message().c_str());
-            // Attempt rollback
-            if (fs::exists(oldDir)) {
-                std::error_code rollbackEc;
-                fs::rename(oldDir, gameDir, rollbackEc);
-            }
-            fs::remove_all(tempDir, ec);
-            return false;
-        }
-
-        // Clean up
-        fs::remove_all(tempDir, ec);
-        fs::remove_all(oldDir, ec);
-
-        // Set executable permissions on macOS/Linux
-#ifndef _WIN32
-        SetExecutablePermissions(gameDir);
-#endif
-
-        // Delete the zip file
-        fs::remove(zipPath, ec);
-
-        if (status) status("Installation complete!");
-        Log::Info("Installation complete");
-        return true;
-    }
-
-    bool Installer::ExtractZip(const std::string& zipPath, const std::string& destDir, StatusCallback status) {
-        Core::ZipArchive zip(zipPath);
-        if (!zip.IsOpen()) {
-            Log::Error("Failed to open zip: %s (%s)", zipPath.c_str(), zip.Error().c_str());
-            return false;
-        }
-
-        const auto& entries = zip.Entries();
-        Log::Info("Extracting %zu files...", entries.size());
-
-        const auto destCanonical = std::filesystem::weakly_canonical(destDir);
-        std::vector<uint8_t> bytes;
-        for (size_t i = 0; i < entries.size(); i++) {
-            const Core::ZipArchive::Entry& entry = entries[i];
-            const std::string& filename = entry.name;
-            std::string fullPath = destDir + "/" + filename;
-
-            // Prevent zip slip attacks
-            auto canonical = std::filesystem::weakly_canonical(fullPath);
-            if (canonical.string().find(destCanonical.string()) != 0) {
-                Log::Warning("Skipping suspicious zip entry: %s", filename.c_str());
-                continue;
-            }
-
-            if (!filename.empty() && (filename.back() == '/' || filename.back() == '\\')) {
-                // Directory entry
-                std::filesystem::create_directories(fullPath);
-            } else {
-                // File entry: read whole (the largest is the game binary), then written.
-                std::filesystem::create_directories(std::filesystem::path(fullPath).parent_path());
-
-                if (!zip.Read(entry, bytes)) {
-                    Log::Error("Error reading zip entry: %s (%s)", filename.c_str(), zip.Error().c_str());
-                    return false;
-                }
-
-                std::ofstream outFile(fullPath, std::ios::binary);
-                if (!outFile.is_open()) {
-                    Log::Error("Failed to create file: %s", fullPath.c_str());
-                    return false;
-                }
-                outFile.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-                if (!outFile) {
-                    Log::Error("Failed to write file: %s", fullPath.c_str());
-                    return false;
-                }
-            }
-
-            if (status && i % 50 == 0) {
-                status("Extracting... (" + std::to_string(i + 1) + "/" +
-                       std::to_string(entries.size()) + ")");
-            }
-        }
-
-        Log::Info("Extraction complete");
-        return true;
-    }
-
     bool Installer::InstallLauncher(const std::string& zipPath, const std::string& currentAppPath,
                                      const std::string& stagingDir) {
         namespace fs = std::filesystem;
@@ -168,7 +25,7 @@ namespace Launcher {
         Log::Info("Current launcher: %s", currentAppPath.c_str());
 
         // Clean staging dir
-        fs::remove_all(stagingDir, ec);
+        FileOps::Discard(stagingDir);
         fs::create_directories(stagingDir, ec);
         if (ec) {
             Log::Error("Failed to create staging dir: %s", ec.message().c_str());
@@ -176,7 +33,10 @@ namespace Launcher {
         }
 
         // Extract zip
-        if (!ExtractZip(zipPath, stagingDir, nullptr)) {
+        std::vector<Core::ZipArchive::Entry> entries;
+        std::string extractError;
+        if (!Extract::ExtractAll(zipPath, stagingDir, entries, extractError)) {
+            Log::Error("Failed to extract launcher update: %s", extractError.c_str());
             fs::remove_all(stagingDir, ec);
             return false;
         }

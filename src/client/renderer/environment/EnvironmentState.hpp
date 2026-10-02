@@ -46,6 +46,10 @@ namespace Render {
         glm::vec3 skyLightColor{1.0f};           // SKY_LIGHT_COLOR (white .. #7a7aff)
         glm::vec3 ambientLightColor{10.0f / 255.0f};   // AMBIENT_LIGHT_COLOR (dimension)
         glm::vec3 blockLightTint{1.0f, 216.0f / 255.0f, 140.0f / 255.0f};   // BLOCK_LIGHT_TINT #ffd88c
+        // GameRenderer.bossOverlayWorldDarkening(partialTick) — a wither's
+        // darken-screen boss bar (Client::g_bossBars): the lightmap's
+        // BossOverlayWorldDarkeningFactor, and the fog colour's darken.
+        float     bossOverlayWorldDarkening = 0.0f;
 
         // Fog distances in blocks (MC FogData). rd* pushed to 1e9 when the
         // fog video option is off; skyEnd/cloudEnd always live (horizon fade).

@@ -21,6 +21,7 @@
 
 #include "common/core/Uuid.hpp"
 #include "common/entity/EntityType.hpp"
+#include "common/entity/EntityTags.hpp"
 #include "common/physics/Physics.hpp"
 #include "common/world/portal/PortalState.hpp"
 #include "common/sound/SoundSource.hpp"
@@ -332,6 +333,12 @@ namespace Game {
         // box (a baby, a slime's size, a bear standing up); the size is
         // applied on top of whatever they answer.
         float scale = 1.0f;
+        // MC LivingEntity.getScale — the SCALE attribute (/attribute … scale),
+        // 1 for anything that is not living. A LivingEntity copies it here
+        // from its attribute map (RefreshAttributeScale); the box, the eye
+        // and the renderer multiply it in beside `scale`, as MC's
+        // getDimensions(pose).scale(getScale()) does.
+        float attributeScale = 1.0f;
 
         // MC LivingEntity.getDefaultDimensions: the type's box, or its baby
         // box (MC 26.3's per-mob BABY_DIMENSIONS, else the adult's halved —
@@ -341,9 +348,9 @@ namespace Game {
         virtual float BaseBbWidth()   const { return IsBaby() ? GetBabyWidth(GetType()) : TypeInfo().width; }
         virtual float BaseBbHeight()  const { return IsBaby() ? GetBabyHeight(GetType()) : TypeInfo().height; }
         virtual float BaseEyeHeight() const { return TypeInfo().eyeHeight; }
-        float GetBbWidth()   const { return BaseBbWidth()   * scale; }
-        float GetBbHeight()  const { return BaseBbHeight()  * scale; }
-        float GetEyeHeight() const { return BaseEyeHeight() * scale; }
+        float GetBbWidth()   const { return BaseBbWidth()   * scale * attributeScale; }
+        float GetBbHeight()  const { return BaseBbHeight()  * scale * attributeScale; }
+        float GetEyeHeight() const { return BaseEyeHeight() * scale * attributeScale; }
 
         double GetEyeY() const { return position.y + GetEyeHeight(); }
         glm::dvec3 GetEyePosition() const {
@@ -828,6 +835,10 @@ namespace Game {
         void SetCustomName(std::optional<std::string> name) { m_customName = std::move(name); }
         bool IsCustomNameVisible() const { return m_customNameVisible; }
         void SetCustomNameVisible(bool visible) { m_customNameVisible = visible; }
+        // MC Entity.tags (entityTags / addTag / removeTag): `/tag`'s
+        // scoreboard tags, tested by `@e[tag=…]`, saved as "Tags".
+        EntityTags&       Tags()       { return m_tags; }
+        const EntityTags& Tags() const { return m_tags; }
         // MC Entity.playSound(sound, volume, pitch): unless silent, the level
         // plays it at this entity for everyone (except = null), in this
         // entity's sound category. Entity.cpp.
@@ -1035,6 +1046,7 @@ namespace Game {
         bool  m_hasFixedBox = false;
         std::optional<std::string> m_customName;   // MC DATA_CUSTOM_NAME
         bool m_customNameVisible = false;          // MC DATA_CUSTOM_NAME_VISIBLE
+        EntityTags m_tags;                         // MC Entity.tags ("Tags")
 
         // MC Entity.applyMovementEmissionAndPlaySound's odometers: moveDist
         // (horizontal, or full while climbing) and flyDist, each ×0.6, and the

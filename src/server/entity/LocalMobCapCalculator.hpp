@@ -50,6 +50,12 @@ namespace Server {
             return false;
         }
 
+        // The mobs charged to one player (its slot in the position list) —
+        // what CanSpawn compares against the raw cap. For the debug panel.
+        int CountFor(size_t player, Game::MobCategory category) const {
+            return player < m_counts.size() ? m_counts[player][static_cast<size_t>(category)] : 0;
+        }
+
     private:
         // MC ChunkMap.getPlayersCloseForSpawning, cached per chunk exactly as
         // MC's playersNearChunk map does — the census probes the same chunks

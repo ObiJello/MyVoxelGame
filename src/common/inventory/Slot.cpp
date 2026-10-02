@@ -67,8 +67,11 @@ namespace Game {
     bool ArmorSlot::MayPlace(const ItemStack& stack) const {
         // MC ArmorSlot.mayPlace → the stack's EQUIPPABLE component must name
         // exactly this slot.
+        // (LivingEntity.isEquippableInSlot: and its allowed_entities admit a
+        // player.)
         auto equippable = stack.get(DataComponents::EQUIPPABLE);
-        return equippable && InventoryIndexFor(equippable->slot) == containerSlot;
+        return equippable && InventoryIndexFor(equippable->slot) == containerSlot &&
+               IsEquippableInPlayerSlot(stack, equippable->slot);
     }
 
 } // namespace Game

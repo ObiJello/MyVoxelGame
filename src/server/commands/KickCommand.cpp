@@ -85,7 +85,7 @@ namespace Server {
 
         // Feedback to the issuer first (the disconnect tears the target
         // connection down so its own SendChatMessage would race).
-        connection.SendChatMessage("Kicked " + target->getName() + ": " + reason, 1);
+        source.SendSuccess(connection, "Kicked " + target->getName() + ": " + reason, true);
 
         // Send the disconnect packet — the network layer's OnDisconnected
         // callback then runs the usual cleanup (broadcast removal, drop

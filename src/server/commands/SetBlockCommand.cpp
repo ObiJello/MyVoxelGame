@@ -90,7 +90,7 @@ namespace Server {
             connection.SendChatMessage("Could not set the block", 1);
             return;
         }
-        connection.SendChatMessage("Changed the block at " + std::to_string(pos.x) + ", " + std::to_string(pos.y) + ", " + std::to_string(pos.z), 1);
+        source.SendSuccess(connection, "Changed the block at " + std::to_string(pos.x) + ", " + std::to_string(pos.y) + ", " + std::to_string(pos.z), true);
     }
 
 } // namespace Server

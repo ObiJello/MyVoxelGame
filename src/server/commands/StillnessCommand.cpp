@@ -56,7 +56,7 @@ namespace Server {
                 .Then(Cmd::Argument("seconds", Cmd::Arg::Float).Suggests({"5", "10", "30", "60"}).Executes()));
     }
 
-    void StillnessCommand::Execute(const CommandSourceStack& /*source*/,
+    void StillnessCommand::Execute(const CommandSourceStack& source,
                                    const std::vector<std::string>& args,
                                    ServerConnection& connection,
                                    PlayerSessionManager& /*sessionManager*/) {
@@ -76,17 +76,17 @@ namespace Server {
                 return;
             }
             stillness->Stop();
-            connection.SendChatMessage("The stillness is lifted", 1);
+            source.SendSuccess(connection, "The stillness is lifted", true);
             return;
         }
 
         if (sub == "query") {
             if (stillness->Active()) {
-                connection.SendChatMessage("A stillness is on: " + Seconds(stillness->RemainingTicks()) +
-                                           " left", 1);
+                source.SendSuccess(connection, "A stillness is on: " + Seconds(stillness->RemainingTicks()) +
+                                           " left", false);
             } else {
-                connection.SendChatMessage("No stillness is on; the next falls in " +
-                                           Seconds(stillness->TicksUntilNext()), 1);
+                source.SendSuccess(connection, "No stillness is on; the next falls in " +
+                                           Seconds(stillness->TicksUntilNext()), false);
             }
             return;
         }
@@ -102,8 +102,8 @@ namespace Server {
             durationTicks = static_cast<int>(std::lround(*seconds * 20.0f));
         }
         stillness->Start(durationTicks);
-        connection.SendChatMessage("A stillness falls over the Hush (" +
-                                   Seconds(stillness->RemainingTicks()) + ")", 1);
+        source.SendSuccess(connection, "A stillness falls over the Hush (" +
+                                   Seconds(stillness->RemainingTicks()) + ")", true);
         Log::Info("[StillnessCommand] Stillness started for %d ticks", stillness->RemainingTicks());
     }
 

@@ -425,6 +425,21 @@ namespace Packets {
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 
+    // MC ServerboundSeenAdvancementsPacket (AdvancementPackets.hpp).
+    class SeenAdvancementsC2SPacketImpl : public IC2SPacket {
+    private:
+        SeenAdvancementsC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit SeenAdvancementsC2SPacketImpl(SeenAdvancementsC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onSeenAdvancementsC2S(m_data); }
+        const SeenAdvancementsC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::SeenAdvancementsC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
     // MC ServerboundContainerButtonClickPacket (BookPackets.hpp).
     class ContainerButtonClickC2SPacketImpl : public IC2SPacket {
     private:
@@ -482,6 +497,21 @@ namespace Packets {
         void apply(IPacketListener& listener) override { listener.onTeleportToEntityC2S(m_data); }
         const TeleportToEntityC2SPacket& getData() const { return m_data; }
         PacketId getId() const override { return PacketId::TeleportToEntityC2S; }
+        std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
+    };
+
+    // This client's look (PlayerAppearancePackets.hpp).
+    class PlayerAppearanceC2SPacketImpl : public IC2SPacket {
+    private:
+        PlayerAppearanceC2SPacket m_data;
+        std::chrono::steady_clock::time_point m_timestamp;
+    public:
+        explicit PlayerAppearanceC2SPacketImpl(PlayerAppearanceC2SPacket data)
+            : m_data(std::move(data))
+            , m_timestamp(std::chrono::steady_clock::now()) {}
+        void apply(IPacketListener& listener) override { listener.onPlayerAppearanceC2S(m_data); }
+        const PlayerAppearanceC2SPacket& getData() const { return m_data; }
+        PacketId getId() const override { return PacketId::PlayerAppearanceC2S; }
         std::chrono::steady_clock::time_point getTimestamp() const override { return m_timestamp; }
     };
 

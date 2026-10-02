@@ -1,5 +1,6 @@
 // File: src/common/entity/Bucketable.cpp
 #include "common/entity/Bucketable.hpp"
+#include "server/advancements/CriteriaTriggers.hpp"
 #include "common/entity/GeneratedItemList.hpp"
 
 #include "common/data/DataComponents.hpp"
@@ -56,8 +57,11 @@ namespace Game::Bucketable {
         if (saveToBucket) saveToBucket(bucket);
         // ItemUtils.createFilledResult(itemStack, player, bucket, false).
         level->CreateFilledResult(player, held, bucket);
-        // CriteriaTriggers.FILLED_BUCKET — no advancements. A leashed mob
-        // drops its lead before it goes.
+        // CriteriaTriggers.FILLED_BUCKET with the filled bucket. A leashed
+        // mob drops its lead before it goes.
+        if (Server::ServerPlayer* sp = Server::CriteriaTriggers::PlayerOf(&player)) {
+            Server::CriteriaTriggers::FilledBucket(*sp, bucket);
+        }
         mob.DropLeash();
         mob.Discard();
         return UseResult::Success;

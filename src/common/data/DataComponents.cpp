@@ -22,6 +22,10 @@ namespace Game {
             static std::unordered_map<uint32_t, const DataComponentTypeBase*> registry;
             return registry;
         }
+        std::unordered_map<std::string, const DataComponentTypeBase*>& NameRegistry() {
+            static std::unordered_map<std::string, const DataComponentTypeBase*> registry;
+            return registry;
+        }
     }
 
     DataComponentTypeBase::DataComponentTypeBase(std::string n, uint32_t netId)
@@ -29,6 +33,20 @@ namespace Game {
         if (netId != 0) {
             NetworkIdRegistry()[netId] = this;
         }
+        NameRegistry()[name] = this;
+    }
+
+    const DataComponentTypeBase* DataComponents::ByName(std::string_view name) {
+        const auto& registry = NameRegistry();
+        auto it = registry.find(std::string(name));
+        return it != registry.end() ? it->second : nullptr;
+    }
+
+    std::vector<const DataComponentTypeBase*> AllComponentTypes() {
+        std::vector<const DataComponentTypeBase*> out;
+        out.reserve(NameRegistry().size());
+        for (const auto& [name, type] : NameRegistry()) out.push_back(type);
+        return out;
     }
 
     const DataComponentTypeBase* DataComponents::ById(uint32_t networkId) {
@@ -94,21 +112,42 @@ namespace Game::DataComponents {
             return v;
         }
 
-        // Our Tool collapses MC Tool.java's rules list to (type, tier, speed) —
-        // wire matches the struct, not MC's rules list.
-        // damagePerBlock is MC Tool.STREAM_CODEC's VAR_INT.
+        // Tool.STREAM_CODEC: the rules (each: its block HolderSet — the raw
+        // entries here — an optional FLOAT speed, an optional BOOL
+        // correct_for_drops), default_mining_speed FLOAT, damage_per_block
+        // VAR_INT, can_destroy_blocks_in_creative BOOL.
         void SerTool(Network::PacketBuffer& b, const Tool& v) {
-            b.WriteByte(static_cast<uint8_t>(v.type));
-            b.WriteByte(static_cast<uint8_t>(v.tier));
-            b.WriteFloat(v.miningSpeed);
+            b.WriteVarInt(static_cast<uint32_t>(v.rules.size()));
+            for (const Tool::Rule& rule : v.rules) {
+                b.WriteVarInt(static_cast<uint32_t>(rule.blocks.size()));
+                for (const std::string& e : rule.blocks) b.WriteString(e);
+                b.WriteByte(rule.speed ? 1 : 0);
+                if (rule.speed) b.WriteFloat(*rule.speed);
+                b.WriteByte(rule.correctForDrops ? 1 : 0);
+                if (rule.correctForDrops) b.WriteByte(*rule.correctForDrops ? 1 : 0);
+            }
+            b.WriteFloat(v.defaultMiningSpeed);
             b.WriteVarInt(static_cast<uint32_t>(v.damagePerBlock));
+            b.WriteByte(v.canDestroyBlocksInCreative ? 1 : 0);
         }
         Tool DeTool(Network::PacketReader& r) {
             Tool v;
-            v.type           = static_cast<ToolType>(r.ReadByte());
-            v.tier           = static_cast<MiningTier>(r.ReadByte());
-            v.miningSpeed    = r.ReadFloat();
-            v.damagePerBlock = static_cast<int>(r.ReadVarInt());
+            const uint32_t count = r.ReadVarInt();
+            if (count > 1024) throw std::runtime_error("tool: too many rules");
+            v.rules.reserve(count);
+            for (uint32_t i = 0; i < count; ++i) {
+                Tool::Rule rule;
+                const uint32_t entries = r.ReadVarInt();
+                if (entries > 4096) throw std::runtime_error("tool: rule block set too large");
+                rule.blocks.reserve(entries);
+                for (uint32_t e = 0; e < entries; ++e) rule.blocks.push_back(r.ReadString());
+                if (r.ReadByte() != 0) rule.speed = r.ReadFloat();
+                if (r.ReadByte() != 0) rule.correctForDrops = r.ReadByte() != 0;
+                v.rules.push_back(std::move(rule));
+            }
+            v.defaultMiningSpeed         = r.ReadFloat();
+            v.damagePerBlock             = static_cast<int>(r.ReadVarInt());
+            v.canDestroyBlocksInCreative = r.ReadByte() != 0;
             return v;
         }
 
@@ -198,11 +237,9 @@ namespace Game::DataComponents {
             b.WriteByte(static_cast<uint8_t>(v.animation));
             b.WriteString(v.sound);
             b.WriteByte(v.hasConsumeParticles ? 1 : 0);
+            // ConsumeEffect.STREAM_CODEC list (ConsumableComponents.cpp).
             b.WriteVarInt(static_cast<uint32_t>(v.onConsumeEffects.size()));
-            for (const auto& e : v.onConsumeEffects) {
-                b.WriteByte(static_cast<uint8_t>(e.type));
-                b.WriteString(e.payload);
-            }
+            for (const auto& e : v.onConsumeEffects) WriteConsumeEffect(b, e);
         }
         Consumable DeConsumable(Network::PacketReader& r) {
             Consumable v;
@@ -211,35 +248,18 @@ namespace Game::DataComponents {
             v.sound               = r.ReadString();
             v.hasConsumeParticles = r.ReadByte() != 0;
             const uint32_t count  = r.ReadVarInt();
+            if (count > 256) throw std::runtime_error("consumable: too many on_consume_effects");
             v.onConsumeEffects.reserve(count);
-            for (uint32_t i = 0; i < count; ++i) {
-                ConsumeEffect e;
-                e.type    = static_cast<ConsumeEffect::Type>(r.ReadByte());
-                e.payload = r.ReadString();
-                v.onConsumeEffects.push_back(std::move(e));
-            }
+            for (uint32_t i = 0; i < count; ++i) v.onConsumeEffects.push_back(ReadConsumeEffect(r));
             return v;
         }
 
         // Field order mirrors FoodProperties.DIRECT_STREAM_CODEC
         // (FoodProperties.java:36-38): VarInt nutrition, float saturation, bool.
-        void SerSulfurCubeBucket(Network::PacketBuffer& b, const SulfurCubeBucketData& v) {
-            b.WriteString(v.bodyItem);
-            b.WriteInt(static_cast<uint32_t>(v.age));
-            b.WriteByte(v.ageLocked ? 1 : 0);
-            b.WriteByte(v.noAi ? 1 : 0);
-        }
-        SulfurCubeBucketData DeSulfurCubeBucket(Network::PacketReader& r) {
-            SulfurCubeBucketData v;
-            v.bodyItem  = r.ReadString();
-            v.age       = static_cast<int>(r.ReadInt());
-            v.ageLocked = r.ReadByte() != 0;
-            v.noAi      = r.ReadByte() != 0;
-            return v;
-        }
         // BUCKET_ENTITY_DATA: a flag byte (bit per boolean key, bit 6 =
         // AgeLocked present, bit 7 = its value), then each optional as a
-        // presence byte + value.
+        // presence byte + value, then the untyped keys (MC's COMPOUND_TAG
+        // stream codec for them).
         void SerBucketEntity(Network::PacketBuffer& b, const BucketEntityData& v) {
             uint8_t flags = 0;
             if (v.noAi)                flags |= 0x01;
@@ -257,6 +277,7 @@ namespace Game::DataComponents {
             if (v.age) b.WriteInt(static_cast<uint32_t>(*v.age));
             b.WriteByte(v.huntingCooldown ? 1 : 0);
             if (v.huntingCooldown) b.WriteLong(static_cast<uint64_t>(*v.huntingCooldown));
+            SerNbtCompoundValue(b, v.extra);
         }
         BucketEntityData DeBucketEntity(Network::PacketReader& r) {
             BucketEntityData v;
@@ -271,6 +292,7 @@ namespace Game::DataComponents {
             if (r.ReadByte() != 0) v.health = r.ReadFloat();
             if (r.ReadByte() != 0) v.age = static_cast<int32_t>(r.ReadInt());
             if (r.ReadByte() != 0) v.huntingCooldown = static_cast<int64_t>(r.ReadLong());
+            v.extra = DeNbtCompoundValue(r);
             return v;
         }
         void SerFood(Network::PacketBuffer& b, const FoodProperties& v) {
@@ -413,20 +435,19 @@ namespace Game::DataComponents {
         void SerString(Network::PacketBuffer& b, const std::string& v) { b.WriteString(v); }
         std::string DeString(Network::PacketReader& r)                 { return r.ReadString(); }
 
-        // Mirrors ItemLore.STREAM_CODEC — a bounded list of Components
-        // (plain strings here). MAX_LINES = 256 (ItemLore.java:22).
+        // Mirrors ItemLore.STREAM_CODEC — ComponentSerialization.
+        // STREAM_CODEC.apply(ByteBufCodecs.list(MAX_LINES)).
         void SerLore(Network::PacketBuffer& b, const ItemLore& v) {
-            const uint32_t count = static_cast<uint32_t>(
-                v.lines.size() > 256 ? 256 : v.lines.size());
+            const uint32_t count = static_cast<uint32_t>(std::min(v.lines.size(), ItemLore::kMaxLines));
             b.WriteVarInt(count);
-            for (uint32_t i = 0; i < count; ++i) b.WriteString(v.lines[i]);
+            for (uint32_t i = 0; i < count; ++i) Text::Write(b, v.lines[i]);
         }
         ItemLore DeLore(Network::PacketReader& r) {
             ItemLore v;
-            uint32_t count = r.ReadVarInt();
-            if (count > 256) count = 256;   // MAX_LINES clamp
+            const uint32_t count = r.ReadVarInt();
+            if (count > ItemLore::kMaxLines) throw std::runtime_error("lore: too many lines");
             v.lines.reserve(count);
-            for (uint32_t i = 0; i < count; ++i) v.lines.push_back(r.ReadString());
+            for (uint32_t i = 0; i < count; ++i) v.lines.push_back(Text::Read(r));
             return v;
         }
 
@@ -483,14 +504,21 @@ namespace Game::DataComponents {
             b.WriteFloat(v.blockDelaySeconds);
             b.WriteFloat(v.disableCooldownScale);
             b.WriteVarInt(static_cast<uint32_t>(v.damageReductions.size()));
+            // The optional holder sets as a count + entries (0 = empty).
+            const auto writeSet = [&b](const std::vector<std::string>& set) {
+                b.WriteVarInt(static_cast<uint32_t>(set.size()));
+                for (const std::string& e : set) b.WriteString(e);
+            };
             for (const auto& dr : v.damageReductions) {
                 b.WriteFloat(dr.horizontalBlockingAngle);
+                writeSet(dr.type);
                 b.WriteFloat(dr.base);
                 b.WriteFloat(dr.factor);
             }
             b.WriteFloat(v.itemDamage.threshold);
             b.WriteFloat(v.itemDamage.base);
             b.WriteFloat(v.itemDamage.factor);
+            writeSet(v.bypassedBy);
             b.WriteString(v.blockSound);
             b.WriteString(v.disableSound);
         }
@@ -498,19 +526,30 @@ namespace Game::DataComponents {
             BlocksAttacks v;
             v.blockDelaySeconds    = r.ReadFloat();
             v.disableCooldownScale = r.ReadFloat();
+            const auto readSet = [&r]() {
+                const uint32_t n = r.ReadVarInt();
+                if (n > 1024) throw std::runtime_error("blocks_attacks: holder set too large");
+                std::vector<std::string> set;
+                set.reserve(n);
+                for (uint32_t i = 0; i < n; ++i) set.push_back(r.ReadString());
+                return set;
+            };
             const uint32_t count   = r.ReadVarInt();
+            if (count > 1024) throw std::runtime_error("blocks_attacks: too many damage reductions");
             v.damageReductions.clear();
             v.damageReductions.reserve(count);
             for (uint32_t i = 0; i < count; ++i) {
                 BlocksAttacks::DamageReduction dr;
                 dr.horizontalBlockingAngle = r.ReadFloat();
+                dr.type   = readSet();
                 dr.base   = r.ReadFloat();
                 dr.factor = r.ReadFloat();
-                v.damageReductions.push_back(dr);
+                v.damageReductions.push_back(std::move(dr));
             }
             v.itemDamage.threshold = r.ReadFloat();
             v.itemDamage.base      = r.ReadFloat();
             v.itemDamage.factor    = r.ReadFloat();
+            v.bypassedBy   = readSet();
             v.blockSound   = r.ReadString();
             v.disableSound = r.ReadString();
             return v;
@@ -720,7 +759,6 @@ namespace Game::DataComponents {
     const DataComponentType<FoodProperties>   FOOD                      {"food",                       9, &SerFood,         &DeFood};
     const DataComponentType<UseRemainder>     USE_REMAINDER             {"use_remainder",             10, &SerUseRemainder, &DeUseRemainder};
     const DataComponentType<std::string>      CUSTOM_NAME               {"custom_name",                4, &SerString,       &DeString};
-    const DataComponentType<SulfurCubeBucketData> SULFUR_CUBE_BUCKET    {"sulfur_cube_bucket",        14, &SerSulfurCubeBucket, &DeSulfurCubeBucket};
     const DataComponentType<BucketEntityData> BUCKET_ENTITY_DATA        {"bucket_entity_data",        64, &SerBucketEntity, &DeBucketEntity};
     const DataComponentType<int32_t>          AXOLOTL_VARIANT           {"axolotl/variant",           65, &SerVarInt,       &DeVarInt};
     const DataComponentType<int32_t>          SALMON_SIZE               {"salmon/size",               66, &SerVarInt,       &DeVarInt};

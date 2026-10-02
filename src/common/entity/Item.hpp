@@ -25,6 +25,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include "ClientItemLoader.hpp"   // CompositeChild
 #include <unordered_map>
 #include <vector>
@@ -95,6 +96,9 @@ namespace Game {
         float playerYaw = 0.0f;
         // Compass target (lodestone OR world spawn). Default: world spawn at origin.
         float compassTargetX = 0.0f, compassTargetZ = 0.0f;
+        // The viewer's dimension (DimensionToRaw) — a lodestone compass
+        // points only in its lodestone's dimension.
+        int dimensionRaw = 0;
         // The Hush's echo compass: the nearest Echo Vault the server gave
         // (HushSignalS2C), or no target — then the needle spins, as MC's
         // compass does with nothing to point at.
@@ -255,6 +259,10 @@ namespace Game {
         std::vector<std::string>      spriteLayers;                // all layerN textures (multi-layer items: leather armor, spawn egg, potion, …)
         std::vector<uint32_t>         layerTints;                  // ARGB tint per layer index (0 = untinted/white). From the items/{slug}.json `tints` array.
         std::vector<ItemTintKind>     layerTintKinds;              // parallel to layerTints — Potion entries resolve per stack (ResolveItemLayerTint)
+        std::vector<uint8_t>          layerTintIndices;            // parallel to layerTints — a custom_model_data source's colour index
+        // The item's model definition reads CUSTOM_MODEL_DATA, so a stack
+        // is drawn from its own evaluation (GetRenderStack), not this summary.
+        bool                          modelReadsCustomModelData = false;
         std::vector<std::string>      spriteFrames;                // animated sprite frames
         ItemFrameSelector             selectFrame = nullptr;        // picks index into spriteFrames
         int                           maxStackSize = 64;
@@ -432,6 +440,19 @@ namespace Game {
         // Matches MC's CompassAngleState.wobble() ticking.
         static void TickAnimated(float dtSeconds);
 
+        // ── Render variants (client drawing only) ─────────────────────────
+        // An item model definition evaluated for a stack (ITEM_MODEL,
+        // CUSTOM_MODEL_DATA — GetRenderStack) becomes an Item of its own
+        // that only the renderers ever see: registered once per `key`, at an
+        // id from RENDER_VARIANT_BASE up, answered by Get() / Slug() like any
+        // item (Slug() gives `slug`, the chosen model's name). `build` runs
+        // only the first time. Thread-safe; ids are never reused. Nothing
+        // but a render copy of a stack may carry such an id.
+        static constexpr ItemID RENDER_VARIANT_BASE = 0xF0000000u;
+        static bool   IsRenderVariant(ItemID id) { return id >= RENDER_VARIANT_BASE; }
+        static ItemID RegisterRenderVariant(const std::string& key, const std::string& slug,
+                                            const std::function<Item()>& build);
+
     private:
         static void RegisterPureItem(ItemID id, const std::string& name,
                                      const std::string& spriteName, int maxStack = 64);
@@ -495,7 +516,17 @@ namespace Game {
         template<typename T>
         std::optional<T> get(const DataComponentType<T>& key) const {
             if (auto v = components.get(key)) return v;
+            if (components.isRemoved(key)) return std::nullopt;   // `[!component]`
             return ItemRegistry::Get(itemId).defaultComponents.get(key);
+        }
+
+        // MC ItemStack.has(type): the stack's patch sets it, or the item's
+        // prototype does and the patch does not remove it. Type-erased, for
+        // the registries that walk component types (tooltips, NBT).
+        bool has(const DataComponentTypeBase& key) const {
+            if (components.has(key)) return true;
+            if (components.isRemoved(key)) return false;
+            return ItemRegistry::Get(itemId).defaultComponents.has(key);
         }
 
         // Mirrors MC `ItemStack.hasFoil()` (ItemStack.java:909–911): explicit
@@ -512,6 +543,16 @@ namespace Game {
     // and a Potion of Fire Resistance orange from the same item.
     uint32_t ResolveItemLayerTint(const ItemStack& stack, size_t layer);
 
+    // Puts a client item definition's summary onto an Item's render fields
+    // (renderType, sprites / layers / tints, block model override, special
+    // renderer hints, animation frames) — what ItemRegistry::Initialize does
+    // with every items/<slug>.json. False (nothing changed) for kind Missing.
+    bool ApplyClientItemDesc(Item& item, const ClientItemDesc& desc);
+    // The frame selector ItemRegistry::Initialize wires for an animated
+    // item: by the range_dispatch property ("compass/...", "time"), the
+    // echo / recovery compass by slug, frame 0 for anything else with frames.
+    ItemFrameSelector ItemFrameSelectorFor(std::string_view property, std::string_view slug, bool hasFrames);
+
     // MC's per-stack use properties for the stack being drawn: ticks into
     // the local player's use (UseDuration.useDuration) when THIS stack is the
     // one in use — drawn from the using slot and of the using item — else -1
@@ -527,6 +568,17 @@ namespace Game {
 
     // MC ItemStack.getHoverName: CUSTOM_NAME, else getItemName.
     std::string GetItemStackHoverName(const ItemStack& stack);
+
+    // MC ItemStack.getMaxStackSize: the stack's MAX_STACK_SIZE (its patch,
+    // else the item's default — Item::maxStackSize), 1 when the patch
+    // removes it. Every stack-level limit (merging, pickup, container
+    // clicks, hoppers, /give splitting) reads this, never Item::maxStackSize,
+    // so `stick[max_stack_size=1]` holds one per slot everywhere.
+    // Implemented in StackComponents.cpp.
+    int GetMaxStackSize(const ItemStack& stack);
+    // MC ItemStack.isStackable: a limit above one and not a damaged
+    // damageable item.
+    bool IsStackable(const ItemStack& stack);
 
     // Mirrors MC `ItemStack.isSameItemSameComponents` (ItemStack.java) — same
     // item AND identical per-stack components, ignoring count. This is the

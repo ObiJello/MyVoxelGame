@@ -21,6 +21,7 @@
 #include "common/sound/SoundEvents.hpp"
 #include "common/sound/SoundType.hpp"
 #include "common/world/block/BlockState.hpp"
+#include "common/world/level/GameRules.hpp"
 
 #include <glm/glm.hpp>
 
@@ -116,11 +117,20 @@ namespace Game {
     // AT the event with vanilla's thunder trick — a volume of 10000, whose
     // send range and linear attenuation distance (16 × volume) cover any
     // loaded world, while the engine clamps the loudness itself to 1.0 as MC
-    // does. Players in other dimensions do not hear it; vanilla's
-    // global_sound_events rule is treated as its default (true).
+    // does. Players in other dimensions do not hear it.
+    //
+    // global_sound_events off: MC falls back to a plain levelEvent, and the
+    // client's LevelEventHandler.levelEvent has no case for 1023/1028/1038 —
+    // the event reaches the players near it and plays nothing. So here the
+    // sound is not played at all (the type still counts as handled).
     template <class LevelT>
     bool PlayGlobalLevelEventSound(LevelT& level, int type, const glm::ivec3& pos) {
         constexpr float kGlobalVolume = 10000.0f;
+        if (!Game::Rules::GetBool(Game::Rules::Id::GlobalSoundEvents)) {
+            return type == LevelEvent::SOUND_WITHER_BOSS_SPAWN ||
+                   type == LevelEvent::SOUND_DRAGON_DEATH ||
+                   type == LevelEvent::SOUND_END_PORTAL_SPAWN;
+        }
         const glm::dvec3 at = Sound::BlockCenter(pos);
         switch (type) {
             case LevelEvent::SOUND_WITHER_BOSS_SPAWN:

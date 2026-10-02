@@ -23,7 +23,8 @@ namespace Game {
             if (!brain) return nullptr;
             if (auto* angry =
                     dynamic_cast<LivingEntity*>(brain->GetEntity(MemoryModule::AngryAt))) {
-                if (mob.CanAttack(*angry)) return angry;
+                // MC Sensor.isEntityAttackableIgnoringLineOfSight.
+                if (SensorTargeting::IsEntityAttackableIgnoringLineOfSight(mob, *angry)) return angry;
             }
             if (auto* player = dynamic_cast<LivingEntity*>(
                     brain->GetEntity(MemoryModule::NearestVisibleAttackablePlayer))) {
@@ -32,41 +33,6 @@ namespace Game {
             return dynamic_cast<LivingEntity*>(
                 brain->GetEntity(MemoryModule::NearestVisibleNemesis));
         }
-
-        // MC StopAttackingIfTargetInvalid.create(target != nearest valid),
-        // with the brute's own validity rule — same shape as the piglin's.
-        class BruteStopAttacking : public Behavior {
-        public:
-            BruteStopAttacking()
-                : Behavior({ MemoryCondition{ MemoryModule::AttackTarget,
-                                              MemoryStatus::ValuePresent },
-                             MemoryCondition{ MemoryModule::CantReachWalkTargetSince,
-                                              MemoryStatus::Registered } },
-                           1) {}
-            const char* DebugString() const override { return "BruteStopAttacking"; }
-
-        protected:
-            bool CheckExtraStartConditions(EntityLevel& level, LivingEntity& body) override {
-                auto* mob = dynamic_cast<Mob*>(&body);
-                Brain* brain = body.GetBrain();
-                if (!mob || !brain) return false;
-
-                auto* target = dynamic_cast<LivingEntity*>(
-                    brain->GetEntity(MemoryModule::AttackTarget));
-
-                bool tired = false;
-                if (const std::optional<int64_t> since =
-                        brain->GetLong(MemoryModule::CantReachWalkTargetSince)) {
-                    tired = (level.GetGameTime() - *since) > 200;
-                }
-
-                if (!target || !target->IsAlive() || !mob->CanAttack(*target) || tired
-                    || FindTarget(*mob) != target) {
-                    brain->EraseMemory(MemoryModule::AttackTarget);
-                }
-                return true;
-            }
-        };
 
         // MC StrollToPoi(HOME, 0.6, 2, 100) — drift back toward the post.
         class StrollToPoi : public Behavior {
@@ -275,7 +241,11 @@ namespace Game {
 
         // ── FIGHT (MC initFightActivity, priority 10) ──────────────────────
         std::vector<BehaviorPtr> fight;
-        fight.push_back(std::make_unique<BruteStopAttacking>());
+        // MC StopAttackingIfTargetInvalid.create(!isNearestValidAttackTarget).
+        fight.push_back(std::make_unique<StopAttackingIfTargetInvalid>(
+            [](EntityLevel&, Mob& body, LivingEntity& target) {
+                return FindTarget(body) != &target;
+            }));
         fight.push_back(std::make_unique<SetWalkTargetFromAttackTarget>(1.0f));
         fight.push_back(std::make_unique<MeleeAttack>(20));
         brain.AddActivityAndRemoveMemoryWhenStopped(Activity::Fight, 10, std::move(fight),

@@ -14,7 +14,8 @@
 //   WingsLayer.submit: translate(0, 0, 0.125) on the parent's pose stack;
 //   the baby model is the mesh scaled 0.5 (BABY_TRANSFORMER).
 //   The texture: textures/entity/equipment/wings/elytra.png (the elytra
-//   asset's WINGS layer; no player skin here carries a custom elytra/cape).
+//   asset's WINGS layer), or a skinned player's cape (ElytraDraw::texture —
+//   WingsLayer draws the cape's sheet when a cape is worn and shown).
 //   An enchanted elytra draws MC's armor glint again over it (additive,
 //   depth EQUAL, TextureTransform.ARMOR_ENTITY_GLINT_TEXTURING: scale 0.16).
 #include "client/renderer/entity/MobRenderer.hpp"
@@ -159,8 +160,9 @@ namespace Render {
         const size_t vertRoom = kMaxVertices - m_vertCursor;
         const size_t idxRoom  = kMaxIndices  - m_idxCursor;
 
+        // The elytra asset, unless the body's cape supplies the texture (MC
+        // WingsLayer: a shown cape's sheet carries the elytra's design too).
         const TextureHandle wings = LoadTexture("assets/textures/entity/equipment/wings/elytra.png");
-        if (wings == INVALID_TEXTURE) return;
         TextureHandle glintTex = INVALID_TEXTURE;
 
         // The glint's scroll, once for the frame.
@@ -170,12 +172,20 @@ namespace Render {
         const float l0 = static_cast<float>(millis % 110000LL) / 110000.0f;
         const float l1 = static_cast<float>(millis % 30000LL) / 30000.0f;
 
-        struct Piece { size_t first = 0, count = 0; bool glint = false; int packedLight = 0; bool glowing = false; };
+        struct Piece {
+            size_t first = 0, count = 0;
+            bool glint = false;
+            int packedLight = 0;
+            bool glowing = false;
+            TextureHandle texture = INVALID_TEXTURE;
+        };
         std::vector<Piece> pieces;
         m_verts.clear();
         m_indices.clear();
         ElytraMesh& mesh = Elytra();
         for (const ElytraDraw& d : draws) {
+            const TextureHandle texture = d.texture != INVALID_TEXTURE ? d.texture : wings;
+            if (texture == INVALID_TEXTURE) continue;
             PoseElytra(mesh, d);
             glm::mat4 m = glm::translate(d.rootPx, glm::vec3(0.0f, 0.0f, 0.125f * 16.0f));
             if (d.baby) m = glm::scale(m, glm::vec3(0.5f));
@@ -185,7 +195,7 @@ namespace Render {
             const size_t vEnd = m_verts.size();
             const size_t iEnd = m_indices.size();
             if (iEnd == iFirst) continue;
-            pieces.push_back({ iFirst, iEnd - iFirst, false, d.packedLight, d.glowing });
+            pieces.push_back({ iFirst, iEnd - iFirst, false, d.packedLight, d.glowing, texture });
             if (d.glint) {
                 if (glintTex == INVALID_TEXTURE) {
                     glintTex = LoadTexture("assets/textures/misc/enchanted_glint_armor.png", /*repeatWrap=*/true);
@@ -204,7 +214,7 @@ namespace Render {
                     for (size_t i = iFirst; i < iEnd; ++i) {
                         m_indices.push_back(base + (m_indices[i] - static_cast<uint32_t>(vFirst)));
                     }
-                    pieces.push_back({ gFirst, m_indices.size() - gFirst, true, d.packedLight, false });
+                    pieces.push_back({ gFirst, m_indices.size() - gFirst, true, d.packedLight, false, glintTex });
                 }
             }
             if (m_verts.size() + 4096 > vertRoom || m_indices.size() + 8192 > idxRoom) break;
@@ -245,9 +255,9 @@ namespace Render {
             if (piece.glint) continue;
             if (piece.glowing) {
                 EntityOutline::Get().SubmitIndexed(fb.mesh, static_cast<uint32_t>(firstIndexThisCall + piece.first),
-                                                   static_cast<uint32_t>(piece.count), wings, viewProj);
+                                                   static_cast<uint32_t>(piece.count), piece.texture, viewProj);
             }
-            g_renderBackend->BindTexture(wings, 0);
+            g_renderBackend->BindTexture(piece.texture, 0);
             EntityEnvironment::SetEntityLight(m_shader, EntityEnvironment::LightColor(piece.packedLight));
             g_renderBackend->DrawIndexed(fb.mesh, static_cast<uint32_t>(piece.count),
                                          static_cast<uint32_t>(firstIndexThisCall + piece.first));

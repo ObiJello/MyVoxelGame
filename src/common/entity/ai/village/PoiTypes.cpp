@@ -26,6 +26,8 @@ namespace Game {
             { "weaponsmith",   1, 1 },
             { "home",          1, 1 },
             { "meeting",      32, 6 },
+            { "beehive",       0, 1 },
+            { "bee_nest",      0, 1 },
             { "lightning_rod", 0, 1 },
         }};
 
@@ -58,6 +60,8 @@ namespace Game {
                 case BlockID::SmithingTable:      return PoiType::Toolsmith;
                 case BlockID::Grindstone:         return PoiType::Weaponsmith;
                 case BlockID::Bell:               return PoiType::Meeting;
+                case BlockID::Beehive:            return PoiType::Beehive;
+                case BlockID::BeeNest:            return PoiType::BeeNest;
                 // MC PoiTypes.LIGHTNING_RODS: Blocks.LIGHTNING_ROD.asList() —
                 // the copper family's rods, every oxidation and wax state.
                 case BlockID::LightningRod:

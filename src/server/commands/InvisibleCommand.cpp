@@ -27,12 +27,12 @@ namespace Server {
             Cmd::Root().Executes().Then(Cmd::Literals({"on", "off"})));
     }
 
-    void InvisibleCommand::Execute(const CommandSourceStack& /*source*/,
+    void InvisibleCommand::Execute(const CommandSourceStack& source,
                                    const std::vector<std::string>& args,
                                    ServerConnection& connection,
-                                   PlayerSessionManager& sessionManager) {
-        auto session = sessionManager.GetSession(connection.GetPlayerId());
-        ServerPlayer* player = session ? session->GetPlayer() : nullptr;
+                                   PlayerSessionManager& /*sessionManager*/) {
+        // The executor (`/execute as Steve run invisible on`).
+        ServerPlayer* player = source.ExecutorPlayer();
         if (!player) {
             connection.SendChatMessage("Only a player can be invisible", 1);
             return;
@@ -50,8 +50,11 @@ namespace Server {
         // The flag rides the next PlayerUpdateS2C broadcast (every tick
         // while others are online), so nothing else needs sending here.
         player->setInvisible(on);
-        connection.SendChatMessage(on ? "You are now invisible to other players"
-                                      : "You are visible to other players again", 1);
+        const bool self = player == source.sender;
+        source.SendSuccess(connection, self ? (on ? "You are now invisible to other players"
+                                              : "You are visible to other players again")
+                                        : player->getName() + (on ? " is now invisible to other players"
+                                                                  : " is visible to other players again"), true);
     }
 
 } // namespace Server

@@ -1,14 +1,23 @@
 // File: src/common/entity/ClientItemLoader.cpp
 #include "ClientItemLoader.hpp"
+#include "Item.hpp"
+#include "../data/DataComponents.hpp"
 #include "../core/Log.hpp"
 #include "../world/biome/Biomes.hpp"   // grass/foliage tint sampling
 
 #include <nlohmann/json.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/constants.hpp>
+#include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <fstream>
 #include <filesystem>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <unordered_map>
 
 namespace PlatformMain { std::string GetAssetPath(const std::string& relativePath); }
 
@@ -128,6 +137,30 @@ namespace Game {
             return true;
         }
 
+        // Any node (or tint source) of the tree that reads CUSTOM_MODEL_DATA.
+        bool ReadsCmd(const nlohmann::json& node, int depth) {
+            if (depth > 128) return false;
+            if (node.is_object()) {
+                for (const char* key : {"property", "type"}) {
+                    auto p = node.find(key);
+                    // custom_model_data, and the other properties a stack
+                    // answers (SelectValue): trim_material.
+                    if (p != node.end() && p->is_string() &&
+                        (StripNamespace(p->get<std::string>()) == "custom_model_data" ||
+                         StripNamespace(p->get<std::string>()) == "trim_material")) {
+                        return true;
+                    }
+                }
+                for (const auto& [k, v] : node.items()) {
+                    (void)k;
+                    if ((v.is_object() || v.is_array()) && ReadsCmd(v, depth + 1)) return true;
+                }
+            } else if (node.is_array()) {
+                for (const auto& v : node) if (ReadsCmd(v, depth + 1)) return true;
+            }
+            return false;
+        }
+
         void Resolve(const nlohmann::json& node, ClientItemDesc& out, bool& foundFrames) {
             if (!node.is_object()) return;
             auto typeIt = node.find("type");
@@ -156,6 +189,7 @@ namespace Game {
                         // One kind per entry, pushed before the value so every
                         // `continue` below leaves the two arrays aligned.
                         out.layerTintKinds.push_back(ItemTintKind::Fixed);
+                        out.layerTintIndices.push_back(0);
                         if (!t.is_object()) { out.layerTints.push_back(0); continue; }
 
                         // Climate-sampled tint sources. MC's `minecraft:grass`
@@ -181,6 +215,27 @@ namespace Game {
                             if (tt == "dye")    out.layerTintKinds.back() = ItemTintKind::Dye;
                             if (tt == "map_color") out.layerTintKinds.back() = ItemTintKind::MapColor;
                             if (tt == "firework")  out.layerTintKinds.back() = ItemTintKind::Firework;
+                            if (tt == "custom_model_data") {
+                                // CustomModelDataSource {index (NON_NEGATIVE_INT, 0),
+                                // default (RGB_COLOR_CODEC: an int or [r, g, b])}.
+                                out.layerTintKinds.back() = ItemTintKind::CustomModelData;
+                                auto ix = t.find("index");
+                                if (ix != t.end() && ix->is_number_integer()) {
+                                    out.layerTintIndices.back() =
+                                        static_cast<uint8_t>(std::clamp<int64_t>(ix->get<int64_t>(), 0, 255));
+                                }
+                                auto d = t.find("default");
+                                if (d != t.end() && d->is_array() && d->size() == 3) {
+                                    uint32_t rgb = 0;
+                                    for (size_t c = 0; c < 3; ++c) {
+                                        const float f = (*d)[c].is_number() ? (*d)[c].get<float>() : 0.0f;
+                                        rgb = (rgb << 8) | static_cast<uint32_t>(
+                                            std::clamp(static_cast<int>(std::floor(f * 255.0f + 0.5f)), 0, 255));
+                                    }
+                                    out.layerTints.push_back(rgb | 0xFF000000u);
+                                    continue;
+                                }
+                            }
                             if (tt == "grass" || tt == "foliage") {
                                 const auto num = [&](const char* k, float dflt) {
                                     auto f = t.find(k);
@@ -410,6 +465,225 @@ namespace Game {
         if (modelIt == root.end()) return desc;
         bool foundFrames = false;
         Resolve(*modelIt, desc, foundFrames);
+        desc.readsCustomModelData = ReadsCmd(*modelIt, 0);
+        return desc;
+    }
+
+    namespace {
+
+        // The parsed definitions, by id ("minecraft:stick"). A null entry
+        // records a missing / unreadable file. Entries are never erased, so
+        // the node pointers Evaluate hands out as leaf keys stay valid.
+        struct DefinitionCache {
+            std::mutex mutex;
+            std::unordered_map<std::string, std::shared_ptr<const nlohmann::json>> byId;
+        };
+        DefinitionCache& Definitions() {
+            static DefinitionCache cache;
+            return cache;
+        }
+
+        std::string NormalizeModelId(const std::string& modelId) {
+            return modelId.find(':') == std::string::npos ? "minecraft:" + modelId : modelId;
+        }
+
+        std::shared_ptr<const nlohmann::json> GetDefinition(const std::string& modelId) {
+            const std::string id = NormalizeModelId(modelId);
+            DefinitionCache& cache = Definitions();
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            if (auto it = cache.byId.find(id); it != cache.byId.end()) return it->second;
+            std::shared_ptr<const nlohmann::json> def;
+            // The engine tree folds the minecraft namespace (resource packs'
+            // assets/minecraft/items override it through GetAssetPath).
+            // Other namespaces have no item definitions here.
+            if (id.rfind("minecraft:", 0) == 0) {
+                const std::string path = PlatformMain::GetAssetPath("assets/items/" + id.substr(10) + ".json");
+                std::ifstream f(path);
+                if (f.is_open()) {
+                    try {
+                        auto root = std::make_shared<nlohmann::json>();
+                        f >> *root;
+                        if (root->is_object() && root->contains("model")) def = std::move(root);
+                    } catch (const std::exception& e) {
+                        Log::Warning("[ClientItemLoader] %s parse error: %s", path.c_str(), e.what());
+                    }
+                }
+            }
+            cache.byId.emplace(id, def);
+            return def;
+        }
+
+        std::string PropertyOf(const nlohmann::json& node) {
+            auto p = node.find("property");
+            return p != node.end() && p->is_string() ? StripNamespace(p->get<std::string>()) : std::string();
+        }
+
+        int IndexOf(const nlohmann::json& node) {
+            auto ix = node.find("index");
+            return ix != node.end() && ix->is_number_integer() ? static_cast<int>(ix->get<int64_t>()) : 0;
+        }
+
+        bool BoolField(const nlohmann::json& node, const char* key, bool fallback) {
+            auto f = node.find(key);
+            return f != node.end() && f->is_boolean() ? f->get<bool>() : fallback;
+        }
+
+        // A ConditionalItemModelProperty the stack answers; nullopt when the
+        // property reads world / holder state (the flat summary's default).
+        std::optional<bool> ConditionValue(const nlohmann::json& node, const ItemStack& stack) {
+            const std::string prop = PropertyOf(node);
+            if (prop == "custom_model_data") {
+                const auto cmd = stack.get(DataComponents::CUSTOM_MODEL_DATA);
+                return cmd && cmd->GetFlag(IndexOf(node)).value_or(false);
+            }
+            if (prop == "has_component") {
+                auto c = node.find("component");
+                if (c == node.end() || !c->is_string()) return false;
+                std::string name = c->get<std::string>();
+                if (name.rfind("minecraft:", 0) == 0) name.erase(0, 10);
+                const DataComponentTypeBase* type = DataComponents::ByName(name);
+                if (!type) return false;
+                return BoolField(node, "ignore_default", false) ? stack.components.has(*type) : stack.has(*type);
+            }
+            if (prop == "damaged") return IsDamaged(stack);
+            if (prop == "broken")  return NextDamageWillBreak(stack);
+            return std::nullopt;
+        }
+
+        // A SelectItemModelProperty the stack answers: outer nullopt = not
+        // stack state; inner nullopt = no value (the fallback).
+        std::optional<std::optional<std::string>> SelectValue(const nlohmann::json& node, const ItemStack& stack) {
+            if (PropertyOf(node) == "custom_model_data") {
+                const auto cmd = stack.get(DataComponents::CUSTOM_MODEL_DATA);
+                return cmd ? cmd->GetString(IndexOf(node)) : std::optional<std::string>{};
+            }
+            // TrimMaterialProperty: the stack's TRIM material key.
+            if (PropertyOf(node) == "trim_material") {
+                const auto trim = stack.get(DataComponents::TRIM);
+                if (!trim) return std::optional<std::string>{};
+                const std::string& m = trim->material;
+                return std::optional<std::string>(m.find(':') == std::string::npos ? "minecraft:" + m : m);
+            }
+            return std::nullopt;
+        }
+
+        // A RangeSelectItemModelProperty the stack answers.
+        std::optional<float> RangeValue(const nlohmann::json& node, const ItemStack& stack) {
+            const std::string prop = PropertyOf(node);
+            if (prop == "custom_model_data") {
+                const auto cmd = stack.get(DataComponents::CUSTOM_MODEL_DATA);
+                return cmd ? cmd->GetFloat(IndexOf(node)).value_or(0.0f) : 0.0f;
+            }
+            if (prop == "damage") {
+                const float damage = static_cast<float>(GetDamageValue(stack));
+                const float maxDamage = static_cast<float>(GetMaxDamage(stack));
+                if (BoolField(node, "normalize", true)) {
+                    return maxDamage > 0.0f ? std::clamp(damage / maxDamage, 0.0f, 1.0f) : 0.0f;
+                }
+                return std::clamp(damage, 0.0f, maxDamage);
+            }
+            if (prop == "count") {
+                const float count = static_cast<float>(stack.count);
+                const float maxCount = static_cast<float>(GetMaxStackSize(stack));   // Count: stack.getMaxStackSize()
+                if (BoolField(node, "normalize", true)) {
+                    return maxCount > 0.0f ? std::clamp(count / maxCount, 0.0f, 1.0f) : 0.0f;
+                }
+                return std::clamp(count, 0.0f, maxCount);
+            }
+            return std::nullopt;
+        }
+
+        bool WhenMatches(const nlohmann::json& when, const std::string& value) {
+            if (when.is_string()) return when.get<std::string>() == value;
+            if (when.is_array()) {
+                for (const auto& w : when) if (w.is_string() && w.get<std::string>() == value) return true;
+            }
+            return false;
+        }
+
+        // MC ItemModel.update down the branches the stack decides; returns
+        // the node where the stack stops deciding.
+        const nlohmann::json* Descend(const nlohmann::json& node, const ItemStack& stack, int depth) {
+            if (depth > 64 || !node.is_object()) return &node;
+            auto typeIt = node.find("type");
+            if (typeIt == node.end() || !typeIt->is_string()) return &node;
+            const std::string type = StripNamespace(typeIt->get<std::string>());
+            if (type == "condition") {
+                const std::optional<bool> v = ConditionValue(node, stack);
+                if (!v) return &node;
+                auto branch = node.find(*v ? "on_true" : "on_false");
+                return branch != node.end() ? Descend(*branch, stack, depth + 1) : &node;
+            }
+            if (type == "select") {
+                const auto v = SelectValue(node, stack);
+                if (!v) return &node;
+                if (*v) {
+                    auto cases = node.find("cases");
+                    if (cases != node.end() && cases->is_array()) {
+                        for (const auto& c : *cases) {
+                            if (!c.is_object()) continue;
+                            auto when = c.find("when");
+                            auto model = c.find("model");
+                            if (when != c.end() && model != c.end() && WhenMatches(*when, **v)) {
+                                return Descend(*model, stack, depth + 1);
+                            }
+                        }
+                    }
+                }
+                auto fb = node.find("fallback");
+                return fb != node.end() ? Descend(*fb, stack, depth + 1) : &node;
+            }
+            if (type == "range_dispatch") {
+                const std::optional<float> raw = RangeValue(node, stack);
+                if (!raw) return &node;
+                auto sc = node.find("scale");
+                const float value = *raw * (sc != node.end() && sc->is_number() ? sc->get<float>() : 1.0f);
+                // lastIndexLessOrEqual over the entries sorted by threshold.
+                const nlohmann::json* chosen = nullptr;
+                float best = -std::numeric_limits<float>::infinity();
+                auto entries = node.find("entries");
+                if (!std::isnan(value) && entries != node.end() && entries->is_array()) {
+                    for (const auto& e : *entries) {
+                        if (!e.is_object()) continue;
+                        auto th = e.find("threshold");
+                        auto model = e.find("model");
+                        if (th == e.end() || !th->is_number() || model == e.end()) continue;
+                        const float t = th->get<float>();
+                        if (t <= value && (chosen == nullptr || t >= best)) { best = t; chosen = &*model; }
+                    }
+                }
+                if (chosen) return Descend(*chosen, stack, depth + 1);
+                auto fb = node.find("fallback");
+                return fb != node.end() ? Descend(*fb, stack, depth + 1) : &node;
+            }
+            return &node;
+        }
+
+    } // namespace
+
+    bool ClientItemLoader::DefinitionExists(const std::string& modelId) {
+        return GetDefinition(modelId) != nullptr;
+    }
+
+    bool ClientItemLoader::ReadsCustomModelData(const std::string& modelId) {
+        const auto def = GetDefinition(modelId);
+        return def && ReadsCmd((*def)["model"], 0);
+    }
+
+    ClientItemDesc ClientItemLoader::Evaluate(const std::string& modelId, const ItemStack& stack,
+                                              std::string& leafKey) {
+        ClientItemDesc desc;
+        leafKey.clear();
+        const auto def = GetDefinition(modelId);
+        if (!def) return desc;
+        const nlohmann::json& root = def->at("model");
+        const nlohmann::json* leaf = Descend(root, stack, 0);
+        bool foundFrames = false;
+        Resolve(*leaf, desc, foundFrames);
+        desc.readsCustomModelData = ReadsCmd(root, 0);
+        char address[32];
+        std::snprintf(address, sizeof(address), "%p", static_cast<const void*>(leaf));
+        leafKey = NormalizeModelId(modelId) + "@" + address;
         return desc;
     }
 

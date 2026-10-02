@@ -77,8 +77,7 @@ namespace Game {
         // MC Slot.getMaxStackSize() / getMaxStackSize(ItemStack).
         virtual int GetMaxStackSize() const { return container->GetMaxStackSize(); }
         int GetMaxStackSize(const ItemStack& stack) const {
-            return std::min(GetMaxStackSize(),
-                            ItemRegistry::Get(stack.itemId).maxStackSize);
+            return std::min(GetMaxStackSize(), Game::GetMaxStackSize(stack));
         }
 
         // MC Slot.safeInsert(stack, amount) — move up to `amount` from `input`

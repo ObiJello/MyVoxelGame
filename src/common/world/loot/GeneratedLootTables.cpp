@@ -1926,6 +1926,27 @@ namespace Game {
         { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
         { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
         { 3, 0, 0.0f, 1, 0, 0, 0, 0, 0, 0 },
+        // Engine flower pots (2026-10-02), appended by hand: indices continue the arrays above.
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 0, 0.0f, 0, 0, 0, 0, 0, 0, 0 },
     };
     const size_t kLootConditionCount = sizeof(kLootConditions) / sizeof(kLootConditions[0]);
 
@@ -4292,6 +4313,29 @@ namespace Game {
         { 0, "zanite_gemstone", 0, 0, 0, 0, 638, 2 },
         { 1, "", 1711, 2, 0, 0, 0, 0 },
         { 0, "zombie_head", 0, 0, 0, 0, 640, 1 },
+        // Engine flower pots (2026-10-02), appended by hand: indices continue the arrays above.
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "resonance_bloom", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "whisperwood_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "twilight_oak_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "canopy_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "tf_mangrove_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "darkwood_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "skyroot_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "golden_oak_sapling", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "white_flower", 0, 0, 0, 0, 0, 0 },
+        { 0, "flower_pot", 0, 0, 0, 0, 0, 0 },
+        { 0, "purple_flower", 0, 0, 0, 0, 0, 0 },
+        // Sky Block (2026-10-02), appended by hand: blocks/sky_block.json, tinted glass's table.
+        { 0, "sky_block", 0, 0, 0, 0, 0, 0 },
     };
     const size_t kLootEntryCount = sizeof(kLootEntries) / sizeof(kLootEntries[0]);
 
@@ -5792,6 +5836,29 @@ namespace Game {
         { 1, 1710, 1, 1764, 1, 0, 0 },
         { 1, 1713, 1, 0, 0, 0, 0 },
         { 1, 1714, 1, 0, 0, 0, 0 },
+        // Engine flower pots (2026-10-02), appended by hand: indices continue the arrays above.
+        { 1, 1715, 1, 1766, 1, 0, 0 },
+        { 1, 1716, 1, 1767, 1, 0, 0 },
+        { 1, 1717, 1, 1768, 1, 0, 0 },
+        { 1, 1718, 1, 1769, 1, 0, 0 },
+        { 1, 1719, 1, 1770, 1, 0, 0 },
+        { 1, 1720, 1, 1771, 1, 0, 0 },
+        { 1, 1721, 1, 1772, 1, 0, 0 },
+        { 1, 1722, 1, 1773, 1, 0, 0 },
+        { 1, 1723, 1, 1774, 1, 0, 0 },
+        { 1, 1724, 1, 1775, 1, 0, 0 },
+        { 1, 1725, 1, 1776, 1, 0, 0 },
+        { 1, 1726, 1, 1777, 1, 0, 0 },
+        { 1, 1727, 1, 1778, 1, 0, 0 },
+        { 1, 1728, 1, 1779, 1, 0, 0 },
+        { 1, 1729, 1, 1780, 1, 0, 0 },
+        { 1, 1730, 1, 1781, 1, 0, 0 },
+        { 1, 1731, 1, 1782, 1, 0, 0 },
+        { 1, 1732, 1, 1783, 1, 0, 0 },
+        { 1, 1733, 1, 1784, 1, 0, 0 },
+        { 1, 1734, 1, 1785, 1, 0, 0 },
+        // Sky Block (2026-10-02), appended by hand: its one pool (survives_explosion, shared row 1540).
+        { 1, 1735, 1, 1540, 1, 0, 0 },
     };
     const size_t kLootPoolCount = sizeof(kLootPools) / sizeof(kLootPools[0]);
 
@@ -6921,6 +6988,7 @@ namespace Game {
         { "shroomlight", 1166, 1, 0, 0 },
         { "shulker_box", 1167, 1, 0, 0 },
         { "skeleton_skull", 1168, 1, 0, 0 },
+        { "sky_block", 1515, 1, 0, 0 },
         { "skyroot_button", 1169, 1, 0, 0 },
         { "skyroot_door", 1170, 1, 0, 0 },
         { "skyroot_fence", 1171, 1, 0, 0 },
@@ -7257,6 +7325,17 @@ namespace Game {
         { "zanite_block", 1492, 1, 0, 0 },
         { "zanite_ore", 1493, 1, 0, 0 },
         { "zombie_head", 1494, 1, 0, 0 },
+        // Engine flower pots (2026-10-02), appended by hand: indices continue the arrays above.
+        { "potted_resonance_bloom", 1495, 2, 0, 0 },
+        { "potted_whisperwood_sapling", 1497, 2, 0, 0 },
+        { "potted_twilight_oak_sapling", 1499, 2, 0, 0 },
+        { "potted_canopy_sapling", 1501, 2, 0, 0 },
+        { "potted_tf_mangrove_sapling", 1503, 2, 0, 0 },
+        { "potted_darkwood_sapling", 1505, 2, 0, 0 },
+        { "potted_skyroot_sapling", 1507, 2, 0, 0 },
+        { "potted_golden_oak_sapling", 1509, 2, 0, 0 },
+        { "potted_white_flower", 1511, 2, 0, 0 },
+        { "potted_purple_flower", 1513, 2, 0, 0 },
     };
     const size_t kLootTableCount = sizeof(kLootTables) / sizeof(kLootTables[0]);
 

@@ -1,6 +1,7 @@
 // File: src/common/inventory/UtilityMenus.cpp
 #include "UtilityMenus.hpp"
 #include "common/data/DataComponents.hpp"
+#include "common/world/crafting/SmithingRecipes.hpp"
 #include "common/entity/Item.hpp"
 #include "common/entity/GeneratedItemList.hpp"   // Items::EnchantedBook, Items::Book
 #include "common/world/enchantment/EnchantmentDefinitions.hpp"
@@ -299,7 +300,7 @@ namespace Game {
             const int remaining  = remaining1 + remaining2 + durability * 5 / 100;
             int count = 1;
             if (!IsDamageableItem(input)) {
-                if (ItemRegistry::Get(input.itemId).maxStackSize < 2 || !ItemStacksMatch(input, additional)) {
+                if (Game::GetMaxStackSize(input) < 2 || !ItemStacksMatch(input, additional)) {
                     return ItemStack{};
                 }
                 count = 2;
@@ -541,20 +542,24 @@ namespace Game {
 
     bool LoomMenu::IsDyeItem(const ItemStack& stack) {
         // #loom_dyes with a DYE: the sixteen dyes.
-        return !stack.IsEmpty() && DyeColorOfItem(stack.itemId) >= 0;
+        return DyeColorOf(stack) >= 0;
     }
 
     bool LoomMenu::IsPatternItem(const ItemStack& stack) {
         // #loom_patterns with PROVIDES_BANNER_PATTERNS.
-        if (stack.IsEmpty()) return false;
-        const std::string tag = BannerPatterns::ProvidedTagOf(std::string(ItemRegistry::Slug(stack.itemId)));
-        return !tag.empty() && !BannerPatterns::Resolve(tag).empty();
+        return stack.has(DataComponents::PROVIDES_BANNER_PATTERNS);
     }
 
     std::vector<std::string> LoomMenu::SelectablePatternsFor(const ItemStack& patternStack) const {
         if (patternStack.IsEmpty()) return BannerPatterns::Resolve("#minecraft:no_item_required");
-        const std::string tag = BannerPatterns::ProvidedTagOf(std::string(ItemRegistry::Slug(patternStack.itemId)));
-        return tag.empty() ? std::vector<std::string>{} : BannerPatterns::Resolve(tag);
+        // The stack's PROVIDES_BANNER_PATTERNS holder set, tags expanded.
+        std::vector<std::string> out;
+        for (const std::string& entry : ProvidedBannerPatterns(patternStack)) {
+            for (std::string& id : BannerPatterns::Resolve(entry)) {
+                if (std::find(out.begin(), out.end(), id) == out.end()) out.push_back(std::move(id));
+            }
+        }
+        return out;
     }
 
     void LoomMenu::SetupResultSlot(const std::string& pattern) {
@@ -562,7 +567,7 @@ namespace Game {
         const ItemStack& dye = Input(DYE_SLOT);
         ItemStack result;
         if (!banner.IsEmpty() && !dye.IsEmpty()) {
-            const int color = DyeColorOfItem(dye.itemId);
+            const int color = DyeColorOf(dye);
             if (color >= 0) {
                 result = banner;
                 result.count = 1;
@@ -681,20 +686,62 @@ namespace Game {
         FinishLayout(playerInventory);
     }
 
+    namespace {
+        // SmithingMenu's input squares: each takes what some smithing
+        // recipe accepts there (RecipePropertySet.SMITHING_TEMPLATE / BASE /
+        // ADDITION).
+        class SmithingInputSlot : public Slot {
+        public:
+            SmithingInputSlot(IContainer* container, int index, int x, int y) : Slot(container, index, x, y) {}
+            bool MayPlace(const ItemStack& stack) const override {
+                switch (containerSlot) {
+                    case 0:  return SmithingRecipes::IsTemplate(stack);
+                    case 1:  return SmithingRecipes::IsBase(stack);
+                    default: return SmithingRecipes::IsAddition(stack);
+                }
+            }
+        };
+    }
+
     void SmithingMenu::PlaceInputSlots() {
         // MC SmithingMenu: template (8,48), base (26,48), addition (44,48),
         // result (98,48).
-        AddInputSlot(0, 8, 48);
-        AddInputSlot(1, 26, 48);
-        AddInputSlot(2, 44, 48);
+        AddSlot(std::make_unique<SmithingInputSlot>(&m_inputs, 0, 8, 48));
+        AddSlot(std::make_unique<SmithingInputSlot>(&m_inputs, 1, 26, 48));
+        AddSlot(std::make_unique<SmithingInputSlot>(&m_inputs, 2, 44, 48));
         AddResultSlot(98, 48);
     }
 
     void SmithingMenu::ComputeResult() {
-        // smithing_transform / smithing_trim are the two recipe types
-        // gen_recipes.py still skips — they need armour trim components to
-        // carry the result. Nothing to compute until those are baked.
-        SetResult(ItemStack{});
+        // MC SmithingMenu.createResult: the first smithing recipe whose
+        // template, base and addition match, assembled (a transform's
+        // upgraded item, a trim's trimmed copy) — else nothing.
+        SetResult(SmithingRecipes::Assemble(Input(0), Input(1), Input(2)));
+    }
+
+    void SmithingMenu::OnTakeResult(const ItemStack& /*taken*/, ContainerClickResult& result) {
+        // MC SmithingMenu.onTake: the result's recipe is awarded
+        // (ResultContainer.awardUsedRecipes → RECIPE_CRAFTED, with the three
+        // inputs), one of each input goes, then levelEvent 1044 at the table
+        // (the session's — the menu has no level).
+        {
+            const std::string recipeId = SmithingRecipes::MatchingRecipeId(Input(0), Input(1), Input(2));
+            if (!recipeId.empty()) {
+                ContainerClickResult::CraftedRecipe crafted;
+                crafted.recipeId = recipeId;
+                for (int i = 0; i < 3; ++i) {
+                    if (!Input(i).IsEmpty()) crafted.ingredients.push_back(Input(i));
+                }
+                result.craftedRecipes.push_back(std::move(crafted));
+            }
+        }
+        for (int i = 0; i < 3; ++i) {
+            ItemStack& in = Input(i);
+            if (!in.IsEmpty() && --in.count <= 0) in.Clear();
+            MarkChanged(result, i);
+        }
+        MarkChanged(result, ResultSlotIndex());
+        result.smithingUsed = true;
     }
 
     // ── Anvil ─────────────────────────────────────────────────────────────

@@ -90,7 +90,7 @@ namespace Server {
         std::string msg = "Updated " + std::to_string(updated) + " block" + (updated == 1 ? "" : "s") +
                           " within " + std::to_string(radius) + " of you";
         if (skipped > 0) msg += " (" + std::to_string(skipped) + " cells not loaded)";
-        connection.SendChatMessage(msg, 1);
+        source.SendSuccess(connection, msg, true);
         Log::Info("[UpdateBlocks] radius %d at (%d,%d,%d): %d updated, %d unloaded",
                   radius, centre.x, centre.y, centre.z, updated, skipped);
     }

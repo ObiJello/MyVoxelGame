@@ -251,7 +251,7 @@ namespace Server {
         }
 
         const Result result = Fill(*level, from, to, biome, filter);
-        if (result.ok) connection.SendChatMessage(result.message, 1);
+        if (result.ok) source.SendSuccess(connection, result.message, true);
         else SendFailure(connection, result.message);
     }
 

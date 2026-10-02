@@ -294,6 +294,7 @@ namespace Input {
         KeyMapping* SwapOffhand = nullptr;
         KeyMapping* VeinMine = nullptr;
         KeyMapping* Inventory = nullptr;
+        KeyMapping* Advancements = nullptr;
         KeyMapping* Chat = nullptr;
         KeyMapping* Command = nullptr;
         KeyMapping* PlayerList = nullptr;
@@ -437,6 +438,8 @@ namespace Input {
                                        BoundKey::Keyboard(GLFW_KEY_RIGHT));
         Binds::Fullscreen        = &Register("key.fullscreen", "Miscellaneous", "Toggle Fullscreen",
                                              BoundKey::Keyboard(GLFW_KEY_F11));
+        Binds::Advancements      = &Register("key.advancements", "Miscellaneous", "Advancements",
+                                             BoundKey::Keyboard(GLFW_KEY_L));
         // Engine-specific actions with no vanilla counterpart; still rebindable.
         Binds::ToggleCursor = &Register("key.toggleCursor", "Miscellaneous", "Toggle Cursor",
                                         BoundKey::Keyboard(GLFW_KEY_TAB));

@@ -312,6 +312,38 @@ namespace Render {
 #endif
         }
 
+        {
+            // Engine option (OptiFine/Sodium render scale): the world view
+            // drawn at this share of the window's pixels on each axis and
+            // stretched over it; the GUI stays sharp. Read every frame.
+            // Two-segment track so native sits at the centre: the left half
+            // spans min..100, the right half 100..max, each snapped to 5 %.
+            constexpr double kLo = Platform::GameSettings::kMinRenderScale;
+            constexpr double kHi = Platform::GameSettings::kMaxRenderScale;
+            auto toPercent = [](double norm) {
+                const double v = norm <= 0.5 ? kLo + (norm / 0.5) * (100.0 - kLo)
+                                             : 100.0 + ((norm - 0.5) / 0.5) * (kHi - 100.0);
+                return static_cast<int>(std::lround(v / 5.0) * 5);
+            };
+            const double pct = s.GetRenderScalePercent();
+            const double initialNorm = pct <= 100.0 ? 0.5 * (pct - kLo) / (100.0 - kLo)
+                                                    : 0.5 + 0.5 * (pct - 100.0) / (kHi - 100.0);
+            auto* renderScale = new SliderButton(0, 0, 150, 20, initialNorm,
+                [toPercent](double norm) -> std::string {
+                    const int p = toPercent(norm);
+                    return std::string("Render Resolution: ") +
+                           (p == 100 ? std::string("100% (Native)") : std::to_string(p) + "%");
+                },
+                [toPercent](double norm) { Settings().SetRenderScalePercent(toPercent(norm)); },
+                0.5 * 5.0 / (kHi - 100.0));
+            renderScale->SetTooltip({"Draws the world at this share of the",
+                                     "window's resolution and stretches it",
+                                     "to fit; menus and the HUD stay sharp.",
+                                     "Lower is faster and softer; above",
+                                     "100% supersamples. Applies instantly."});
+            m_list->AddBig(renderScale);
+        }
+
         // Engine option: OFF = the world fully lit (Render::Lightmap full
         // white), AO / face shading kept. Read by the lightmap every frame.
         auto* lighting = OnOff("Lighting", s.GetWorldLighting(),

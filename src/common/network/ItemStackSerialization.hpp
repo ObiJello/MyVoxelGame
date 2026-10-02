@@ -42,7 +42,8 @@ namespace Network::Serialization {
         // and MC validates the same bound on decode (ItemStack.java:132-135
         // rejects count > getMaxStackSize outright). Clamping rather than
         // rejecting keeps a desynced peer from dropping the whole packet.
-        stack.count      = std::min(count, Game::ItemRegistry::Get(stack.itemId).maxStackSize);
+        // The limit is the stack's own (a max_stack_size patch included).
+        stack.count      = std::min(count, Game::GetMaxStackSize(stack));
         return stack;
     }
 

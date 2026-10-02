@@ -1,4 +1,5 @@
 // File: src/common/entity/DyeColorUtil.cpp
+#include "common/data/DataComponents.hpp"
 #include "common/entity/DyeColorUtil.hpp"
 
 #include "common/core/JavaRandom.hpp"
@@ -33,10 +34,8 @@ namespace Game {
     } // namespace
 
     int DyeColorOfItem(uint32_t itemId) {
-        // The dye items are declared in DyeColor order in Items.java
-        // (white_dye … black_dye), so the generated ids are contiguous.
-        if (itemId < Items::WhiteDye || itemId > Items::BlackDye) return -1;
-        return static_cast<int>(itemId - Items::WhiteDye);
+        // The item's default DYE (Items.java gives the sixteen dyes theirs).
+        return DyeColorOf(ItemStack(static_cast<ItemID>(itemId), 1));
     }
 
     uint32_t DyeItemOfColor(uint8_t color) {

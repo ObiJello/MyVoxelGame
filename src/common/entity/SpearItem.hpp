@@ -27,11 +27,13 @@
 
 #include "common/entity/Item.hpp"
 #include "common/entity/GeneratedItemList.hpp"
+#include "common/data/DataComponents.hpp"
 
 #include <glm/glm.hpp>
 
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <vector>
 
 namespace Game {
@@ -53,86 +55,56 @@ namespace Game {
         // something — the hit sound and the hand's recoil).
         constexpr uint8_t kEntityEventKineticHit = 2;
 
-        // MC KineticWeapon.Condition.
-        struct KineticCondition {
-            int   maxDurationTicks = 0;
-            float minSpeed = 0.0f;
-            float minRelativeSpeed = 0.0f;
+        // The component records (common/data/components/WeaponComponents.hpp)
+        // under the names this module has always used.
+        using KineticCondition = Game::KineticWeapon::Condition;
+        using KineticWeapon    = Game::KineticWeapon;
+        using PiercingWeapon   = Game::PiercingWeapon;
+        using AttackRange      = Game::AttackRange;
 
-            bool Test(int ticksUsed, double attackerSpeed, double relativeSpeed,
-                      double entityFactor) const {
-                return ticksUsed <= maxDurationTicks &&
-                       attackerSpeed >= static_cast<double>(minSpeed) * entityFactor &&
-                       relativeSpeed >= static_cast<double>(minRelativeSpeed) * entityFactor;
-            }
-        };
-
-        // MC KineticWeapon.
-        struct KineticWeapon {
-            int   contactCooldownTicks = 10;
-            int   delayTicks = 0;
-            std::optional<KineticCondition> dismountConditions;
-            std::optional<KineticCondition> knockbackConditions;
-            std::optional<KineticCondition> damageConditions;
-            float forwardMovement = 0.0f;
-            float damageMultiplier = 1.0f;
-            const char* sound = nullptr;      // makeSound: at the start of the hold
-            const char* hitSound = nullptr;   // makeLocalHitSound: on a connecting charge
-
-            // MC computeDamageUseDuration: how long a mob holds the charge.
-            int ComputeDamageUseDuration() const {
-                return delayTicks + (damageConditions ? damageConditions->maxDurationTicks : 0);
-            }
-        };
-
-        // MC PiercingWeapon.
-        struct PiercingWeapon {
-            bool dealsKnockback = true;
-            bool dismounts = false;
-            const char* sound = nullptr;      // makeSound: every jab
-            const char* hitSound = nullptr;   // makeHitSound: a jab that struck
-        };
-
-        // MC AttackRange.
-        struct AttackRange {
-            float minReach = 0.0f, maxReach = 3.0f;
-            float minCreativeReach = 0.0f, maxCreativeReach = 5.0f;
-            float hitboxMargin = 0.3f;
-            float mobFactor = 1.0f;
-
-            float EffectiveMinRange(const Entity& entity) const;
-            float EffectiveMaxRange(const Entity& entity) const;
-        };
-
+        // What makes a stack spear-like: its KINETIC_WEAPON (the charge),
+        // PIERCING_WEAPON (the jab), ATTACK_RANGE and ATTACK_ANIMATION
+        // components (Item.Properties.spear puts all of them on the seven
+        // spears; a component patch can give them to anything).
         struct SpearDefinition {
-            ItemID         item = Items::Air;
-            KineticWeapon  kinetic;
-            PiercingWeapon piercing;
-            AttackRange    range;
-            // MC ATTACK_ANIMATION: SwingAnimation(STAB, attackDuration * 20).
-            int            stabDurationTicks = 6;
+            ItemID                        item = Items::Air;
+            std::optional<KineticWeapon>  kineticWeapon;
+            std::optional<PiercingWeapon> piercingWeapon;
+            AttackRange                   range;
+            // MC ATTACK_ANIMATION's duration (SwingAnimation(STAB, …)).
+            int                           stabDurationTicks = 6;
+            bool                          stab = false;
         };
 
-        // The spear's definition, or null for anything that is not a spear.
+        // The stack's definition — nullopt when it has neither a
+        // KINETIC_WEAPON nor a PIERCING_WEAPON.
+        std::optional<SpearDefinition> ForStack(const ItemStack& stack);
+        // The item prototype's (a holder known only by its item id: a
+        // remote player's hand, a renderer's cached id). Null when the
+        // prototype is not spear-like.
         const SpearDefinition* Find(ItemID id);
         inline bool IsSpear(ItemID id) { return Find(id) != nullptr; }
-        inline const KineticWeapon* Kinetic(const ItemStack& stack) {
-            const SpearDefinition* d = stack.IsEmpty() ? nullptr : Find(stack.itemId);
-            return d ? &d->kinetic : nullptr;
-        }
-        inline const PiercingWeapon* Piercing(const ItemStack& stack) {
-            const SpearDefinition* d = stack.IsEmpty() ? nullptr : Find(stack.itemId);
-            return d ? &d->piercing : nullptr;
-        }
+        // MC `stack.has(PIERCING_WEAPON)` — jabs instead of attacking.
+        bool IsPiercing(const ItemStack& stack);
+        // MC stack.get(KINETIC_WEAPON) / get(PIERCING_WEAPON).
+        std::optional<KineticWeapon>  Kinetic(const ItemStack& stack);
+        std::optional<PiercingWeapon> Piercing(const ItemStack& stack);
 
-        // MC ItemStack.getAttackAnimation().duration() — the spear's STAB
-        // length, SwingAnimation.DEFAULT's 6-tick WHACK for everything else.
+        // MC ItemStack.getAttackAnimation().duration() — the ATTACK_ANIMATION
+        // component's, SwingAnimation.DEFAULT's 6-tick WHACK without one.
         int AttackAnimationDuration(ItemID id);
+        int AttackAnimationDuration(const ItemStack& stack);
+        // Whether the attack swing is a STAB (ATTACK_ANIMATION type).
+        bool IsStabSwing(ItemID id);
+        bool IsStabSwing(const ItemStack& stack);
 
         // MC Player.cannotAttackWithItem(stack, tolerance): a full charge is
         // required (MINIMUM_ATTACK_CHARGE), with `tolerance` ticks of slack
         // (0 on the client's click, 5 on the server's check).
         bool CannotAttackWithItem(ItemID id, int attackStrengthTicker, float attackStrengthDelay,
+                                  int tolerance);
+        // The same over a stack's own MINIMUM_ATTACK_CHARGE.
+        bool CannotAttackWithItem(const ItemStack& stack, int attackStrengthTicker, float attackStrengthDelay,
                                   int tolerance);
 
         // ── SpearAnimations.UseParams ─────────────────────────────────────
@@ -186,7 +158,7 @@ namespace Game {
         // MC KineticWeapon.makeSound / PiercingWeapon.makeSound —
         // level.playSound(causer, ...): everyone but the causer, whose
         // client plays it itself.
-        void PlayWeaponSound(LivingEntity& causer, const char* sound);
+        void PlayWeaponSound(LivingEntity& causer, std::string_view sound);
 
     } // namespace Spear
 } // namespace Game

@@ -12,6 +12,7 @@
 #include "common/world/block/entity/BlockEntityTypes.hpp"
 #include "common/world/block/entity/PistonMovingBlockEntity.hpp"
 #include "common/world/block/piston/PistonStructureResolver.hpp"
+#include "common/world/block/piston/PistonBlockEntities.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/gameevent/GameEvent.hpp"
 #include "common/world/level/NeighborUpdater.hpp"
@@ -63,12 +64,20 @@ namespace Game {
         }
 
         // MC MovingPistonBlock.newMovingBlockEntity + Level.setBlockEntity.
+        // `carried` is the moved block's own entity under the
+        // pistons_move_block_entities rule (PistonBlockEntities.hpp).
         void InstallMovingEntity(ILevelWrite& level, const glm::ivec3& pos, BlockState movedState,
-                                 Direction direction, bool extending, bool isSourcePiston) {
+                                 Direction direction, bool extending, bool isSourcePiston,
+                                 std::unique_ptr<BlockEntity> carried = nullptr) {
             const auto* type = BlockEntityTypes::ForId(BlockEntityTypeIds::PISTON);
-            if (!type) return;
+            if (!type) {
+                // No cell to ride in: it lands nowhere, so it spills here.
+                PistonBlockEntities::PlaceCarried(level, pos, std::move(carried), false);
+                return;
+            }
             auto be = std::make_unique<PistonMovingBlockEntity>(type, pos, BlockID::MovingPiston);
             be->Init(movedState, direction, extending, isSourcePiston);
+            be->Carry(std::move(carried));
             level.SetBlockEntity(pos, std::move(be));
         }
 
@@ -157,6 +166,28 @@ namespace Game {
                 toPushShapes.push_back(state);
                 deleteAfterMove.emplace_back(pos, state);
             }
+
+            // pistons_move_block_entities (PistonBlockEntities.hpp): every
+            // pushed cell's block entity is lifted out BEFORE the first write
+            // — detached without side effects, so a container cannot spill
+            // and the writes below cannot free it — and rides in the moving
+            // cell its block goes to. The client's mirrored move lifts its
+            // own copy the same way, for drawing.
+            //
+            // An entity the rule does not carry can only be a lazily attached
+            // one (vanilla pushes its block): MC has none, so it is retired
+            // here as a removal would — its contents spill where it stood.
+            std::vector<std::unique_ptr<BlockEntity>> carried(toPush.size());
+            for (size_t i = 0; i < toPush.size(); ++i) {
+                BlockEntity* entity = level.GetBlockEntity(toPush[i]);
+                if (!entity) continue;
+                if (PistonBlockEntities::ShouldCarry(*entity)) {
+                    carried[i] = level.TakeBlockEntity(toPush[i]);
+                } else if (!level.IsClientSide() && entity->GetBlockId() != BlockID::MovingPiston) {
+                    entity->PreRemoveSideEffects(level, toPush[i], toPushShapes[i]);
+                    level.RemoveBlockEntity(toPush[i]);
+                }
+            }
             const std::vector<glm::ivec3>& toDestroy = resolver.GetToDestroy();
             std::vector<BlockState> toUpdate;
             toUpdate.reserve(toPush.size() + toDestroy.size());
@@ -186,7 +217,8 @@ namespace Game {
                 removeDelete(pos);
                 const BlockState state = WithFacing(BlockStates::Default(BlockID::MovingPiston), direction);
                 SetBlock(level, pos, state, F324);
-                InstallMovingEntity(level, pos, toPushShapes[static_cast<size_t>(i)], direction, extending, false);
+                InstallMovingEntity(level, pos, toPushShapes[static_cast<size_t>(i)], direction, extending, false,
+                                    std::move(carried[static_cast<size_t>(i)]));
                 toUpdate.push_back(blockState);
             }
 

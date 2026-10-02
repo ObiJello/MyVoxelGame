@@ -124,7 +124,8 @@ namespace Game::MobCrossbow {
                 if (ammoToUse > source.count) continue;
                 ItemStack used = source;
                 if (ammoToUse == 0) {
-                    used.count = 1;   // copyWithCount(1) (+ INTANGIBLE_PROJECTILE: not modelled)
+                    used.count = 1;   // copyWithCount(1), marked INTANGIBLE_PROJECTILE
+                    used.components.set(DataComponents::INTANGIBLE_PROJECTILE, true);
                 } else {
                     used.count = ammoToUse;
                     source.count -= ammoToUse;   // split

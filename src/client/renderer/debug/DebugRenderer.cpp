@@ -170,11 +170,15 @@ namespace Render::DebugRenderer {
             if (Client::g_remotePlayerManager) {
                 for (const auto& [id, rp] : Client::g_remotePlayerManager->GetPlayers()) {
                     if (!Client::IsRemotePlayerInBoundLevel(rp) || !rp.positionInitialized) continue;
-                    const float h = (rp.isCrouching ? 1.5f : 1.8f) * rp.scale;
-                    const float eye = (rp.isCrouching ? 1.27f : 1.62f) * rp.scale;
+                    // A morphed player's box is the body's (Morph::DimsOf —
+                    // a mob has no sneak pose); otherwise the player's.
+                    const Game::Morph::Dims body = Game::Morph::DimsOf(rp.morph);
+                    const bool crouch = rp.isCrouching && !rp.IsMorphed();
+                    const float h   = (crouch ? 1.5f  : body.height)    * rp.scale;
+                    const float eye = (crouch ? 1.27f : body.eyeHeight) * rp.scale;
                     const glm::vec3 view = Game::Mth::ViewVector(rp.rotation.y, rp.rotation.x);
                     const glm::dvec3 pos = glm::mix(rp.renderPrevPosition, rp.position, static_cast<double>(a.partialTick));
-                    ShowHitbox(pos, 0.6f * rp.scale, h, eye, &view, true);
+                    ShowHitbox(pos, body.width * rp.scale, h, eye, &view, true);
                 }
             }
             if (!Client::ClientLevels::HasSession()) return;

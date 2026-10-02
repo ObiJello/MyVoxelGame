@@ -36,7 +36,6 @@ namespace Server {
                                  const std::vector<std::string>& args,
                                  ServerConnection& connection,
                                  PlayerSessionManager& sessionManager) {
-        (void)source;
         if (!g_integratedServer) return;
         RemoteControlManager& control = g_integratedServer->RemoteControl();
         const uint32_t selfId = connection.GetPlayerId();
@@ -73,7 +72,7 @@ namespace Server {
             connection.SendChatMessage(error);
             return;
         }
-        connection.SendChatMessage("Controlling " + targetName + " (/control off to stop)");
+        source.SendSuccess(connection, "Controlling " + targetName + " (/control off to stop)", true);
     }
 
 } // namespace Server

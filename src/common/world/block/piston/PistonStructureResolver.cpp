@@ -4,6 +4,7 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/RedstoneStateUtil.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/piston/PistonBlockEntities.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 
@@ -58,7 +59,11 @@ namespace Game {
         } else if (BoolOf(state, PropertyId::EXTENDED)) {
             return false;
         }
-        return !BlockEntityTypes::HasBlockEntity(id);
+        // MC: `!state.hasBlockEntity()`. The pistons_move_block_entities rule
+        // lets the movable kinds through; moveBlocks carries their entity
+        // (PistonBlockEntities.hpp).
+        if (!BlockEntityTypes::HasBlockEntity(id)) return true;
+        return PistonBlockEntities::CanPushBlockWithEntity(id);
     }
 
     PistonStructureResolver::PistonStructureResolver(ILevelWrite& level, const glm::ivec3& pistonPos,

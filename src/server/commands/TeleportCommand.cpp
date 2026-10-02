@@ -5,6 +5,8 @@
 #include "../IntegratedServer.hpp"
 #include "../level/ServerLevel.hpp"
 #include "../entity/ItemEntityManager.hpp"
+#include "../entity/ExperienceOrbManager.hpp"
+#include "common/entity/ExperienceOrb.hpp"
 #include "../entity/MobManager.hpp"
 #include "../entity/ServerEntityTracker.hpp"
 #include "../entity/ServerLevelBridge.hpp"   // PlayerEntityView
@@ -87,6 +89,7 @@ namespace Server {
                     eyeHeight = e.mob ? e.mob->GetEyeHeight() : 0.0;
                     break;
                 case SelectedEntity::Kind::Item: eyeHeight = 0.0; break;
+                case SelectedEntity::Kind::Orb:  eyeHeight = Game::ExperienceOrb::kEyeHeight; break;
             }
             return e.position + glm::dvec3(0.0, eyeHeight, 0.0);
         }
@@ -245,6 +248,29 @@ namespace Server {
                     item->stack.Clear();
                     return TeleportResult::Moved;
                 }
+
+                case SelectedEntity::Kind::Orb: {
+                    ExperienceOrbManager* fromOrbs = from->Orbs();
+                    ExperienceOrbManager* toOrbs   = to->Orbs();
+                    if (!fromOrbs || !toOrbs) return TeleportResult::Failed;
+                    auto it = fromOrbs->AllMutable().find(victim.id);
+                    if (it == fromOrbs->AllMutable().end() || it->second.pickedUp) return TeleportResult::Failed;
+
+                    EnsureLandingLoaded(*to, pos);
+
+                    // As the item: a copy spawns in the new level and the old
+                    // one ages out on its level's next tick (its removal
+                    // broadcast there).
+                    Game::ExperienceOrb arrival = it->second;
+                    arrival.pos          = pos;
+                    arrival.vel          = glm::dvec3(0.0);
+                    arrival.onGround     = true;
+                    arrival.pendingSpawn = true;
+                    arrival.needsSync    = true;
+                    if (toOrbs->Adopt(std::move(arrival)) == 0) return TeleportResult::Failed;
+                    it->second.age = Game::ExperienceOrb::kLifetimeTicks;
+                    return TeleportResult::Moved;
+                }
             }
             return TeleportResult::Failed;
         }
@@ -317,6 +343,21 @@ namespace Server {
                     // There is no per-client tracked set for items; the flag is
                     // what puts this entity in the next tick's sync batch.
                     item->needsSync = true;
+                    return TeleportResult::Moved;
+                }
+
+                case SelectedEntity::Kind::Orb: {
+                    if (!g_integratedServer) return TeleportResult::Moved;
+                    ServerLevel* orbLevel = g_integratedServer->GetLevel(victim.dimension);
+                    ExperienceOrbManager* orbs = orbLevel ? orbLevel->Orbs() : nullptr;
+                    if (!orbs) return TeleportResult::Moved;
+                    auto it = orbs->AllMutable().find(victim.id);
+                    if (it == orbs->AllMutable().end()) return TeleportResult::Moved;
+                    Game::ExperienceOrb& orb = it->second;
+                    orb.pos       = pos;
+                    orb.vel.y     = 0.0;
+                    orb.onGround  = true;
+                    orb.needsSync = true;
                     return TeleportResult::Moved;
                 }
             }
@@ -416,10 +457,9 @@ namespace Server {
                 return;
             }
 
-            connection.SendChatMessage(
-                moved == 1
+            source.SendSuccess(connection, moved == 1
                     ? "Teleported " + targets.front().name + " to " + dest.name
-                    : "Teleported " + std::to_string(moved) + " entities to " + dest.name, 1);
+                    : "Teleported " + std::to_string(moved) + " entities to " + dest.name, true);
             Log::Info("[TeleportCommand] %s teleported %d entity(s) to %s",
                       sender.getName().c_str(), moved, dest.name.c_str());
             return;
@@ -540,13 +580,17 @@ namespace Server {
             return;
         }
 
-        connection.SendChatMessage(
-            moved == 1
+        source.SendSuccess(connection, moved == 1
                 ? "Teleported " + targets.front().name + " to " + FormatPos(pos)
-                : "Teleported " + std::to_string(moved) + " entities to " + FormatPos(pos), 1);
+                : "Teleported " + std::to_string(moved) + " entities to " + FormatPos(pos), true);
 
         Log::Info("[TeleportCommand] %s teleported %d entity(s) to (%.1f, %.1f, %.1f)",
                   sender.getName().c_str(), moved, pos.x, pos.y, pos.z);
+    }
+
+    bool TeleportCommand::TeleportEntity(const CommandSource& source, const SelectedEntity& victim,
+                                         Game::DimensionId level, const glm::dvec3& pos, float yRot, float xRot) {
+        return PerformTeleport(source, victim, level, pos, Rotation{yRot, xRot}) == TeleportResult::Moved;
     }
 
 } // namespace Server

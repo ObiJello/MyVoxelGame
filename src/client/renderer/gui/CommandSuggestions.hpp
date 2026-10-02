@@ -45,6 +45,17 @@ namespace Render::CommandSuggestions {
     // selector's `name=` offers them with the player names.
     void SetKnownEntityNames(std::vector<std::string> names);
 
+    // The local player's own attribute rows as the server last synced them
+    // (UpdateAttributesS2C): each attribute's id ("step_height"), base and
+    // modifier Identifiers — what /attribute's `modifier remove|value get
+    // <id>` and `base set <value>` offer.
+    struct OwnAttribute {
+        std::string              id;
+        double                   base = 0.0;
+        std::vector<std::string> modifierIds;
+    };
+    void SetOwnAttributes(std::vector<OwnAttribute> rows);
+
     struct Completion {
         int                      anchor = 0;   // index in the text the entries replace from
         std::vector<std::string> items;

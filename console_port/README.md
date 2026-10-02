@@ -75,7 +75,9 @@ some panels and fonts are approximations built from the supplied art. The
 panorama, save-list fade, button press and scroll-arrow timings now follow
 the original SWF frames. The title and Controls screen use assets embedded in the PlayStation 3
 `skinPS3.swf`, while the principal menu control positions follow the original
-720p movies.
+720p movies. A [headless Ruffle compatibility test](docs/RUFFLE_EVALUATION.md)
+found that direct playback currently fails on the movies' cross-library class
+placements, so the C++ menus remain the playable path.
 
 ## Play
 
