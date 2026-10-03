@@ -15,6 +15,7 @@
 #include "../IntegratedServer.hpp"
 #include "../control/RemoteControlManager.hpp"
 #include "../world/ticketing/ChunkLevel.hpp"
+#include "common/world/math/ChunkViewDistance.hpp"
 #include "common/world/block/RedstonePlus.hpp"
 #include "common/world/block/piston/PistonBlockEntities.hpp"
 #include "common/world/level/World.hpp"
@@ -1034,8 +1035,13 @@ namespace Server {
         const bool vsync = reader.ReadByte() != 0;
         const float mouseSensitivity = reader.ReadFloat();
         const int simulationDistance = ReadSimulationDistance(reader, renderDistance);
-        ApplyClientSettings(std::clamp(renderDistance, 2, 32), simulationDistance,
-                            vsync, mouseSensitivity);
+        // The protocol range only (up to the engine's debug ceiling); the
+        // server's own cap — 32 for a dedicated server and guests, more for
+        // the integrated server's owner — is applied in
+        // IntegratedServer::ApplyClientViewDistance.
+        ApplyClientSettings(std::clamp(renderDistance, Game::Math::kMinViewDistance,
+                                       Game::Math::kMaxDebugViewDistance),
+                            simulationDistance, vsync, mouseSensitivity);
     }
 
     int ServerConnection::ReadSimulationDistance(Network::PacketReader& reader, int renderDistance) {
@@ -1378,7 +1384,11 @@ namespace Server {
                 // does not exist yet.
                 if (m_phase == ConnectionPhase::PLAY) {
                     Network::PacketReader reader(payload);
-                    const int renderDistance = std::clamp(static_cast<int>(reader.ReadVarInt()), 2, 32);
+                    // Protocol range; the server's cap comes later (see
+                    // HandleClientSettings).
+                    const int renderDistance = std::clamp(static_cast<int>(reader.ReadVarInt()),
+                                                          Game::Math::kMinViewDistance,
+                                                          Game::Math::kMaxDebugViewDistance);
                     const bool vsync = reader.ReadByte() != 0;
                     const float mouseSensitivity = reader.ReadFloat();
                     const int simulationDistance = ReadSimulationDistance(reader, renderDistance);

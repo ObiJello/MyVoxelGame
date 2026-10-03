@@ -863,7 +863,8 @@ namespace Server {
     }
 
     void PlayerSessionManager::SetMaxViewDistance(int distance) {
-        m_config.maxViewDistance = std::clamp(distance, 2, 32);
+        m_config.maxViewDistance = std::clamp(distance, Game::Math::kMinViewDistance,
+                                              Game::Math::kMaxDebugViewDistance);
         
         // Update all sessions
         auto sessions = GetAllSessions();

@@ -79,7 +79,7 @@ namespace Launcher {
         // "127.0.0.1" (routers rarely hairpin their own public IP).
         std::string friendsService;
         // The player's look (Appearance::Settings::ToJson): mode, skin
-        // source, cape, the painted stick figure.
+        // source, cape, the painted or drawn stick figure.
         nlohmann::json appearance = nlohmann::json::object();
 
         void Load(const std::string& path) {
@@ -687,7 +687,7 @@ namespace Launcher {
             if (appearanceFiles.capePath.empty()) return "";
             return " --cape " + Appearance::QuoteArg(appearanceFiles.capePath);
         };
-        // "--stick-figure <txt>" — a painted stick figure.
+        // "--stick-figure <txt>" — a painted stick figure, or a drawn one.
         auto buildStickFigureArg = [&]() -> std::string {
             if (appearanceFiles.stickFigurePath.empty()) return "";
             return " --stick-figure " + Appearance::QuoteArg(appearanceFiles.stickFigurePath);

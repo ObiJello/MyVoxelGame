@@ -20,12 +20,13 @@ namespace Render {
     }
 
     void ChunkMegaBuffer::Initialize(size_t slabVertexCapacity, size_t slabIndexCapacity,
-                                     bool perSectionIndexBuffers) {
+                                     bool perSectionIndexBuffers, const char* name) {
         if (!m_slabs.empty()) {
             Log::Warning("ChunkMegaBuffer::Initialize called on already-initialized buffer, shutting down first");
             Shutdown();
         }
 
+        m_name = name ? name : "terrain";
         m_slabVertexCapacity = slabVertexCapacity;
         m_slabIndexCapacity = slabIndexCapacity;
         m_perSectionIndexBuffers = perSectionIndexBuffers;
@@ -76,6 +77,13 @@ namespace Render {
         m_slabs.clear();
         m_regions.clear();
         m_pendingFrees.clear();
+        m_recentIndexAllocs.clear();
+        m_drainSlab = UINT32_MAX;
+        m_drainLastCount = 0;
+        m_drainStalls = 0;
+        m_drainCooldownUntil = 0;
+        m_releasedSinceLog = 0;
+        m_recreatedSinceLog = 0;
         m_usedVertexUnits = 0;
         m_usedIndices = 0;
         m_uploadFailed = false;
@@ -95,6 +103,26 @@ namespace Render {
         if (!g_renderBackend) {
             Log::Error("ChunkMegaBuffer::AllocateSlab: no render backend");
             return 0;
+        }
+
+        // A released hole first, lowest index first: its slot (and its rows
+        // of the origin table) are already there, and a low slab is where
+        // the first-fit search wants the next sections anyway. Nothing can
+        // name a hole — it was empty when released — so re-creating it
+        // under the same index is invisible to every draw path.
+        for (uint32_t i = 0; i < m_slabs.size(); ++i) {
+            Slab& hole = m_slabs[i];
+            if (!hole.released) continue;
+            hole = Slab{};
+            CreateSlabResources(hole);
+            ++m_recreatedSinceLog;
+            // A slab had to come back while one was being drained: the
+            // pool is fuller than the drain assumed — stop moving sections
+            // around before they ping-pong between slabs.
+            if (m_drainSlab != UINT32_MAX) EndDrain(/*cooldown=*/true);
+            Log::Debug("ChunkMegaBuffer[%s]: re-created released slab %u (%u live, %u released)",
+                       m_name, i, GetLiveSlabCount(), GetReleasedSlabCount());
+            return i;
         }
 
         if (m_slabs.size() >= kMaxSlabs) {
@@ -118,8 +146,23 @@ namespace Render {
         }
 
         Slab slab;
+        CreateSlabResources(slab);
+        if (m_drainSlab != UINT32_MAX) EndDrain(/*cooldown=*/true);   // as for a re-created hole
+
+        uint32_t index = static_cast<uint32_t>(m_slabs.size());
+        m_slabs.push_back(std::move(slab));
+
+        Log::Debug("ChunkMegaBuffer[%s]: allocated slab %u (%.1f MB VBO + %.1f MB IBO)",
+                   m_name, index,
+                   static_cast<double>(m_slabVertexCapacity * VERTEX_STRIDE) / (1024.0 * 1024.0),
+                   static_cast<double>(m_slabIndexCapacity * INDEX_SIZE) / (1024.0 * 1024.0));
+        return index;
+    }
+
+    void ChunkMegaBuffer::CreateSlabResources(Slab& slab) {
         slab.vboCapacity = m_slabVertexCapacity;
         slab.iboCapacity = m_slabIndexCapacity;
+        slab.released = false;
 
         slab.vbo = g_renderBackend->CreateBuffer(
             BufferUsage::Vertex,
@@ -141,15 +184,69 @@ namespace Render {
             Log::Error("ChunkMegaBuffer: no buffer texture for the face map — "
                        "greedy-merged rectangles will read garbage records");
         }
+    }
 
-        uint32_t index = static_cast<uint32_t>(m_slabs.size());
-        m_slabs.push_back(std::move(slab));
+    void ChunkMegaBuffer::ReleaseSlab(uint32_t slabIndex) {
+        if (slabIndex >= m_slabs.size()) return;
+        Slab& slab = m_slabs[slabIndex];
+        if (slab.released || slab.sectionCount != 0) return;
+        if (g_renderBackend) {
+            // Deferred: the slab emptied this frame, but the PREVIOUS
+            // frame's command stream may still reference these buffers.
+            // GL's default is an immediate delete (driver refcounts
+            // pending commands); Vulkan queues the handles behind the
+            // fence of the last submitted frame (this runs before
+            // BeginFrame, see VKBackend::DeletionSlot) — destroying
+            // immediately there is use-after-free. The buffer texture
+            // views the VBO: it goes first.
+            if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(slab.faceMapTex);
+            if (slab.vbo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.vbo);
+            if (slab.ibo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.ibo);
+        }
+        // Everything the slab knew goes with its buffers: free-lists, slots,
+        // hot and fenced ranges. Capacities read 0, so the statistics and
+        // the first-fit search pass over it.
+        slab = Slab{};
+        slab.released = true;
 
-        Log::Debug("ChunkMegaBuffer: allocated slab %u (%.1f MB VBO + %.1f MB IBO)",
-                   index,
-                   static_cast<double>(m_slabVertexCapacity * VERTEX_STRIDE) / (1024.0 * 1024.0),
-                   static_cast<double>(m_slabIndexCapacity * INDEX_SIZE) / (1024.0 * 1024.0));
-        return index;
+        // Ranges parked for this slab must not reach RetireFreedRegions: it
+        // would zero a range of a destroyed IBO now, or — once the hole is
+        // re-created — hand a stale range to the NEW slab's free-list as
+        // free space that may be in use. Same for the hot-range bookkeeping.
+        m_pendingFrees.erase(
+            std::remove_if(m_pendingFrees.begin(), m_pendingFrees.end(),
+                           [slabIndex](const PendingFree& p) { return p.slabIndex == slabIndex; }),
+            m_pendingFrees.end());
+        m_recentIndexAllocs.erase(
+            std::remove_if(m_recentIndexAllocs.begin(), m_recentIndexAllocs.end(),
+                           [slabIndex](const RecentAlloc& a) { return a.slabIndex == slabIndex; }),
+            m_recentIndexAllocs.end());
+
+        if (m_drainSlab == slabIndex) EndDrain(/*cooldown=*/false);   // drained: done
+        ++m_releasedSinceLog;
+        Log::Debug("ChunkMegaBuffer[%s]: released empty slab %u", m_name, slabIndex);
+    }
+
+    uint32_t ChunkMegaBuffer::GetLiveSlabCount() const {
+        uint32_t live = 0;
+        for (const Slab& slab : m_slabs) live += slab.released ? 0u : 1u;
+        return live;
+    }
+
+    void ChunkMegaBuffer::ReportSlabChurn() {
+        if (m_releasedSinceLog == 0 && m_recreatedSinceLog == 0) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - m_lastChurnLog < std::chrono::seconds(10)) return;
+        m_lastChurnLog = now;
+        const double slabMB = static_cast<double>(m_slabVertexCapacity * VERTEX_STRIDE +
+                                                  m_slabIndexCapacity * INDEX_SIZE) / (1024.0 * 1024.0);
+        const uint32_t live = GetLiveSlabCount();
+        Log::Info("ChunkMegaBuffer[%s]: released %u / re-created %u slabs since the last report; "
+                  "%u live (%.0f MB), %u released holes",
+                  m_name, m_releasedSinceLog, m_recreatedSinceLog,
+                  live, live * slabMB, GetSlabCount() - live);
+        m_releasedSinceLog = 0;
+        m_recreatedSinceLog = 0;
     }
 
     // ========================================================================
@@ -159,6 +256,7 @@ namespace Render {
     void ChunkMegaBuffer::BindSlab(uint32_t slabIndex) const {
         if (slabIndex >= m_slabs.size() || !g_renderBackend) return;
         const Slab& slab = m_slabs[slabIndex];
+        if (slab.released) return;   // never drawn: a hole holds no section
 
         g_renderBackend->BindVertexBuffer(slab.vbo, static_cast<uint32_t>(VERTEX_STRIDE));
         // Per-section mode binds the section's own IBO at draw time instead.
@@ -209,14 +307,29 @@ namespace Render {
             RemoveSection(key);
         }
 
-        // Try to fit in an existing slab (last first — most likely to have space)
-        for (int i = static_cast<int>(m_slabs.size()) - 1; i >= 0; i--) {
-            if (TryUploadToSlab(static_cast<uint32_t>(i), key, vertexData, vertexCount, indexData, indexCount,
+        // First fit by slab INDEX: the lowest slab with room. Live geometry
+        // then packs into the low slabs and the high ones drain on their own
+        // as sections are re-meshed or unloaded, which is what lets
+        // CompactIfNeeded give their memory back (the old last-slab-first
+        // order spread a far teleport's churn over every slab for good).
+        // Full slabs are skipped in O(1) by their minFailed hints. The
+        // slab being drained (CollectRelocationCandidates) is the last
+        // resort before a new slab: a section moved out must not land back.
+        const uint32_t slabCount = static_cast<uint32_t>(m_slabs.size());
+        for (uint32_t i = 0; i < slabCount; ++i) {
+            if (m_slabs[i].released || i == m_drainSlab) continue;
+            if (TryUploadToSlab(i, key, vertexData, vertexCount, indexData, indexCount,
                                 faceMap, faceMapTexels, fadeStartMs))
                 return true;
         }
+        if (m_drainSlab < slabCount && !m_slabs[m_drainSlab].released &&
+            TryUploadToSlab(m_drainSlab, key, vertexData, vertexCount, indexData, indexCount,
+                            faceMap, faceMapTexels, fadeStartMs)) {
+            return true;
+        }
 
-        // No slab has space — allocate a new one (<1ms, zero copy)
+        // No slab has space — re-create a released one or allocate a new one
+        // (<1ms, zero copy)
         uint32_t newSlab = AllocateSlab();
         if (newSlab == UINT32_MAX) return false;
         return TryUploadToSlab(newSlab, key, vertexData, vertexCount, indexData, indexCount,
@@ -247,11 +360,7 @@ namespace Render {
                                            int32_t fadeStartMs) {
         if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
-
-        // Origin-table row first: it is the scarcer resource in a slab of
-        // small sections, and failing here costs nothing to undo.
-        uint16_t slot = 0;
-        if (!AllocSlot(slab, slot)) return false;
+        if (slab.released) return false;
 
         // Vertex allocation: the vertices plus the face-map records behind
         // them, in whole vertex-stride units (see Region::allocUnits). The
@@ -262,8 +371,20 @@ namespace Render {
             ? (faceMapTexels + kWordsPerUnit - 1) / kWordsPerUnit + 1       // faceMapTexels = uint32 words
             : 0;
         const size_t allocUnits = vertexCount + faceMapUnits;
+
+        // Known full for a request this size (see Slab::minFailedUnits):
+        // skip without touching the free-lists.
+        if (allocUnits >= slab.minFailedUnits) return false;
+        if (!m_perSectionIndexBuffers && indexCount >= slab.minFailedIndices) return false;
+
+        // Origin-table row first: it is the scarcer resource in a slab of
+        // small sections, and failing here costs nothing to undo.
+        uint16_t slot = 0;
+        if (!AllocSlot(slab, slot)) return false;
+
         size_t vertexOffset = 0;
         if (!AllocRegion(slab.freeVertexBlocks, slab.vertexHighWater, slab.vboCapacity, allocUnits, vertexOffset)) {
+            slab.minFailedUnits = std::min(slab.minFailedUnits, allocUnits);
             FreeSlot(slab, slot);
             return false;
         }
@@ -274,7 +395,9 @@ namespace Render {
         size_t indexOffset = 0;
         if (!m_perSectionIndexBuffers) {
             if (!AllocRegion(slab.freeIndexBlocks, slab.indexHighWater, slab.iboCapacity, indexCount, indexOffset)) {
-                // Undo vertex allocation
+                slab.minFailedIndices = std::min(slab.minFailedIndices, indexCount);
+                // Undo vertex allocation (never more room than before the
+                // attempt, so the minFailed hints stay true)
                 FreeRegion(slab.freeVertexBlocks, vertexOffset, allocUnits);
                 FreeSlot(slab, slot);
                 return false;
@@ -377,6 +500,8 @@ namespace Render {
         region.sectionIbo   = sectionIbo;
         m_regions[key] = region;
         slab.sectionCount++;
+        slab.usedUnits += allocUnits;
+        slab.usedIndices += m_perSectionIndexBuffers ? 0 : indexCount;
         m_usedVertexUnits += allocUnits;
         m_usedIndices += m_perSectionIndexBuffers ? 0 : indexCount;
         return true;
@@ -451,7 +576,10 @@ namespace Render {
             // zeroes it; the renderer must not bridge a merged draw across it.
             if (!m_perSectionIndexBuffers) slab.hotRangesDirty = true;
             if (region.noBridge != 0) slab.parkedIndexRanges.erase(region.indexOffset);
+            if ((region.noBridge & kNoBridgeParked) && slab.parkedCount > 0) slab.parkedCount--;
             if (slab.sectionCount > 0) slab.sectionCount--;
+            slab.usedUnits -= std::min(slab.usedUnits, region.allocUnits);
+            if (region.sectionIbo == INVALID_BUFFER) slab.usedIndices -= std::min(slab.usedIndices, region.indexCount);
         }
         m_regions.erase(it);
     }
@@ -469,7 +597,7 @@ namespace Render {
         return true;
     }
     BufferHandle ChunkMegaBuffer::DebugGetSlabVbo(uint32_t slab) const {
-        return slab < m_slabs.size() ? m_slabs[slab].vbo : INVALID_BUFFER;
+        return slab < m_slabs.size() ? m_slabs[slab].vbo : INVALID_BUFFER;   // INVALID for a released hole
     }
     BufferHandle ChunkMegaBuffer::DebugGetSlabIbo(uint32_t slab) const {
         return slab < m_slabs.size() ? m_slabs[slab].ibo : INVALID_BUFFER;
@@ -498,10 +626,14 @@ namespace Render {
                 m_pendingFrees[keep++] = p;   // still too young to reuse
                 continue;
             }
-            if (p.slabIndex < m_slabs.size()) {
+            if (p.slabIndex < m_slabs.size() && !m_slabs[p.slabIndex].released) {
                 Slab& slab = m_slabs[p.slabIndex];
                 FreeRegion(slab.freeVertexBlocks, p.vertexOffset, p.vertexCount);
                 FreeSlot(slab, p.slot);
+                // Room came back: every "too big for this slab" verdict is
+                // void (Slab::minFailedUnits).
+                slab.minFailedUnits = SIZE_MAX;
+                slab.minFailedIndices = SIZE_MAX;
                 if (p.freeIndices) {
                     // Zero the range before it becomes free space. Index 0 is
                     // always a valid vertex (slab vertex 0), so a run of zeros
@@ -558,6 +690,12 @@ namespace Render {
         Region& region = it->second;
         const uint8_t before = region.noBridge;
         region.noBridge = on ? static_cast<uint8_t>(before | reason) : static_cast<uint8_t>(before & ~reason);
+        // Parked regions pin their slab (it cannot be drained by re-meshing).
+        if (((before ^ region.noBridge) & kNoBridgeParked) && region.slabIndex < m_slabs.size()) {
+            uint32_t& parked = m_slabs[region.slabIndex].parkedCount;
+            if (region.noBridge & kNoBridgeParked) ++parked;
+            else if (parked > 0) --parked;
+        }
         if ((before != 0) == (region.noBridge != 0)) return;   // fenced-ness unchanged
         if (region.slabIndex >= m_slabs.size() || region.indexCount == 0 ||
             region.sectionIbo != INVALID_BUFFER) {
@@ -677,43 +815,193 @@ namespace Render {
     // ========================================================================
 
     bool ChunkMegaBuffer::CompactIfNeeded(float) {
-        // With slab pool, "compaction" is just deleting empty slabs.
-        // We never copy data between slabs — free-list reuse handles fragmentation.
-        // Empty slabs at the end of the vector can be safely removed.
-        // Interior slabs can't be removed without invalidating indices in cached draw commands.
-        bool removed = false;
-        while (!m_slabs.empty() && m_slabs.back().sectionCount == 0 && m_slabs.size() > 1) {
-            Slab& slab = m_slabs.back();
-            if (g_renderBackend) {
-                // Deferred: the slab emptied this frame, but the PREVIOUS
-                // frame's command stream may still reference these buffers.
-                // GL's default is an immediate delete (driver refcounts
-                // pending commands); Vulkan queues the handles behind the
-                // fence of the last submitted frame (this runs before
-                // BeginFrame, see VKBackend::DeletionSlot) — destroying
-                // immediately there is use-after-free.
-                if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(slab.faceMapTex);
-                if (slab.vbo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.vbo);
-                if (slab.ibo != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slab.ibo);
-            }
-            Log::Debug("ChunkMegaBuffer: freed empty slab %zu", m_slabs.size() - 1);
-            m_slabs.pop_back();
-            removed = true;
+        // With slab pool, "compaction" is releasing empty slabs. We never
+        // copy data between slabs — free-list reuse handles fragmentation
+        // inside one, and re-meshing (CollectRelocationCandidates) empties
+        // the thinly used ones.
+        //
+        // Any empty slab may go, not only trailing ones: it is RELEASED
+        // (buffers destroyed, slot kept), so the index of every other slab —
+        // what cached draw commands and the origin table address — never
+        // changes. Releasing is safe for the draw paths because an empty
+        // slab has no region: GPUSectionData draw commands, merged/bridged
+        // runs (IsIndexGapDrawable works within a slab, between live
+        // regions) and per-section IBOs all come from live regions, and
+        // the draw list is rebuilt from them every frame. Ranges freed in
+        // the last frames still sit in m_pendingFrees and are purged by
+        // ReleaseSlab; the frame in flight is covered by the deferred
+        // destroy.
+        //
+        // Only a QUIESCENT empty slab goes: none of its ranges still waits
+        // in m_pendingFrees, i.e. nothing in it was drawn for the last
+        // kFreeDelayFrames frames. A slab emptied a moment ago may still be
+        // read by the frame in flight — not just its buffers (the deferred
+        // destroy covers those) but its rows of the shared origin table,
+        // which a hole re-created this same frame would overwrite with
+        // unsynchronised writes under that frame's feet.
+        //
+        // Kept: slab 0 (IsInitialized, BindSlab always have one) and ONE
+        // empty spare, the lowest-index empty slab — the next uploads fill
+        // it first, and a pool that just emptied a slab while streaming
+        // would otherwise release and re-create one every compaction.
+        m_compactBusy.assign(m_slabs.size(), 0);
+        for (const PendingFree& p : m_pendingFrees) {
+            if (p.slabIndex < m_compactBusy.size()) m_compactBusy[p.slabIndex] = 1;
+        }
+        bool released = false;
+        bool keptSpare = false;
+        for (uint32_t i = 0; i < m_slabs.size(); ++i) {
+            const Slab& slab = m_slabs[i];
+            if (slab.released || slab.sectionCount != 0) continue;
+            if (i == 0 || !keptSpare) { keptSpare = true; continue; }
+            if (m_compactBusy[i]) continue;   // released at a later compaction
+            ReleaseSlab(i);
+            released = true;
         }
 
-        // Drop parked ranges belonging to slabs that just went away. The bounds
-        // check in RetireFreedRegions would skip them today, but only until a
-        // new slab is allocated into the same index — then a stale range would
-        // be returned to a DIFFERENT slab's free-list and hand out memory that
-        // is already in use. Purge them here so that cannot happen.
-        if (removed) {
-            const uint32_t slabCount = static_cast<uint32_t>(m_slabs.size());
-            m_pendingFrees.erase(
-                std::remove_if(m_pendingFrees.begin(), m_pendingFrees.end(),
-                               [slabCount](const PendingFree& p) { return p.slabIndex >= slabCount; }),
-                m_pendingFrees.end());
+        // Trailing holes carry nothing a re-creation needs (their origin
+        // rows are rewritten per slot as sections arrive), so the vector is
+        // trimmed back as the old tail-only path did. Every entry for them
+        // was purged by ReleaseSlab.
+        while (m_slabs.size() > 1 && m_slabs.back().released) {
+            m_slabs.pop_back();
         }
-        return removed;
+        if (m_drainSlab != UINT32_MAX && m_drainSlab >= m_slabs.size()) EndDrain(/*cooldown=*/false);
+
+        ReportSlabChurn();
+        return released;
+    }
+
+    // ========================================================================
+    // CONSOLIDATION
+    // ========================================================================
+
+    void ChunkMegaBuffer::EndDrain(bool cooldown) {
+        if (m_drainSlab == UINT32_MAX) return;
+        if (cooldown) {
+            m_drainCooldownUntil = m_frameCounter + kDrainCooldownFrames;
+            Log::Debug("ChunkMegaBuffer[%s]: gave up draining slab %u (%zu sections left)",
+                       m_name, m_drainSlab,
+                       m_drainSlab < m_slabs.size() ? m_slabs[m_drainSlab].sectionCount : size_t(0));
+        }
+        m_drainSlab = UINT32_MAX;
+        m_drainLastCount = 0;
+        m_drainStalls = 0;
+    }
+
+    uint32_t ChunkMegaBuffer::PickDrainSlab() const {
+        const uint32_t slabCount = static_cast<uint32_t>(m_slabs.size());
+        uint32_t live = 0;
+        size_t capUnits = 0, capIndices = 0;
+        for (const Slab& s : m_slabs) {
+            if (s.released) continue;
+            ++live;
+            capUnits += s.vboCapacity;
+            capIndices += s.iboCapacity;
+        }
+        if (live < 2 || capUnits == 0) return UINT32_MAX;
+
+        // Mostly empty, by every resource a slab can run out of.
+        const auto share = [](size_t used, size_t cap) {
+            return cap > 0 ? static_cast<float>(used) / static_cast<float>(cap) : 0.0f;
+        };
+        float utilization = std::max(share(m_usedVertexUnits, capUnits),
+                                     share(m_regions.size(), size_t(live) * kSlotsPerSlab));
+        if (!m_perSectionIndexBuffers) utilization = std::max(utilization, share(m_usedIndices, capIndices));
+        if (utilization >= kDefragUtilization) return UINT32_MAX;
+
+        // Room a section can actually land in, per slab: the untouched tail
+        // plus free blocks big enough for a typical section layer. Ranges
+        // still in m_pendingFrees are not counted (conservative).
+        std::vector<size_t> roomUnits(slabCount, 0), roomIndices(slabCount, 0), roomSlots(slabCount, 0);
+        size_t totalUnits = 0, totalIndices = 0, totalSlots = 0;
+        for (uint32_t i = 0; i < slabCount; ++i) {
+            const Slab& s = m_slabs[i];
+            if (s.released) continue;
+            size_t units = s.vboCapacity - std::min(s.vboCapacity, s.vertexHighWater);
+            for (const Slab::FreeBlock& b : s.freeVertexBlocks) {
+                if (b.size >= kMinUsefulUnits) units += b.size;
+            }
+            size_t indices = s.iboCapacity - std::min(s.iboCapacity, s.indexHighWater);
+            for (const Slab::FreeBlock& b : s.freeIndexBlocks) {
+                if (b.size >= kMinUsefulIndices) indices += b.size;
+            }
+            const size_t slots = kSlotsPerSlab - std::min<size_t>(kSlotsPerSlab, s.sectionCount);
+            roomUnits[i] = units;     totalUnits += units;
+            roomIndices[i] = indices; totalIndices += indices;
+            roomSlots[i] = slots;     totalSlots += slots;
+        }
+
+        // The sparsest slab whose sections the others can take; a tie goes
+        // to the higher index (first fit drains the top anyway). Slab 0 is
+        // never released, so never drained.
+        uint32_t best = UINT32_MAX;
+        float bestFill = 2.0f;
+        for (uint32_t i = 1; i < slabCount; ++i) {
+            const Slab& s = m_slabs[i];
+            if (s.released || s.sectionCount == 0 || s.parkedCount != 0) continue;
+            float fill = std::max(share(s.usedUnits, s.vboCapacity),
+                                  share(s.sectionCount, kSlotsPerSlab));
+            if (!m_perSectionIndexBuffers) fill = std::max(fill, share(s.usedIndices, s.iboCapacity));
+            if (fill > kDefragMaxSlabFill || fill > bestFill) continue;
+            const auto fits = [](size_t otherRoom, size_t need) {
+                return static_cast<double>(otherRoom) >= static_cast<double>(need) * kDrainRoomMargin;
+            };
+            if (!fits(totalUnits - roomUnits[i], s.usedUnits)) continue;
+            if (!fits(totalSlots - roomSlots[i], s.sectionCount)) continue;
+            if (!m_perSectionIndexBuffers && !fits(totalIndices - roomIndices[i], s.usedIndices)) continue;
+            best = i;   // ascending index: an equal fill later replaces it
+            bestFill = fill;
+        }
+        return best;
+    }
+
+    bool ChunkMegaBuffer::CollectRelocationCandidates(std::vector<MegaBufferSectionKey>& out, size_t maxCount) {
+        out.clear();
+        if (maxCount == 0) return false;
+
+        // Progress check on the drain in hand: the caller only asks again
+        // once its previous batch has landed, so a section count that did
+        // not fall means the re-meshes went back where they came from (or
+        // never ran) — give up rather than re-mesh the same sections forever.
+        if (m_drainSlab != UINT32_MAX) {
+            const Slab* s = m_drainSlab < m_slabs.size() ? &m_slabs[m_drainSlab] : nullptr;
+            if (!s || s->released || s->sectionCount == 0) {
+                EndDrain(/*cooldown=*/false);            // emptied: CompactIfNeeded releases it
+            } else if (s->parkedCount != 0) {
+                EndDrain(/*cooldown=*/true);             // a parked mesh pinned it meanwhile
+            } else if (s->sectionCount >= m_drainLastCount) {
+                if (++m_drainStalls >= kMaxDrainStalls) EndDrain(/*cooldown=*/true);
+            } else {
+                m_drainStalls = 0;
+            }
+        }
+        if (m_drainSlab == UINT32_MAX) {
+            if (m_frameCounter < m_drainCooldownUntil) return false;
+            m_drainSlab = PickDrainSlab();
+            if (m_drainSlab == UINT32_MAX) return false;
+            m_drainStalls = 0;
+            const Slab& s = m_slabs[m_drainSlab];
+            Log::Debug("ChunkMegaBuffer[%s]: draining slab %u (%zu sections, %.0f%% of its vertices; "
+                       "pool %zu sections over %u live slabs)",
+                       m_name, m_drainSlab, s.sectionCount,
+                       s.vboCapacity ? 100.0 * static_cast<double>(s.usedUnits) / static_cast<double>(s.vboCapacity) : 0.0,
+                       m_regions.size(), GetLiveSlabCount());
+        }
+        m_drainLastCount = m_slabs[m_drainSlab].sectionCount;
+
+        for (const auto& [key, region] : m_regions) {
+            if (region.slabIndex != m_drainSlab || (region.noBridge & kNoBridgeParked)) continue;
+            out.push_back(key);
+            if (out.size() >= maxCount) break;
+        }
+        return !out.empty();
+    }
+
+    bool ChunkMegaBuffer::IsInDrainSlab(const MegaBufferSectionKey& key) const {
+        if (m_drainSlab == UINT32_MAX) return false;
+        auto it = m_regions.find(key);
+        return it != m_regions.end() && it->second.slabIndex == m_drainSlab;
     }
 
     // ========================================================================

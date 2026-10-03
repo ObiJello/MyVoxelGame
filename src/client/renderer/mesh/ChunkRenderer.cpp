@@ -998,9 +998,13 @@ namespace Render {
             ClearPortalViewSections();
             // The portal views this frame accumulate into a grid around the
             // main camera; anything a portal shows beyond it overflows.
+            // Portal views draw at most 32 chunks (SetRenderDistanceOverride
+            // is clamped there), so a debug render distance does not size
+            // this grid — it is cleared every frame.
             m_portalViewGrid.Reset(static_cast<int>(std::floor(camera.position.x / 16.0f)),
                                    static_cast<int>(std::floor(camera.position.z / 16.0f)),
-                                   Platform::g_gameSettings.GetRenderDistance() + 4);
+                                   std::min(Platform::g_gameSettings.GetRenderDistance(),
+                                            Game::Math::kMaxOptionsViewDistance) + 4);
         }
 
         // --- Reachable-section caching (async BFS occlusion graph) ---
@@ -1109,6 +1113,10 @@ namespace Render {
         // (SetRenderDistanceOverride); never past the graph's 32-chunk cap.
         if (s_renderDistanceOverride > 0) {
             renderDistanceChunks = std::clamp(s_renderDistanceOverride, 2, 32);
+        } else if (renderDistanceChunks > Game::Math::kMaxOptionsViewDistance) {
+            // A debug render distance: size everything below by what is
+            // loaded, not by the setting (see FarViewGraphRadius).
+            renderDistanceChunks = FarViewGraphRadius(currentChunkX, currentChunkZ, renderDistanceChunks);
         }
 
         // RENDER-DISTANCE CHANGE invalidation. The reachable-slot cache is
@@ -2620,13 +2628,71 @@ namespace Render {
         return subDraws;
     }
 
+    int ChunkRenderer::FarViewGraphRadius(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks) {
+        const auto stepped = [&]() {
+            // The farthest loaded chunk, plus 2 so it falls inside the
+            // buffer-1 render test (IsWithinChunkViewDistance) like every
+            // chunk short of the real edge, rounded up to a step.
+            const int needed = m_farExtentChunks + 2;
+            int radius = ((needed + kFarViewGraphStep - 1) / kFarViewGraphStep) * kFarViewGraphStep;
+            // The GPU mesh pool has a hard ceiling (ChunkMegaBuffer::
+            // kMaxSlabs). Once a layer is three quarters full the view stops
+            // WIDENING: sections past the current radius are never put in the
+            // graph, so never meshed — rather than meshed, refused by a full
+            // pool, re-dirtied and meshed again forever. It may still shrink.
+            if (m_meshes && m_meshes->MeshBuffersNearCapacity() && m_farGraphRadius > 0) {
+                radius = std::min(radius, m_farGraphRadius);
+            }
+            return std::clamp(radius, Game::Math::kMaxOptionsViewDistance, renderDistanceChunks);
+        };
+        // Portal and directional views ride the main view's extent: they are
+        // capped or centred elsewhere, and rescanning for each would cost a
+        // pass over the loaded set per view per frame.
+        if (!m_chunks || m_useProjectionOverride) return stepped();
+
+        // Rescan when the camera changes chunk, or when chunks have arrived
+        // or left — at most every 30 prepares while streaming. One pass over
+        // the loaded set (the same walk the outside-view fence makes).
+        const uint64_t version = m_chunks->LoadedSetVersion();
+        const bool moved = cameraChunkX != m_farExtentCamX || cameraChunkZ != m_farExtentCamZ;
+        const bool due = version != m_farExtentLoadedVersion &&
+                         m_prepareCounter - m_farExtentComputedAt >= 30;
+        if (moved || due) {
+            PROFILE_ZONE_N("FarViewExtent");
+            int64_t farthestSq = 0;
+            m_chunks->ForEachLoadedChunkPos([&](::Game::Math::ChunkPos pos) {
+                const int64_t dx = pos.x - cameraChunkX;
+                const int64_t dz = pos.z - cameraChunkZ;
+                farthestSq = std::max(farthestSq, dx * dx + dz * dz);
+            });
+            m_farExtentChunks = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(farthestSq))));
+            m_farExtentCamX = cameraChunkX;
+            m_farExtentCamZ = cameraChunkZ;
+            m_farExtentLoadedVersion = version;
+            m_farExtentComputedAt = m_prepareCounter;
+        }
+        m_farGraphRadius = stepped();
+        return m_farGraphRadius;
+    }
+
     void ChunkRenderer::UpdateOutsideViewFence(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks) {
         if (!m_chunks || !m_meshes) return;
         const uint64_t version = m_chunks->LoadedSetVersion();
-        if (cameraChunkX == m_fenceCamX && cameraChunkZ == m_fenceCamZ &&
-            renderDistanceChunks == m_fenceRenderDistance && version == m_fenceLoadedVersion) {
+        const bool sameView = cameraChunkX == m_fenceCamX && cameraChunkZ == m_fenceCamZ &&
+                              renderDistanceChunks == m_fenceRenderDistance;
+        if (sameView && version == m_fenceLoadedVersion) {
             return;
         }
+        // A far (debug) view streams continuously over a loaded set that can
+        // be a hundred times the usual: only arrivals changed, so refresh at
+        // most every 30 prepares. Its radius already covers every loaded chunk
+        // (FarViewGraphRadius), and a chunk beyond it is not in the graph, so
+        // never meshed — nothing for a bridged gap to draw meanwhile.
+        if (sameView && renderDistanceChunks > Game::Math::kMaxOptionsViewDistance &&
+            m_prepareCounter - m_fenceComputedAt < 30) {
+            return;
+        }
+        m_fenceComputedAt = m_prepareCounter;
         m_fenceCamX = cameraChunkX;
         m_fenceCamZ = cameraChunkZ;
         m_fenceRenderDistance = renderDistanceChunks;

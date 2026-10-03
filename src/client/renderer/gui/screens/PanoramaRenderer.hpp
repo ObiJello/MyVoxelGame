@@ -102,6 +102,12 @@ namespace Render {
         // most one finished mip level and switches that face to trilinear.
         static void PumpLastWorldMips();
         static void DiscardAdoptedFaces();   // a capture that did not complete
+        // A world is starting: the leave capture's CPU side (the in-memory
+        // faces, ~36 MB each at a Retina window, and any finished half-size
+        // mip still waiting for a title frame) has no reader left in the
+        // world — the PNGs on disk serve the next title. Without this they
+        // stayed resident through the whole next session.
+        static void ReleaseCaptureMemory();
         // Continuity from the world: the view the player left with, so the
         // captured set opens on exactly it. The panorama's yaw picks up
         // `yawOffsetDeg` past face 0 (MC sign, turning right positive) and
@@ -162,6 +168,10 @@ namespace Render {
 
         // SetHandoff — pending until a LoadSet consumes it.
         static std::shared_ptr<LastWorldFaces> s_memoryFaces;   // SaveLastWorldAsync -> TryLoadSet (fallback)
+        // The title already took this capture's faces as textures, so the
+        // in-memory copy has no reader left (SaveLastWorldAsync may arrive
+        // after that adoption).
+        static bool          s_lastWorldAdopted;
         static TextureHandle s_adoptedFaces[6];                  // SetLastWorldFace -> TryLoadSet
         static int           s_adoptedSize;
         // The captured faces' textures wherever they currently live

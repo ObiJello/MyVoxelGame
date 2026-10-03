@@ -197,9 +197,14 @@ namespace Client {
             size_t bytes = m_meshes->ParkChunkGPUData(chunkPos);
             for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
                 if (const auto* sec = chunk->chunkData->GetSection(sy)) {
-                    bytes += sec->States().RawWords().size() * 8 + sec->Biomes().RawWords().size() * 8;
+                    bytes += sizeof(*sec) +
+                             sec->States().RawWords().size() * 8 + sec->Biomes().RawWords().size() * 8;
                 }
             }
+            // The light layers (2 KB each, typically 6-10 a chunk) are the
+            // largest per-chunk heap cost after the meshes. Leaving them out
+            // let 25,000 retained chunks hold ~0.7 GB the budget never saw.
+            bytes += chunk->chunkData->light.HeapBytes();
             bytes += sizeof(ClientChunk) + sizeof(Game::Chunk);
             if (m_retained.count(chunkPos)) DiscardRetained(chunkPos);
             m_retainedLru.push_front(chunkPos);
@@ -233,6 +238,7 @@ namespace Client {
             auto& sectionInfo = it->second->sectionInfos[sectionY];
             sectionInfo.version++;
             sectionInfo.dirty = true;
+            sectionInfo.relocate = false;   // a real change: ordinary scheduling rules
             // Sticky until the section is scheduled — a player edit that lands
             // while an earlier compile is still in flight must not lose its
             // priority when the version bump re-dirties the section.
@@ -322,6 +328,48 @@ namespace Client {
             m_schedulerSkip = 0;
             Log::Debug("Marked all sections in chunk (%d, %d) as dirty", chunkPos.x, chunkPos.z);
         }
+    }
+
+    bool ClientChunkManager::MarkSectionForRelocation(Game::Math::ChunkPos chunkPos, int sectionY) {
+        ASSERT_MAIN_THREAD();
+        if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) return false;
+        auto it = m_chunks.find(chunkPos);
+        if (it == m_chunks.end() || !it->second || it->second->state != ChunkState::LOADED ||
+            !it->second->chunkData) {
+            return false;
+        }
+        ClientChunk& chunk = *it->second;
+        auto& si = chunk.sectionInfos[sectionY];
+        // Only a section at rest: built, its GPU mesh describing the current
+        // content, nothing queued or compiling. Anything else re-uploads by
+        // itself soon (and lands low by first fit). version 0 would read as
+        // "in flight" with meshingVersion reset to 0 below.
+        if (!si.builtOnce || si.dirty || si.state == SectionState::MESHING ||
+            si.version == 0 || si.uploadedVersion != si.version) {
+            return false;
+        }
+        // The re-mesh must reproduce what is on screen. It does when the
+        // mesh was built against the neighbours present now (an outer-ring
+        // section built without its missing neighbour rebuilds the same
+        // border faces) and under the current greedy palette; otherwise it
+        // would visibly change, so leave it to the regular re-dirty paths.
+        if (si.builtPaletteGen != ::Render::Mesher::GreedyPaletteGen()) return false;
+        if (!NeighborsAllLoadedCached(chunk) && si.lastNeighborMask != CurrentNeighborMask(chunkPos)) {
+            return false;
+        }
+
+        // The NoteMeshBuildFailed re-dirty: same version, meshingVersion
+        // reset so the scheduler sees it as not in flight. Unlike
+        // MarkSectionDirty there is no version bump (the BFS keeps trusting
+        // the uploaded mask once the job is scheduled — dirty alone opens it
+        // for at most the frame until then) and no SchedulePropagationFrom.
+        si.dirty = true;
+        si.relocate = true;
+        si.meshingVersion = 0;
+        chunk.AddDirty(sectionY);
+        m_chunksWithDirtySections.insert(chunkPos);
+        m_schedulerSkip = 0;
+        return true;
     }
     
     void ClientChunkManager::ClearSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY) {
@@ -1523,7 +1571,11 @@ namespace Client {
                     if (neighborsLoaded == 0) continue;
                 }
 
-                if (farColumn && !si.dirtyFromPlayer &&
+                // A relocation re-mesh (MarkSectionForRelocation) is admitted
+                // out of view too: it only moves an existing mesh between
+                // mega-buffer slabs, and waiting to be looked at would leave
+                // the slab it is draining allocated (and the section dirty).
+                if (farColumn && !si.dirtyFromPlayer && !si.relocate &&
                     (!columnInView ||
                      (!m_renderer->IsMainViewSection(chunkPos, sectionY) &&
                       !m_renderer->IsPortalViewSection(chunkPos, sectionY)))) {
@@ -1654,7 +1706,9 @@ namespace Client {
                 const float ddz = candidate.chunkPos.z * 16.0f + 8.0f - playerPosition.z;
                 const float ddy = (-64.0f + candidate.sectionY * 16.0f + 8.0f) - playerPosition.y;
                 const bool isNearby = (ddx * ddx + ddy * ddy + ddz * ddz) < kNearbySyncDistSq;
-                rebuildSync = isNearby || sectionInfo.dirtyFromPlayer;
+                // A relocation changes nothing on screen: never worth a
+                // main-thread compile.
+                rebuildSync = (isNearby && !sectionInfo.relocate) || sectionInfo.dirtyFromPlayer;
             } else if (chunkBuilderMode == 1) {
                 rebuildSync = sectionInfo.dirtyFromPlayer;
             }
@@ -1693,6 +1747,7 @@ namespace Client {
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
                 sectionInfo.dirtyFromPlayer = false;
+                sectionInfo.relocate = false;
                 chunk->RemoveDirty(candidate.sectionY);
                 if (chunk->dirtySections.empty()) {
                     m_chunksWithDirtySections.erase(candidate.chunkPos);
@@ -1720,6 +1775,7 @@ namespace Client {
                 sectionInfo.state = SectionState::MESHING;
                 sectionInfo.dirty = false;
                 sectionInfo.dirtyFromPlayer = false;
+                sectionInfo.relocate = false;
                 chunk->RemoveDirty(candidate.sectionY);
                 if (chunk->dirtySections.empty()) {
                     m_chunksWithDirtySections.erase(candidate.chunkPos);
@@ -2041,6 +2097,7 @@ namespace Client {
             auto& si = raw->sectionInfos[sy];
             si.lastMeshJob.reset();
             si.dirtyFromPlayer = false;
+            si.relocate = false;
         }
         m_chunks.emplace(pos, std::move(chunk));
         TransitionChunkState(raw, ChunkState::LOADED);

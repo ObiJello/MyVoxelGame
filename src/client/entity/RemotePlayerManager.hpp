@@ -148,7 +148,7 @@ namespace Client {
         uint8_t elytraFlags = 0;
         Game::ElytraAnimationState elytraAnim;
         // MC LivingEntity.fallFlyTicks as this client counts it (one per
-        // broadcast): eases the glide pose in.
+        // client tick while the glide flag is set): eases the glide pose in.
         int  fallFlyTicks = 0;
 
         // MC LivingEntity.sleepingPos — the bed's head cell while this player
@@ -248,11 +248,14 @@ namespace Client {
             auto it = m_players.find(id);
             if (it != m_players.end()) it->second.elytraFlags = flags;
         }
+        // The glide flag only; Tick counts fallFlyTicks (MC LivingEntity.tick
+        // on the client), so the glide's ease-in runs at 20 Hz however the
+        // broadcasts bunch up.
         void SetFallFlying(uint32_t id, bool fallFlying) {
             auto it = m_players.find(id);
             if (it == m_players.end()) return;
             it->second.fallFlying = fallFlying;
-            it->second.fallFlyTicks = fallFlying ? it->second.fallFlyTicks + 1 : 0;
+            if (!fallFlying) it->second.fallFlyTicks = 0;
         }
 
         // A player lay down (bed head cell) or got up (nullopt). Applied to
@@ -553,15 +556,21 @@ namespace Client {
                 const glm::dvec3 vel = rp.position - rp.prevPosition;
                 const double speedSq = vel.x * vel.x + vel.z * vel.z;
                 rp.prevPosition = rp.position;
-                // MC LivingEntity.tick → elytraAnimationState.tick(): the
-                // wings follow the glide (its dive from this tick's travel),
-                // the crouch, or fold.
+                // MC LivingEntity.tick: fallFlyTicks counts the glide, then
+                // elytraAnimationState.tick(): the wings follow the glide
+                // (its dive from this tick's travel), the crouch, or fold.
+                rp.fallFlyTicks = rp.fallFlying ? rp.fallFlyTicks + 1 : 0;
                 rp.elytraAnim.Tick(rp.fallFlying, rp.isCrouching, vel);
 
-                // MC LivingEntity.updateWalkAnimation: horizontal travel × 4,
-                // capped at 1, smoothed by 0.4 a tick. Only a morph reads it.
+                // MC RemotePlayer.tick → calculateEntityAnimation(false):
+                // horizontal travel × 4, capped at 1, smoothed by 0.4 a tick
+                // (updateWalkAnimation); a passenger or a corpse stops the
+                // limbs outright (walkAnimation.stop). The skinned body and
+                // a morph read it.
                 ++rp.ticks;
-                {
+                if (rp.vehicleId != 0 || rp.deathTime > 0) {
+                    rp.walk.Stop();
+                } else {
                     float f = static_cast<float>(std::sqrt(speedSq)) * 4.0f;
                     if (f > 1.0f) f = 1.0f;
                     rp.walk.Update(f, 0.4f, 1.0f);

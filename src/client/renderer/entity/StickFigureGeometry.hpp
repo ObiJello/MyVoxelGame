@@ -8,7 +8,9 @@
 //     launcher compiles this file; it depends on glm and common/ only)
 //
 // A figure is one colour or painted per cell (Game::StickFigurePaint; the
-// launcher's painter, docs/player-appearance.md).
+// launcher's painter, docs/player-appearance.md) — or replaced by a drawn
+// figure (Game::StickFigureDrawing), round strokes drawn like the figure's
+// own limbs: the end of this file.
 //
 // Vertex layout matches the block vertex layout (pos3 + uv2 + color4 ubyte = 24 B)
 // so the world renderer can stream it straight into a GPU buffer without copies.
@@ -21,6 +23,7 @@
 #include "common/entity/PlayerColors.hpp"
 
 #include <glm/glm.hpp>
+#include <algorithm>
 #include <vector>
 #include <cstdint>
 
@@ -141,5 +144,103 @@ namespace Render {
     // scaled about its feet scales this the same way.
     glm::vec3 StickFigureHand(const glm::vec3& feetPos, float bodyYawDeg,
                               bool isCrouching, bool isSitting, bool rightHand);
+
+    // ── The drawn figure (Game::StickFigureDrawing) ─────────────────────────
+    //
+    // A drawing replaces the stick figure, and its strokes are drawn the way
+    // the stick figure draws its limbs: each segment rides the figure's LINE
+    // list as a line pair, and the world renderer widens it toward the
+    // camera at draw time (PlayerRenderer's EmitThickWorldStripFromLines) —
+    // a camera-facing ribbon the stroke's width, with a camera-facing disc at
+    // every point for the round joints and ends. Together those are the
+    // silhouette of a round tube along the stroke, so the drawing reads as
+    // the same drawing from the front, as a figure of tubes from the side,
+    // and never vanishes edge-on. The colour is flat like the limbs': the
+    // figure's light, hurt flash and translucency, no face shading.
+    //
+    // BuildDrawingMesh flattens the strokes once per look into FIGURE-space
+    // segments — blocks, feet at the origin, +X the player's right, +Y up,
+    // the drawing in the plane Z = 0. AppendDrawingLines places them at a
+    // body every frame (body yaw, the sneak); the world renderer's glide,
+    // swim, spin, death topple, lying in bed, body scale and portal model
+    // reach them through the line list like the limbs.
+    //
+    // Layers. Strokes are coplanar, so where two of different colours
+    // overlap their ribbons are at the same depth; a later stroke must win
+    // as it did on the canvas. Each segment carries its stroke's layer — one
+    // above every earlier stroke of another colour it touches — and the
+    // widening pulls the ribbon toward the eye by kDrawingLayerStep of the
+    // distance per layer: along the eye ray, so the picture on screen does
+    // not move, only its depth.
+
+    struct DrawingSegment {
+        glm::vec2 a{0.0f}, b{0.0f};   // figure space (X the player's right, Y up), blocks
+        float     radius = 0.0f;      // blocks
+        uint8_t   color = 0;          // Game::PlayerColorId
+        uint8_t   layer = 0;          // 0 .. kDrawingMaxLayer
+        bool      capEnd = false;     // a round cap at `b` too: a stroke's last segment
+    };
+    struct DrawingMesh {
+        // Every stroke's segments in stroke order; a dot is one segment with
+        // a == b. Each point's disc is drawn at the start of the segment
+        // leaving it, and the last point's by `capEnd`.
+        std::vector<DrawingSegment> segments;
+        float top = 0.0f;      // the highest ink above the feet (blocks)
+        bool Empty() const { return segments.empty(); }
+    };
+    inline constexpr int   kDrawingMaxLayer = 31;
+    inline constexpr float kDrawingLayerStep = 1.0f / 4096.0f;
+    // Flattens the parts of the strokes at least `fromHeight` blocks above
+    // the feet (0: all of it; kDrawingHeadFrom: the head, for a spectator's
+    // floating head) — a cut stroke ends round there like any end.
+    void BuildDrawingMesh(const Game::StickFigureDrawing& drawing, DrawingMesh& out, float fromHeight = 0.0f);
+    // Where a spectator's floating head starts: the stick figure's neck
+    // (ComputeStickFigureSkeleton's standing neckY).
+    inline constexpr float kDrawingHeadFrom = 1.44f;
+    // The sneak: the drawing is squashed toward its feet by the stick
+    // figure's crouched eye height over its standing one (HumanoidModel's
+    // 4.2-px head drop on a 1.62 eye), so it lowers as the figure does and
+    // never sinks into the ground. The stroke width is kept.
+    inline constexpr float kDrawingCrouchScaleY = (1.62f - 4.2f / 16.0f) / 1.62f;
+
+    // A drawn segment's line pair is told from a limb's by its `v`: a limb
+    // carries its paint cell (>= 0), a stroke a negative tag holding its
+    // layer and whether its end is capped. Its `u` is its radius in blocks
+    // (a limb's `u` is the body scale, 0 until the renderer sets it).
+    inline float DrawingStrokeTag(int layer, bool capEnd) {
+        return -static_cast<float>(1 + 2 * layer + (capEnd ? 1 : 0));
+    }
+    inline bool IsDrawingStroke(const StickVertex& v) { return v.v < -0.5f; }
+    // A body's size on a line's width: a limb's `u` becomes the scale, a
+    // stroke's radius is multiplied by it.
+    inline void ScaleLineWidth(StickVertex& v, float scale) {
+        v.u = IsDrawingStroke(v) ? v.u * scale : scale;
+    }
+
+    // Appends `mesh`'s segments as line pairs placed at a body: feet at
+    // `feetPos`, facing `bodyYawDeg` (MC yaw), squashed while `isCrouching`,
+    // each in `palette`'s colour for its PlayerColorId (the caller's light,
+    // hurt flash and translucency already applied).
+    void AppendDrawingLines(std::vector<StickVertex>& out, const DrawingMesh& mesh,
+                            const glm::vec3& feetPos, float bodyYawDeg, bool isCrouching,
+                            const PlayerColor* palette);
+
+    // Widens one drawn segment's line pair (IsDrawingStroke) toward `eye`
+    // into triangles: the ribbon, the disc at its start and, for a stroke's
+    // last segment, the disc at its end — every vertex pulled toward the eye
+    // by its layer. Its own space: the eye must be in the vertices' space.
+    // No winding: drawn without culling, like the limbs' strips.
+    void AppendDrawingStrokeTriangles(const StickVertex& a, const StickVertex& b, const glm::vec3& eye,
+                                      std::vector<StickVertex>& out);
+
+    // The stick figure's front view as strokes, at its true size and place:
+    // the torso, legs and arms at the limbs' width, the head outline and
+    // smile at the rings', the eyes as dots, each part split where its paint
+    // changes colour — `paint` is the figure's paint,
+    // StickFigurePaint::Uniform(colour) for a plain one. Everything stays
+    // inside the canvas (the hands are cut at the hitbox's sides, the feet
+    // lifted by their radius). The drawing editor's "From stick figure" and
+    // its guide.
+    void StickFigureStrokes(const Game::StickFigurePaint& paint, Game::StickFigureDrawing& out);
 
 } // namespace Render

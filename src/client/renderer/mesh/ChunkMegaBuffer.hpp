@@ -44,9 +44,22 @@ namespace Render {
     //
     // One ChunkMegaBuffer is used per render layer (opaque, cutout, translucent).
     // When a slab fills up, a new empty slab is allocated (<1ms, no data copy).
-    // Sections are uploaded to whichever slab has free space.
+    // Sections are uploaded to the LOWEST-INDEX slab with room, so live
+    // geometry packs into the low slabs and the high ones drain.
     //
     // Free-list allocator per slab manages regions with first-fit and coalescing.
+    //
+    // Giving memory back: a slab is addressed by its index everywhere (draw
+    // commands cached on GPUSectionData, the origin table's offset), so an
+    // EMPTY slab is never erased from m_slabs — CompactIfNeeded RELEASES it:
+    // its VBO, IBO and face-map view are destroyed (deferred, see the
+    // Vulkan frame-overlap rules) and the slot stays behind as a hole that
+    // AllocateSlab re-creates before it ever appends. An empty slab has no
+    // live region, so no draw command, bridged gap or BindSlab can name it.
+    // Sections scattered thinly over many slabs after a far teleport are
+    // consolidated by re-meshing them (CollectRelocationCandidates, driven
+    // by ClientMeshManager::DefragmentMegaBuffers): the re-mesh's upload
+    // lands in a lower slab and the drained slab is released.
     //
     class ChunkMegaBuffer {
     public:
@@ -75,8 +88,9 @@ namespace Render {
         // Cost: the layer can no longer be issued as one multi-draw per slab; it
         // becomes one bind + draw per section. Worth it only where re-sorts are
         // frequent, i.e. translucent. Leave false for opaque/cutout.
+        // `name`: the layer, for log lines only (a string literal — kept by pointer).
         void Initialize(size_t slabVertexCapacity = 512000, size_t slabIndexCapacity = 1024000,
-                        bool perSectionIndexBuffers = false);
+                        bool perSectionIndexBuffers = false, const char* name = "terrain");
 
         // Per-section IBO for this section, or INVALID_BUFFER when the pool uses
         // shared slab indices. The renderer binds this before drawing the section.
@@ -229,7 +243,13 @@ namespace Render {
         // Bind a specific slab's VBO and IBO via the render backend.
         void BindSlab(uint32_t slabIndex) const;
 
+        // Slab SLOTS, released holes included — the bound for a slab index
+        // (draw entries, per-slab scratch arrays). Not a memory figure.
         uint32_t GetSlabCount() const { return static_cast<uint32_t>(m_slabs.size()); }
+        // Slabs that hold GPU buffers right now, and released holes waiting
+        // to be re-created (both together = GetSlabCount()).
+        uint32_t GetLiveSlabCount() const;
+        uint32_t GetReleasedSlabCount() const { return GetSlabCount() - GetLiveSlabCount(); }
 
         // ── Capacity pressure ──────────────────────────────────────────────
         // The pool can grow to kMaxSlabs and no further. Past three quarters
@@ -237,6 +257,9 @@ namespace Render {
         // upload found no room at all, the chunk manager drops parked meshes
         // (the retention cache) so live sections keep fitting — see
         // ClientChunkManager::RelieveMeshBufferPressure.
+        // Measured against kMaxSlabs, NOT the slabs allocated right now: a
+        // released hole is re-created on demand, so it is headroom exactly
+        // like a slot never used — live usage is what can run out.
         bool NearCapacity() const {
             const size_t maxUnits = size_t(kMaxSlabs) * m_slabVertexCapacity;
             const size_t maxIndices = size_t(kMaxSlabs) * m_slabIndexCapacity;
@@ -279,9 +302,34 @@ namespace Render {
         // MAINTENANCE
         // ========================================================================
 
-        // No-copy cleanup: just deletes completely empty slabs.
-        // Returns true if any slabs were removed.
+        // No-copy cleanup: releases every completely empty slab (its GPU
+        // buffers go, its slot stays as a hole — see the class comment)
+        // except slab 0 and one empty spare, the lowest-index one, so a
+        // stream of uploads right after a drain does not re-create a slab
+        // per compaction. Trailing holes are trimmed off m_slabs.
+        // Returns true if any slab was released.
         bool CompactIfNeeded(float threshold = 0.5f);
+
+        // ── Consolidation (re-mesh driven) ─────────────────────────────────
+        // When the pool is mostly empty (live usage under kDefragUtilization
+        // of the ALLOCATED slabs), picks the sparsest slab whose sections
+        // the other live slabs can take (the "drain slab") and returns up
+        // to `maxCount` of its sections for the caller to re-mesh; their
+        // uploads skip the drain slab (UploadSection), so each one moves
+        // out, and the emptied slab is released by CompactIfNeeded. The
+        // caller asks again only after the previous batch has landed (ask
+        // for a whole slab's worth, kSlotsPerSlab, so a batch is one pass
+        // over the drain slab); a
+        // drain that makes no progress for kMaxDrainStalls batches, or that
+        // forced a slab to be (re-)created, is abandoned and the pool rests
+        // for kDrainCooldownFrames. Parked sections (kNoBridgeParked) cannot
+        // be re-meshed, so a slab holding any is never chosen.
+        // O(slabs + free blocks) to choose, O(regions) to collect.
+        bool CollectRelocationCandidates(std::vector<MegaBufferSectionKey>& out, size_t maxCount);
+        // Whether the section still sits in the slab being drained — a
+        // queued candidate that already moved (re-meshed for its own
+        // reasons) needs no relocation.
+        bool IsInDrainSlab(const MegaBufferSectionKey& key) const;
 
     private:
         // Per-slab GPU resources and allocator state
@@ -297,6 +345,24 @@ namespace Render {
             size_t vertexHighWater = 0;
             size_t indexHighWater = 0;
             size_t sectionCount = 0;  // Live sections in this slab
+            // Live allocation units / slab-IBO indices (m_usedVertexUnits /
+            // m_usedIndices, per slab) — how full the slab is, for choosing
+            // what to drain.
+            size_t usedUnits = 0;
+            size_t usedIndices = 0;
+            // Live regions fenced with kNoBridgeParked: retention-cache
+            // meshes, which cannot be re-meshed, so the slab cannot drain.
+            uint32_t parkedCount = 0;
+            // GPU buffers destroyed, slot kept as a hole (CompactIfNeeded);
+            // AllocateSlab re-creates it. Capacities read 0 while released.
+            bool released = false;
+            // Smallest request that found no room here since the slab last
+            // got space back (RetireFreedRegions). Allocation only shrinks
+            // free space, so any request at least this big fails again —
+            // what lets the lowest-index-first search skip full slabs
+            // without walking their free-lists on every upload.
+            size_t minFailedUnits = SIZE_MAX;
+            size_t minFailedIndices = SIZE_MAX;
 
             // Free-list per slab (sorted by offset for coalescing)
             struct FreeBlock {
@@ -417,7 +483,49 @@ namespace Render {
 
         // Slab management
         // Returns the new slab's index, or UINT32_MAX when kMaxSlabs is reached.
+        // Re-creates the lowest released hole before appending a slot.
         uint32_t AllocateSlab();
+        // Creates `slab`'s VBO, IBO and face-map view at the pool's capacities.
+        void CreateSlabResources(Slab& slab);
+        // Destroys slab `slabIndex`'s GPU buffers (deferred) and turns it
+        // into a released hole. The slab must hold no live section.
+        void ReleaseSlab(uint32_t slabIndex);
+        // The slab CollectRelocationCandidates should drain next, or UINT32_MAX.
+        uint32_t PickDrainSlab() const;
+        // Stop draining; `cooldown` = it failed, rest before trying again.
+        void EndDrain(bool cooldown);
+        // One rate-limited Info line for releases/re-creations since the last.
+        void ReportSlabChurn();
+
+        const char* m_name = "terrain";
+
+        // Consolidation state (CollectRelocationCandidates).
+        uint32_t m_drainSlab = UINT32_MAX;
+        size_t   m_drainLastCount = 0;      // drain slab's sectionCount at the last batch
+        uint32_t m_drainStalls = 0;         // consecutive batches without progress
+        uint64_t m_drainCooldownUntil = 0;  // m_frameCounter value
+        // Drain only while live usage is under this share of what the live
+        // slabs hold, and only slabs at most this full: past that the
+        // re-meshing it costs buys back too little.
+        static constexpr float    kDefragUtilization   = 0.6f;
+        static constexpr float    kDefragMaxSlabFill   = 0.6f;
+        // The other slabs must have this much more usable room than the
+        // drain slab holds — sections land in first-fit holes, not in one
+        // block — counting only free blocks of at least kMinUsefulUnits /
+        // kMinUsefulIndices (a typical section layer) plus the untouched tail.
+        static constexpr float    kDrainRoomMargin     = 1.5f;
+        static constexpr size_t   kMinUsefulUnits      = 2048;
+        static constexpr size_t   kMinUsefulIndices    = 3072;
+        static constexpr uint32_t kMaxDrainStalls      = 3;
+        static constexpr uint64_t kDrainCooldownFrames = 3600;
+
+        // CompactIfNeeded scratch: slabs with ranges still in m_pendingFrees.
+        std::vector<uint8_t> m_compactBusy;
+
+        // Slab churn since the last ReportSlabChurn line.
+        uint32_t m_releasedSinceLog = 0;
+        uint32_t m_recreatedSinceLog = 0;
+        std::chrono::steady_clock::time_point m_lastChurnLog{};
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                              const float* vertexData, size_t vertexCount,
                              const uint16_t* indexData, size_t indexCount,

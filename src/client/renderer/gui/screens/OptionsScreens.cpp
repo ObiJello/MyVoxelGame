@@ -414,8 +414,18 @@ namespace Render {
         }
 
         m_list->AddSmall(
-            ValueSlider("Render Distance", s.GetRenderDistance(), 2, 32, 1,
-                [](double v) { return std::to_string(static_cast<int>(v)) + " chunks"; },
+            // Positioned at the SAVED value (2..32). While a debug-panel
+            // override beyond 32 is active (session-only) the label shows that
+            // distance instead, and moving this slider replaces it
+            // (GameSettings::SetRenderDistance).
+            ValueSlider("Render Distance", s.GetSavedRenderDistance(),
+                Game::Math::kMinViewDistance, Game::Math::kMaxOptionsViewDistance, 1,
+                [](double v) {
+                    if (Settings().HasDebugRenderDistanceOverride()) {
+                        return std::to_string(Settings().GetRenderDistance()) + " (debug)";
+                    }
+                    return std::to_string(static_cast<int>(v)) + " chunks";
+                },
                 [&mgr](double v) {
                     Settings().SetRenderDistance(static_cast<int>(v));
                     mgr.MarkSettingApplied(ScreenManager::APPLY_RENDER_DISTANCE);

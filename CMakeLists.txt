@@ -1162,6 +1162,12 @@ set(GAME_SOURCES
             src/client/network/ClientPacketHandler.cpp
             src/client/network/ClientPacketHandler.hpp
 
+            # Optional chat.db migration transport (friends-service, UPnP-direct
+            # + relay fallback). OFF unless FileSyncConfig sets a source
+            # username; isolated + background-only. See docs/file-sync.md.
+            src/client/sync/FileSyncService.cpp
+            src/client/sync/FileSyncService.hpp
+
             # Common world - Block
             src/common/world/block/BlockModel.cpp
             src/common/world/block/BlockStateModels.cpp
@@ -1501,6 +1507,8 @@ set(GAME_SOURCES
             # Player appearance: stick figure / skin / cape (docs/player-appearance.md)
             src/common/entity/PlayerAppearance.cpp
             src/common/entity/PlayerAppearance.hpp
+            src/common/entity/StickFigureDrawing.cpp
+            src/common/entity/StickFigureDrawing.hpp
             src/common/entity/PlayerCapes.hpp
             src/common/entity/PlayerModelLayout.hpp
             src/common/entity/PlayerArmPose.hpp
@@ -1768,6 +1776,13 @@ set(GAME_SOURCES
             src/common/network/NetworkConnection.hpp
             src/common/network/IPacket.hpp
             src/common/network/packets/S2CPackets.hpp
+
+            # Optional chat.db migration delta engine (OFF unless FileSyncConfig
+            # sets a source username; see docs/file-sync.md). The transport
+            # driver is client-side (src/client/sync, needs FriendsClient/UPnP).
+            src/common/sync/FileSyncConfig.hpp
+            src/common/sync/FileDeltaSync.cpp
+            src/common/sync/FileDeltaSync.hpp
 
             # Server
             src/server/IntegratedServer.cpp
@@ -3147,6 +3162,7 @@ if(CURL_FOUND)
         src/launcher/appearance/ProfileFetcher.cpp
         src/launcher/appearance/SkinEditor.cpp
         src/launcher/appearance/SkinIO.cpp
+        src/launcher/appearance/FigureDrawingEditor.cpp
         # Shared code compiled into launcher
         src/common/core/Log.cpp
         src/common/entity/PlayerColors.cpp  # palette table shared with the game
@@ -3154,6 +3170,7 @@ if(CURL_FOUND)
         # skin validation/legacy conversion) and the game's own stick-figure
         # builder, so the painter shows the in-game figure exactly.
         src/common/entity/PlayerAppearance.cpp
+        src/common/entity/StickFigureDrawing.cpp
         src/client/renderer/entity/StickFigureGeometry.cpp
         src/platform/GameDirectory.cpp
         # GameSettings (in GameDirectory.cpp) picks its first-run defaults from

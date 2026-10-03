@@ -16,7 +16,9 @@
 // skin, 64x32 cape, size caps) and relays the bytes as sent.
 //
 // Wire (both directions; S2C prefixes VarInt playerId):
-//   byte   version            (1)
+//   byte   version            (4; 1 = ends after the paint, 2 = no drawing,
+//                              3 = the drawing field holds the old pixel
+//                              canvas — Decode converts it either way)
 //   byte   mode               (AppearanceMode)
 //   byte   model              (SkinModel)
 //   byte   modelParts         (ModelPartBits)
@@ -24,6 +26,14 @@
 //   VarInt capeLength, bytes  (PNG; 0 = no cape)
 //   byte   hasPaint
 //   [hasPaint] byte cellCount, cellCount bytes (PlayerColorId per cell)
+//   VarInt sculptLength, bytes — version 2's 3D voxels, retired: written as
+//          0, and a version-2 sender's bytes are skipped.
+//   VarInt drawingLength, bytes (StickFigureDrawing::Encode — its strokes,
+//          or a version-3 sender's pixel canvas; 0 = none — a drawing
+//          replaces the stick figure) — trailing, version 3: absent from
+//          older senders. A blob over StickFigureDrawing::
+//          kMaxEncodedBytes, or one that does not decode, is skipped and the
+//          look arrives without it.
 // Fields may be appended after these (wire-compat: trailing additions).
 #pragma once
 
@@ -49,7 +59,7 @@ namespace Network {
 
     namespace Serialization {
 
-        inline constexpr uint8_t kPlayerAppearanceVersion = 1;
+        inline constexpr uint8_t kPlayerAppearanceVersion = 4;
 
         inline void WritePlayerAppearance(PacketBuffer& buffer, const Game::PlayerAppearance& a) {
             buffer.WriteByte(kPlayerAppearanceVersion);
@@ -65,6 +75,12 @@ namespace Network {
                 buffer.WriteByte(static_cast<uint8_t>(Game::StickFigurePaint::kCellCount));
                 buffer.WriteBytes(a.paint.cells.data(), a.paint.cells.size());
             }
+            // Version 2's voxel slot, retired: always empty.
+            buffer.WriteVarInt(0);
+            // Version 3 on: the drawn figure (its strokes since version 4).
+            const std::vector<uint8_t> drawing = a.drawing.Encode();
+            buffer.WriteVarInt(static_cast<uint32_t>(drawing.size()));
+            if (!drawing.empty()) buffer.WriteBytes(drawing);
         }
 
         // Throws (PacketReader's runtime_error) on a truncated or oversized
@@ -94,11 +110,32 @@ namespace Network {
                     if (i < keep) a.paint.cells[i] = v;
                 }
             }
+            // Version 2's voxel slot (a version-1 sender stops before it):
+            // retired, its bytes skipped.
+            if (reader.Remaining() > 0) {
+                const uint32_t sculptLength = reader.ReadVarInt();
+                if (sculptLength > reader.Remaining()) throw std::runtime_error("PlayerAppearance: truncated sculpt");
+                if (sculptLength > 0) (void)reader.ReadBytes(sculptLength);
+            }
+            // Version 3's drawing (older senders stop before it). The
+            // structure is checked here, the caps by Decode; a bad blob costs
+            // the drawing, never the rest of the look.
+            if (reader.Remaining() > 0) {
+                const uint32_t drawingLength = reader.ReadVarInt();
+                if (drawingLength > reader.Remaining()) throw std::runtime_error("PlayerAppearance: truncated drawing");
+                if (drawingLength > 0) {
+                    const std::vector<uint8_t> bytes = reader.ReadBytes(drawingLength);
+                    if (drawingLength <= Game::StickFigureDrawing::kMaxEncodedBytes) {
+                        if (auto drawing = Game::StickFigureDrawing::Decode(bytes)) a.drawing = std::move(*drawing);
+                    }
+                }
+            }
             return a;
         }
 
         inline std::vector<uint8_t> Serialize(const PlayerAppearanceC2SPacket& packet) {
-            PacketBuffer buffer(512 + packet.appearance.skinPng.size() + packet.appearance.capePng.size());
+            PacketBuffer buffer(512 + packet.appearance.skinPng.size() + packet.appearance.capePng.size() +
+                                Game::StickFigureDrawing::kMaxEncodedBytes);
             WritePlayerAppearance(buffer, packet.appearance);
             return buffer.GetData();
         }
@@ -111,7 +148,8 @@ namespace Network {
         }
 
         inline std::vector<uint8_t> Serialize(const PlayerAppearanceS2CPacket& packet) {
-            PacketBuffer buffer(512 + packet.appearance.skinPng.size() + packet.appearance.capePng.size());
+            PacketBuffer buffer(512 + packet.appearance.skinPng.size() + packet.appearance.capePng.size() +
+                                Game::StickFigureDrawing::kMaxEncodedBytes);
             buffer.WriteVarInt(packet.playerId);
             WritePlayerAppearance(buffer, packet.appearance);
             return buffer.GetData();

@@ -224,16 +224,19 @@ namespace Server {
         // Ticket-driven generation: chunks the disk did not have, waiting to be
         // handed to the terrain library (IntegratedServer::ServiceGenerationQueues).
         std::vector<Game::Math::ChunkPos> generationBacklog;
-        // The backlog is kept nearest-first (to the nearest of
+        // The backlog is a binary heap, nearest on top (to the nearest of
         // generationBacklogAnchors: the player and portal-far-side centres in
-        // THIS level) and consumed from the back; it is re-sorted only when
-        // entries arrive or an anchor moves, never rescanned per tick — with a
-        // wide simulation ring it holds tens of thousands of entries.
-        bool generationBacklogSorted = false;
-        int64_t generationBacklogSortTick = -1;   // m_currentServerTick of the last sort
+        // THIS level, as of the last rebuild); entries are pushed and popped
+        // in O(log n) and the heap is rebuilt only when an anchor moves or
+        // cancelled entries pile up, never rescanned per tick — with a wide
+        // simulation ring it holds tens of thousands of entries, with a debug
+        // render distance millions (IntegratedServer::ServiceGenerationQueues).
+        bool generationBacklogSorted = false;     // the heap has been built against the current anchors
+        int64_t generationBacklogSortTick = -1;   // m_currentServerTick of the last rebuild
         std::chrono::steady_clock::time_point generationLastStallCheck{};   // watchdog runs ~1/s
         std::vector<Game::Math::ChunkPos> generationBacklogAnchors;
-        std::vector<int> generationBacklogAnchorBias;   // their portal entry legs, chunks (resort on change)
+        std::vector<int> generationBacklogAnchorBias;   // their portal entry legs, chunks (rebuild on change)
+        std::vector<float> generationBacklogAnchorFarScale;   // ChunkLoadAnchor::farScale, for the heap key
         size_t generationInFlight = 0;
         // When each in-flight request was handed to the library, and when the
         // library last completed anything: the stall watchdog reads both.

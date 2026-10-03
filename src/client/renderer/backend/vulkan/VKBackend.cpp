@@ -241,6 +241,7 @@ namespace Render {
         if (m_textureDescriptorLayout != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(m_device, m_textureDescriptorLayout, nullptr);
         if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+        m_spareTexelBufferSets.clear();   // freed with the pool
         if (m_imguiDescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_device, m_imguiDescriptorPool, nullptr);
 
         CleanupSwapchain();
@@ -2032,6 +2033,13 @@ namespace Render {
         DestroyFrameCopies(handle, it->second);
         if (it->second.bufferView != VK_NULL_HANDLE) {
             vkDestroyBufferView(m_device, it->second.bufferView, nullptr);
+            // No command buffer still holds the set: the immediate form
+            // drained above, and the deferred flush only reaches here once
+            // the last frame that bound it has passed its fence (or after
+            // the same wait). Its next CreateBufferTexture rewrites it.
+            if (it->second.descriptorSet != VK_NULL_HANDLE) {
+                m_spareTexelBufferSets.push_back(it->second.descriptorSet);
+            }
         }
         if (it->second.sampler != VK_NULL_HANDLE) vkDestroySampler(m_device, it->second.sampler, nullptr);
         if (it->second.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, it->second.imageView, nullptr);
@@ -5417,16 +5425,24 @@ namespace Render {
             return INVALID_TEXTURE;
         }
 
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool     = m_descriptorPool;
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts        = &m_texelBufferLayout;
+        // A destroyed buffer texture's set first (m_spareTexelBufferSets):
+        // the pool has no FREE_DESCRIPTOR_SET flag, so fresh allocations are
+        // never returned.
         VkDescriptorSet set = VK_NULL_HANDLE;
-        if (vkAllocateDescriptorSets(m_device, &allocInfo, &set) != VK_SUCCESS) {
-            Log::Error("VKBackend::CreateBufferTexture: descriptor pool exhausted");
-            vkDestroyBufferView(m_device, view, nullptr);
-            return INVALID_TEXTURE;
+        if (!m_spareTexelBufferSets.empty()) {
+            set = m_spareTexelBufferSets.back();
+            m_spareTexelBufferSets.pop_back();
+        } else {
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool     = m_descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts        = &m_texelBufferLayout;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &set) != VK_SUCCESS) {
+                Log::Error("VKBackend::CreateBufferTexture: descriptor pool exhausted");
+                vkDestroyBufferView(m_device, view, nullptr);
+                return INVALID_TEXTURE;
+            }
         }
         VkWriteDescriptorSet write{};
         write.sType            = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;

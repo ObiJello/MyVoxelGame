@@ -26,6 +26,8 @@
 #include <string>
 #include <vector>
 
+namespace Render { struct DrawingMesh; }
+
 namespace Launcher::Appearance {
 
     // What the GL preview draws: one vertex of a triangle list.
@@ -111,6 +113,17 @@ namespace Launcher::Appearance {
     // thin limb is easy to hit) and the faces, front-facing only. -1 for none.
     int PickStickCell(const Game::StickFigurePaint& paint, bool uniformLook,
                       const glm::vec3& eye, const glm::vec3& origin, const glm::vec3& dir);
+
+    // ── The drawn figure ────────────────────────────────────────────────────
+
+    // A drawing's strokes (StickFigureGeometry's DrawingMesh) standing at the
+    // origin facing +Z — exactly as a player with body yaw 0 wears it —
+    // widened toward `eye` the way the game widens them (camera-facing
+    // ribbons with round joints, AppendDrawingStrokeTriangles), in the
+    // palette's own flat colours: unlit, drawn without culling, like the
+    // stick figure's limbs here.
+    void AppendDrawingPreview(const Render::DrawingMesh& mesh, const glm::vec3& eye,
+                              std::vector<PreviewVertex>& out);
 
     // Möller–Trumbore; t along `dir` (any length), false for a miss. With
     // `frontOnly`, a triangle seen from its back (CW from the ray) misses.

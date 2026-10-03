@@ -4948,6 +4948,66 @@ namespace Render {
                                     });
             }
 
+            // ── WingsLayer — the elytra in the chest slot ─────────────────
+            // HumanoidMobRenderer registers it (the zombie, skeleton and
+            // piglin families) and ArmorStandRenderer does: armorCutoutNoCull
+            // with NO_OVERLAY, kept on an invisible body (a layer), the
+            // armor glint when enchanted. The angles are ElytraAnimationState
+            // at rest (DEFAULT_X_ROT / DEFAULT_Z_ROT — a mob neither glides
+            // nor crouches here); ELYTRA_BABY for a baby or a small stand.
+            {
+                bool wingsLayer = false;
+                switch (type) {
+                    case Game::EntityTypeId::Zombie:   case Game::EntityTypeId::Husk:
+                    case Game::EntityTypeId::Drowned:  case Game::EntityTypeId::ZombieVillager:
+                    case Game::EntityTypeId::Skeleton: case Game::EntityTypeId::Stray:
+                    case Game::EntityTypeId::WitherSkeleton: case Game::EntityTypeId::Bogged:
+                    case Game::EntityTypeId::Parched:
+                    case Game::EntityTypeId::Piglin:   case Game::EntityTypeId::PiglinBrute:
+                    case Game::EntityTypeId::ZombifiedPiglin:
+                        wingsLayer = mob.HasAnyEquipment();
+                        break;
+                    case Game::EntityTypeId::ArmorStand:
+                        wingsLayer = armorStand != nullptr;
+                        break;
+                    default:
+                        break;
+                }
+                const uint8_t wings = !wingsLayer ? 0
+                    : Game::ElytraLayerFlags(armorStand ? armorStand->GetItemBySlot(Game::EquipmentSlot::CHEST)
+                                                        : mob.GetEquipment(Game::EquipmentSlot::CHEST));
+                if (wings & Game::kElytraWorn) {
+                    ElytraDraw d;
+                    d.rootPx    = entityMatrix;
+                    d.baby      = state.isBaby;
+                    d.rootScaledForBaby = state.isBaby && !modelEntry->babyModel;
+                    d.crouching = state.isCrouching;
+                    const size_t vFirst = m_verts.size();
+                    const size_t iFirst = m_indices.size();
+                    const TextureHandle tex = AppendElytra(d, m_verts, m_indices);
+                    if (tex != INVALID_TEXTURE && m_indices.size() > iFirst) {
+                        const size_t vEnd = m_verts.size();
+                        const size_t iEnd = m_indices.size();
+                        batches.push_back({ tex, glm::vec4(0.0f), iFirst, iEnd - iFirst, false, false });
+                        batches.back().part = BatchPart::Layer;
+                        const TextureHandle glintTex = (wings & Game::kElytraGlint)
+                            ? LoadTexture("assets/textures/misc/enchanted_glint_armor.png", /*repeatWrap=*/true)
+                            : INVALID_TEXTURE;
+                        if (glintTex != INVALID_TEXTURE) {
+                            const size_t glintFirst = m_indices.size();
+                            AppendArmorGlint(m_verts, m_indices, vFirst, vEnd, iFirst, iEnd, glintL0, glintL1);
+                            Batch glintBatch;
+                            glintBatch.texture = glintTex;
+                            glintBatch.firstIndex = glintFirst;
+                            glintBatch.indexCount = m_indices.size() - glintFirst;
+                            glintBatch.part = BatchPart::Layer;
+                            glintBatch.glint = true;
+                            batches.push_back(glintBatch);
+                        }
+                    }
+                }
+            }
+
             // ── Wolf armour — MC WolfArmorLayer ────────────────────────────
             //
             // Registered BEFORE the collar layer in WolfRenderer, so it draws
@@ -6113,6 +6173,8 @@ namespace Render {
                         ElytraDraw d;
                         d.rootPx    = entityMatrix;
                         d.baby      = state.isBaby;
+                        // No baby mesh: the body was the adult at kBabyScale.
+                        d.rootScaledForBaby = state.isBaby && !modelEntry->babyModel;
                         d.rotX      = pose.elytraRotX;
                         d.rotY      = pose.elytraRotY;
                         d.rotZ      = pose.elytraRotZ;

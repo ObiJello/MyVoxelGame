@@ -1110,8 +1110,11 @@ namespace Debug {
                 if (mb && mb->IsInitialized()) {
                     float usedMB = static_cast<float>(mb->GetUsedVertices() * 24 + mb->GetUsedIndices() * 4) / (1024.0f * 1024.0f);
                     float capacityMB = static_cast<float>(mb->GetMemoryUsageBytes()) / (1024.0f * 1024.0f);
-                    ImGui::Text("  %-10s %5.1f / %5.1f MB  (%zu sec, %u slabs)",
-                               layerNames[i], usedMB, capacityMB, mb->GetSectionCount(), mb->GetSlabCount());
+                    // Capacity counts allocated slabs only; released holes
+                    // (empty slabs whose buffers were given back) follow.
+                    ImGui::Text("  %-10s %5.1f / %5.1f MB  (%zu sec, %u slabs, %u released)",
+                               layerNames[i], usedMB, capacityMB, mb->GetSectionCount(),
+                               mb->GetLiveSlabCount(), mb->GetReleasedSlabCount());
                 }
             }
         }
@@ -1256,15 +1259,70 @@ namespace Debug {
 
         // Render Distance
         ImGui::TextColored(COL_BLUE, "View Distance");
-        static int renderDistance = Platform::g_gameSettings.GetRenderDistance();
-        if (ImGui::SliderInt("Render Distance", &renderDistance, 2, 32, "%d chunks")) {
-            Platform::g_gameSettings.SetRenderDistance(renderDistance);
-            s_renderDistanceChanged = true;
+        // Up to the engine's ceiling (Game::Math::kMaxDebugViewDistance), not
+        // the options' 32. Read from the setting every frame, so a change in
+        // Video Settings (which replaces an override) shows here at once.
+        // Logarithmic, so 2-32 keep most of the track; the box beside it
+        // takes an exact number. Above 32 the value is a session-only
+        // override (GameSettings::SetDebugRenderDistanceOverride): never
+        // written to options.txt, gone on restart. Applied on release /
+        // Enter only — every change re-diffs the server's tracking view, and
+        // dragging through hundreds of values would request each one.
+        {
+            static int pendingRenderDistance = 0;
+            static bool editingRenderDistance = false;
+            int renderDistance = editingRenderDistance ? pendingRenderDistance
+                                                       : Platform::g_gameSettings.GetRenderDistance();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.55f);
+            ImGui::SliderInt("##RenderDistanceSlider", &renderDistance, Game::Math::kMinViewDistance,
+                             Game::Math::kMaxDebugViewDistance, "%d chunks",
+                             ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp);
+            bool commit = false;
+            if (ImGui::IsItemActive()) {
+                editingRenderDistance = true;
+                pendingRenderDistance = renderDistance;
+            }
+            if (ImGui::IsItemDeactivatedAfterEdit()) commit = true;
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x * 0.45f);
+            int typedDistance = renderDistance;
+            if (ImGui::InputInt("##RenderDistanceInput", &typedDistance, 1, 16,
+                                ImGuiInputTextFlags_EnterReturnsTrue)) {
+                renderDistance = std::clamp(typedDistance, Game::Math::kMinViewDistance,
+                                            Game::Math::kMaxDebugViewDistance);
+                commit = true;
+            }
+            if (commit) {
+                editingRenderDistance = false;
+                if (renderDistance != Platform::g_gameSettings.GetRenderDistance()) {
+                    Platform::g_gameSettings.SetDebugRenderDistanceOverride(renderDistance);
+                    s_renderDistanceChanged = true;
+                }
+            } else if (!ImGui::IsAnyItemActive()) {
+                editingRenderDistance = false;
+            }
+            ImGui::SameLine();
+            ImGui::TextUnformatted("Render Distance");
+            ImGui::SameLine();
+            ImGui::TextDisabled("(?)");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("How far chunks are loaded and rendered (%d-%d chunks).\n"
+                                  "%d-%d is the normal setting and is saved. Above %d it is a\n"
+                                  "session-only debug override: not saved, back to the Video\n"
+                                  "Settings value on restart, and replaced the moment that\n"
+                                  "slider moves. Only the integrated server honours it (a\n"
+                                  "dedicated server keeps its own cap). Every chunk costs memory\n"
+                                  "and generation time: 64 is ~13 000 chunks, 128 ~51 000,\n"
+                                  "1024 ~3.3 million, far more than any machine holds, so the\n"
+                                  "server stops widening the view when memory runs low.",
+                                  Game::Math::kMinViewDistance, Game::Math::kMaxDebugViewDistance,
+                                  Game::Math::kMinViewDistance, Game::Math::kMaxOptionsViewDistance,
+                                  Game::Math::kMaxOptionsViewDistance);
+            if (Platform::g_gameSettings.HasDebugRenderDistanceOverride()) {
+                ImGui::TextColored(COL_YELLOW, "Debug override active (saved: %d chunks)",
+                                   Platform::g_gameSettings.GetSavedRenderDistance());
+            }
         }
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("How far chunks are loaded and rendered (2-32 chunks)");
 
         // Simulation Distance — the same setting as Options -> Video Settings,
         // but this slider goes all the way to the engine's cap. Applied through

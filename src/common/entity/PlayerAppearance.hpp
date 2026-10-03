@@ -1,7 +1,8 @@
 // File: src/common/entity/PlayerAppearance.hpp
 //
 // How a player looks: the engine's stick figure (optionally painted cell by
-// cell from the stick-figure palette), or a Minecraft player model in a skin
+// cell from the stick-figure palette, or replaced by a drawing of round
+// strokes the player made — StickFigureDrawing), or a Minecraft player model in a skin
 // (classic or slim arms, MC PlayerModelType WIDE / SLIM) with an optional
 // cape. Shared by the launcher (which builds it), the game's CLI (which loads
 // it from the launcher's files), the network (PlayerAppearancePackets.hpp —
@@ -13,6 +14,7 @@
 #pragma once
 
 #include "common/entity/PlayerColors.hpp"
+#include "common/entity/StickFigureDrawing.hpp"
 
 #include <array>
 #include <cstddef>
@@ -75,8 +77,9 @@ namespace Game {
     //                   angle and in the same direction as the outline
     //
     // 62 cells. The text form (StickFigurePaint::ToText) is one header line
-    // and one hex digit per cell — what the launcher writes and --stick-figure
-    // reads; the wire carries the raw cell bytes.
+    // and one hex digit per cell — the version-1 stick-figure file; the
+    // launcher now writes StickFigureFile (version 4), which can carry a
+    // drawing as well. The wire carries the raw cell bytes.
     struct StickFigurePaint {
         enum class Part : uint8_t {
             Torso = 0, LeftArm, RightArm, LeftLeg, RightLeg,
@@ -123,6 +126,43 @@ namespace Game {
     static_assert(StickFigurePaint::FirstCell(StickFigurePaint::Part::Count) ==
                       StickFigurePaint::kCellCount,
                   "kCellCount must be the sum of kCellsPerPart");
+
+    // ── The stick-figure file (--stick-figure) ──────────────────────────────
+    //
+    // Version 4, what the launcher writes:
+    //
+    //   obeycraft-stickfigure 4
+    //   paint <62 hex digits>        optional: the painted cells
+    //   drawing <hex>                optional: StickFigureDrawing::Encode —
+    //                                the drawn figure's strokes, worn
+    //                                instead of the stick figure
+    //
+    // Unknown lines are skipped. Older files still load: version 3 (the same
+    // lines, its drawing the old pixel canvas — StickFigureDrawing::Decode
+    // converts it to strokes), version 2 (paint, plus `sculpt <hex>` — the
+    // retired 3D voxels, skipped) and version 1 (the header
+    // `obeycraft-stickfigure 1` and the 62 digits, StickFigurePaint::ToText),
+    // each a painted or plain figure.
+    struct StickFigureFile {
+        bool               hasPaint = false;
+        StickFigurePaint   paint;
+        StickFigureDrawing drawing;
+
+        // Anything worth a file: paint or a drawing.
+        bool Any() const { return hasPaint || !drawing.Empty(); }
+
+        std::string ToText() const;
+        // Nullopt for a file of no known version; `why` says what. A drawing
+        // that fails to decode is dropped alone (the paint still loads) and
+        // is reported in `why` too, as is a version-2 file's skipped sculpt.
+        static std::optional<StickFigureFile> FromText(std::string_view text, std::string* why = nullptr);
+    };
+    // The file's size cap: the header, the paint line and the largest drawing
+    // in hex (StickFigureDrawing::kMaxEncodedBytes, ~49 KB of hex) — or a
+    // version-2 file's sculpt line, which is read and skipped.
+    inline constexpr size_t kMaxStickFigureFileBytes = 64 * 1024;
+    static_assert(2 * StickFigureDrawing::kMaxEncodedBytes + 256 <= kMaxStickFigureFileBytes,
+                  "the largest drawing's hex line must fit the stick-figure file");
 
     // ── Skin and cape images ────────────────────────────────────────────────
 
@@ -186,20 +226,27 @@ namespace Game {
         // the player's single colour (PlayerColorId, sent at login).
         bool             hasPaint = false;
         StickFigurePaint paint;
+        // StickFigure mode: the drawn figure; empty = none. When there is one
+        // it REPLACES the stick figure (plain or painted) entirely.
+        StickFigureDrawing drawing;
 
         bool IsSkin() const { return mode == AppearanceMode::Skin; }
+        // The drawing is what this player looks like.
+        bool IsDrawn() const { return !IsSkin() && !drawing.Empty(); }
         bool HasCape() const { return IsSkin() && !capePng.empty(); }
         bool ShowsPart(uint8_t bit) const { return (modelParts & bit) != 0; }
 
         // Drops what fails validation — a bad skin falls back to the default
-        // skin, a bad cape to none — and clamps the paint. `log` (optional)
-        // gets one line per thing dropped.
+        // skin, a bad cape to none, a drawing that is malformed or over a cap
+        // (StickFigureDrawing) to none — and clamps the paint. `log`
+        // (optional) gets one line per thing dropped.
         void Sanitize(std::vector<std::string>* log = nullptr);
 
         bool operator==(const PlayerAppearance& o) const {
             return mode == o.mode && model == o.model && modelParts == o.modelParts &&
                    skinPng == o.skinPng && capePng == o.capePng &&
-                   hasPaint == o.hasPaint && (!hasPaint || paint == o.paint);
+                   hasPaint == o.hasPaint && (!hasPaint || paint == o.paint) &&
+                   drawing == o.drawing;
         }
         bool operator!=(const PlayerAppearance& o) const { return !(*this == o); }
     };

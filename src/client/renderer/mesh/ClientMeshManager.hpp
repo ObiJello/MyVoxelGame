@@ -114,6 +114,16 @@ namespace Render {
         // answers by dropping parked (retained) chunk meshes. Consumes the
         // failure flags.
         bool ConsumeMeshBufferPressure();
+        // The capacity half of the above, without consuming anything: a layer
+        // is past three quarters of its slab ceiling (kMaxSlabs, released
+        // holes included — they are re-created on demand, so they are
+        // headroom, not used capacity). Read by the chunk
+        // renderer to stop widening a far (debug) view's graph once the GPU
+        // mesh pool cannot take more (ChunkRenderer::FarViewGraphRadius).
+        bool MeshBuffersNearCapacity() const {
+            return m_opaqueMegaBuffer.NearCapacity() || m_cutoutMegaBuffer.NearCapacity() ||
+                   m_translucentMegaBuffer.NearCapacity();
+        }
 
         // ========================================================================
         // GPU DATA ACCESS
@@ -422,6 +432,33 @@ namespace Render {
         // across frames.
         std::vector<GPUSectionData> m_pendingDestroys;
         void ProcessPendingDestroys();
+
+        // ── Mega-buffer consolidation ─────────────────────────────────────
+        // After the visible set shrinks (a far teleport and back), the live
+        // sections sit thinly across many slabs and no slab ever empties.
+        // While the client is idle-ish, this re-meshes a pool's drain-slab
+        // sections (ChunkMegaBuffer::CollectRelocationCandidates) a few per
+        // frame through ClientChunkManager::MarkSectionForRelocation; each
+        // upload lands in a lower slab and CompactIfNeeded releases the
+        // emptied one. Bound level only — only its scheduler runs every
+        // frame. Main thread.
+        void DefragmentMegaBuffers();
+        int      m_compactFrameCounter = 0;            // PerformGPUUploads' CompactIfNeeded period
+        // Keys per CollectRelocationCandidates: a whole slab's worth (a slab
+        // holds at most 1024 sections), so one batch is one pass over the
+        // drain slab and the pool's progress check compares whole passes.
+        static constexpr size_t   kRelocationBatch               = 1024;
+        static constexpr int      kRelocationsPerFrame           = 4;    // marks per frame (snapshot + upload each)
+        static constexpr size_t   kRelocationMaxInFlight         = 16;   // marked, result not back yet
+        static constexpr uint64_t kRelocationBatchIntervalFrames = 10;
+        static constexpr uint64_t kRelocationTimeoutFrames       = 600;  // dropped/cancelled jobs stop counting
+        uint64_t m_defragFrame = 0;
+        uint64_t m_lastRelocationBatchFrame = 0;
+        int      m_defragLayerCursor = 0;              // round-robin over the three pools
+        ChunkMegaBuffer* m_relocationPool = nullptr;   // the pool the queued batch drains
+        std::vector<SectionKey> m_relocationQueue;     // collected, not yet marked
+        std::unordered_map<SectionKey, uint64_t, SectionKeyHash> m_relocationsInFlight;   // -> frame marked
+        std::vector<MegaBufferSectionKey> m_relocationScratch;
 
 
         // ========================================================================

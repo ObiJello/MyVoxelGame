@@ -22,6 +22,19 @@ namespace Game {
         constexpr uint8_t kColorCount = static_cast<uint8_t>(PlayerColorId::Count);
 
         constexpr std::string_view kPaintHeader = "obeycraft-stickfigure 1";
+        // Versions 2 (paint + the retired voxel sculpt) and 3 (paint + a
+        // pixel drawing) read with the same line parser — the drawing line
+        // says its own encoding; the launcher writes version 4 (paint + a
+        // stroke drawing).
+        constexpr std::string_view kV2Header    = "obeycraft-stickfigure 2";
+        constexpr std::string_view kV3Header    = "obeycraft-stickfigure 3";
+        constexpr std::string_view kFileHeader  = "obeycraft-stickfigure 4";
+
+        std::string_view Trim(std::string_view s) {
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
+            return s;
+        }
 
         int HexValue(char c) {
             if (c >= '0' && c <= '9') return c - '0';
@@ -216,6 +229,81 @@ namespace Game {
         return paint;
     }
 
+    // ── StickFigureFile ─────────────────────────────────────────────────────
+
+    std::string StickFigureFile::ToText() const {
+        std::string out(kFileHeader);
+        out.push_back('\n');
+        if (hasPaint) {
+            // The paint line is the version-1 body: the cells after its header.
+            const std::string v1 = paint.ToText();
+            out += "paint ";
+            out += Trim(std::string_view(v1).substr(kPaintHeader.size()));
+            out.push_back('\n');
+        }
+        if (!drawing.Empty()) {
+            out += "drawing ";
+            out += drawing.ToHex();
+            out.push_back('\n');
+        }
+        return out;
+    }
+
+    std::optional<StickFigureFile> StickFigureFile::FromText(std::string_view text, std::string* why) {
+        const size_t nl = text.find('\n');
+        const std::string_view header = Trim(text.substr(0, nl));
+        if (header == kPaintHeader) {
+            auto paint = StickFigurePaint::FromText(text);
+            if (!paint) {
+                if (why) *why = "not a painted figure";
+                return std::nullopt;
+            }
+            StickFigureFile file;
+            file.hasPaint = true;
+            file.paint = *paint;
+            return file;
+        }
+        if (header != kFileHeader && header != kV3Header && header != kV2Header) {
+            if (why) *why = "not a stick-figure file";
+            return std::nullopt;
+        }
+        StickFigureFile file;
+        std::string_view rest = nl == std::string_view::npos ? std::string_view() : text.substr(nl + 1);
+        while (!rest.empty()) {
+            const size_t end = rest.find('\n');
+            const std::string_view line = Trim(rest.substr(0, end));
+            rest = end == std::string_view::npos ? std::string_view() : rest.substr(end + 1);
+            const size_t space = line.find(' ');
+            const std::string_view key = line.substr(0, space);
+            const std::string_view value = space == std::string_view::npos ? std::string_view()
+                                                                            : Trim(line.substr(space + 1));
+            if (key == "paint") {
+                std::string v1(kPaintHeader);
+                v1.push_back('\n');
+                v1.append(value);
+                if (auto paint = StickFigurePaint::FromText(v1)) {
+                    file.hasPaint = true;
+                    file.paint = *paint;
+                } else if (why) {
+                    *why = "the paint line is malformed";
+                }
+            } else if (key == "drawing") {
+                std::string reason;
+                if (auto drawing = StickFigureDrawing::FromHex(std::string(value), &reason)) {
+                    file.drawing = std::move(*drawing);
+                } else if (why) {
+                    *why = "drawing dropped (" + reason + ")";
+                }
+            } else if (key == "sculpt") {
+                // Version 2's voxels built onto the figure: retired, so the
+                // figure loads without them.
+                if (why && !value.empty()) *why = "the old 3D voxels are no longer worn; skipped";
+            }
+            // Anything else: a newer launcher's line, skipped.
+        }
+        return file;
+    }
+
     // ── Images ──────────────────────────────────────────────────────────────
 
     bool DecodePng(const uint8_t* data, size_t size, SkinImage& out) {
@@ -315,6 +403,15 @@ namespace Game {
             if (log) log->push_back("cape dropped (" + why + ")");
         }
         if (hasPaint) paint.Sanitize();
+        if (!drawing.Empty()) {
+            if (IsSkin()) {
+                // A drawing replaces the stick figure; a skin has no use for it.
+                drawing.Clear();
+            } else if (!drawing.Validate(&why)) {
+                drawing.Clear();
+                if (log) log->push_back("drawn figure dropped (" + why + ")");
+            }
+        }
     }
 
     bool ReadFileBytes(const std::string& path, std::vector<uint8_t>& out, size_t maxBytes) {
@@ -363,13 +460,16 @@ namespace Game {
         }
         if (!args.stickFigurePath.empty()) {
             std::vector<uint8_t> bytes;
-            if (ReadFileBytes(args.stickFigurePath, bytes, 4096)) {
+            if (ReadFileBytes(args.stickFigurePath, bytes, kMaxStickFigureFileBytes)) {
                 const std::string_view text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-                if (auto paint = StickFigurePaint::FromText(text)) {
-                    a.hasPaint = true;
-                    a.paint = *paint;
+                std::string why;
+                if (auto file = StickFigureFile::FromText(text, &why)) {
+                    a.hasPaint = file->hasPaint;
+                    a.paint = file->paint;
+                    a.drawing = std::move(file->drawing);
+                    if (!why.empty() && log) log->push_back("stick figure " + args.stickFigurePath + ": " + why);
                 } else if (log) {
-                    log->push_back("stick figure " + args.stickFigurePath + " is not a painted figure");
+                    log->push_back("stick figure " + args.stickFigurePath + " is " + why);
                 }
             } else if (log) {
                 log->push_back("could not read stick figure " + args.stickFigurePath);

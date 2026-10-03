@@ -93,6 +93,24 @@ namespace Render {
         // MC LivingEntityRenderer.submit's forceTransparent tint, 0x26 alpha.
         constexpr uint32_t kTranslucentAlpha = 38;
 
+        // WingsLayer for a skinned body: HumanoidRenderState's elytra angles
+        // and crouch, on the body's root, in the skin's cape sheet when a
+        // cape is worn and shown (getPlayerElytraTexture), else the asset.
+        MobRenderer::ElytraDraw SkinnedElytraDraw(const MobRenderer::SkinnedPlayerPose& pose,
+                                                  const glm::mat4& root) {
+            MobRenderer::ElytraDraw d;
+            d.rootPx    = root;
+            d.rotX      = pose.elytraRotX;
+            d.rotY      = pose.elytraRotY;
+            d.rotZ      = pose.elytraRotZ;
+            d.crouching = pose.crouching && !pose.passenger;
+            d.glint     = (pose.elytraFlags & Game::kElytraGlint) != 0;
+            if (pose.cape != INVALID_TEXTURE && (pose.modelParts & Game::ModelPartBits::Cape)) {
+                d.texture = pose.cape;
+            }
+            return d;
+        }
+
     } // namespace
 
     PlayerModel& MobRenderer::PlayerSkinModel(bool slim) {
@@ -366,21 +384,12 @@ namespace Render {
                     batches.push_back(b);
                 });
 
-            // WingsLayer (a layer: kept on an invisible body; not for a
-            // spectator, nor in a bed).
-            if ((pose.elytraFlags & Game::kElytraWorn) && !pose.spectator && !Sleeping(pose)) {
-                ElytraDraw d;
-                d.rootPx    = root;
-                d.rotX      = pose.elytraRotX;
-                d.rotY      = pose.elytraRotY;
-                d.rotZ      = pose.elytraRotZ;
-                d.crouching = pose.crouching && !pose.passenger;
-                d.glint     = (pose.elytraFlags & Game::kElytraGlint) != 0;
+            // WingsLayer (a layer: kept on an invisible body and on a
+            // sleeper, on the body's pose stack; none for a spectator).
+            if ((pose.elytraFlags & Game::kElytraWorn) && !pose.spectator) {
+                ElytraDraw d = SkinnedElytraDraw(pose, root);
                 d.packedLight = packedLight;
                 d.glowing   = glowing;
-                if (pose.cape != INVALID_TEXTURE && (pose.modelParts & Game::ModelPartBits::Cape)) {
-                    d.texture = pose.cape;
-                }
                 elytras.push_back(d);
             }
             // SpinAttackEffectLayer.
@@ -479,7 +488,15 @@ namespace Render {
             [&](TextureHandle tex, size_t first, bool, int part) {
                 ranges.push_back({ tex, first, m_indices.size() - first, part == kPartBody });
             });
-        (void)root;
+        // WingsLayer: InventoryScreen draws the whole entity, layers
+        // included. (The glint's additive pass has no GUI batch.)
+        if ((pose.elytraFlags & Game::kElytraWorn) && !pose.spectator) {
+            const size_t first = m_indices.size();
+            const TextureHandle tex = AppendElytra(SkinnedElytraDraw(pose, root), m_verts, m_indices);
+            if (tex != INVALID_TEXTURE && m_indices.size() > first) {
+                ranges.push_back({ tex, first, m_indices.size() - first, false });
+            }
+        }
         ui = saved;
 
         for (const Range& r : ranges) {

@@ -3,9 +3,12 @@
 // The launcher's Appearance view (rail → Appearance): how the player looks
 // in game. Two modes, the design's segmented control on the header:
 //
-//   Stick figure    the colour swatches (--color), and the painter — colour
-//                   the figure's parts cell by cell from the same palette,
-//                   by clicking them on the rotatable 3D figure.
+//   Stick figure    the colour swatches (--color) and the style: plain;
+//                   painted — colour the figure's parts cell by cell from
+//                   the same palette, by clicking them on the rotatable 3D
+//                   figure; or drawn — a picture of round strokes from the
+//                   drawing editor (FigureDrawingEditor) worn in the
+//                   figure's place.
 //   Minecraft skin  Steve, Alex, a Java profile's skin (fetched from Mojang
 //                   by username) or a custom skin from the skin editor, on
 //                   the rotatable player model; and the cape grid — every
@@ -23,6 +26,8 @@
 #include "ProfileFetcher.hpp"
 #include "SkinEditor.hpp"
 #include "SkinIO.hpp"
+#include "FigureDrawingEditor.hpp"
+#include "client/renderer/entity/StickFigureGeometry.hpp"
 
 #include <imgui.h>
 
@@ -42,8 +47,8 @@ namespace Launcher::Appearance {
         // The view, in the content area right of the rail.
         void Draw(Settings& settings, std::string& playerColor, bool& dirty);
 
-        // The skin editor takes the whole window while open.
-        bool EditorOpen() const { return m_editor.IsOpen(); }
+        // The skin editor or the drawing editor takes the whole window while open.
+        bool EditorOpen() const { return m_editor.IsOpen() || m_drawingEditor.IsOpen(); }
         void DrawEditor(Settings& settings, bool& dirty);
 
         // The rail account card's avatar: the skin's face (with its hat) in
@@ -121,6 +126,11 @@ namespace Launcher::Appearance {
         bool m_orbiting = false;
 
         SkinEditor m_editor;
+        FigureDrawingEditor m_drawingEditor;
+        // The drawn figure the preview shows, meshed when the settings' changes.
+        Game::StickFigureDrawing m_shownDrawing;
+        Render::DrawingMesh m_drawingMesh;
+        bool m_drawingMeshed = false;
     };
 
 } // namespace Launcher::Appearance

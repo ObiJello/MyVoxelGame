@@ -4,6 +4,7 @@
 #include "levelgen/WorldgenRandom.h"
 #include "random/LegacyRandomSource.h"
 #include "synth/ImprovedNoise.h"
+#include <memory>
 #include "random/XoroshiroRandomSource.h"
 #include <vector>
 #include <cstdint>
@@ -145,7 +146,11 @@ private:
     static void skipOctave(levelgen::WorldgenRandom& random);
 
     // Member variables (Reference: PerlinNoise.java lines 23-29)
-    std::vector<ImprovedNoise*> m_noiseLevels;  // Can contain nullptrs
+    // Can contain nullptrs. Shared, not raw: a PerlinNoise is copied by
+    // value (NormalNoise holds two), copies share their octaves, and the
+    // last one frees them — raw `new` with no destructor leaked every
+    // octave of every per-feature noise (a geode's NormalNoise each time).
+    std::vector<std::shared_ptr<ImprovedNoise>> m_noiseLevels;
     int32_t m_firstOctave;
     std::vector<double> m_amplitudes;
     double m_lowestFreqValueFactor;

@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <iterator>
 #include <system_error>
 #include <utility>
 
@@ -298,10 +299,26 @@ namespace Launcher::Appearance {
         const ImGuiIO& io = ImGui::GetIO();
         const ImVec2 size = p1 - p0;
         const bool stick = settings.mode == Game::AppearanceMode::StickFigure;
-        const bool painting = stick && settings.painted;
+        // A drawn figure (with something drawn) replaces the figure here as in game.
+        const bool drawnShown = stick && settings.drawn && !settings.drawing.Empty();
+        const bool painting = stick && settings.painted && !drawnShown;
         const Game::StickFigurePaint shownPaint =
             settings.painted ? settings.paint : Game::StickFigurePaint::Uniform(Game::ParsePlayerColorName(playerColor));
 
+        // The frame: a drawing may stand up to 3 blocks tall.
+        if (drawnShown) {
+            if (!m_drawingMeshed || settings.drawing != m_shownDrawing) {
+                m_shownDrawing = settings.drawing;
+                Render::BuildDrawingMesh(m_shownDrawing, m_drawingMesh);
+                m_drawingMeshed = true;
+            }
+            const float top = std::max(1.8f, m_drawingMesh.top);
+            m_preview.fitExtent = glm::vec2(1.2f, top + 0.3f);
+            m_preview.target = glm::vec3(0.0f, top * 0.5f + 0.05f, 0.0f);
+        } else {
+            m_preview.fitExtent = glm::vec2(1.2f, 2.1f);
+            m_preview.target = glm::vec3(0.0f, 1.0f, 0.0f);
+        }
         m_preview.FitTo(size);
 
         // Input first, so this frame's geometry shows this frame's paint.
@@ -340,7 +357,12 @@ namespace Launcher::Appearance {
 
         // ── Scene ──
         m_preview.Clear();
-        if (stick) {
+        if (drawnShown) {
+            // The strokes face the camera, as the stick figure's limbs do.
+            std::vector<PreviewVertex> drawn;
+            AppendDrawingPreview(m_drawingMesh, m_preview.Eye(), drawn);
+            m_preview.AddBatch(drawn, 0, /*cull=*/false, /*lit=*/false);
+        } else if (stick) {
             const Game::StickFigurePaint& paint = settings.painted ? settings.paint : shownPaint;
             BuildStickMesh(paint, /*uniformLook=*/!settings.painted, m_preview.Eye(), 0.022f,
                            painting ? m_hoverCell : -1, m_stickMesh);
@@ -440,25 +462,75 @@ namespace Launcher::Appearance {
         dl->AddLine(ImVec2(x, y), ImVec2(x + width, y), BorderSoft);
         y += 16.0f;
 
+        // ── Style: plain, painted, or a drawing worn in the figure's place ──
+        Txt(dl, g_fontBodySemi, ImVec2(x, y), TextPrimary, "Style");
+        Txt(dl, g_fontSmall, ImVec2(x, y + 20.0f), TextMuted, "Your colour, painted parts, or a drawing.");
+        y += 44.0f;
+        {
+            constexpr int kPlain = 0, kPainted = 1, kDrawn = 2;
+            const int style = settings.drawn ? kDrawn : settings.painted ? kPainted : kPlain;
+            const char* labels[] = { "Plain", "Painted", "Drawn" };
+            ImVec2 box(0.0f, 0.0f);
+            const int clicked = Segmented("##stickStyle", labels, 3, style, ImVec2(x, y), false, &box);
+            if (clicked >= 0 && clicked != style) {
+                if (clicked == kPlain) {
+                    settings.painted = false;
+                    settings.drawn = false;
+                } else if (clicked == kPainted) {
+                    settings.drawn = false;
+                    settings.painted = true;
+                    // Painting starts from the plain figure in your colour —
+                    // unless a painting from before is still there to go back to.
+                    if (settings.paint.IsUniform()) {
+                        settings.paint = Game::StickFigurePaint::Uniform(current);
+                        m_brush = current;
+                    }
+                } else {
+                    // The paint stays for going back; the drawing is worn.
+                    settings.drawn = true;
+                }
+                dirty = true;
+            }
+            y += box.y + 18.0f;
+        }
+        dl->AddLine(ImVec2(x, y), ImVec2(x + width, y), BorderSoft);
+        y += 16.0f;
+
+        if (settings.drawn) {
+            // ── The drawn figure (the drawing editor) ──
+            Txt(dl, g_fontBodySemi, ImVec2(x, y), TextPrimary, "Your drawing");
+            Txt(dl, g_fontSmall, ImVec2(x, y + 20.0f), TextMuted, "Worn in your figure's place, drawn like it.");
+            y += 48.0f;
+            const bool empty = settings.drawing.Empty();
+            char summary[64];
+            if (empty) {
+                std::snprintf(summary, sizeof(summary), "Nothing drawn yet.");
+            } else {
+                const int strokes = settings.drawing.StrokeCount();
+                std::snprintf(summary, sizeof(summary), "%d stroke%s, %.1f blocks tall.", strokes,
+                              strokes == 1 ? "" : "s", static_cast<double>(settings.drawing.TopBlocks()));
+            }
+            const float btnW = 150.0f;
+            if (Secondary("##openDrawingEditor", empty ? "Start drawing" : "Edit drawing",
+                          ImVec2(x, y), ImVec2(btnW, 34.0f))) {
+                m_drawingEditor.Open(settings, current);
+            }
+            Txt(dl, g_fontSmall, ImVec2(x + btnW + 12.0f, y + 9.0f), empty ? TextGhost : TextBody, summary);
+            y += 34.0f + 14.0f;
+            Txt(dl, g_fontSmall, ImVec2(x, y), TextGhost,
+                empty ? "Until you draw something, you are the stick figure."
+                      : "0.6 blocks wide, like a player; up to 3 tall.", width);
+            return y + 20.0f - origin.y;
+        }
+        if (!settings.painted) {
+            Txt(dl, g_fontSmall, ImVec2(x, y), TextGhost, "Plain: the whole figure is your colour.", width);
+            return y + 20.0f - origin.y;
+        }
+
         // ── The painter ──
         Txt(dl, g_fontBodySemi, ImVec2(x, y), TextPrimary, "Paint your figure");
         Txt(dl, g_fontSmall, ImVec2(x, y + 20.0f), TextMuted, "Colour each part from the same palette.");
-        ImGui::SetCursorScreenPos(ImVec2(x + width - 34.0f, y + 6.0f));
-        if (Toggle("##stickPainted", settings.painted)) {
-            settings.painted = !settings.painted;
-            // Switching on starts from the plain figure in your colour —
-            // unless a painting from before is still there to go back to.
-            if (settings.painted && settings.paint.IsUniform()) {
-                settings.paint = Game::StickFigurePaint::Uniform(current);
-                m_brush = current;
-            }
-            dirty = true;
-        }
         y += 48.0f;
-        if (!settings.painted) {
-            Txt(dl, g_fontSmall, ImVec2(x, y), TextGhost, "Off: the whole figure is your colour.", width);
-            return y + 20.0f - origin.y;
-        }
 
         // Brush.
         SectionLabel(dl, ImVec2(x, y), "BRUSH");
@@ -848,6 +920,11 @@ namespace Launcher::Appearance {
                 DrawFace(dl, skin.texture, p0, p1, rounding);
                 return;
             }
+        } else if (settings.drawn && !settings.drawing.Empty()) {
+            // The drawing's most used colour.
+            dl->AddRectFilled(p0, p1, ColorOf(settings.drawing.DominantColor(Game::PlayerColorId::Default)),
+                              rounding);
+            return;
         } else if (settings.painted) {
             // The painted figure's head outline colour.
             dl->AddRectFilled(p0, p1, ColorOf(settings.paint.At(Game::StickFigurePaint::Part::HeadRing, 0)), rounding);
@@ -868,6 +945,10 @@ namespace Launcher::Appearance {
     }
 
     void AppearanceView::DrawEditor(Settings& settings, bool& dirty) {
+        if (m_drawingEditor.IsOpen()) {
+            if (m_drawingEditor.Draw(settings)) dirty = true;
+            return;
+        }
         EnsureLoaded(settings);
         PollAsync(settings, dirty);
         EditorTemplates t;
@@ -901,6 +982,7 @@ namespace Launcher::Appearance {
         m_capes.ReleaseGpu();
         m_preview.Release();
         m_editor.ReleaseGpu();
+        m_drawingEditor.ReleaseGpu();
     }
 
 } // namespace Launcher::Appearance

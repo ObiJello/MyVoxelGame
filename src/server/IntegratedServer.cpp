@@ -27,6 +27,8 @@
 #include "common/sound/LevelEventSounds.hpp"
 #include "common/core/SaveVersion.hpp"
 #include "common/core/HardwareProfile.hpp"
+#include "common/core/ProcessMemory.hpp"
+#include "common/world/math/ChunkViewDistance.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
 #include "server/world/storage/anvil/WorldSidecar.hpp"
 #include "server/world/storage/anvil/PlayerDataStore.hpp"
@@ -628,10 +630,14 @@ namespace Server {
         PROFILE_ZONE_N("Server.Initialize");
         Log::Info("IntegratedServer::Initialize - Creating world on server thread");
 
-        // serverViewDistance stays at default (32) for integrated server — no cap on client.
-        // A dedicated server would set this from its config file.
-        Log::Info("Server view distance cap: %d chunks, simulation distance cap: %d chunks",
-                  m_config.serverViewDistance, m_config.maxSimulationDistance);
+        // serverViewDistance stays at default (32) — guests and a headless
+        // (dedicated) server are clamped to it. The game's own player may go
+        // further (ownerViewDistanceCap: the ImGui debug render distance).
+        // A dedicated server would set these from its config file.
+        Log::Info("Server view distance cap: %d chunks (owner: %d), simulation distance cap: %d chunks",
+                  m_config.serverViewDistance,
+                  m_config.ownerViewDistanceCap > 0 ? m_config.ownerViewDistanceCap : m_config.serverViewDistance,
+                  m_config.maxSimulationDistance);
 
         // The session system comes FIRST now, because a ServerLevel needs the
         // PlayerSessionManager to build its ServerLevelBridge. Nothing in
@@ -2576,6 +2582,11 @@ namespace Server {
         // the join (the render-distance slider, or one that lost the race with
         // session setup) has no other way in — nothing resends it.
         ApplyPendingClientViewDistances();
+
+        // A debug render distance beyond 32 can ask for more chunks than
+        // the machine holds; cut it back to what has arrived once memory
+        // runs short (before the diff below, so the cut cancels loads).
+        TrimFarViewsUnderMemoryPressure();
 
         // Process watch set changes: request loading for new chunks entering view
         ProcessWatchSetChanges();
@@ -6676,7 +6687,12 @@ namespace Server {
             constexpr int kLoadingRadiusCap      = 8;   // IPGlobal.indirectLoadingRadiusCap (indirect + global loaders)
             constexpr int kVisibleRangeChunks    = 8;   // PerformanceLevel.getVisiblePortalRangeChunks(good)
             constexpr int kIndirectRangeChunks   = 2;   // getIndirectVisiblePortalRangeChunks(good)
-            const int viewDistance = session.GetViewDistance();   // McHelper.getPlayerLoadDistance
+            // McHelper.getPlayerLoadDistance — but never past the options
+            // range: a debug render distance (up to 1024) would otherwise put
+            // a disc of millions of chunks behind EVERY portal near the
+            // player, in every dimension they lead to. The player's own view
+            // is the only one that grows past 32.
+            const int viewDistance = std::min(session.GetViewDistance(), Game::Math::kMaxOptionsViewDistance);
             const uint32_t playerId = session.GetPlayerId();
             const glm::dvec3 playerPos = session.GetPlayer()->getPosition();
 
@@ -7514,17 +7530,44 @@ namespace Server {
                                    now - level.generationLastStallCheck >= std::chrono::seconds(1);
         if (!canIssue && !stallCheckDue && !gen.HasQueuedWork()) return;
         if (stallCheckDue) level.generationLastStallCheck = now;
+
+        // The backlog is a binary heap, nearest request on top: the distance
+        // to the nearest of the anchors it was last built against
+        // (generationBacklogAnchors — the player and portal far sides in this
+        // level, rebuilt when one moves). Adding is O(log n) and taking is
+        // O(log n), so the work per pump no longer grows with the backlog. It
+        // used to be a vector sorted whole on every tick that brought a new
+        // request, with each batch inserted at its front — harmless at a 32-
+        // chunk view, but a debug render distance puts millions of chunks in
+        // it (a 1024 view is ~3.3 million), and that was a sort of millions
+        // and a front insert of tens of megabytes on every tick. The key reads
+        // only the STORED anchors, so it stays fixed between rebuilds, which
+        // is what the heap's invariant needs.
+        const auto backlogKey = [&level](Game::Math::ChunkPos p) {
+            const auto& positions = level.generationBacklogAnchors;
+            if (positions.empty()) return 0.0;
+            double best = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < positions.size(); ++i) {
+                // ChunkLoadAnchor::EuclideanTo, from the stored copy.
+                const double dx = p.x - positions[i].x, dz = p.z - positions[i].z;
+                best = std::min(best, level.generationBacklogAnchorBias[i] +
+                                          std::sqrt(dx * dx + dz * dz) * level.generationBacklogAnchorFarScale[i]);
+            }
+            return best;
+        };
+        // std heap order: "less" is FARTHER, so the top is the nearest.
+        const auto backlogNearer = [&backlogKey](Game::Math::ChunkPos a, Game::Math::ChunkPos b) {
+            return backlogKey(a) > backlogKey(b);
+        };
+        const auto backlogPush = [&level, &backlogNearer](Game::Math::ChunkPos p) {
+            level.generationBacklog.push_back(p);
+            std::push_heap(level.generationBacklog.begin(), level.generationBacklog.end(), backlogNearer);
+        };
         {
             std::vector<Game::Math::ChunkPos> fresh;
             gen.TakeRequests(fresh);
             level.generationWaiting.insert(fresh.begin(), fresh.end());
-            if (!fresh.empty()) {
-                // At the FRONT (the back is served first): until this tick's
-                // or the next tick's sort places them, new requests queue
-                // behind the ones already ordered nearest-first.
-                level.generationBacklog.insert(level.generationBacklog.begin(), fresh.begin(), fresh.end());
-                level.generationBacklogSorted = false;
-            }
+            for (const auto& p : fresh) backlogPush(p);
         }
 
         // Stall watchdog. A request the library has held for kStuckAfter with
@@ -7559,10 +7602,7 @@ namespace Server {
                     if (level.generationInFlight > 0) --level.generationInFlight;
                     ++level.genStuck;
                     level.generationQuarantine[pos] = now + kQuarantine;
-                    if (level.pendingChunkLoads.count(pos)) {
-                        level.generationBacklog.push_back(pos);
-                        level.generationBacklogSorted = false;
-                    }
+                    if (level.pendingChunkLoads.count(pos)) backlogPush(pos);
                 }
                 level.generationLastCompletion = now;    // one warning per stall, not one per tick
             }
@@ -7588,58 +7628,58 @@ namespace Server {
                                         [Game::DimensionSlot(dimension)]);
             }
             auto& bl = level.generationBacklog;
-            // Nearest-first, consumed from the BACK: sort descending by
-            // distance once, and again only when entries arrive or an
-            // anchor has moved a few chunks. Entries nobody wants any more
-            // (their load was cancelled) are skipped as they surface.
+            // Nearest-first off the top of the heap (see backlogKey). It is
+            // rebuilt only when an anchor has moved a few chunks — or, with
+            // more than 65,536 waiting (a view beyond the options range),
+            // sixteen: a rebuild is O(n·anchors) and the order of a backlog
+            // that size barely changes in four chunks — and when cancelled
+            // entries have piled up. Entries nobody wants any more (their
+            // load was cancelled) are otherwise skipped as they surface.
+            const int moveThreshold = bl.size() > 65536 ? 16 : 4;
             bool moved = anchors.size() != level.generationBacklogAnchors.size() ||
-                         anchors.size() != level.generationBacklogAnchorBias.size();
+                         anchors.size() != level.generationBacklogAnchorBias.size() ||
+                         anchors.size() != level.generationBacklogAnchorFarScale.size();
             for (size_t i = 0; !moved && i < anchors.size(); ++i) {
                 moved = std::max(std::abs(anchors[i].pos.x - level.generationBacklogAnchors[i].x),
-                                 std::abs(anchors[i].pos.z - level.generationBacklogAnchors[i].z)) >= 4 ||
-                        std::abs(anchors[i].bias - level.generationBacklogAnchorBias[i]) >= 2;
+                                 std::abs(anchors[i].pos.z - level.generationBacklogAnchors[i].z)) >= moveThreshold ||
+                        std::abs(anchors[i].bias - level.generationBacklogAnchorBias[i]) >= 2 ||
+                        anchors[i].farScale != level.generationBacklogAnchorFarScale[i];
             }
-            // At most once a tick: requests arrive all the time, and this ran
-            // again on every PumpChunkPipeline call that saw one (several per
-            // tick) — over the whole backlog, cancelled entries included.
-            // Fresh entries wait unsorted at the front of the vector (served
-            // last) until the next tick's sort.
-            const bool sortDue = (!level.generationBacklogSorted || moved) &&
-                                 level.generationBacklogSortTick != m_currentServerTick;
-            if (sortDue) {
-                // Cancelled requests leave the backlog here, physically —
-                // skipping them only as they reached the front meant the dead
-                // ones, which are far from everyone, sorted to the back and
-                // were never reached: the backlog only ever grew.
-                bl.erase(std::remove_if(bl.begin(), bl.end(), [&](const Game::Math::ChunkPos& p) {
-                             return level.pendingChunkLoads.count(p) == 0;
-                         }), bl.end());
+            // Cancelled entries far from everyone sink to the bottom and are
+            // never reached, so without a purge the backlog only ever grew:
+            // purge once they outnumber the live ones.
+            const bool cluttered = bl.size() > 4096 && bl.size() > 2 * level.pendingChunkLoads.size();
+            // At most once a tick: anchors are re-read on every pump.
+            const bool rebuildDue = (!level.generationBacklogSorted || moved || cluttered) &&
+                                    level.generationBacklogSortTick != m_currentServerTick;
+            if (rebuildDue) {
+                // The purge is a hash lookup per entry, so only when it pays:
+                // a moved anchor alone just re-keys the heap.
+                if (cluttered || !level.generationBacklogSorted) {
+                    bl.erase(std::remove_if(bl.begin(), bl.end(), [&](const Game::Math::ChunkPos& p) {
+                                 return level.pendingChunkLoads.count(p) == 0;
+                             }), bl.end());
+                }
                 level.generationBacklogSortTick = m_currentServerTick;
-                // One key per entry, then one sort: O(n·anchors + n log n).
                 // Portal-aware (ChunkLoadAnchor): a far side is keyed by the
                 // walk to its portal plus its distance from where the view
                 // comes out, so it generates interleaved with the player's
                 // own area instead of after it. Order only — the requests,
                 // their tickets and the in-flight cap are unchanged.
-                std::vector<std::pair<double, Game::Math::ChunkPos>> keyed;
-                keyed.reserve(bl.size());
-                for (const auto& p : bl) {
-                    double best = anchors.empty() ? 0.0 : std::numeric_limits<double>::max();
-                    for (const auto& a : anchors) best = std::min(best, a.EuclideanTo(p));
-                    keyed.emplace_back(best, p);
-                }
-                std::sort(keyed.begin(), keyed.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
-                for (size_t i = 0; i < keyed.size(); ++i) bl[i] = keyed[i].second;
-                level.generationBacklogSorted = true;
                 level.generationBacklogAnchors.clear();
                 level.generationBacklogAnchorBias.clear();
+                level.generationBacklogAnchorFarScale.clear();
                 for (const auto& a : anchors) {
                     level.generationBacklogAnchors.push_back(a.pos);
                     level.generationBacklogAnchorBias.push_back(a.bias);
+                    level.generationBacklogAnchorFarScale.push_back(a.farScale);
                 }
+                std::make_heap(bl.begin(), bl.end(), backlogNearer);
+                level.generationBacklogSorted = true;
             }
             std::vector<Game::Math::ChunkPos> held;                       // quarantined: skip, keep
             while (!bl.empty() && level.generationInFlight < kMaxInFlight) {
+                std::pop_heap(bl.begin(), bl.end(), backlogNearer);
                 const auto pos = bl.back();
                 bl.pop_back();
                 if (level.pendingChunkLoads.count(pos) == 0) {             // cancelled meanwhile
@@ -7661,10 +7701,10 @@ namespace Server {
                     level.failedChunkLoads.insert(pos);
                 }
             }
-            // Quarantined entries go back under everything else (the back is
-            // the front of the queue), so they surface again only once the
-            // rest has been handed out.
-            bl.insert(bl.begin(), held.begin(), held.end());
+            // Quarantined entries go back in after the loop, so each is passed
+            // over at most once per pump; they surface again at their
+            // distance and are held again until the quarantine ends.
+            for (const auto& pos : held) backlogPush(pos);
         }
 
         // Throttle slots let go (MC ticketsToRelease): the request's 5x5 is
@@ -8921,6 +8961,7 @@ namespace Server {
             std::lock_guard<std::mutex> lock(m_pendingViewDistanceMutex);
             m_pendingClientViewDistance.erase(connectionId);
         }
+        m_farViewTrimmed.erase(connectionId);
 
         // Forget everything this player was tracking, in EVERY level. Connection
         // ids ARE reused, so a leftover watch set would make the next player to
@@ -9077,9 +9118,21 @@ namespace Server {
     void IntegratedServer::ApplyClientViewDistance(PlayerSession& session,
                                                    uint32_t connectionId,
                                                    ClientDistances requested) {
-        // Clamp client's requested distance to [2, serverViewDistance]
+        // Clamp the client's requested distance to [2, cap]. The cap is the
+        // server's (32) for everyone but this process's own player, who may
+        // go to ownerViewDistanceCap — the debug render distance, which only
+        // the ImGui panel can ask for (GameSettings::
+        // SetDebugRenderDistanceOverride).
+        const int viewDistanceCap =
+            (m_config.ownerViewDistanceCap > 0 && IsSingleplayerOwnerConnection(connectionId))
+                ? std::min(m_config.ownerViewDistanceCap, Game::Math::kMaxDebugViewDistance)
+                : m_config.serverViewDistance;
         const int effectiveViewDistance =
-            std::clamp(requested.viewDistance, 2, m_config.serverViewDistance);
+            std::clamp(requested.viewDistance, Game::Math::kMinViewDistance,
+                       std::max(Game::Math::kMinViewDistance, viewDistanceCap));
+        // A new request starts the far view over: whatever a memory trim cut
+        // it to before (TrimFarViewsUnderMemoryPressure) no longer applies.
+        m_farViewTrimmed.erase(connectionId);
         // MC IntegratedServer.tickServer: max(2, options.simulationDistance).
         // MC caps it by the view distance because its chunk-level scale ends
         // at 32; here the scale has headroom (ChunkLevel::SIMULATION_HEADROOM)
@@ -9093,7 +9146,7 @@ namespace Server {
                   "simulation distance %d (effective %d), server cap %d",
                   session.GetPlayerId(), requested.viewDistance, effectiveViewDistance,
                   requested.simulationDistance, effectiveSimulationDistance,
-                  m_config.serverViewDistance);
+                  viewDistanceCap);
 
         // Update session view distance (triggers watch set recalculation)
         session.SetViewDistance(effectiveViewDistance);
@@ -9105,7 +9158,11 @@ namespace Server {
         // The chunk cache must hold the whole simulation ring plus the view
         // and a stale area, or the LRU evicts ring chunks as fast as they
         // load. Sized per player currently in the dimension (they may stand
-        // apart), grow-only (ChunkProvider::SetMaxLoadedChunks).
+        // apart), grow-only (ChunkProvider::SetMaxLoadedChunks). Only the
+        // CAPACITY grows (ChunkCache::GrowMaxSize allocates nothing): a debug
+        // view of 1024 raises the cap to ~4.2 million chunks, and what is
+        // actually resident is what has streamed in — bounded in turn by
+        // TrimFarViewsUnderMemoryPressure.
         {
             const size_t ringSide = 2 * static_cast<size_t>(std::max(effectiveSimulationDistance, effectiveViewDistance) + 2) + 1;
             size_t players = 0;
@@ -9123,6 +9180,65 @@ namespace Server {
 
         // Send effective view distance back to client
         SendSetChunkCacheRadius(connectionId, effectiveViewDistance);
+    }
+
+    void IntegratedServer::TrimFarViewsUnderMemoryPressure() {
+        // Once a second, and only while some player's view is beyond the
+        // options range — at 32 and below this is one modulo and nothing else.
+        if (!m_sessionManager || m_currentServerTick % 20 != 0) return;
+        const auto sessions = m_sessionManager->GetAllSessions();
+        bool anyFar = false;
+        for (const auto& session : sessions) {
+            if (session && session->GetViewDistance() > Game::Math::kMaxOptionsViewDistance) { anyFar = true; break; }
+        }
+        if (!anyFar) return;
+
+        // The process footprint (client + server: this is the integrated
+        // server, the only one that grants more than 32) against a share of
+        // physical RAM. 60% by default; OBEY_FAR_VIEW_MEMORY_PCT overrides it
+        // for tuning runs. Unknown RAM or a failed query: never trims.
+        static const uint64_t kBudgetBytes = [] {
+            uint64_t percent = 60;
+            if (const char* e = std::getenv("OBEY_FAR_VIEW_MEMORY_PCT")) {
+                percent = static_cast<uint64_t>(std::clamp(std::atoi(e), 10, 95));
+            }
+            return Core::HardwareProfile::Get().physicalMemoryBytes / 100 * percent;
+        }();
+        if (kBudgetBytes == 0) return;
+        const Core::ProcessMemory memory = Core::QueryProcessMemory();
+        if (memory.footprintBytes == 0 || memory.footprintBytes < kBudgetBytes) return;
+
+        for (const auto& session : sessions) {
+            if (!session) continue;
+            const int view = session->GetViewDistance();
+            if (view <= Game::Math::kMaxOptionsViewDistance) continue;
+            const uint32_t connectionId = session->GetConnectionId();
+            // Once per request: a view cut back to what it holds stays there
+            // until the client asks again (ApplyClientViewDistance clears the
+            // mark). Trimming again would only shave the edge's gaps, ring by
+            // ring, down to 32 while memory stayed high for other reasons.
+            if (m_farViewTrimmed.count(connectionId) != 0) continue;
+            // The radius of the disc the client has already received — the
+            // view streams nearest-first, so that disc is what is complete.
+            constexpr double kPi = 3.14159265358979323846;
+            const double received = static_cast<double>(session->GetSentChunkCount());
+            const int filled = static_cast<int>(std::sqrt(received / kPi));
+            const int trimmed = std::clamp(filled, Game::Math::kMaxOptionsViewDistance, view);
+            m_farViewTrimmed[connectionId] = trimmed;
+            if (trimmed >= view) continue;
+            Log::Warning("[IntegratedServer] Memory footprint %llu MB is over the far-view budget %llu MB: "
+                         "player %u view distance %d cut to %d (the %zu chunks received so far); "
+                         "the rest of the view is cancelled until the render distance is set again",
+                         static_cast<unsigned long long>(memory.footprintBytes >> 20),
+                         static_cast<unsigned long long>(kBudgetBytes >> 20),
+                         session->GetPlayerId(), view, trimmed, session->GetSentChunkCount());
+            // The next ProcessWatchSetChanges diffs the smaller view: the cut
+            // ring leaves (unload packets, load cancels), exactly as if the
+            // player had lowered the setting. The client is told the new
+            // radius, so its fog, culling and F3 follow.
+            session->SetViewDistance(trimmed);
+            SendSetChunkCacheRadius(connectionId, trimmed);
+        }
     }
 
     void IntegratedServer::SendSetChunkCacheRadius(uint32_t connectionId, int viewDistance) {

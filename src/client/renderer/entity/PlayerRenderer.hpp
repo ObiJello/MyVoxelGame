@@ -6,6 +6,7 @@
 #include "StickFigureGeometry.hpp"
 #include "client/entity/RemotePlayerManager.hpp"
 #include <glm/glm.hpp>
+#include <unordered_map>
 #include <unordered_set>
 #include <cstdint>
 #include <vector>
@@ -81,9 +82,10 @@ namespace Render {
                           float spinAttackAgeTicks = -1.0f,
                           uint32_t subjectId = kLocalPlayer);
         // `subjectId`: whose look the figure takes — kLocalPlayer (the
-        // launcher's choice: colour, or the painted figure), or a remote
-        // player's id (their painted figure from PlayerAppearanceS2C; the
-        // colour still comes from `colorId`). A subject whose look is a
+        // launcher's choice: colour, the painted figure, or a drawn figure
+        // in its place), or a remote player's id (their painted or drawn
+        // figure from PlayerAppearanceS2C; the colour still comes from
+        // `colorId`). A subject whose look is a
         // Minecraft skin draws nothing here — the player model is
         // MobRenderer::RenderPlayerSkins'.
         static constexpr uint32_t kLocalPlayer = 0xFFFFFFFFu;
@@ -176,14 +178,48 @@ namespace Render {
         bool m_viewerSeesInvisible = false;
         bool m_outlinePlayers      = false;
 
+        // Drawn figures (Game::StickFigureDrawing): each subject's strokes,
+        // flattened and layered once per look (PlayerSkins' revision), placed
+        // per frame and widened toward the camera with the limbs.
+        struct DrawingCacheEntry {
+            uint64_t    revision = 0;
+            DrawingMesh mesh;
+            DrawingMesh head;          // the spectator's floating head, meshed on first use
+            bool        headBuilt = false;
+        };
+        std::unordered_map<uint32_t, DrawingCacheEntry> m_drawingCache;
+        // The subject's mesh (kLocalPlayer or a remote id), rebuilt when its
+        // look changed — `headOnly`: the strokes from the neck up; null when the
+        // subject is not a drawn figure (it is the stick figure, or a skin).
+        const DrawingMesh* DrawingMeshFor(uint32_t subjectId, bool headOnly = false);
+        // Drops the meshes of subjects that are no longer drawn figures
+        // (left, changed look). Once per bulk pass.
+        void PruneDrawingCache();
+        // Appends `mesh` at a body (feet, body yaw, the sneak) to `out` — the
+        // figure's line list — in `shade`'s palette. Returns where it starts.
+        template <class Shade>
+        size_t AppendDrawing(std::vector<StickVertex>& out, const DrawingMesh& mesh, const glm::vec3& feet,
+                             float bodyYaw, bool crouching, Shade&& shade);
+        // The last bulk pass's partial tick: RenderSingle has none of its own
+        // and a drawn figure's swim tilt lerps by it.
+        float m_partialTick = 1.0f;
+
         static const char* s_vertSource;
         static const char* s_fragSource;
 
-        // Each line segment becomes a 6-vert camera-facing thick triangle strip.
-        // Per player: head circle (64) + smile (32) + eyes (2) + body/limbs (~6) ≈
-        // 100 segments × 6 ≈ 620 verts/player. 65 536 / 620 ≈ 105 players concurrent
-        // before this buffer fills. Per set, shared by every call in a frame.
-        static constexpr size_t MAX_VERTICES = 65536;
+        // Each line segment becomes a 6-vert camera-facing thick triangle
+        // strip: a stick figure's limbs are ~6 segments, ~36 vertices. The
+        // set also carries the drawn figures' strokes — a ribbon and a round
+        // joint per point, about 27 vertices at the limbs' width and 60 at
+        // the largest brush: a few thousand for an ordinary drawing, and
+        // StickFigureDrawing::kMaxPoints (4,096) of the largest brush just
+        // fits on its own. 6 MB a set, shared by every call in a frame; a
+        // frame that overflows draws the strips that fit.
+        static constexpr size_t MAX_VERTICES = 262144;
+        // The triangle set: the head rings and back-of-head discs, ~640
+        // vertices a figure — about 100 figures a frame. A frame that
+        // overflows draws the triangles that fit.
+        static constexpr size_t MAX_TRI_VERTICES = 65536;
     };
 
 } // namespace Render

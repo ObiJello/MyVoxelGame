@@ -104,8 +104,13 @@ namespace Render {
         pose.autoSpinAttack = player.IsAutoSpinAttack();
         pose.ticksSinceKineticHitFeedback = player.GetTicksSinceKineticHitFeedback(pt);
 
-        // The glide, from the tick's travel.
-        const glm::dvec3 movement = player.physics.position - skins.LocalPrevPos();
+        // The glide, from MC's getDeltaMovement — the glide's `velocity` in
+        // blocks per second (TravelFallFlying), per tick here. Not the
+        // position less the last tick's: the body integrates every frame,
+        // so that difference grows from one tick's travel to two across
+        // each tick, and the speedValue it feeds is its square cubed — the
+        // limbs pulsed between swinging and frozen twenty times a second.
+        const glm::dvec3 movement = glm::dvec3(player.physics.velocity) / 20.0;
         pose.fallFlying   = player.physics.isFallFlying && !player.IsSleeping();
         pose.fallFlyTicks = pose.fallFlying ? static_cast<float>(player.fallFlyTicks) + pt : 0.0f;
         if (pose.fallFlying) FlyingYRot(movement, headYaw, pitch, pose.applyFlyingYRot, pose.flyingYRot);

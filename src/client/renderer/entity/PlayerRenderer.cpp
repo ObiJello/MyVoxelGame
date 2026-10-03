@@ -18,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace Render {
 
@@ -187,6 +188,12 @@ void main() {
         for (size_t i = 0; i + 1 < lineVerts.size(); i += 2) {
             const auto& va = lineVerts[i];
             const auto& vb = lineVerts[i + 1];
+            // A drawn figure's stroke: the same strip at the stroke's own
+            // width, with round joints and ends (StickFigureGeometry.hpp).
+            if (IsDrawingStroke(va)) {
+                AppendDrawingStrokeTriangles(va, vb, cameraPos, triOut);
+                continue;
+            }
             glm::vec3 a(va.x, va.y, va.z);
             glm::vec3 b(vb.x, vb.y, vb.z);
             glm::vec3 d = b - a;
@@ -270,7 +277,7 @@ void main() {
             fb.lineMesh = g_renderBackend->CreateMesh(fb.lineVB, INVALID_BUFFER, GetBlockVertexLayout());
 
             fb.triVB = g_renderBackend->CreateBuffer(
-                BufferUsage::Vertex, MAX_VERTICES * sizeof(StickVertex), nullptr, BufferAccess::Streaming);
+                BufferUsage::Vertex, MAX_TRI_VERTICES * sizeof(StickVertex), nullptr, BufferAccess::Streaming);
             fb.triMesh = g_renderBackend->CreateMesh(fb.triVB, INVALID_BUFFER, GetBlockVertexLayout());
         }
 
@@ -340,15 +347,18 @@ void main() {
         // back-face-culled. Ring is wound CCW from lookDir → visible from in
         // front of the player; disc is wound CCW from -lookDir → visible from
         // behind. CullMode::Back hides whichever side the camera isn't on.
-        if (!m_triVerts.empty() && fb.triMesh != INVALID_MESH &&
-            m_triCursor + m_triVerts.size() <= MAX_VERTICES) {
+        // What fits of this call's triangles (whole triangles): a frame of
+        // more figures than the set holds draws the first ones rather than none.
+        const size_t triCount = m_triCursor < MAX_TRI_VERTICES
+            ? std::min(m_triVerts.size(), (MAX_TRI_VERTICES - m_triCursor) / 3 * 3) : 0;
+        if (triCount > 0 && fb.triMesh != INVALID_MESH) {
             // Unsynchronised: the ring is per frame parity and the cursor only
             // advances, so no draw of this frame or the one in flight reads
             // the range. The synchronised update made Apple's GL driver wait
             // for the previous draw of the buffer — 0.7 ms per body, 0.6 ms of
             // every frame with a portal in view (tour1, 2026-09-04).
             g_renderBackend->UpdateBufferUnsynchronized(fb.triVB, m_triCursor * sizeof(StickVertex),
-                m_triVerts.size() * sizeof(StickVertex), m_triVerts.data());
+                triCount * sizeof(StickVertex), m_triVerts.data());
 
             PipelineState triState;
             triState.depthTestEnabled  = true;
@@ -371,16 +381,16 @@ void main() {
             EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
             EntityEnvironment::ApplyWorld(m_shader, Render::ToWorld(cameraPos));
             if (drawBody) {
-                g_renderBackend->DrawArrays(fb.triMesh, static_cast<uint32_t>(m_triVerts.size()),
+                g_renderBackend->DrawArrays(fb.triMesh, static_cast<uint32_t>(triCount),
                                             static_cast<uint32_t>(m_triCursor));
                 g_renderBackend->UnbindMesh();
             }
             if (glowing) {
                 EntityOutline::Get().SubmitArrays(fb.triMesh, static_cast<uint32_t>(m_triCursor),
-                                                  static_cast<uint32_t>(m_triVerts.size()),
+                                                  static_cast<uint32_t>(triCount),
                                                   m_dummyTexture, mvp);
             }
-            m_triCursor += m_triVerts.size();
+            m_triCursor += triCount;
         }
 
         // --- Pass 2: Body/limbs/head outline/face features as camera-facing
@@ -396,8 +406,15 @@ void main() {
 
             m_stripVerts.clear();
             EmitThickWorldStripFromLines(m_lineVerts, cameraPos, kStripHalfWidth, m_stripVerts);
+            // What fits of this call's strips (whole triangles): a frame of
+            // many detailed drawn figures draws the first ones rather than none.
+            if (m_lineCursor < MAX_VERTICES) {
+                m_stripVerts.resize(std::min(m_stripVerts.size(), (MAX_VERTICES - m_lineCursor) / 3 * 3));
+            } else {
+                m_stripVerts.clear();
+            }
 
-            if (!m_stripVerts.empty() && m_lineCursor + m_stripVerts.size() <= MAX_VERTICES) {
+            if (!m_stripVerts.empty()) {
                 g_renderBackend->UpdateBufferUnsynchronized(fb.lineVB, m_lineCursor * sizeof(StickVertex),
                     m_stripVerts.size() * sizeof(StickVertex), m_stripVerts.data());
 
@@ -430,6 +447,107 @@ void main() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Drawn figures (Game::StickFigureDrawing, StickFigureGeometry.hpp)
+    // ------------------------------------------------------------------
+
+    const DrawingMesh* PlayerRenderer::DrawingMeshFor(uint32_t subjectId, bool headOnly) {
+        const Client::PlayerSkins& skins = Client::PlayerSkins::Get();
+        uint64_t revision = 0;
+        const Game::StickFigureDrawing* drawing = subjectId == kLocalPlayer
+            ? skins.LocalDrawing(&revision) : skins.RemoteDrawing(subjectId, &revision);
+        if (!drawing) {
+            m_drawingCache.erase(subjectId);
+            return nullptr;
+        }
+        DrawingCacheEntry& entry = m_drawingCache[subjectId];
+        if (entry.revision != revision) {
+            PROFILE_ZONE_N("PlayerDrawingMesh");
+            BuildDrawingMesh(*drawing, entry.mesh);
+            entry.headBuilt = false;
+            entry.revision = revision;
+        }
+        if (headOnly) {
+            if (!entry.headBuilt) {
+                BuildDrawingMesh(*drawing, entry.head, kDrawingHeadFrom);
+                entry.headBuilt = true;
+            }
+            return &entry.head;
+        }
+        return &entry.mesh;
+    }
+
+    void PlayerRenderer::PruneDrawingCache() {
+        const Client::PlayerSkins& skins = Client::PlayerSkins::Get();
+        for (auto it = m_drawingCache.begin(); it != m_drawingCache.end();) {
+            const bool keep = it->first == kLocalPlayer ? skins.LocalDrawing() != nullptr
+                                                        : skins.RemoteDrawing(it->first) != nullptr;
+            it = keep ? std::next(it) : m_drawingCache.erase(it);
+        }
+    }
+
+    template <class Shade>
+    size_t PlayerRenderer::AppendDrawing(std::vector<StickVertex>& out, const DrawingMesh& mesh,
+                                         const glm::vec3& feet, float bodyYaw, bool crouching, Shade&& shade) {
+        const size_t begin = out.size();
+        // The palette through the figure's own light, hurt flash and
+        // translucency — flat, like the limbs.
+        PlayerColor palette[static_cast<int>(Game::PlayerColorId::Count)];
+        for (int i = 0; i < static_cast<int>(Game::PlayerColorId::Count); ++i) {
+            const auto& e = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(i));
+            palette[i] = shade(PlayerColor{ e.r, e.g, e.b, 255 });
+        }
+        AppendDrawingLines(out, mesh, feet, bodyYaw, crouching, palette);
+        return begin;
+    }
+
+    namespace {
+        // A drawn figure in bed: MC lays the player model on its back
+        // (setupRotations' sleeping branch), and a flat picture rolled on its
+        // side like the stick figure would stand on its edge — so it is tipped
+        // back about its own side axis, face up, the head toward where it
+        // faced (the caller turns it to face the bed's foot).
+        void LieDrawing(std::vector<StickVertex>& verts, size_t begin, const glm::vec3& feet, float bodyYawDeg) {
+            const glm::vec3 forward = Game::Mth::HorizontalViewVector(bodyYawDeg);
+            const glm::vec3 right = glm::normalize(glm::cross(forward, glm::vec3(0.0f, 1.0f, 0.0f)));
+            // About the right: forward turns up, up turns back.
+            const glm::mat4 rot = glm::rotate(glm::mat4(1.0f), glm::radians(90.0f), right);
+            for (size_t i = begin; i < verts.size(); ++i) {
+                const glm::vec3 q = feet + glm::vec3(rot * glm::vec4(verts[i].x - feet.x, verts[i].y - feet.y,
+                                                                     verts[i].z - feet.z, 0.0f));
+                verts[i].x = q.x;
+                verts[i].y = q.y;
+                verts[i].z = q.z;
+            }
+        }
+
+        // MC AvatarRenderer.setupRotations' swim branch for a drawn figure:
+        // rotateX(lerp(swimAmount, 0, inWater ? −90 − xRot : −90)) — the
+        // glide's tip, about the same side axis — then, while visually
+        // swimming, translate(0, −1, 0.3) in the tipped body's frame, which
+        // puts the lying body over the swimmer's short box.
+        void SwimDrawing(std::vector<StickVertex>& verts, size_t begin, const glm::vec3& feet,
+                         float bodyYawDeg, float pitchDeg, float swimAmount, bool inWater,
+                         bool visuallySwimming) {
+            if (swimAmount <= 0.0f) return;
+            const float angle = swimAmount * (inWater ? 90.0f + pitchDeg : 90.0f);
+            const glm::vec3 up(0.0f, 1.0f, 0.0f);
+            const glm::vec3 forward = Game::Mth::HorizontalViewVector(bodyYawDeg);
+            const glm::vec3 axis = glm::normalize(glm::cross(up, forward));
+            const glm::mat3 rot(glm::rotate(glm::mat4(1.0f), glm::radians(angle), axis));
+            // The model frame's (0, −1, 0.3): down the body and toward its
+            // back (MC's model +Z is behind the body), tipped with it.
+            const glm::vec3 shift = visuallySwimming ? rot * (-up - 0.3f * forward) : glm::vec3(0.0f);
+            for (size_t i = begin; i < verts.size(); ++i) {
+                const glm::vec3 p(verts[i].x, verts[i].y, verts[i].z);
+                const glm::vec3 q = feet + rot * (p - feet) + shift;
+                verts[i].x = q.x;
+                verts[i].y = q.y;
+                verts[i].z = q.z;
+            }
+        }
+    } // namespace
+
     void PlayerRenderer::Render(const glm::mat4& projection, const glm::mat4& view,
                                 const glm::vec3& cameraPos, const Frustum& frustum,
                                 const Client::RemotePlayerManager& remotePlayers,
@@ -438,8 +556,10 @@ void main() {
                                 const glm::vec4& clipPlane) {
         PROFILE_ZONE_N("PlayerRender");
         m_tally = Tally{};
+        m_partialTick = partialTick;   // RenderSingle's too (a drawn figure's swim)
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
 
+        PruneDrawingCache();
         const auto& players = remotePlayers.GetPlayers();
         if (players.empty()) return;
 
@@ -485,10 +605,14 @@ void main() {
             const bool bodyInvisible = rp.effects.Invisible();
             const bool translucent = spectatorHead || (bodyInvisible && m_viewerSeesInvisible);
             if (bodyInvisible && !glowing && !translucent) continue;
+            // A drawn figure: its strokes replace the stick figure (the
+            // spectator's floating head keeps them from the neck up).
+            const DrawingMesh* drawing = DrawingMeshFor(id, spectatorHead);
             // Which batch the figure joins: drawn, drawn and outlined, or
             // outlined only — or the translucent batch (the head alone for a
-            // spectator: its lines are built and dropped).
-            std::vector<StickVertex>& lineOut = spectatorHead ? m_scratchLineVerts
+            // spectator: the stick figure's lines are built and dropped, a
+            // drawing's head strokes kept).
+            std::vector<StickVertex>& lineOut = (spectatorHead && !drawing) ? m_scratchLineVerts
                                               : translucent ? m_translucentLineVerts
                                               : !glowing ? m_lineVerts
                                               : (bodyInvisible ? m_outlineOnlyLineVerts : m_glowLineVerts);
@@ -524,9 +648,11 @@ void main() {
 
             // MC Entity.shouldRenderAtSqrDistance for a 0.6x1.8 player: 64
             // blocks x viewScale (160 at a 20+ chunk view), before the Entity
-            // Distance option.
+            // Distance option. A drawing may stand taller than the player
+            // (up to 3 blocks): its box grows with it, so a tall hat in view
+            // never pops while the body is off screen.
             const float bodyWidth  = kPlayerWidth  * rp.scale;
-            const float bodyHeight = kPlayerHeight * rp.scale;
+            const float bodyHeight = std::max(kPlayerHeight, drawing ? drawing->top : 0.0f) * rp.scale;
             if (!EntityCulling::ShouldRenderAtSqrDistance(cameraPos, cullPos,
                                                           bodyWidth, bodyHeight)) {
                 ++m_tally.cullDistance;
@@ -581,6 +707,7 @@ void main() {
             float bodyYaw = renderBodyYaw, headYaw = renderHeadYaw, pitch = renderPitch;
             bool crouching = rp.isCrouching;
             float flip = MobRenderer::DeathFlipDegrees(rp.deathTime, partialTick);
+            bool lyingDrawing = false;
             if (rp.sleepingPos && Client::g_clientBlockAccess) {
                 const glm::ivec3 bed = *rp.sleepingPos;
                 const Game::BlockState state =
@@ -590,10 +717,18 @@ void main() {
                     const glm::vec3 d(static_cast<float>(Game::StepX(facing)), 0.0f,
                                       static_cast<float>(Game::StepZ(facing)));
                     renderFeet -= d * (1.62f * rp.scale - 0.1f);
-                    bodyYaw = headYaw = Game::ToYRot(Game::CounterClockWise(facing));
                     pitch = 0.0f;
                     crouching = false;
-                    flip = 90.0f;
+                    if (drawing) {
+                        // A drawn figure lies on its back (LieDrawing): built
+                        // facing the bed's foot, so tipping back puts the
+                        // head on the pillow.
+                        bodyYaw = headYaw = Game::ToYRot(Game::Opposite(facing));
+                        lyingDrawing = true;
+                    } else {
+                        bodyYaw = headYaw = Game::ToYRot(Game::CounterClockWise(facing));
+                        flip = 90.0f;
+                    }
                 }
             }
 
@@ -609,11 +744,17 @@ void main() {
                 if (translucent) c.a = 38;   // ARGB 0x26FFFFFF, MC's forceTransparent tint
                 return c;
             };
-            const Game::StickFigurePaint* paint = Client::PlayerSkins::Get().RemotePaint(id);
-            const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
-                                                   : StickFigureColors::Uniform(shade(baseColor));
-            BuildStickFigure(lineOut, triOut, triOut, renderFeet,
-                             headYaw, bodyYaw, pitch, crouching, colors, sitting);
+            // The drawn figure's strokes, or the stick figure. Every
+            // transform below reaches either through this player's slice.
+            if (drawing) {
+                AppendDrawing(lineOut, *drawing, renderFeet, bodyYaw, crouching, shade);
+            } else {
+                const Game::StickFigurePaint* paint = Client::PlayerSkins::Get().RemotePaint(id);
+                const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
+                                                       : StickFigureColors::Uniform(shade(baseColor));
+                BuildStickFigure(lineOut, triOut, triOut, renderFeet,
+                                 headYaw, bodyYaw, pitch, crouching, colors, sitting);
+            }
 
             // An elytra glide lays the figure along its flight — unless it
             // riptides, whose spin takes over (AvatarRenderer).
@@ -628,6 +769,15 @@ void main() {
                 SpinStickFigure(lineOut, lineBegin, renderFeet, bodyYaw, pitch, age);
                 SpinStickFigure(triOut,  triBegin,  renderFeet, bodyYaw, pitch, age);
             }
+            // A drawn figure swims lying along its stroke (the player model's
+            // tilt; the stick figure has none), and lies on its back in bed.
+            if (drawing && !rp.fallFlying && !rp.autoSpinAttack && !rp.sleepingPos) {
+                if (const Client::AvatarState* avatar = Client::PlayerSkins::Get().RemoteAvatar(id)) {
+                    SwimDrawing(lineOut, lineBegin, renderFeet, bodyYaw, pitch, avatar->SwimAmount(partialTick),
+                                avatar->inWater, avatar->visuallySwimming);
+                }
+            }
+            if (lyingDrawing) LieDrawing(lineOut, lineBegin, renderFeet, bodyYaw);
             // The corpse falls over (or the sleeper lies down). Applied to
             // just this player's slice of the batch, which is why the two
             // offsets above are taken first.
@@ -635,7 +785,7 @@ void main() {
             ToppleStickFigure(triOut,  triBegin,  renderFeet, bodyYaw, flip);
             ScaleStickFigure(lineOut, lineBegin, renderFeet, rp.scale);
             ScaleStickFigure(triOut,  triBegin,  renderFeet, rp.scale);
-            for (size_t i = lineBegin; i < lineOut.size(); ++i) lineOut[i].u = rp.scale;
+            for (size_t i = lineBegin; i < lineOut.size(); ++i) ScaleLineWidth(lineOut[i], rp.scale);
         }
 
         // The strips are widened against the camera in the vertices' own
@@ -735,12 +885,20 @@ void main() {
             if (spectatorHead) c.a = 38;
             return c;
         };
-        // The painted figure (the launcher's painter), if the subject has one.
-        const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
-                                               : StickFigureColors::Uniform(shade(baseColor));
-        BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderFeet,
-                         headYaw, bodyYaw, pitch, isCrouching, colors, isSitting);
-        if (spectatorHead) m_lineVerts.clear();
+        // A drawn figure: its strokes instead of the stick figure (from the
+        // neck up on a spectator's floating head); the glide, swim, spin,
+        // topple and model below reach them through m_lineVerts.
+        const DrawingMesh* drawing = DrawingMeshFor(subjectId, spectatorHead);
+        if (drawing) {
+            AppendDrawing(m_lineVerts, *drawing, renderFeet, bodyYaw, isCrouching, shade);
+        } else {
+            // The painted figure (the launcher's painter), if the subject has one.
+            const StickFigureColors colors = paint ? StickFigureColors::FromPaint(*paint, shade)
+                                                   : StickFigureColors::Uniform(shade(baseColor));
+            BuildStickFigure(m_lineVerts, m_triVerts, m_triVerts, renderFeet,
+                             headYaw, bodyYaw, pitch, isCrouching, colors, isSitting);
+            if (spectatorHead) m_lineVerts.clear();
+        }
         if (fallFlyTicks > 0.0f && spinAttackAgeTicks < 0.0f) {
             GlideStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, pitch, fallFlyTicks);
             GlideStickFigure(m_triVerts,  0, renderFeet, bodyYaw, pitch, fallFlyTicks);
@@ -748,6 +906,15 @@ void main() {
         if (spinAttackAgeTicks >= 0.0f && deathFlipDeg == 0.0f) {
             SpinStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, pitch, spinAttackAgeTicks);
             SpinStickFigure(m_triVerts,  0, renderFeet, bodyYaw, pitch, spinAttackAgeTicks);
+        }
+        // A drawn figure swims lying along its stroke (the player model's
+        // tilt, from the subject's per-tick swim state).
+        if (drawing && fallFlyTicks <= 0.0f && spinAttackAgeTicks < 0.0f && deathFlipDeg == 0.0f) {
+            const Client::AvatarState* avatar = local ? &skins.LocalAvatar() : skins.RemoteAvatar(subjectId);
+            if (avatar) {
+                SwimDrawing(m_lineVerts, 0, renderFeet, bodyYaw, pitch, avatar->SwimAmount(m_partialTick),
+                            avatar->inWater, avatar->visuallySwimming);
+            }
         }
         ToppleStickFigure(m_lineVerts, 0, renderFeet, bodyYaw, deathFlipDeg);
         ToppleStickFigure(m_triVerts,  0, renderFeet, bodyYaw, deathFlipDeg);
@@ -780,10 +947,9 @@ void main() {
             for (auto& v : m_lineVerts) {
                 glm::vec4 w = model * glm::vec4(v.x, v.y, v.z, 1.0f);
                 v.x = w.x; v.y = w.y; v.z = w.z;
-                v.u = modelScale;
+                ScaleLineWidth(v, modelScale);
             }
         }
-
 
         // For RenderSingle the camera position is recoverable from the
         // inverse view matrix's translation column — same convention as

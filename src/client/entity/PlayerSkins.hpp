@@ -94,6 +94,14 @@ namespace Client {
         // The painted figure a remote player chose, or null.
         const Game::StickFigurePaint* RemotePaint(uint32_t playerId) const;
 
+        // ── Drawn figures (Game::StickFigureDrawing) ────────────────────
+        // The drawing a player wears instead of the stick figure, or null
+        // (none, or the look is a skin). `revision` (optional) gets a number
+        // that changes whenever that player's look is replaced — the
+        // renderers' mesh cache key.
+        const Game::StickFigureDrawing* RemoteDrawing(uint32_t playerId, uint64_t* revision = nullptr) const;
+        const Game::StickFigureDrawing* LocalDrawing(uint64_t* revision = nullptr) const;
+
         // ── Textures (render thread, backend up) ────────────────────────
         struct Textures {
             ::Render::TextureHandle skin = ::Render::INVALID_TEXTURE;   // 64x64
@@ -109,7 +117,8 @@ namespace Client {
 
         // ── Per-body animation state (cape physics, swimming) ───────────
         // Once per client tick, after the remote players' own tick: every
-        // remote body drawn with the player model.
+        // remote body drawn with the player model, and every drawn figure
+        // (its swim tilt).
         void TickRemote(const RemotePlayerManager& players);
         // Once per client tick for the local body (`headYaw` the camera's,
         // degrees): its avatar state plus what a remote copy keeps for it
@@ -141,6 +150,7 @@ namespace Client {
             bool skinTried = false;
             bool capeTried = false;
             AvatarState physics;
+            uint64_t revision = 0;   // a new number each time `appearance` is replaced
         };
 
         Textures Resolve(Entry& entry);
@@ -148,6 +158,7 @@ namespace Client {
         static void ReleaseEntry(Entry& entry);
 
         Entry m_local;
+        uint64_t m_nextRevision = 1;
         LocalBody m_localBody;
         glm::dvec3 m_localPrevPos{0.0};
         std::unordered_map<uint32_t, Entry> m_remote;

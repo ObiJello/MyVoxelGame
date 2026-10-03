@@ -1,8 +1,11 @@
 // File: src/client/renderer/entity/ElytraLayer.cpp
 //
 // MC WingsLayer + ElytraModel for this engine's bodies: the stick-figure
-// players (MobRenderer::RenderElytras) and the humanoid /morph bodies that
-// HumanoidMobRenderer gives the layer (RenderMorphs → DrawElytras).
+// players (MobRenderer::RenderElytras), the skinned players (AvatarRenderer,
+// RenderPlayerSkins and the inventory preview), the humanoid /morph bodies
+// and mobs that HumanoidMobRenderer gives the layer, and armor stands
+// (ArmorStandRenderer) — the last two through AppendElytra into the mob
+// pass's own batches.
 //
 //   ElytraModel.createLayer (64 × 32, CubeDeformation 1.0):
 //     left_wing   texOffs(22, 0) box(-10, 0, 0, 10, 20, 2)
@@ -12,12 +15,16 @@
 //   setupAnim: both wings y = crouching ? 3 : 0, the left wing's angles from
 //   ElytraAnimationState (x, y, z), the right mirrored (−y, −z).
 //   WingsLayer.submit: translate(0, 0, 0.125) on the parent's pose stack;
-//   the baby model is the mesh scaled 0.5 (BABY_TRANSFORMER).
+//   ELYTRA_BABY is the mesh through ElytraModel.BABY_TRANSFORMER =
+//   MeshTransformer.scaling(0.5): the root pose scaled 0.5 and moved
+//   24.016 · (1 − 0.5) px down.
 //   The texture: textures/entity/equipment/wings/elytra.png (the elytra
 //   asset's WINGS layer), or a skinned player's cape (ElytraDraw::texture —
 //   WingsLayer draws the cape's sheet when a cape is worn and shown).
-//   An enchanted elytra draws MC's armor glint again over it (additive,
-//   depth EQUAL, TextureTransform.ARMOR_ENTITY_GLINT_TEXTURING: scale 0.16).
+//   An enchanted elytra draws MC's armor glint over it (RenderTypes.
+//   armorCutoutNoCullGlint: glint², GlintAlpha 0.75, added unlit —
+//   TextureTransform.ARMOR_ENTITY_GLINT_TEXTURING: scale 0.16), here as a
+//   second additive pass at depth EQUAL.
 #include "client/renderer/entity/MobRenderer.hpp"
 
 #include "client/renderer/backend/RenderBackend.hpp"
@@ -88,7 +95,66 @@ namespace Render {
             return glm::vec2(x * c - y * s - l0, x * s + y * c + l1);
         }
 
+        // EntityModel.MODEL_Y_OFFSET in pixels (−1.501 blocks) — the 24.016
+        // MeshTransformer.scaling measures its baby offset against.
+        constexpr float kModelYOffsetPx = -1.501f * 16.0f;
+        // ElytraModel.BABY_TRANSFORMER's factor.
+        constexpr float kBabyFactor = 0.5f;
+
     } // namespace
+
+    TextureHandle MobRenderer::AppendElytra(const ElytraDraw& d, std::vector<ModelVertex>& verts,
+                                            std::vector<uint32_t>& idx) {
+        const TextureHandle texture = d.texture != INVALID_TEXTURE
+            ? d.texture : LoadTexture("assets/textures/entity/equipment/wings/elytra.png");
+        if (texture == INVALID_TEXTURE) return INVALID_TEXTURE;
+        ElytraMesh& mesh = Elytra();
+        PoseElytra(mesh, d);
+        glm::mat4 m = d.rootPx;
+        if (d.rootScaledForBaby) {
+            // The body's root carries the mini-adult fallback's 0.5 (a
+            // uniform scale ahead of the −1.501 offset); MC's pose stack has
+            // no such scale — the baby is in the mesh — so take it back out
+            // before WingsLayer's translate, which is in unscaled blocks.
+            m = glm::translate(m, glm::vec3(0.0f, -kModelYOffsetPx, 0.0f));
+            m = glm::scale(m, glm::vec3(1.0f / kBabyFactor));
+            m = glm::translate(m, glm::vec3(0.0f, kModelYOffsetPx, 0.0f));
+        }
+        // WingsLayer.submit: poseStack.translate(0, 0, 0.125).
+        m = glm::translate(m, glm::vec3(0.0f, 0.0f, 0.125f * 16.0f));
+        if (d.baby || d.rootScaledForBaby) {
+            // ELYTRA_BABY's root pose: PartPose.scaled(0.5).translated(0,
+            // 24.016 · (1 − 0.5), 0) — ModelPart.translateAndRotate's
+            // translate, then its scale.
+            m = glm::translate(m, glm::vec3(0.0f, -kModelYOffsetPx * (1.0f - kBabyFactor), 0.0f));
+            m = glm::scale(m, glm::vec3(kBabyFactor));
+        }
+        mesh.root->Build(m, 64.0f, 32.0f, verts, idx, /*culled=*/false);
+        return texture;
+    }
+
+    void MobRenderer::AppendArmorGlint(std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                                       size_t vFirst, size_t vEnd, size_t iFirst, size_t iEnd,
+                                       float l0, float l1) {
+        // MC entity.fsh under GLINT: `color.rgb += glint.rgb²` with glint =
+        // GlintAlpha · texture — GlintAlpha the glintStrength option, 0.75 by
+        // default. The additive (SRC_COLOR, ONE) pass squares the fragment,
+        // so the 0.75 rides the vertex colour (0xBF, as GuiGraphics' item
+        // glint does).
+        constexpr uint8_t kGlintAlpha = 191;
+        const auto base = static_cast<uint32_t>(verts.size());
+        for (size_t i = vFirst; i < vEnd; ++i) {
+            ModelVertex v = verts[i];
+            const glm::vec2 uv = GlintUv(v.u, v.v, l0, l1);
+            v.u = uv.x;
+            v.v = uv.y;
+            v.r = v.g = v.b = v.a = kGlintAlpha;
+            verts.push_back(v);
+        }
+        for (size_t i = iFirst; i < iEnd; ++i) {
+            idx.push_back(base + (idx[i] - static_cast<uint32_t>(vFirst)));
+        }
+    }
 
     void MobRenderer::RenderElytras(const glm::mat4& projection, const glm::mat4& view,
                                     const glm::vec3& cameraPos, const Frustum& frustum,
@@ -160,9 +226,6 @@ namespace Render {
         const size_t vertRoom = kMaxVertices - m_vertCursor;
         const size_t idxRoom  = kMaxIndices  - m_idxCursor;
 
-        // The elytra asset, unless the body's cape supplies the texture (MC
-        // WingsLayer: a shown cape's sheet carries the elytra's design too).
-        const TextureHandle wings = LoadTexture("assets/textures/entity/equipment/wings/elytra.png");
         TextureHandle glintTex = INVALID_TEXTURE;
 
         // The glint's scroll, once for the frame.
@@ -182,16 +245,11 @@ namespace Render {
         std::vector<Piece> pieces;
         m_verts.clear();
         m_indices.clear();
-        ElytraMesh& mesh = Elytra();
         for (const ElytraDraw& d : draws) {
-            const TextureHandle texture = d.texture != INVALID_TEXTURE ? d.texture : wings;
-            if (texture == INVALID_TEXTURE) continue;
-            PoseElytra(mesh, d);
-            glm::mat4 m = glm::translate(d.rootPx, glm::vec3(0.0f, 0.0f, 0.125f * 16.0f));
-            if (d.baby) m = glm::scale(m, glm::vec3(0.5f));
             const size_t vFirst = m_verts.size();
             const size_t iFirst = m_indices.size();
-            mesh.root->Build(m, 64.0f, 32.0f, m_verts, m_indices, /*culled=*/false);
+            const TextureHandle texture = AppendElytra(d, m_verts, m_indices);
+            if (texture == INVALID_TEXTURE) continue;
             const size_t vEnd = m_verts.size();
             const size_t iEnd = m_indices.size();
             if (iEnd == iFirst) continue;
@@ -201,19 +259,8 @@ namespace Render {
                     glintTex = LoadTexture("assets/textures/misc/enchanted_glint_armor.png", /*repeatWrap=*/true);
                 }
                 if (glintTex != INVALID_TEXTURE) {
-                    const auto base = static_cast<uint32_t>(m_verts.size());
-                    for (size_t i = vFirst; i < vEnd; ++i) {
-                        ModelVertex v = m_verts[i];
-                        const glm::vec2 uv = GlintUv(v.u, v.v, l0, l1);
-                        v.u = uv.x;
-                        v.v = uv.y;
-                        v.r = v.g = v.b = v.a = 255;
-                        m_verts.push_back(v);
-                    }
                     const size_t gFirst = m_indices.size();
-                    for (size_t i = iFirst; i < iEnd; ++i) {
-                        m_indices.push_back(base + (m_indices[i] - static_cast<uint32_t>(vFirst)));
-                    }
+                    AppendArmorGlint(m_verts, m_indices, vFirst, vEnd, iFirst, iEnd, l0, l1);
                     pieces.push_back({ gFirst, m_indices.size() - gFirst, true, d.packedLight, false, glintTex });
                 }
             }

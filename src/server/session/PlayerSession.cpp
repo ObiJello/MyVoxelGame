@@ -298,7 +298,8 @@ namespace Server {
     void PlayerSession::Initialize(const Config& config, int dimensionId, const glm::vec3& spawnPos) {
         m_config = config;
         m_simulationDistance = std::clamp(config.simulationDistance, 2, 32);
-        m_viewDistance = std::clamp(config.viewDistance, 2, 32);
+        m_viewDistance = std::clamp(config.viewDistance, Game::Math::kMinViewDistance,
+                                    Game::Math::kMaxDebugViewDistance);
         
         // Calculate initial chunk position
         m_currentChunk = Game::Math::ChunkPos(
@@ -868,7 +869,11 @@ namespace Server {
         // to set every player's simulation distance to the server's view
         // cap (32) just to let them SEE 32 chunks — and so the server ticked
         // a 65x65-chunk area for everyone, whatever their settings said.
-        m_viewDistance = std::clamp(distance, 2, 32);
+        // The protocol range only; the server's cap (32, or the integrated
+        // server owner's debug ceiling) is the caller's —
+        // IntegratedServer::ApplyClientViewDistance.
+        m_viewDistance = std::clamp(distance, Game::Math::kMinViewDistance,
+                                    Game::Math::kMaxDebugViewDistance);
 
         Log::Info("PlayerSession: Player %u view distance changed to %d",
                  m_playerId, m_viewDistance);
@@ -906,6 +911,65 @@ namespace Server {
             same = loaders[i].SameAs(m_loaders[i]);
         }
         if (same) return;
+
+        // Fast path: every level tracked by exactly ONE loader, before and
+        // after, and the loaders pairwise the same ones (moved or resized) —
+        // the player walking, and always the case for a far debug view, whose
+        // own view covers its simulation ring. Then each level's watched set
+        // IS that loader's view, and the diff is MC's own
+        // ChunkTrackingView.difference: a walk of the two views' bounding box
+        // with no allocation beyond the entered/left lists. The general path
+        // below rebuilds the whole watched set as a hash set instead —
+        // fine at 32 (~3,600 chunks), but 3.3 million inserts for every chunk
+        // crossed at a 1024 view. Two loaders in one level (the simulation
+        // ring, a portal looking back into this level) or a loader appearing
+        // or going still take the general path.
+        {
+            const auto oneLoaderPerLevel = [](const std::vector<ChunkLoader>& list) {
+                for (size_t i = 0; i < list.size(); ++i) {
+                    if (list[i].IsSimulation()) return false;
+                    for (size_t j = i + 1; j < list.size(); ++j) {
+                        if (list[i].dimension == list[j].dimension) return false;
+                    }
+                }
+                return true;
+            };
+            bool pairwise = loaders.size() == m_loaders.size() && m_simulated.empty() &&
+                            oneLoaderPerLevel(loaders) && oneLoaderPerLevel(m_loaders);
+            for (size_t i = 0; pairwise && i < loaders.size(); ++i) {
+                pairwise = loaders[i].dimension == m_loaders[i].dimension &&
+                           loaders[i].source == m_loaders[i].source;
+            }
+            if (pairwise) {
+                std::vector<DimChunkKey> enteredKeys, leftKeys;
+                for (size_t i = 0; i < loaders.size(); ++i) {
+                    const Game::DimensionId dim = loaders[i].dimension;
+                    ChunkTrackingView::Difference(
+                        m_loaders[i].view, loaders[i].view,
+                        [&](Game::Math::ChunkPos pos) { enteredKeys.push_back(DimChunkKey::Of(dim, pos)); },
+                        [&](Game::Math::ChunkPos pos) { leftKeys.push_back(DimChunkKey::Of(dim, pos)); });
+                }
+                // Same order and the same "m_watched is still the PREVIOUS
+                // set" rule as the general path.
+                for (const DimChunkKey& key : enteredKeys) onEnter(key.Dimension(), key.Pos());
+                for (const DimChunkKey& key : leftKeys) onLeave(key.Dimension(), key.Pos(), false);
+                for (const DimChunkKey& key : leftKeys) m_watched.erase(key);
+                for (const DimChunkKey& key : enteredKeys) m_watched.insert(key);
+                m_loaders = std::move(loaders);
+                const int entered = static_cast<int>(enteredKeys.size());
+                const int left = static_cast<int>(leftKeys.size());
+                if (entered > 64) m_chunkOrderLogBatches = kChunkOrderLogBatches;
+                Log::Info("UpdateChunkTracking: player %u loaders=%zu watched=%zu entered=%d left=%d "
+                          "simulated=%zu (+0 -0)",
+                          m_playerId, m_loaders.size(), m_watched.size(), entered, left, m_simulated.size());
+                {
+                    std::lock_guard<std::mutex> lock(m_statsMutex);
+                    m_stats.chunksInWatch = GetSentChunkCount() + GetPendingChunksToSendCount();
+                    m_stats.chunksPending = GetPendingChunksToSendCount();
+                }
+                return;
+            }
+        }
 
         std::unordered_set<DimChunkKey, DimChunkKeyHash> next;
         std::unordered_set<DimChunkKey, DimChunkKeyHash> nextSimulated;

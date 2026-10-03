@@ -168,6 +168,13 @@ namespace Server {
         float chunkProcessBudgetMs = 2.0f;     // Time budget for chunk processing per tick
         int defaultViewDistance = 8;           // Default view distance in chunks (Minecraft-like)
         int serverViewDistance = 32;           // Server's max view distance cap (clients clamped to this)
+        // The singleplayer owner's cap instead, when non-zero — the game sets
+        // it to Game::Math::kMaxDebugViewDistance, so the ImGui panel's debug
+        // render distance (beyond 32) reaches this machine's own server.
+        // Guests on an opened world and a headless (dedicated) server keep
+        // serverViewDistance. Above 32 the view is also bounded by memory:
+        // see TrimFarViewsUnderMemoryPressure.
+        int ownerViewDistanceCap = 0;
         // Cap on the simulation distance clients may request. Above the view
         // distance the extra ring is loaded and ticked but never sent (see
         // ChunkLoader::Source::Simulation). ChunkLevel's scale is sized for it.
@@ -798,6 +805,16 @@ namespace Server {
 
         // Send the effective view distance to the client
         void SendSetChunkCacheRadius(uint32_t connectionId, int viewDistance);
+
+        // The memory bound on views beyond the options range (only the
+        // owner's debug render distance gets there): once a second, while
+        // the process footprint is over a share of physical RAM, each such
+        // view is cut to the disc the client has already received (never
+        // below 32) and the client is told. Server thread.
+        void TrimFarViewsUnderMemoryPressure();
+        // Connections whose far view was already cut (or judged) since their
+        // last ClientConfigC2S — at most one trim per request. Server thread.
+        std::unordered_map<uint32_t, int> m_farViewTrimmed;
 
         // ========================================================================
         // CONFIGURATION

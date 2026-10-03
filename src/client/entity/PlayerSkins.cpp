@@ -158,10 +158,16 @@ namespace Client {
         if (appearance == m_local.appearance) return;
         ReleaseEntry(m_local);
         m_local.appearance = appearance;
+        m_local.revision = m_nextRevision++;
         Log::Info("[PlayerSkins] local look: %s%s%s%s", Game::AppearanceModeSlug(appearance.mode),
                   appearance.IsSkin() ? (appearance.model == Game::SkinModel::Slim ? " slim" : " classic") : "",
                   appearance.IsSkin() && appearance.skinPng.empty() ? " (default skin)" : "",
                   appearance.HasCape() ? " + cape" : (appearance.hasPaint ? " (painted)" : ""));
+        if (appearance.IsDrawn()) {
+            Log::Info("[PlayerSkins] local figure is a drawing (%d strokes, %d points, %zu B)",
+                      appearance.drawing.StrokeCount(), appearance.drawing.PointCount(),
+                      appearance.drawing.EncodedSize());
+        }
     }
 
     void PlayerSkins::SetRemote(uint32_t playerId, const Game::PlayerAppearance& appearance) {
@@ -170,6 +176,7 @@ namespace Client {
         if (!inserted && entry.appearance == appearance) return;
         ReleaseEntry(entry);
         entry.appearance = appearance;
+        entry.revision = m_nextRevision++;
     }
 
     void PlayerSkins::Forget(uint32_t playerId) {
@@ -197,6 +204,19 @@ namespace Client {
     const Game::StickFigurePaint* PlayerSkins::RemotePaint(uint32_t playerId) const {
         const Game::PlayerAppearance* a = Remote(playerId);
         return (a && !a->IsSkin() && a->hasPaint) ? &a->paint : nullptr;
+    }
+
+    const Game::StickFigureDrawing* PlayerSkins::RemoteDrawing(uint32_t playerId, uint64_t* revision) const {
+        const auto it = m_remote.find(playerId);
+        if (it == m_remote.end() || !it->second.appearance.IsDrawn()) return nullptr;
+        if (revision) *revision = it->second.revision;
+        return &it->second.appearance.drawing;
+    }
+
+    const Game::StickFigureDrawing* PlayerSkins::LocalDrawing(uint64_t* revision) const {
+        if (!m_local.appearance.IsDrawn()) return nullptr;
+        if (revision) *revision = m_local.revision;
+        return &m_local.appearance.drawing;
     }
 
     ::Render::TextureHandle PlayerSkins::DefaultSkin(Game::SkinModel model) {
@@ -254,7 +274,8 @@ namespace Client {
 
     void PlayerSkins::TickRemote(const RemotePlayerManager& players) {
         for (auto& [id, entry] : m_remote) {
-            if (!entry.appearance.IsSkin()) continue;
+            // The player model's cape and swim, and a drawn figure's swim tilt.
+            if (!entry.appearance.IsSkin() && !entry.appearance.IsDrawn()) continue;
             const auto& all = players.GetPlayers();
             const auto it = all.find(id);
             if (it == all.end()) continue;
@@ -297,10 +318,14 @@ namespace Client {
         b.bodyYaw += Game::Mth::WrapDegrees(bodyTarget - b.bodyYaw) * 0.3f;
         const float headOffset = Game::Mth::WrapDegrees(headYaw - b.bodyYaw);
         if (std::fabs(headOffset) > 50.0f) b.bodyYaw += headOffset - std::copysign(50.0f, headOffset);
-        // MC LivingEntity.updateWalkAnimation: horizontal travel × 4, capped
-        // at 1, smoothed by 0.4 a tick (a seat stops the limbs).
-        float f = riding ? 0.0f : std::min(1.0f, static_cast<float>(std::sqrt(speedSq)) * 4.0f);
-        b.walk.Update(f, 0.4f, 1.0f);
+        // MC LivingEntity.calculateEntityAnimation(false): horizontal travel
+        // × 4, capped at 1, smoothed by 0.4 a tick (updateWalkAnimation); a
+        // seat stops the limbs outright (walkAnimation.stop).
+        if (riding) {
+            b.walk.Stop();
+        } else {
+            b.walk.Update(std::min(1.0f, static_cast<float>(std::sqrt(speedSq)) * 4.0f), 0.4f, 1.0f);
+        }
         ++b.ticks;
     }
 

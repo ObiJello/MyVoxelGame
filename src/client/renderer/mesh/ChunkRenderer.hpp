@@ -827,6 +827,23 @@ namespace Render {
         // a change invalidates every reachable-slot (see the worldVersion
         // bump where this is compared).
         int m_lastRenderDistanceChunks = -1;
+        // Beyond the options range (a debug render distance, up to
+        // Game::Math::kMaxDebugViewDistance) the occlusion graph, the section
+        // grids and the frustum sweep are sized to the chunks actually LOADED
+        // rather than to the setting: the graph is dense — (2r+1)^2 x 24
+        // cells, ~1.6 GB per job at r = 1024 — and every full rebuild looks up
+        // every column of it on the main thread. Returns the setting's radius
+        // cut to the loaded extent plus the halo, in steps of
+        // kFarViewGraphStep (each step re-keys the reachable slots), never
+        // below 32. At 32 and below this is never called: the radius is the
+        // setting, exactly as before.
+        int FarViewGraphRadius(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks);
+        static constexpr int kFarViewGraphStep = 16;
+        int m_farExtentCamX = INT_MIN, m_farExtentCamZ = INT_MIN;
+        uint64_t m_farExtentLoadedVersion = ~uint64_t{0};
+        uint32_t m_farExtentComputedAt = 0;   // m_prepareCounter of the last scan
+        int m_farExtentChunks = 0;            // farthest loaded chunk from the camera chunk, chunks (ceil)
+        int m_farGraphRadius = 0;             // the main view's last answer (held while the mesh pool is near full)
         uint64_t m_eraseToken = 1;
         int m_bfsVisitedCount = 0;
         int m_bfsOccludedCount = 0;
@@ -1086,6 +1103,7 @@ namespace Render {
         void UpdateOutsideViewFence(int cameraChunkX, int cameraChunkZ, int renderDistanceChunks);
         int m_fenceCamX = INT_MIN, m_fenceCamZ = INT_MIN, m_fenceRenderDistance = -1;
         uint64_t m_fenceLoadedVersion = ~uint64_t{0};
+        uint32_t m_fenceComputedAt = 0;   // m_prepareCounter of the last refresh (far views throttle on it)
         StrayAudit m_strayAudit;
         bool m_strayAuditFrame = false;          // this frame's main view is sampled
         int  m_strayAuditRenderDistance = 0;

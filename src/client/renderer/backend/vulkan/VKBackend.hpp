@@ -642,6 +642,13 @@ namespace Render {
         // Descriptor sets of destroyed frame copies, reused by the next
         // promotion (the pool has no FREE_DESCRIPTOR_SET flag).
         std::vector<VkDescriptorSet> m_spareTextureSets;
+        // Texel-buffer descriptor sets (m_texelBufferLayout) of destroyed
+        // buffer textures, reused by the next CreateBufferTexture. The
+        // terrain mega buffers release and re-create slabs at play time
+        // (ChunkMegaBuffer::CompactIfNeeded / AllocateSlab), one face-map
+        // view each; without reuse every re-creation spent one of the
+        // pool's 512 texel descriptors for good.
+        std::vector<VkDescriptorSet> m_spareTexelBufferSets;
         // The shared body of DestroyTexture: `forceWait` = the immediate
         // form, which always drains; the deferred flush passes false and
         // waits only when the texture was used by the frame in flight.

@@ -6,6 +6,7 @@
 #include "common/network/PacketTypes.hpp"
 #include "common/world/level/DimensionId.hpp"
 #include "common/world/math/WorldMath.hpp"
+#include "common/world/math/ChunkViewDistance.hpp"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -209,7 +210,12 @@ namespace Threading {
         // 0.9-1.8 s watch-set phase when 50 players joined at once (Tracy,
         // 2026-09-24). Everything else (saves, world I/O) is FIFO and served
         // first, as before.
-        static constexpr int kDistanceBuckets = 64;   // Chebyshev chunks; the last also holds "no player in that dimension"
+        // Chebyshev chunks; the last also holds "no player in that dimension".
+        // One per chunk of the largest view (the debug render distance, plus
+        // the send buffer), so a view beyond 64 still loads nearest-first
+        // instead of in scan order past bucket 63. An empty deque allocates
+        // nothing, and a take scans at most this many empty() tests.
+        static constexpr int kDistanceBuckets = Game::Math::kMaxDebugViewDistance + 4;
         int DistanceBucket(const ServerJob& job, const ChunkLoadAnchors* anchors) const;
         mutable std::mutex m_jobQueueMutex;
         std::deque<ServerJob> m_otherJobs;

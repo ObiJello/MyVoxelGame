@@ -416,6 +416,7 @@ static void SetChatPointerCursor(GLFWwindow* window, bool wantHand) {
 #include "common/core/Assert.hpp"   // Client::g_clientThreadId
 
 #include "platform/GameDirectory.hpp"
+#include "client/sync/FileSyncService.hpp"   // optional chat.db migration (OFF by default)
 #include "client/resource/ResourcePacks.hpp"
 #include "client/renderer/viewmodel/HeldItemSpriteMesh.hpp"
 #include "client/renderer/entity/ItemEntityRenderer.hpp"
@@ -4077,6 +4078,25 @@ static uint16_t     s_lastPresencePort = 0;
         // Non-zero when a dev-harness session (--world) could not start and
         // the process exits instead of showing the title screen.
         int processExitCode = 0;
+
+        // Optional chat.db migration (docs/file-sync.md). A literal no-op
+        // unless Sync::kFileSyncSourceUsername is set; when on, it self-selects
+        // source/client by player name and reaches the other Mac through the
+        // friends service (UPnP-direct + relay), on its OWN dedicated service
+        // connection and background thread — it never touches the game's
+        // FriendsClient, presence, or relay handler. Started once here, at the
+        // title screen, before any session.
+        {
+            Sync::FileSyncService::Params fsp;
+            fsp.localPlayerName = playerName;
+            fsp.gameDir         = Platform::g_gameDirectory.GetGameDirectory();
+            fsp.serviceHost     = friendsServiceHost;
+            fsp.servicePort     = friendsServicePort;
+            fsp.token           = friendsSessionToken;
+            fsp.accountId       = friendsAccountId;
+            Sync::FileSyncService::Instance().StartIfConfigured(fsp);
+        }
+
         for (;;) {
         // CLI --server bypasses the title screen for the FIRST session only;
         // after a quit-to-title the menu shows normally.
@@ -4156,6 +4176,7 @@ static uint16_t     s_lastPresencePort = 0;
                     Render::g_renderBackend->Shutdown();
                     Render::g_renderBackend.reset();
                 }
+                Sync::FileSyncService::Instance().RequestStop();   // join-with-timeout/detach
                 glfwDestroyWindow(window);
                 glfwTerminate();
                 return 0;
@@ -4372,6 +4393,9 @@ static uint16_t     s_lastPresencePort = 0;
             titleAction.worldName,
             !isRemoteClient && !titleAction.useMinecraftSave);
 
+        // The previous leave capture's CPU copies have no use in a world.
+        Render::PanoramaRenderer::ReleaseCaptureMemory();
+
         sessionWorldId = isRemoteClient
             ? remoteServerAddress + ":" + std::to_string(remoteServerPort)
             : (titleAction.useMinecraftSave && !titleAction.worldPath.empty()
@@ -4429,6 +4453,10 @@ static uint16_t     s_lastPresencePort = 0;
             // integrated server at all.
             serverConfig.singleplayerProfileName = playerName;
             serverConfig.hasSingleplayerOwner    = true;
+            // This process's own player may ask for the ImGui panel's debug
+            // render distance (beyond 32); guests stay at serverViewDistance,
+            // and the headless server never sets this.
+            serverConfig.ownerViewDistanceCap    = Game::Math::kMaxDebugViewDistance;
             // Back into the panorama's world: it holds still (paused, chunks
             // still streaming) until the hand-over frame releases it — see
             // IntegratedServer::ReleaseOwnerJoinHold and the hand-over below.
@@ -4866,7 +4894,7 @@ static uint16_t     s_lastPresencePort = 0;
                 bool ok = false;
                 // MC dumps every atlas as <atlas>.png.
                 for (int i = 0; i < Render::kAtlasCount; ++i) {
-                    const Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i));
+                    Render::AtlasBuilder* atlas = Render::GetAtlas(static_cast<Render::AtlasId>(i));
                     if (atlas && atlas->SaveAtlasDebugImage((dir / (std::string("atlas_") + atlas->GetConfig().name + ".png")).string())) ok = true;
                 }
                 if (!ok) return false;
@@ -12294,6 +12322,10 @@ static uint16_t     s_lastPresencePort = 0;
         } catch (...) {
             Log::Error("Unknown exception during OpenGL cleanup");
         }
+
+        // Optional LAN chat.db migration: signal its background thread and
+        // join-with-timeout (else detach) so it never holds up shutdown.
+        Sync::FileSyncService::Instance().RequestStop();
 
         Log::Info("🎮 Minecraft Java Edition Architecture shutdown complete!");
         Log::Info("   All threads stopped, all resources cleaned up");

@@ -26,6 +26,27 @@
 
 namespace Game::Math {
 
+    // The render (view) distance range, in chunks.
+    //
+    //   kMinViewDistance         MC's minimum (Options.renderDistance 2..32).
+    //   kMaxOptionsViewDistance  MC's maximum: the Video Settings slider,
+    //                            options.txt and every graphics preset stop
+    //                            here, and so does a dedicated server's cap.
+    //   kMaxDebugViewDistance    The engine's hard ceiling, reachable only
+    //                            from the ImGui Render Controls panel as a
+    //                            session-only override (GameSettings::
+    //                            SetDebugRenderDistanceOverride) and honoured
+    //                            only by the integrated server for its owner.
+    //
+    // Nothing may be sized by kMaxDebugViewDistance itself: everything that
+    // scales with the view is sized by the distance actually in use (and the
+    // client's occlusion graph by the chunks actually loaded — ChunkRenderer::
+    // FarViewGraphRadius), so the ceiling costs nothing until it is used.
+    // 1024 squared still fits a long in the test below.
+    inline constexpr int kMinViewDistance        = 2;
+    inline constexpr int kMaxOptionsViewDistance = 32;
+    inline constexpr int kMaxDebugViewDistance   = 1024;
+
     inline bool IsWithinChunkViewDistance(int centerX, int centerZ, int viewDistance,
                                           int chunkX, int chunkZ, bool includeNeighbors) {
         const int bufferRange = includeNeighbors ? 2 : 1;

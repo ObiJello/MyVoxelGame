@@ -1,6 +1,8 @@
 // File: src/platform/GameDirectory.hpp
 #pragma once
 
+#include "common/world/math/ChunkViewDistance.hpp"
+
 #include <algorithm>
 #include <string>
 #include <unordered_map>
@@ -289,8 +291,41 @@ namespace Platform {
         }
         void SetCloudRange(int range) { SetInt("cloudRange", range); NoteGraphicsOptionChanged(); }
 
-        int GetRenderDistance() const { return std::clamp(GetInt("renderDistance", 12), 2, 32); }
-        void SetRenderDistance(int distance) { SetInt("renderDistance", std::clamp(distance, 2, 32)); NoteGraphicsOptionChanged(); }
+        // MC renderDistance 2..32. GetRenderDistance is the distance IN USE —
+        // the debug override when one is active, otherwise the saved option —
+        // and is what every consumer (ClientConfigC2S, the renderer, fog)
+        // reads. GetSavedRenderDistance is only ever the options.txt value,
+        // for the Video Settings slider, which cannot represent more than 32.
+        int GetRenderDistance() const {
+            return m_debugRenderDistanceOverride > 0 ? m_debugRenderDistanceOverride : GetSavedRenderDistance();
+        }
+        int GetSavedRenderDistance() const {
+            return std::clamp(GetInt("renderDistance", 12), Game::Math::kMinViewDistance,
+                              Game::Math::kMaxOptionsViewDistance);
+        }
+        // The normal setter (Video Settings, presets, options.txt): writes the
+        // saved option and REPLACES any debug override, so moving the normal
+        // slider always takes effect.
+        void SetRenderDistance(int distance) {
+            m_debugRenderDistanceOverride = 0;
+            SetInt("renderDistance", std::clamp(distance, Game::Math::kMinViewDistance,
+                                                Game::Math::kMaxOptionsViewDistance));
+            NoteGraphicsOptionChanged();
+        }
+        // ImGui Render Controls only: a render distance beyond the options
+        // range, up to Game::Math::kMaxDebugViewDistance. Session-only — it is
+        // never written to options.txt (it lives outside m_settings), so a
+        // restart comes back at the saved value. A value inside the options
+        // range is not an override: it goes through SetRenderDistance and is
+        // saved like any other change.
+        void SetDebugRenderDistanceOverride(int distance) {
+            if (distance <= Game::Math::kMaxOptionsViewDistance) {
+                SetRenderDistance(distance);
+                return;
+            }
+            m_debugRenderDistanceOverride = std::min(distance, Game::Math::kMaxDebugViewDistance);
+        }
+        bool HasDebugRenderDistanceOverride() const { return m_debugRenderDistanceOverride > 0; }
 
         // MC simulationDistance 5..32: how far from the player the server
         // ticks entities, random ticks and fluids. Sent to the server in
@@ -575,6 +610,9 @@ namespace Platform {
         // Options.isApplyingGraphicsPreset): the setters it calls must not
         // flip the preset it is writing back to Custom.
         bool m_applyingGraphicsPreset = false;
+        // SetDebugRenderDistanceOverride's value; 0 = none. Deliberately not
+        // an m_settings entry, so Save() can never write it.
+        int m_debugRenderDistanceOverride = 0;
 
         // Create default settings
         void CreateDefaults();

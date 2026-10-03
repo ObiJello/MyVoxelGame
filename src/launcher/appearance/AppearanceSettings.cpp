@@ -75,6 +75,8 @@ namespace Launcher::Appearance {
         out["cape"] = cape;
         out["stick_painted"] = painted;
         out["stick_paint"] = paint.ToText();
+        out["stick_drawn"] = drawn;
+        out["stick_drawing"] = drawing.Empty() ? std::string() : drawing.ToHex();
     }
 
     Settings Settings::FromJson(const nlohmann::json& in) {
@@ -95,6 +97,18 @@ namespace Launcher::Appearance {
                 s.paint = *p;
             } else {
                 s.painted = false;
+            }
+            // (An older launcher's "stick_sculpt" — the retired 3D voxels —
+            // is not read, and goes with the next save.)
+            s.drawn = in.value("stick_drawn", false);
+            const std::string drawingHex = in.value("stick_drawing", std::string());
+            if (!drawingHex.empty()) {
+                std::string why;
+                if (auto drawing = Game::StickFigureDrawing::FromHex(drawingHex, &why)) {
+                    s.drawing = std::move(*drawing);
+                } else {
+                    Log::Warning("[Appearance] drawn figure dropped (%s)", why.c_str());
+                }
             }
             // A custom skin name is a bare file name; never a path.
             if (s.customSkin.find('/') != std::string::npos || s.customSkin.find('\\') != std::string::npos ||
@@ -149,8 +163,14 @@ namespace Launcher::Appearance {
         if (settings.mode == Game::AppearanceMode::StickFigure) {
             RemoveFile(skinOut);
             RemoveFile(capeOut);
-            if (settings.painted) {
-                const std::string text = settings.paint.ToText();
+            // The version-4 file: the paint and the drawing worn in its
+            // place, whichever there are.
+            Game::StickFigureFile file;
+            file.hasPaint = settings.painted;
+            file.paint = settings.paint;
+            if (settings.drawn) file.drawing = settings.drawing;
+            if (file.Any()) {
+                const std::string text = file.ToText();
                 if (WriteFileBytes(stickOut, std::vector<uint8_t>(text.begin(), text.end()))) {
                     files.stickFigurePath = stickOut;
                 }

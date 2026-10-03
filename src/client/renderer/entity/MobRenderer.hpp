@@ -280,6 +280,10 @@ namespace Render {
         struct ElytraDraw {
             glm::mat4 rootPx{1.0f};
             bool  baby = false;
+            // `rootPx` already carries the mini-adult fallback's 0.5 (a baby
+            // body with no baby mesh, kBabyScale on its matrix — a small
+            // armor stand): drawn as the baby elytra on the unscaled root.
+            bool  rootScaledForBaby = false;
             float rotX = 0.2617994f, rotY = 0.0f, rotZ = -0.2617994f;
             bool  crouching = false;
             bool  glint = false;
@@ -292,6 +296,19 @@ namespace Render {
         };
         void DrawElytras(const glm::mat4& projection, const glm::mat4& view,
                          const glm::vec3& cameraPos, const std::vector<ElytraDraw>& draws);
+        // One elytra's geometry (WingsLayer + ElytraModel, ElytraLayer.cpp)
+        // appended to `verts`/`idx` for a caller that batches it itself —
+        // the mob pass, the GUI capture. Returns the texture it samples
+        // (INVALID_TEXTURE: nothing appended).
+        TextureHandle AppendElytra(const ElytraDraw& d, std::vector<ModelVertex>& verts,
+                                   std::vector<uint32_t>& idx);
+        // The armor glint (armorCutoutNoCullGlint's GLINT half) over the
+        // geometry in [vFirst, vEnd) / [iFirst, iEnd): a copy with
+        // ARMOR_ENTITY_GLINT_TEXTURING UVs (scroll l0 / l1) and GlintAlpha in
+        // its colour, for an additive SRC_COLOR / ONE, depth-EQUAL draw.
+        static void AppendArmorGlint(std::vector<ModelVertex>& verts, std::vector<uint32_t>& idx,
+                                     size_t vFirst, size_t vEnd, size_t iFirst, size_t iEnd,
+                                     float l0, float l1);
 
         // ── Players drawn with the Minecraft player model (skins) ──────────
         //

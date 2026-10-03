@@ -68,13 +68,13 @@ namespace Render {
 
         // Initialize mega-buffer slab pools (one pool per render layer).
         // Slab sizes: fixed-size GPU buffers that never grow (new slabs allocated when full).
-        m_opaqueMegaBuffer.Initialize(512000, 1024000);   // 512K verts/slab (~12MB each)
-        m_cutoutMegaBuffer.Initialize(256000, 512000);     // 256K verts/slab (~6MB each)
+        m_opaqueMegaBuffer.Initialize(512000, 1024000, false, "opaque");   // 512K verts/slab (~12MB each)
+        m_cutoutMegaBuffer.Initialize(256000, 512000, false, "cutout");     // 256K verts/slab (~6MB each)
         // Per-section index buffers for TRANSLUCENT only — MC's layout
         // (CompiledSectionMesh -> SectionBuffers per layer). Re-sorts rewrite
         // this layer's indices constantly, and writing into a shared slab IBO
         // with draws in flight cost 0.18ms/write against a 0.011ms sort.
-        m_translucentMegaBuffer.Initialize(256000, 512000, /*perSectionIndexBuffers=*/false);
+        m_translucentMegaBuffer.Initialize(256000, 512000, /*perSectionIndexBuffers=*/false, "translucent");
 
         // Create the shared block VAO (GL_ARB_vertex_attrib_binding).
         // One VAO defines the vertex format; mega-buffer VBOs are switched at
@@ -94,6 +94,9 @@ namespace Render {
         m_opaqueMegaBuffer.Shutdown();
         m_cutoutMegaBuffer.Shutdown();
         m_translucentMegaBuffer.Shutdown();
+        m_relocationQueue.clear();
+        m_relocationsInFlight.clear();
+        m_relocationPool = nullptr;
 
         // Clean up GPU data tracking (no per-section GPU resources to destroy anymore)
         {
@@ -154,20 +157,107 @@ namespace Render {
         m_cutoutMegaBuffer.RetireFreedRegions();
         m_translucentMegaBuffer.RetireFreedRegions();
 
-        // Periodic cleanup: remove empty slabs from mega-buffer pools.
-        // With slab pool architecture, this just frees unused GPU memory — no data copy.
-        static int compactFrameCounter = 0;
-        if (++compactFrameCounter >= 600) {
-            compactFrameCounter = 0;
+        // Periodic cleanup: release empty slabs from mega-buffer pools.
+        // With slab pool architecture, this just frees unused GPU memory — no
+        // data copy. Any empty slab, not just the last one (released slots
+        // stay as holes, see ChunkMegaBuffer::CompactIfNeeded); O(slabs), so
+        // a short period costs nothing and a drained slab goes within ~2 s.
+        // Per manager: a function-static counter shared by every level's
+        // call reset at the same level each time, and the others never ran.
+        if (++m_compactFrameCounter >= 120) {
+            m_compactFrameCounter = 0;
             m_opaqueMegaBuffer.CompactIfNeeded();
             m_cutoutMegaBuffer.CompactIfNeeded();
             m_translucentMegaBuffer.CompactIfNeeded();
         }
 
+        // Move thinly spread sections out of the sparsest slabs so they
+        // empty and the cleanup above can release them.
+        DefragmentMegaBuffers();
+
         // The results themselves are drained by DrainMeshResults, once per
         // frame for every level, because the queue they sit in is shared.
         m_stats.meshUploadsThisFrame = 0;
         m_stats.gpuUploadTimeMs = 0.0f;
+    }
+
+    void ClientMeshManager::DefragmentMegaBuffers() {
+        PROFILE_ZONE;
+        ++m_defragFrame;
+
+        // A relocation whose result never comes back (cancelled, superseded
+        // by a real edit, chunk unloaded) stops holding the batch open.
+        if (!m_relocationsInFlight.empty() && m_defragFrame % 60 == 0) {
+            for (auto it = m_relocationsInFlight.begin(); it != m_relocationsInFlight.end(); ) {
+                if (m_defragFrame - it->second > kRelocationTimeoutFrames) it = m_relocationsInFlight.erase(it);
+                else ++it;
+            }
+        }
+
+        // Only the bound level's scheduler runs every frame; a relocation
+        // marked in another level would sit dirty until it is entered.
+        if (this != g_clientMeshManager || !m_chunkManager) {
+            m_relocationQueue.clear();
+            return;
+        }
+
+        // Idle-ish: no real meshing backlog (anything queued beyond our own
+        // relocations is streaming or edits, which come first) and no
+        // results waiting to upload. Re-meshes then cost worker time the
+        // client is not using, and their uploads a few per frame.
+        if (GetPendingMeshBuildCount() > kRelocationMaxInFlight + 4 ||
+            GetCompletedResultCount() > kRelocationMaxInFlight) {
+            return;
+        }
+
+        // Next batch only once the previous one has fully landed, so the
+        // pool's progress check (CollectRelocationCandidates) sees its
+        // effect. Round-robin over the pools: a section re-mesh moves its
+        // geometry in all three layers, so any pool's drain tidies the
+        // others too.
+        if (m_relocationQueue.empty() && m_relocationsInFlight.empty() &&
+            m_defragFrame - m_lastRelocationBatchFrame >= kRelocationBatchIntervalFrames) {
+            m_lastRelocationBatchFrame = m_defragFrame;
+            ChunkMegaBuffer* pools[3] = {&m_opaqueMegaBuffer, &m_cutoutMegaBuffer, &m_translucentMegaBuffer};
+            for (int n = 0; n < 3; ++n) {
+                const int layer = (m_defragLayerCursor + n) % 3;
+                if (!pools[layer]->CollectRelocationCandidates(m_relocationScratch, kRelocationBatch)) continue;
+                m_relocationPool = pools[layer];
+                m_relocationQueue.reserve(m_relocationScratch.size());
+                for (const MegaBufferSectionKey& k : m_relocationScratch) {
+                    m_relocationQueue.push_back(SectionKey{k.chunkPos, k.sectionY});
+                }
+                m_defragLayerCursor = (layer + 1) % 3;
+                break;
+            }
+        }
+
+        // A few marks per frame: each costs one region snapshot in the next
+        // scheduling pass and one upload when it lands — the per-frame bound
+        // (~0.1 ms each at most) that keeps this off the frame time. The old
+        // mesh draws until the upload swaps in the new one, in one call.
+        int issued = 0;
+        while (!m_relocationQueue.empty() && issued < kRelocationsPerFrame &&
+               m_relocationsInFlight.size() < kRelocationMaxInFlight) {
+            const SectionKey key = m_relocationQueue.back();
+            m_relocationQueue.pop_back();
+            // Moved already (re-meshed for its own reasons), or the drain
+            // ended (emptied, abandoned): nothing to do for this one.
+            if (!m_relocationPool ||
+                !m_relocationPool->IsInDrainSlab(MegaBufferSectionKey{key.chunkPos, key.sectionY})) {
+                continue;
+            }
+            bool active = false;
+            {
+                std::shared_lock<std::shared_mutex> lock(m_gpuDataMutex);
+                active = m_gpuData.find(key) != m_gpuData.end();   // not parked, not gone
+            }
+            if (!active) continue;
+            if (!m_chunkManager->MarkSectionForRelocation(key.chunkPos, key.sectionY)) continue;
+            m_relocationsInFlight.emplace(key, m_defragFrame);
+            ++issued;
+        }
+        PROFILE_PLOT("MegaBuffer/RelocationsInFlight", static_cast<int64_t>(m_relocationsInFlight.size()));
     }
 
     // ========================================================================
@@ -382,6 +472,11 @@ namespace Render {
     
     void ClientMeshManager::ProcessMeshBuildResult(const Network::MeshBuildResult& result) {
         PROFILE_ZONE_N("ProcessMeshResult");
+        // A relocation's result is back (uploaded or dropped): it stops
+        // counting toward the in-flight cap (DefragmentMegaBuffers).
+        if (!m_relocationsInFlight.empty()) {
+            m_relocationsInFlight.erase(SectionKey{result.chunkPos, result.sectionY});
+        }
         // Let ClientChunkManager decide whether to accept or drop this result
         auto decision = m_chunkManager->AcceptMeshResult(result);
 

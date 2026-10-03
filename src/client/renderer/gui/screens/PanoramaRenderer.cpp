@@ -194,6 +194,7 @@ void main() {
     }
 
     std::shared_ptr<PanoramaRenderer::LastWorldFaces> PanoramaRenderer::s_memoryFaces;
+    bool PanoramaRenderer::s_lastWorldAdopted = false;
     std::thread PanoramaRenderer::s_saveThread;
     TextureHandle PanoramaRenderer::s_adoptedFaces[6] = {INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
                                                         INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE};
@@ -210,6 +211,7 @@ void main() {
             DiscardAdoptedFaces();
             s_adoptedSize = size;
         }
+        s_lastWorldAdopted = false;   // a new capture: nothing has taken it yet
         if (s_adoptedFaces[face] != INVALID_TEXTURE) g_renderBackend->DeferredDestroyTexture(s_adoptedFaces[face]);
         if (s_mipJobs[face].valid()) s_mipJobs[face].wait();
         // Two levels reserved, both empty; the tiles fill level 0 and the
@@ -241,11 +243,15 @@ void main() {
         // the face by ~1.3×; without it that minification sparkled and
         // read as "not the world" right at the switch. `faces` keeps the
         // buffer alive for the job.
-        s_mipJobs[face] = std::async(std::launch::async, [faces, face]() {
+        s_mipJobs[face] = std::async(std::launch::async, [faces, face]() mutable {
             Mipmap::Image level0;
             level0.width  = faces->size;
             level0.height = faces->size;
             level0.pixels = faces->rgba[static_cast<size_t>(face)];   // the filter consumes its input
+            // The job's state (and this capture) lives until a title frame
+            // collects the result; holding the pack that long kept all six
+            // faces resident in the next world.
+            faces.reset();
             std::vector<Mipmap::Image> levels = Mipmap::GenerateMipLevels(
                 std::move(level0), /*maxLevel=*/1, Mipmap::Strategy::Mean, 0.0f, /*isItemTexture=*/false);
             return levels.size() > 1 ? std::move(levels[1]) : Mipmap::Image{};
@@ -276,6 +282,25 @@ void main() {
             g_renderBackend->SetTextureFilter(tex, TextureFilter::LinearMipmapLinear, TextureFilter::Linear);
             return;   // one a frame: ~10 MB, well inside a vsync frame
         }
+    }
+
+    void PanoramaRenderer::ReleaseCaptureMemory() {
+        s_memoryFaces.reset();
+        for (int face = 0; face < 6; ++face) {
+            // A half-size level nobody pumped (the title was left, or never
+            // shown, before its frame came): nothing pumps it in a world, so
+            // it would sit in its future (~9.5 MB) until the next leave.
+            // Each job is ~100 ms and started at the leave, so one still
+            // running here is all but done — wait it out, then drop it.
+            if (s_mipJobs[face].valid()) {
+                (void)s_mipJobs[face].get();
+                s_mipUploaded[face] = true;
+            }
+        }
+        // The capture's GPU faces the title never adopted (a world joined
+        // without the title taking them): ~48 MB each, and the next title
+        // loads the PNGs instead. Adopted ones are already the title's.
+        DiscardAdoptedFaces();
     }
 
     void PanoramaRenderer::DiscardAdoptedFaces() {
@@ -325,7 +350,9 @@ void main() {
 
     void PanoramaRenderer::SaveLastWorldAsync(std::shared_ptr<LastWorldFaces> faces) {
         if (!faces || faces->size <= 0) return;
-        s_memoryFaces = faces;
+        // Only while the title can still need it: once it has adopted the
+        // GPU faces, nothing reads this copy (the writer below holds its own).
+        if (!s_lastWorldAdopted) s_memoryFaces = faces;
         // The identity is known now; the files follow.
         s_lastWorldId         = faces->worldId;
         s_lastWorldBaseYaw    = faces->baseYaw;
@@ -519,6 +546,9 @@ void main() {
     // and m_texturesValid is false (gradient fallback).
     bool PanoramaRenderer::TryLoadSet(const std::string& slug) {
         DestroyFaceTextures();
+        // Another set: the capture's in-memory copy has no reader (the PNGs
+        // being written serve a later "Last World").
+        if (slug != kLastWorldSet) s_memoryFaces.reset();
         m_easeActive = m_easeDone = false;   // a new set drifts freely
         bool allValid = true;
         // The set just captured, already on the GPU (built tile by tile
@@ -530,6 +560,7 @@ void main() {
                 for (int i = 0; i < 6; ++i) { m_faces[i] = s_adoptedFaces[i]; s_adoptedFaces[i] = INVALID_TEXTURE; }
                 Log::Info("PanoramaRenderer: last-world set adopted from the capture (%dx%d faces)", s_adoptedSize, s_adoptedSize);
                 s_adoptedSize   = 0;
+                s_lastWorldAdopted = true;
                 s_memoryFaces.reset();   // the writer thread holds its own reference
                 m_overlay       = INVALID_TEXTURE;   // a capture has no overlay
                 m_texturesValid = true;

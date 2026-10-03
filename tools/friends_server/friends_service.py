@@ -500,6 +500,12 @@ class Service:
         self.db = db
         self.presence = Presence()
         self.relay = Relay()
+        # Optional chat.db migration feature (see docs/file-sync.md in the
+        # game repo). account_id -> {conn, host, port, created}. Entirely
+        # separate from presence/hosting: a source advertises here, a client
+        # asks here, and the pairing rides the SAME relay splice as a game
+        # join. Nothing here affects existing accounts/presence/join flows.
+        self.filesync_offers = {}
 
     # ── event push ──────────────────────────────────────────────────────
 
@@ -816,6 +822,54 @@ class Service:
     def op_ping(self, body, peer_ip, conn):
         return {"ok": True}
 
+    # ── optional chat.db migration (file sync) ──────────────────────────
+    # Additive, backward-compatible: the game's hosting/join/presence paths
+    # are untouched. A dedicated file-sync connection offers/asks here and
+    # the two halves are spliced through the existing Relay.
+
+    def op_filesync_offer(self, body, peer_ip, conn):
+        """A source advertises it will serve a file to a friend. Needs a
+        persistent NDJSON connection so the relay push can reach it."""
+        me = self._auth(body, conn)
+        if me is None:
+            return {"ok": False, "error": "bad_token"}
+        if conn is None:
+            return {"ok": False, "error": "needs_session"}
+        self.filesync_offers[me["id"]] = {
+            "conn": conn,
+            "host": str(body.get("host", "")),
+            "port": int(body.get("port", 0)),
+            "created": time.time(),
+        }
+        log.info("filesync: %s (id %d) offering (direct %s:%s)",
+                 me["name"], me["id"], body.get("host", ""), body.get("port", 0))
+        return {"ok": True}
+
+    async def op_filesync_connect(self, body, peer_ip, conn):
+        """A client asks to reach a friend (by name) that is offering a file.
+        Mints a relay ticket, pushes it to the source, and hands the client
+        back the ticket plus the source's direct hint (tried first)."""
+        me = self._auth(body, conn)
+        if me is None:
+            return {"ok": False, "error": "bad_token"}
+        row = self.db.find_account(str(body.get("name", "")))
+        if row is None:
+            return {"ok": False, "error": "not_found"}
+        src_id = row["id"]
+        if not self.db.are_friends(me["id"], src_id):
+            return {"ok": False, "error": "not_friends"}
+        offer = self.filesync_offers.get(src_id)
+        if offer is None:
+            return {"ok": False, "error": "not_offering"}
+        ticket = self.relay.create(src_id, me["id"])
+        offer["conn"].send_line(
+            (json.dumps({"event": "filesync_relay", "ticket": ticket},
+                        separators=(",", ":")) + "\n").encode())
+        log.info("filesync: relay ticket minted (source id %d <-> client id %d)",
+                 src_id, me["id"])
+        return {"ok": True, "ticket": ticket,
+                "host": offer.get("host", ""), "port": offer.get("port", 0)}
+
 
 # ═══════════════════════════════ front-ends ════════════════════════════════
 
@@ -894,6 +948,10 @@ async def serve_ndjson(service: Service, first: bytes,
             asyncio.IncompleteReadError, json.JSONDecodeError):
         pass
     finally:
+        # Drop this connection's file-sync offer, if it was the one offering.
+        o = service.filesync_offers.get(account["id"])
+        if o is not None and o["conn"] is conn:
+            service.filesync_offers.pop(account["id"], None)
         if service.presence.drop_conn(account["id"], conn):
             # The moment the last connection dropped is the "last online"
             # time friends see; written now, not after the grace period, so

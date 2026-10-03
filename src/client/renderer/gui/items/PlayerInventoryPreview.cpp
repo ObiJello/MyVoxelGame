@@ -235,14 +235,19 @@ namespace Render {
         const StickFigureColors colors = (!look.IsSkin() && look.hasPaint)
             ? StickFigureColors::FromPaint(look.paint, [](PlayerColor c) { return c; })
             : StickFigureColors::Uniform(color);
+        // A drawn figure stands in its place (below, after the view's frame).
+        uint64_t drawnRevision = 0;
+        const Game::StickFigureDrawing* drawn = Client::PlayerSkins::Get().LocalDrawing(&drawnRevision);
         std::vector<StickVertex> lineVerts;
         std::vector<StickVertex> ringTris;
         std::vector<StickVertex> discTris;
-        BuildStickFigure(lineVerts, ringTris, discTris,
-                         /*feetPos*/ glm::vec3(0.0f),
-                         effective.headYawDeg, effective.bodyYawDeg,
-                         effective.headPitchDeg, effective.isCrouching,
-                         colors, effective.isSitting);
+        if (!drawn) {
+            BuildStickFigure(lineVerts, ringTris, discTris,
+                             /*feetPos*/ glm::vec3(0.0f),
+                             effective.headYawDeg, effective.bodyYawDeg,
+                             effective.headPitchDeg, effective.isCrouching,
+                             colors, effective.isSitting);
+        }
 
         // ─── Outer view rotation ─────────────────────────────────────────────
         // We negate Y inside ProjectToScreen (world-Y-up → screen-Y-down) so we
@@ -268,6 +273,61 @@ namespace Render {
         // (e.g. 1.5 px) makes the preview feel chunkier than the actual model.
         const float kLineWidth = 1.0f;
         const auto sz = static_cast<float>(size);
+
+        // ─── A drawn figure (Game::StickFigureDrawing) ───────────────────────
+        // Its strokes instead of the figure, turned to the preview's body
+        // yaw and widened as the world widens them (a ribbon and a round
+        // joint per point, StickFigureGeometry.hpp) toward a viewer far out
+        // along +Z — the box's orthographic view — then flattened onto the
+        // box in stroke order, so a later stroke lies over an earlier one as
+        // on the canvas. Flat colours like the figure's lines. A drawing
+        // taller than the player is shrunk about its feet to the 1.8-block
+        // frame the box is laid out for; no stroke is thinner than a pixel.
+        if (drawn) {
+            static DrawingMesh s_mesh;
+            static uint64_t s_revision = 0;
+            if (drawnRevision != s_revision) {
+                BuildDrawingMesh(*drawn, s_mesh);
+                s_revision = drawnRevision;
+            }
+            PlayerColor palette[static_cast<int>(Game::PlayerColorId::Count)];
+            for (int i = 0; i < static_cast<int>(Game::PlayerColorId::Count); ++i) {
+                const auto& e = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(i));
+                palette[i] = PlayerColor{ e.r, e.g, e.b, 255 };
+            }
+            std::vector<StickVertex> lines;
+            AppendDrawingLines(lines, s_mesh, glm::vec3(0.0f), effective.bodyYawDeg,
+                               /*isCrouching=*/false, palette);
+            constexpr float kFrameHeight = 1.8f;
+            const float fit = s_mesh.top > kFrameHeight ? kFrameHeight / s_mesh.top : 1.0f;
+            const glm::mat4 fitted = glm::scale(model, glm::vec3(fit));
+            const float minRadius = 0.5f / std::max(sz, 1.0f);
+            for (StickVertex& v : lines) {
+                const glm::vec3 m = glm::vec3(fitted * glm::vec4(v.x, v.y, v.z, 1.0f));
+                v.x = m.x; v.y = m.y; v.z = m.z;
+                ScaleLineWidth(v, fit);
+                v.u = std::max(v.u, minRadius);
+            }
+            std::vector<StickVertex> tris;
+            for (size_t i = 0; i + 1 < lines.size(); i += 2) {
+                // The viewer straight out along +Z from each segment: the
+                // box's projection drops Z, so it must face Z exactly.
+                const glm::vec3 eye((lines[i].x + lines[i + 1].x) * 0.5f, (lines[i].y + lines[i + 1].y) * 0.5f,
+                                    (lines[i].z + lines[i + 1].z) * 0.5f + 1000.0f);
+                tris.clear();
+                AppendDrawingStrokeTriangles(lines[i], lines[i + 1], eye, tris);
+                const uint32_t color = PackColorRGBA(lines[i].r, lines[i].g, lines[i].b, 255);
+                for (size_t k = 0; k + 2 < tris.size(); k += 3) {
+                    glm::vec2 p[3];
+                    for (int c = 0; c < 3; ++c) {
+                        const StickVertex& t = tris[k + static_cast<size_t>(c)];
+                        p[c] = glm::vec2(centerX + t.x * sz, centerY - t.y * sz);
+                    }
+                    EmitTriangleQuad(rs, p[0], p[1], p[2], color, scissor);
+                }
+            }
+            return;
+        }
 
         // ─── Project + emit lines ────────────────────────────────────────────
         // BuildStickFigure outputs line vertices as PAIRS (a, b, a, b, ...).

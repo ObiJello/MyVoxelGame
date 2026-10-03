@@ -193,7 +193,7 @@ namespace Render {
         void ReleaseGpuResources();
 
         // Debug: Save atlas to file
-        bool SaveAtlasDebugImage(const std::string& outputPath) const;
+        bool SaveAtlasDebugImage(const std::string& outputPath);
 
         // This atlas's animated sprites (MC TextureAtlas.cycleAnimationFrames).
         TextureAnimator* GetTextureAnimator() const { return m_animator.get(); }
@@ -250,7 +250,6 @@ namespace Render {
 
         // Atlas pixel data (for debug saving)
         std::vector<unsigned char> atlasData;
-        std::vector<unsigned char> originalAtlasData; // Original data without border extrusion
         // Retained so the mip chain can be rebuilt when the debug UI toggles
         // mipmaps or changes the level — those paths recreate the texture and
         // would otherwise leave levels 1..N undefined.
@@ -318,6 +317,15 @@ namespace Render {
         // Helper: Copy texture to atlas at specified position
         void CopyTextureToAtlas(const TextureSource& source,
                                int destX, int destY);
+
+        // Level 0 is not kept on the CPU once the sheet is on the GPU (32 MB
+        // for the block atlas). RestoreLevel0 rebuilds it into `atlasData`
+        // from the retained sources exactly as CreateAtlasTexture laid it out
+        // (sprites copied, then border extrusion when `extrude`) for the
+        // paths that need it again: a mip-chain rebuild, RebuildAtlas, the
+        // F3+S dump. ReleaseLevel0 hands the memory back afterwards.
+        bool RestoreLevel0(bool extrude);
+        void ReleaseLevel0();
         
         // Builds the 16 edge-variant tiles each connected-texture block needs
         // and appends them to `sources` as ordinary entries. See

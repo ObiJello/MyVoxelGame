@@ -125,7 +125,6 @@ namespace Render {
         textureKeyToUV.clear();
         pendingAnimations.clear();
         atlasData.clear();
-        originalAtlasData.clear();
         if (!ParseAtlasJSON(atlasJsonPath, texturesRootPath, textureSources)) {
             Log::Error("Failed to parse atlas JSON");
             return false;
@@ -613,8 +612,6 @@ namespace Render {
         if (GetConfig().spriteTable) BuildSpriteTable();
         BuildSpriteAlpha(sources, packedRects);
         
-        // Save original atlas data before any modifications
-        originalAtlasData = atlasData;
 
         // Pre-fill transparent pixels with nearest opaque color (prevents dark mipmap fringes)
         // This must happen before border extrusion so the extrusion also picks up solidified colors
@@ -665,11 +662,10 @@ namespace Render {
 
         RegisterAnimations();
 
-        // Atlas is now on GPU — free the CPU copy to save 64-256MB of RAM.
-        // RebuildAtlas() regenerates from source textures if ever needed.
-        size_t freedBytes = atlasData.size();
-        atlasData.clear();
-        atlasData.shrink_to_fit();
+        // Atlas is now on GPU — free the CPU copy (RestoreLevel0 rebuilds it
+        // from the sources whenever a later path needs it).
+        const size_t freedBytes = atlasData.size();
+        ReleaseLevel0();
         Log::Info("Atlas CPU data freed (%.1f MB, GPU copy retained)",
                   static_cast<double>(freedBytes) / (1024.0 * 1024.0));
 
@@ -683,6 +679,7 @@ namespace Render {
         if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            ReleaseLevel0();
             RegisterAnimations();   // the frames carry the new chain depth
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
         }
@@ -695,6 +692,7 @@ namespace Render {
             // The chain is CPU-authored, so a new level count means rebuilding
             // it — the driver is not going to fill the extra levels for us.
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            ReleaseLevel0();
             RegisterAnimations();
             Log::Info("Set mipmap level to %d", m_mipmapLevel);
         }
@@ -714,6 +712,7 @@ namespace Render {
             // chain has to be rebuilt; switching OFF only needs the sampler
             // change above, the unused levels can stay resident.
             if (enabled) BuildAndUploadMipChain(textureSources, m_packedRects);
+            ReleaseLevel0();
             RegisterAnimations();
             Log::Info("AtlasBuilder mipmap levels -> %d (%s)", levels, enabled ? "on" : "off");
         }
@@ -766,40 +765,22 @@ namespace Render {
             Log::Warning("Cannot rebuild atlas: no texture created yet");
             return;
         }
-
-        if (originalAtlasData.empty()) {
-            Log::Warning("Cannot rebuild atlas: no original data saved");
+        // Level 0 from the sources: extruded for the Minecraft style (the
+        // padding the mip chain samples), bare sprites for Classic.
+        if (!RestoreLevel0(useMinecraftStyle)) {
+            Log::Warning("Cannot rebuild atlas: no sources to rebuild from");
             return;
         }
 
         // Destroy existing texture
         DestroyAtlasTextures();
 
-        // If Minecraft style, apply solidify + border extrusion to a copy of the data
-        const unsigned char* uploadData = originalAtlasData.data();
-        if (useMinecraftStyle) {
-            atlasData = originalAtlasData;
-            // Note: SolidifyTransparentPixels skipped — causes grass side overlay
-            // to render all-green. Edge extrusion alone is sufficient for mipmap safety.
-
-            // Extrude borders into padding region
-            for (const auto& kvp : textureKeyToUV) {
-                const AtlasUVRect& uvRect = kvp.second;
-                int x = static_cast<int>(uvRect.uvMin.x * atlasWidth);
-                int y = static_cast<int>(uvRect.uvMin.y * atlasHeight);
-                int width = static_cast<int>((uvRect.uvMax.x - uvRect.uvMin.x) * atlasWidth);
-                int height = static_cast<int>((uvRect.uvMax.y - uvRect.uvMin.y) * atlasHeight);
-                ExtrudeTextureBorders(x, y, width, height);
-            }
-            uploadData = atlasData.data();
-        }
-
         // Create new texture via backend
         // Use RGBA8 — all rendering is done in gamma space like Minecraft.
         // No sRGB decode on sample; shade values are direct gamma-space multipliers.
         Render::TextureFormat format = Render::TextureFormat::RGBA8;
         m_atlasTexture = Render::g_renderBackend->CreateTexture2D(
-            atlasWidth, atlasHeight, format, uploadData);
+            atlasWidth, atlasHeight, format, atlasData.data());
 
         // Set filtering based on mode
         mipmapEnabled = useMinecraftStyle;
@@ -808,6 +789,7 @@ namespace Render {
         // Fresh texture object, so its levels above 0 start undefined — the
         // CPU chain has to be re-uploaded onto it.
         BuildAndUploadMipChain(textureSources, m_packedRects);
+        ReleaseLevel0();
 
         // Update TextureAnimator with the new atlas handle
         RegisterAnimations();
@@ -823,17 +805,13 @@ namespace Render {
         if (packedRects.empty() || sources.empty()) return;
 
         // Level 0 is written back in here, so the CPU buffer has to exist. It
-        // is released after the initial build to save the RAM, which means a
-        // later rebuild (debug UI mipmap toggle) arrives with it empty.
+        // is released after every build to save the RAM, so a later rebuild
+        // (the mipmap options) rebuilds it from the sources first.
         const size_t expected = static_cast<size_t>(atlasWidth) *
                                 static_cast<size_t>(atlasHeight) * 4u;
-        if (atlasData.size() != expected) {
-            if (originalAtlasData.size() == expected) {
-                atlasData = originalAtlasData;
-            } else {
-                Log::Warning("Mip chain skipped: no CPU atlas copy to rebuild from");
-                return;
-            }
+        if (atlasData.size() != expected && !RestoreLevel0(m_borderExtrusionEnabled)) {
+            Log::Warning("Mip chain skipped: no sources to rebuild level 0 from");
+            return;
         }
 
         // Every sprite in this atlas is a multiple of 16 in both axes and the
@@ -959,10 +937,6 @@ namespace Render {
                 levelH[static_cast<size_t>(k)], levelData[static_cast<size_t>(k)].data());
         }
 
-        // Keep the retained CPU copy in step with what the GPU now holds, so
-        // RebuildAtlas and the debug dump show the real level 0.
-        originalAtlasData = atlasData;
-
         Log::Info("Built MC-style mip chain: %d levels, %zu sprites", levels, packedRects.size());
     }
 
@@ -982,6 +956,29 @@ namespace Render {
         }
     }
     
+    bool AtlasBuilder::RestoreLevel0(bool extrude) {
+        if (atlasWidth <= 0 || atlasHeight <= 0 || m_packedRects.empty() || textureSources.empty()) return false;
+        atlasData.assign(static_cast<size_t>(atlasWidth) * static_cast<size_t>(atlasHeight) * 4u, 0);
+        for (const auto& rect : m_packedRects) {
+            if (rect.textureIndex < 0 || rect.textureIndex >= static_cast<int>(textureSources.size())) continue;
+            const TextureSource& source = textureSources[static_cast<size_t>(rect.textureIndex)];
+            if (source.data.empty()) continue;
+            CopyTextureToAtlas(source, rect.x, rect.y);
+        }
+        if (extrude) {
+            for (const auto& rect : m_packedRects) {
+                if (rect.textureIndex < 0 || rect.textureIndex >= static_cast<int>(textureSources.size())) continue;
+                ExtrudeTextureBorders(rect.x, rect.y, rect.width, rect.height);
+            }
+        }
+        return true;
+    }
+
+    void AtlasBuilder::ReleaseLevel0() {
+        atlasData.clear();
+        atlasData.shrink_to_fit();
+    }
+
     void AtlasBuilder::ExtrudeTextureBorders(int textureX, int textureY,
                                             int textureWidth, int textureHeight) {
         // Extrude edges by m_padding pixels to prevent mipmap bleeding.
@@ -1311,30 +1308,36 @@ namespace Render {
         return false;
     }
 
-    bool AtlasBuilder::SaveAtlasDebugImage(const std::string& outputPath) const {
-        // `atlasData` is freed once the sheet is on the GPU (BuildFromJSON);
-        // `originalAtlasData` is the level-0 copy kept for RebuildAtlas, and
-        // is what a dump after startup has to read. F3+S always said "could
-        // not save" because it only looked at the freed one.
-        const std::vector<unsigned char>& pixels = atlasData.empty() ? originalAtlasData : atlasData;
-        if (pixels.empty() || atlasWidth <= 0 || atlasHeight <= 0 ||
-            pixels.size() < static_cast<size_t>(atlasWidth) * static_cast<size_t>(atlasHeight) * 4) {
+    bool AtlasBuilder::SaveAtlasDebugImage(const std::string& outputPath) {
+        // `atlasData` is freed once the sheet is on the GPU, so a dump after
+        // startup rebuilds level 0 from the sources for the duration of the
+        // write. It matches the uploaded level 0 except under alpha 0, where
+        // the mip chain's cutout strategies also rewrite the colour — pixels
+        // a PNG viewer shows as transparent either way.
+        const bool restored = atlasData.empty();
+        if (restored && !RestoreLevel0(m_borderExtrusionEnabled)) {
             Log::Warning("No atlas data to save");
+            return false;
+        }
+        if (atlasWidth <= 0 || atlasHeight <= 0 ||
+            atlasData.size() < static_cast<size_t>(atlasWidth) * static_cast<size_t>(atlasHeight) * 4) {
+            Log::Warning("No atlas data to save");
+            if (restored) ReleaseLevel0();
             return false;
         }
 
         // Save as PNG
-        int result = stbi_write_png(outputPath.c_str(),
-                                   atlasWidth, atlasHeight, 4,
-                                   pixels.data(), atlasWidth * 4);
+        const int result = stbi_write_png(outputPath.c_str(),
+                                          atlasWidth, atlasHeight, 4,
+                                          atlasData.data(), atlasWidth * 4);
+        if (restored) ReleaseLevel0();
 
         if (result) {
             Log::Info("Saved atlas debug image to: %s", outputPath.c_str());
             return true;
-        } else {
-            Log::Error("Failed to save atlas debug image");
-            return false;
         }
+        Log::Error("Failed to save atlas debug image");
+        return false;
     }
 
     void AtlasBuilder::RegisterAnimations() {

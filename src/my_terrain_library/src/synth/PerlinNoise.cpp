@@ -108,24 +108,24 @@ PerlinNoise::PerlinNoise(XoroshiroRandomSource& random, int32_t firstOctave, con
                 ss << "octave_" << octave;
 
                 XoroshiroRandomSource octaveRandom = positional.fromHashOf(ss.str());
-                m_noiseLevels[i] = new ImprovedNoise(octaveRandom);
+                m_noiseLevels[i] = std::make_shared<ImprovedNoise>(octaveRandom);
             }
         }
     } else {
         // Legacy initialization (pre-1.18)
         // Reference: PerlinNoise.java lines 99-128
-        ImprovedNoise* zeroOctave = new ImprovedNoise(random);
+        std::shared_ptr<ImprovedNoise> zeroOctave = std::make_shared<ImprovedNoise>(random);
 
         if (zeroOctaveIndex >= 0 && zeroOctaveIndex < octaves) {
             double zeroOctaveAmplitude = m_amplitudes[zeroOctaveIndex];
             if (zeroOctaveAmplitude != static_cast<double>(0.0F)) {
                 m_noiseLevels[zeroOctaveIndex] = zeroOctave;
             } else {
-                delete zeroOctave;
+                zeroOctave.reset();
                 zeroOctave = nullptr;
             }
         } else {
-            delete zeroOctave;
+            zeroOctave.reset();
             zeroOctave = nullptr;
         }
 
@@ -133,7 +133,7 @@ PerlinNoise::PerlinNoise(XoroshiroRandomSource& random, int32_t firstOctave, con
             if (i < octaves) {
                 double amplitude = m_amplitudes[i];
                 if (amplitude != static_cast<double>(0.0F)) {
-                    m_noiseLevels[i] = new ImprovedNoise(random);
+                    m_noiseLevels[i] = std::make_shared<ImprovedNoise>(random);
                 } else {
                     skipOctave(random);
                 }
@@ -184,22 +184,22 @@ PerlinNoise::PerlinNoise(LegacyRandomSource& random, int32_t firstOctave, const 
                 ss << "octave_" << octave;
 
                 LegacyRandomSource octaveRandom = positional.fromHashOf(ss.str());
-                m_noiseLevels[i] = new ImprovedNoise(octaveRandom);
+                m_noiseLevels[i] = std::make_shared<ImprovedNoise>(octaveRandom);
             }
         }
     } else {
-        ImprovedNoise* zeroOctave = new ImprovedNoise(random);
+        std::shared_ptr<ImprovedNoise> zeroOctave = std::make_shared<ImprovedNoise>(random);
 
         if (zeroOctaveIndex >= 0 && zeroOctaveIndex < octaves) {
             double zeroOctaveAmplitude = m_amplitudes[zeroOctaveIndex];
             if (zeroOctaveAmplitude != static_cast<double>(0.0F)) {
                 m_noiseLevels[zeroOctaveIndex] = zeroOctave;
             } else {
-                delete zeroOctave;
+                zeroOctave.reset();
                 zeroOctave = nullptr;
             }
         } else {
-            delete zeroOctave;
+            zeroOctave.reset();
             zeroOctave = nullptr;
         }
 
@@ -207,7 +207,7 @@ PerlinNoise::PerlinNoise(LegacyRandomSource& random, int32_t firstOctave, const 
             if (i < octaves) {
                 double amplitude = m_amplitudes[i];
                 if (amplitude != static_cast<double>(0.0F)) {
-                    m_noiseLevels[i] = new ImprovedNoise(random);
+                    m_noiseLevels[i] = std::make_shared<ImprovedNoise>(random);
                 } else {
                     skipOctave(random);
                 }
@@ -256,7 +256,7 @@ PerlinNoise::PerlinNoise(levelgen::WorldgenRandom& random, int32_t firstOctave, 
                     ss << "octave_" << octave;
 
                     levelgen::WorldgenRandom octaveRandom{positional.fromHashOf(ss.str())};
-                    m_noiseLevels[i] = new ImprovedNoise(octaveRandom);
+                    m_noiseLevels[i] = std::make_shared<ImprovedNoise>(octaveRandom);
                 }
             }
         } else {
@@ -269,23 +269,23 @@ PerlinNoise::PerlinNoise(levelgen::WorldgenRandom& random, int32_t firstOctave, 
                     ss << "octave_" << octave;
 
                     levelgen::WorldgenRandom octaveRandom{positional.fromHashOf(ss.str())};
-                    m_noiseLevels[i] = new ImprovedNoise(octaveRandom);
+                    m_noiseLevels[i] = std::make_shared<ImprovedNoise>(octaveRandom);
                 }
             }
         }
     } else {
-        ImprovedNoise* zeroOctave = new ImprovedNoise(random);
+        std::shared_ptr<ImprovedNoise> zeroOctave = std::make_shared<ImprovedNoise>(random);
 
         if (zeroOctaveIndex >= 0 && zeroOctaveIndex < octaves) {
             double zeroOctaveAmplitude = m_amplitudes[zeroOctaveIndex];
             if (zeroOctaveAmplitude != static_cast<double>(0.0F)) {
                 m_noiseLevels[zeroOctaveIndex] = zeroOctave;
             } else {
-                delete zeroOctave;
+                zeroOctave.reset();
                 zeroOctave = nullptr;
             }
         } else {
-            delete zeroOctave;
+            zeroOctave.reset();
             zeroOctave = nullptr;
         }
 
@@ -293,7 +293,7 @@ PerlinNoise::PerlinNoise(levelgen::WorldgenRandom& random, int32_t firstOctave, 
             if (i < octaves) {
                 double amplitude = m_amplitudes[i];
                 if (amplitude != static_cast<double>(0.0F)) {
-                    m_noiseLevels[i] = new ImprovedNoise(random);
+                    m_noiseLevels[i] = std::make_shared<ImprovedNoise>(random);
                 } else {
                     skipOctave(random);
                 }
@@ -336,7 +336,7 @@ double PerlinNoise::getValue(double x, double y, double z, double yScale, double
     double valueFactor = m_lowestFreqValueFactor;
 
     for (size_t i = 0; i < m_noiseLevels.size(); ++i) {
-        ImprovedNoise* noise = m_noiseLevels[i];
+        ImprovedNoise* noise = m_noiseLevels[i].get();
         if (noise != nullptr) {
             // CRITICAL: yFlatHack uses -noise->yo instead of wrapping y coordinate
             double noiseVal = noise->noise(
@@ -368,7 +368,7 @@ double PerlinNoise::edgeValue(double noiseValue) const {
     double valueFactor = m_lowestFreqValueFactor;
 
     for (size_t i = 0; i < m_noiseLevels.size(); ++i) {
-        ImprovedNoise* noise = m_noiseLevels[i];
+        ImprovedNoise* noise = m_noiseLevels[i].get();
         if (noise != nullptr) {
             value += m_amplitudes[i] * noiseValue * valueFactor;
         }
@@ -381,7 +381,7 @@ double PerlinNoise::edgeValue(double noiseValue) const {
 
 ImprovedNoise* PerlinNoise::getOctaveNoise(int32_t i) const {
     // Reference: PerlinNoise.java lines 188-190
-    return m_noiseLevels[m_noiseLevels.size() - 1 - i];
+    return m_noiseLevels[m_noiseLevels.size() - 1 - i].get();
 }
 
 double PerlinNoise::wrap(double x) {

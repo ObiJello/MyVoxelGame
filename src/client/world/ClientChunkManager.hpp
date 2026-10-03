@@ -164,7 +164,12 @@ namespace Client {
         // "Semi Blocking" / "Fully Blocking" chunk-builder modes, which compile
         // player edits on the main thread so they appear the same frame.
         bool dirtyFromPlayer = false;
-        
+        // Re-dirtied only to MOVE its mesh to another mega-buffer slab
+        // (MarkSectionForRelocation): the content is unchanged. Admitted to
+        // the compile queue even out of view (like a player edit), never
+        // compiled synchronously; cleared when scheduled or really dirtied.
+        bool relocate = false;
+
         // Per-task cancellation: reference to last submitted mesh job
         std::shared_ptr<::Client::Render::MeshJobData> lastMeshJob;
 
@@ -395,6 +400,17 @@ namespace Client {
 
         // Mark entire chunk dirty (all 24 sections) for mesh rebuilding
         void MarkChunkDirty(Game::Math::ChunkPos chunkPos);
+
+        // Re-mesh a built, current section at its UNCHANGED version so its
+        // upload lands in another mega-buffer slab (ClientMeshManager::
+        // DefragmentMegaBuffers). No version bump and no BFS propagation —
+        // the geometry and visibility mask stay what they are; the old mesh
+        // keeps drawing until the new one replaces it in one upload. False
+        // (nothing done) when the section is dirty, in flight, stale, not
+        // yet built, or was built against other neighbours or another
+        // greedy palette than the current ones (a re-mesh would then change
+        // what is on screen).
+        bool MarkSectionForRelocation(Game::Math::ChunkPos chunkPos, int sectionY);
         
         // Clear dirty flag for a section (called when mesh build completes)
         void ClearSectionDirty(Game::Math::ChunkPos chunkPos, int sectionY);

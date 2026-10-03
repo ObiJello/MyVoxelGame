@@ -48,6 +48,12 @@ namespace Launcher::Appearance {
         // (LauncherUIState::playerColor, --color); painted, these cells win.
         bool painted = false;
         Game::StickFigurePaint paint;
+        // The drawn figure (the drawing editor — Game::StickFigureDrawing).
+        // While `drawn`, the drawing replaces the figure in game (a blank
+        // one leaves the plain or painted figure); off, it is kept to go
+        // back to. The paint is kept either way.
+        bool drawn = false;
+        Game::StickFigureDrawing drawing;
 
         // The arm model the chosen skin draws with.
         Game::SkinModel Model() const;

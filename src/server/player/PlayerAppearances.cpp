@@ -54,12 +54,13 @@ namespace Server::PlayerAppearances {
         if (it != store.end() && it->second == appearance) return;
         store[playerId] = appearance;
 
-        Log::Info("[PlayerAppearances] player %u: %s%s%s (skin %zu B, cape %zu B)", playerId,
+        Log::Info("[PlayerAppearances] player %u: %s%s%s (skin %zu B, cape %zu B, drawing %zu B)", playerId,
                   Game::AppearanceModeSlug(appearance.mode),
                   appearance.IsSkin() ? " " : "",
                   appearance.IsSkin() ? Game::SkinModelSlug(appearance.model)
-                                      : (appearance.hasPaint ? " painted" : ""),
-                  appearance.skinPng.size(), appearance.capePng.size());
+                                      : (appearance.IsDrawn() ? " drawn" : appearance.hasPaint ? " painted" : ""),
+                  appearance.skinPng.size(), appearance.capePng.size(),
+                  appearance.drawing.EncodedSize());
 
         PlayerSessionManager* sessions = Sessions();
         if (!sessions) return;

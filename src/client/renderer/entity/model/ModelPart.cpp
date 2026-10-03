@@ -121,10 +121,10 @@ namespace Render {
             const uint8_t sh = EntityLighting::ShadeByte(normalMat * modelNormal, lightSet);
             const uint32_t base = static_cast<uint32_t>(verts.size());
 
-            // Mirroring swaps the u extents, which is exactly what MC's
-            // CubeListBuilder.mirror() does — it is a texture-space flip, not a
-            // geometry flip, so a mirrored left arm reuses the right arm's
-            // texels the right way round.
+            // Mirroring swaps the u extents — CubeListBuilder.mirror() is a
+            // texture-space flip, not a geometry flip, so a mirrored left arm
+            // reuses the right arm's texels the right way round. (The X
+            // faces also trade strips; see the WEST / EAST calls below.)
             const float uA = cube.mirror ? U1 : U0;
             const float uB = cube.mirror ? U0 : U1;
 
@@ -173,10 +173,26 @@ namespace Render {
             else                  { const glm::vec3 q[4] = { l1, l0, t0, t1 }; emit(q, u1, v0, u2,  v1, N_DOWN); }
             { const glm::vec3 q[4] = { t2, t3, l3, l2 }; emit(q, u2, v1, u22, v0, N_UP); }
         }
+        // A mirrored cube swaps its X extents before the faces are built
+        // (ModelPart.Cube: `if (mirror) { swap minX, maxX }`), so MC's WEST
+        // polygon — the u0..u1 strip — lands on the +X side and the EAST one
+        // — u2..u3 — on the −X side, each flipped by the polygon's reversed
+        // vertex order. Here the faces stay where they are and take the
+        // other side's strip, flipped by emit's u swap: the same texels on
+        // the same side as vanilla (a mirrored right elytra wing's edges).
+        // A no-cull zero-thickness X box is the exception: its two faces
+        // share one plane, where swapping X moves nothing, and the later-
+        // drawn wins — so there MC's mirror changes no texel's place (WEST's
+        // u0..u1 first, EAST's u2..u3 last), and emit's u swap is undone.
+        const bool flatNoCullX = flatX && !culled;
+        const bool mirrorSides = cube.mirror && !flatNoCullX;
+        const bool keepU       = cube.mirror && flatNoCullX;
+        const float westU0 = mirrorSides ? u2 : u0, westU1 = mirrorSides ? u3 : u1;
+        const float eastU0 = mirrorSides ? u0 : u2, eastU1 = mirrorSides ? u1 : u3;
         if (!(flatY || flatZ)) {
-            if (flatX && !culled) { const glm::vec3 q[4] = { l0, t0, t3, l3 }; emit(q, u1, v1, u0, v2, N_WEST); }
-            else                  { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, u0, v1, u1, v2, N_WEST); }
-            { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, u2, v1, u3, v2, N_EAST); }
+            if (flatNoCullX) { const glm::vec3 q[4] = { l0, t0, t3, l3 }; emit(q, keepU ? u0 : u1, v1, keepU ? u1 : u0, v2, N_WEST); }
+            else             { const glm::vec3 q[4] = { t0, l0, l3, t3 }; emit(q, westU0, v1, westU1, v2, N_WEST); }
+            { const glm::vec3 q[4] = { l1, t1, t2, l2 }; emit(q, keepU ? eastU1 : eastU0, v1, keepU ? eastU0 : eastU1, v2, N_EAST); }
         }
         if (!(flatX || flatY)) {
             if (flatZ && !culled) { const glm::vec3 q[4] = { t0, t1, t2, t3 }; emit(q, u2, v1, u1, v2, N_NORTH); }

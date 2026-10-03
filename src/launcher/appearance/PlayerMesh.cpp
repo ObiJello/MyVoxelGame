@@ -350,4 +350,27 @@ namespace Launcher::Appearance {
         return best;
     }
 
+    void AppendDrawingPreview(const Render::DrawingMesh& mesh, const glm::vec3& eye,
+                              std::vector<PreviewVertex>& out) {
+        Render::PlayerColor palette[static_cast<int>(Game::PlayerColorId::Count)];
+        for (int i = 0; i < static_cast<int>(Game::PlayerColorId::Count); ++i) {
+            const auto& e = Game::LookupPlayerColor(static_cast<Game::PlayerColorId>(i));
+            palette[i] = Render::PlayerColor{ e.r, e.g, e.b, 255 };
+        }
+        std::vector<Render::StickVertex> lines, tris;
+        Render::AppendDrawingLines(lines, mesh, glm::vec3(0.0f), 0.0f, /*isCrouching=*/false, palette);
+        for (size_t i = 0; i + 1 < lines.size(); i += 2) {
+            Render::AppendDrawingStrokeTriangles(lines[i], lines[i + 1], eye, tris);
+        }
+        out.reserve(out.size() + tris.size());
+        for (const Render::StickVertex& s : tris) {
+            PreviewVertex pv{};
+            pv.x = s.x; pv.y = s.y; pv.z = s.z;
+            pv.ny = 1.0f;
+            pv.r = s.r; pv.g = s.g; pv.b = s.b;
+            pv.a = 255;
+            out.push_back(pv);
+        }
+    }
+
 } // namespace Launcher::Appearance
