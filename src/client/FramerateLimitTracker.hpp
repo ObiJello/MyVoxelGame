@@ -18,8 +18,8 @@
 //
 // Every input event resets the AFK clock (onInputReceived — MC calls it from
 // KeyboardHandler.keyPress, MouseHandler.onButton/onScroll/onDrop and mouse
-// motion while the window is active); here from Input's GLFW callbacks and
-// the /control remote-input feed. DELIBERATE DEVIATION: MC's latestInputTime
+// motion while the window is active); here from Input's GLFW callbacks, the
+// /control remote-input feed and --replay pose playback. DELIBERATE DEVIATION: MC's latestInputTime
 // starts at 0, so a client nobody has touched yet reads as long-AFK; this one
 // starts the clock at startup.
 #pragma once

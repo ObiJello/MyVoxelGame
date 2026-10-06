@@ -446,6 +446,48 @@ images (2 frames > 33 ms in the 57 s replay). That is the display, not
 GPU or CPU work; `ca-client-buffer-wait-interval` does NOT show it, the
 "Wait for Next Drawable" rows of `metal-application-intervals` do.
 
+## Presentation on MoltenVK: async submits and the mailbox (2026-10-05)
+
+MoltenVK has no `VK_PRESENT_MODE_MAILBOX_KHR` (FIFO and IMMEDIATE only), and
+IMMEDIATE still ties every frame to a free `CAMetalDrawable`: the frame
+renders INTO the drawable, MoltenVK fetches it (`nextDrawable`) while it
+encodes the frame, and the GPU cannot start the frame before CoreAnimation
+hands one back. At RD 8 that wait was ~1 ms of every frame (inside
+`Vk.QueueSubmit`; only ~0.34 ms of that zone is encoding). Worse, whenever
+WindowServer *composites* the window instead of scanning the drawable out
+directly — any window over the fullscreen game does it, e.g. a Notification
+Center banner ("Tips", "Game Mode: On") — drawables come back at exactly
+2 x refresh and the game is capped at **120 fps** with the GPU half idle
+(OpenGL is not affected: it presents outside CAMetalLayer).
+
+- **Asynchronous submits** (`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` false,
+  layer setting in `CreateInstance`): MoltenVK encodes and waits for the
+  drawable on its queue thread; the main thread waits only in the frame-slot
+  fence. Same mean fps, p95/p99 -10..20 %.
+- **Mailbox** (`m_mailbox`, vsync off; `OBEY_VK_MAILBOX=0` disables):
+  `BeginFrame` decides whether the frame will be shown. If a drawable is
+  free right now (`MailboxDrawableFree`) it acquires and the frame draws
+  straight into the swapchain image as before; otherwise it draws into its
+  frame slot's stand-in image and is never presented. The stand-ins sit in
+  front of the real images in `m_swapchainImages`, so every pass,
+  framebuffer, blit and read-back works on either.
+- **"Free right now"** cannot come from MoltenVK's acquire: it hands out an
+  image whether or not CoreAnimation has a drawable, and the encode then
+  blocks the queue thread — and every frame behind it. `VK_KHR_present_wait`
+  (+ `present_id`, enabled when the device has them; the features need
+  `VK_KHR_get_physical_device_properties2` on this 1.0 instance) tells,
+  without waiting, whether the last present reached the screen. A frame is
+  shown only when it has (`OBEY_VK_MAILBOX_PENDING`, default 1 — 2 blocks
+  again) AND at least half a refresh has passed since the last present
+  (`OBEY_VK_MAILBOX_HZ` overrides the 2 x refresh rate; presenting faster
+  only queues for drawables). 50 ms without a present presents anyway, so a
+  present that never reports back cannot freeze the picture.
+- Measured (tour replay, RD 8, 100 %, rain, composited window): 120 fps →
+  ~380 fps; presenting ~100 frames/s. With presenting switched off entirely
+  the same scene ran ~400 fps — the mailbox gets within ~5 % of it. A first
+  version copied a stand-in onto the drawable on present; deciding at
+  `BeginFrame` removed that copy (+1.3 ms per presented frame at 100 %).
+
 ## GPU cost per render stage (2026-09-25)
 
 Metal cannot time stages inside one render pass on a tile GPU, so each stage
@@ -466,6 +508,119 @@ stops). Parked at the tour's first pose, full screen, 20 s per stage:
 | translucent | 0.72 | 0.54 |
 | sky | 0.37 | 0.43 |
 | held item, HUD, clouds, mobs, players, items, block entities, particles, outline | ≤ 0.07 each (noise ±0.03-0.07) | ≤ 0.08 each |
+
+2026-10-05, RD 8, 100 %, raining, mailbox present (fps-based, `OBEY_SKIP_PERIOD=3`
+in one run each — runs minutes apart differ by up to 30 % on the fanless Air,
+so only within-run toggles are trusted): weather 2.06 ms/frame (276 → 642
+fps; MC's rain is ~441 camera-facing 21-block quads, 7-8 screens of overdraw
+at 3420×2146 — the Weather Radius option is the lever: 5 instead of 10 =
++44 %), opaque 0.59, cutout 0.29, translucent 0.21, sky 0.19, the rest
+≤ 0.13 (noise floor ~0.07). Render Resolution 50 % = +82 %.
+
+Rain, taken apart (2026-10-05, within-run A/Bs of temporary shader
+variants): of its ~2 ms, ~1.2 ms is launching the ~50 M pixels of MC's
+overdraw at all (a shader reading one input and keeping nothing), ~0.9 ms the
+texture read that finds the streaks (rain.png is 2.3 % visible texels: 93
+one-texel-wide streaks in 43 of 64 columns). Tried and reverted, so nobody
+repeats them: drawing each column as strips over only its live texture
+columns (exact, 30 % fewer pixels) was 0.5 ms SLOWER — tall thin triangles
+multiply the tiler's work and waste 2×2-quad lanes along every edge; and
+MC's own particle.vsh/.fsh structure (fog distances per vertex, textureLod)
+measured the same as the current shader. Per-streak instancing would be
+~1 M vertices a frame — more than the saving. The levers are the look:
+Weather Radius (MC's option) or a resolution change.
+
+Half-resolution rain (Video Settings → Rain Resolution, built 2026-10-05):
+the columns drawn into a ½ × ½ target, depth-tested in the shader against the
+farthest of the four full-resolution depth texels (`weather_half_vk.frag`,
+`RenderBackend::FrameDepthTexture`), premultiplied, composited over the frame
+with One / OneMinusSrcAlpha. Measured within one run: radius 10 +11-12 %
+(0.32 ms), radius 5 −5 %. The shading saving is real (~1.4 ms) but on a
+tile GPU leaving the frame's render pass and coming back costs **0.60 ms by
+itself** at 3420×2146 (colour and depth out to memory and back; measured
+with an empty target pass), and Vulkan must also store the frame's depth
+(preserved while it rains). That was the split path, now OpenGL's only;
+Vulkan draws the half-res rain ahead of the frame's pass from the previous
+frame's depth instead (below), which keeps the whole saving.
+
+Also tried in the full-resolution shader, within-run A/Bs (2026-10-05),
+both SLOWER on the M4 through MoltenVK and reverted:
+- an occupancy bitmask (one bit per texel, alpha > 25, dilated a texel; 16 KB
+  uniform block) tested before the texture read: +0.76 ms. Every fragment
+  indexes a different word, and divergent loads from Metal constant memory
+  cost more than the sampler fetch they replace.
+- `layout(early_fragment_tests)`: +0.64 ms; the hardware's own hidden-surface
+  removal already handles the occluded fragments.
+In-pass depth for a full-screen rain pass is not available either: MoltenVK
+serves input attachments by Metal framebuffer fetch (`[[color(n)]]`), which
+covers colour attachments only; a depth input attachment means ending the
+Metal render pass, i.e. the same 0.6 ms break. The in-pass route would be
+every world shader writing its depth to an extra (memoryless) colour
+attachment that a full-screen pass then fetches — an engine-wide change.
+
+Last two measured, then rain was left alone (2026-10-05):
+- Ray-march upper bound — rain in one full-screen pass inside the frame's
+  pass, no depth read at all (every pixel sky), 2D DDA over the column grid,
+  columns in the user uniform block: 3.5 ms SLOWER than the rasterized rain
+  (164 vs 378 fps). Each pixel visits ~20 cells and needs each one's column
+  data whether it hits or not; even from a buffer texture that is ~40
+  fetches a pixel against today's ~7.5. Dead on this GPU.
+- Option "previous frame's depth, no split": a prototype (a second command
+  buffer submitted ahead of the frame's) measured 0.82 ms over full
+  resolution — then built properly, below.
+
+### Rain from the previous frame's depth (Vulkan, Rain Resolution: Half)
+
+Half-resolution rain on Vulkan is drawn BEFORE the frame's render pass opens,
+depth-tested against the previous frame's depth, so the frame's pass never
+splits. Within one run (`OBEY_SKIP=rainhalf`, `tour`, RD 8, 3420×2146, rain):
+**3.22 ms vs 4.39 ms a frame for Full — 1.17 ms (228 → 310 fps)**; the Full
+phases keep no depth and draw no bands, so that is the whole cost. OpenGL
+keeps the split path (FBO 0's depth copied at the weather's place).
+
+The pieces (`WeatherEffectRenderer::RenderAhead`, `VKBackend` depth handoff,
+`LateDepthBands.hpp`, `weather_half_vk.frag`):
+- **Gate.** Vulkan, Half, main view, precipitation this frame (rain or snow),
+  not Improved Transparency. Frame by frame, no tail: the depth images are
+  built preservable once while the option is on (`SetFrameDepthCapable`), so
+  turning preservation on or off is only the pass's store op — never a
+  device idle. Gate off: the frame is drawn exactly as before (checked: a
+  frozen clear-weather scene is pixel-identical to the build without this,
+  and the clear-weather replay's frame time is unchanged, 2.38 vs 2.39 ms).
+- **Handoff.** A gated frame preserves its depth; its EndFrame moves the
+  depth it drew the world into (the scaled scene's under Render Resolution)
+  to SHADER_READ and stamps the slot (frame number, image, generation,
+  size). The next frame's pass opens lazily (`EnsureFramePass` on its first
+  draw; a full `Clear` on the unopened pass only sets its clear values — the
+  frame's own start-of-frame clear must not open it), so `RenderAhead`, called
+  right after the camera is final, binds the half target with no pass to
+  break. A stale stamp (first rainy frame, resize, scale change, anything
+  drawn first) draws the rain at full resolution in the frame instead. The
+  slot's next frame moves the image back to an attachment before its pass.
+  No frame-overlap cost: the queue is in order, and two slots are hazard-free.
+- **Bands.** The hand, portal gun and GUI's 3D items cleared depth before
+  drawing (MC's clear before the hand), which leaves the frame ending on
+  depth that is not the world's. On gated frames they draw into viewport
+  depth ranges near 0 instead — GUI [0, w), hand [w, 2w), gun [2w, 3w), w =
+  0.01 on D32F (Apple GPUs), 0.05 on D24 (Intel/AMD Macs) — nearer wins, so
+  the order is the clears' (gun first, the hand over it, the GUI over both).
+  The GUI's per-zone clear becomes a depth clear of the zone's own rect to w.
+  The rain treats stored depth below 3w as no occluder.
+- **Reprojection.** The fragment shader multiplies its render-space position
+  by the previous frame's view-projection (moved by the render-origin delta),
+  samples the four depth texels there and keeps the farthest (as the split
+  path did). Terrain is static, so a turn or a move is exact; off that
+  frame's screen or behind its camera the rain is drawn. Fast-turn frames
+  (~280 °/s) show no halos or holes at silhouettes, and nothing over the hand.
+- **Alpha.** Vulkan pipelines blend alpha One / Zero (the fragment's own
+  alpha) unless `PipelineState::blendAlphaLikeColor`; the half target needs
+  its alpha accumulated "over" like its colour, or it holds only the last
+  layer's and the composite lets too much frame through under the summed
+  colour — overlapping streaks read light blue / white (fixed 2026-10-05;
+  OpenGL's glBlendFunc always blended alpha like colour).
+
+Rain otherwise stays at MC's geometry (~2 ms at 7 Mpx); Weather Effect Radius
+5 (the Fast preset) is the other lever.
 
 Terrain is the GPU frame; cutout costs more than opaque (MC's fancy leaves
 draw every leaf face — `LeavesBlock.skipRendering` with `cutoutLeaves`).
@@ -1442,9 +1597,12 @@ to exist only when needed:
   window); Vulkan routes the frame passes, framebuffer, extent, colour image, final layout and depth
   through `Frame*()` helpers. Vulkan keeps one colour + depth image per frame slot (frames
   overlap), its scene passes are the frame passes ending in `COLOR_ATTACHMENT_OPTIMAL`
-  (compatible, so no pipeline is rebuilt), the resolve is a `vkCmdBlitImage` onto the acquired
-  image (the swapchain asks for `TRANSFER_DST`), and the GUI continues in
-  `m_renderPassAfterScene` (colour loaded, depth cleared). A size change rebuilds every slot after a
+  (compatible, so no pipeline is rebuilt). The resolve (2026-10-05) is a full-screen triangle
+  sampling the scene (`scene_upscale_vk.*`) that opens `m_renderPassAfterSceneDraw` (colour
+  DONT_CARE, depth cleared) for the GUI; the old `vkCmdBlitImage` + LOADed
+  `m_renderPassAfterScene` wrote the whole image and read it back — two full-resolution trips
+  through memory: 50 % went 381 → 458 fps in one run (`OBEY_SKIP=sceneblit` A/B), 75 % from
+  ~255 to ~378. The blit remains the fallback and the above-100 % path. A size change rebuilds every slot after a
   device idle; going back to 100 % frees them. Improved Transparency rebuilds its targets on the
   scene's depth (`m_oitOnScene`).
 - **PlatformMain** swaps `width`/`height` to the scene's size from `glfwGetFramebufferSize` to the

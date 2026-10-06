@@ -1,5 +1,6 @@
 // File: src/client/renderer/viewmodel/HeldItemRenderer.cpp
 #include "client/entity/ClientFishing.hpp"
+#include "client/renderer/core/LateDepthBands.hpp"
 #include "client/renderer/entity/ShieldTextures.hpp"
 #include "common/entity/FireworkItems.hpp"
 #include "common/entity/GeneratedItemList.hpp"
@@ -579,13 +580,18 @@ namespace Render {
         // GameRenderer.renderItemInHand path which runs after
         // `RenderSystem.clear(GL_DEPTH_BUFFER_BIT, ...)`. The viewmodel
         // then z-sorts only against itself.
-        g_renderBackend->Clear(/*color=*/false, /*depth=*/true, /*stencil=*/false);
+        // While the next frame reads this frame's depth (rain, Vulkan): its
+        // own depth band near 0 instead, which wins the same way and leaves
+        // the world's depth in place (LateDepthBands.hpp).
+        const bool banded = LateDepthBands::Begin(LateDepthBands::Layer::Hand);
+        if (!banded) g_renderBackend->Clear(/*color=*/false, /*depth=*/true, /*stencil=*/false);
         m_viewPitchDeg = viewPitchDeg;
 
         // MC renderHandsWithItems: off hand first, then main hand on top.
         if (drawOff)  RenderHand(1, aspect, partialTick, walkDistance);
         if (drawMain) RenderHand(0, aspect, partialTick, walkDistance);
         if (drawArm)  RenderEmptyArm(aspect, partialTick, walkDistance);
+        if (banded) LateDepthBands::End();
     }
 
     void HeldItemRenderer::RenderHand(int hand, float aspect, float partialTick,

@@ -587,7 +587,16 @@ namespace Render {
             ValueSlider("Weather Effect Radius", s.GetWeatherRadius(), 3, 10, 1,
                 [](double v) { return std::to_string(static_cast<int>(v)) + " blocks"; },
                 [](double v) { Settings().SetWeatherRadius(static_cast<int>(v)); }),
-            nullptr);
+            [this, &s] {
+                // Engine option: rain and snow at half the world's resolution.
+                auto* rain = Cycle("Rain Resolution", {"Full", "Half"}, s.GetRainHalfResolution() ? 1 : 0,
+                                   [](int i) { Settings().SetRainHalfResolution(i == 1); });
+                rain->SetTooltip({"Draws rain and snow at half the",
+                                  "resolution: far fewer pixels to shade",
+                                  "in a storm, slightly softer streaks.",
+                                  "Full matches Minecraft."});
+                return rain;
+            }());
 
         m_list->AddHeader("Preferences");
 

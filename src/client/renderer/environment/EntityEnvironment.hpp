@@ -56,8 +56,10 @@ namespace Render::EntityEnvironment {
     // portal pipeline layout (the Common UBO carries the fog) and marked as
     // taking its matrices from the push constants only
     // (VKBackend::SetShaderIgnoresCommonMatrices), so a per-draw uMVP never
-    // costs a UBO slot. OpenGL: CreateShaderFromFiles.
-    ShaderHandle CreateShader(const std::string& vertexPath, const std::string& fragmentPath);
+    // costs a UBO slot — unless `readsCommonMatrices` (the shader reads
+    // uModel from the Common UBO). OpenGL: CreateShaderFromFiles.
+    ShaderHandle CreateShader(const std::string& vertexPath, const std::string& fragmentPath,
+                              bool readsCommonMatrices = false);
 
     // No lightmap (MC's EMISSIVE render types).
     inline constexpr float kEmissive = 1.0f;

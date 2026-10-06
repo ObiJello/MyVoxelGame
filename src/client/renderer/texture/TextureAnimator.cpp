@@ -140,6 +140,15 @@ namespace Render {
 
     void TextureAnimator::UpdateAnimations(float deltaTime) {
         if (!animationEnabled || m_atlasTexture == INVALID_TEXTURE || animatedTextures.empty()) return;
+        // OBEY_FREEZE_SPRITES=1: every animated sprite stays on its first
+        // frame. The animation runs on wall-clock time (not the game's tick,
+        // so /tick freeze does not stop it); frozen, two runs of a still
+        // scene render pixel-identical frames — for before/after diffs.
+        static const bool s_frozen = [] {
+            const char* v = std::getenv("OBEY_FREEZE_SPRITES");
+            return v && std::strcmp(v, "0") != 0;
+        }();
+        if (s_frozen) return;
 
         // MC runs cycleAnimationFrames once per client tick.
         m_tickAccumulator += std::max(0.0f, deltaTime) * kTicksPerSecond;

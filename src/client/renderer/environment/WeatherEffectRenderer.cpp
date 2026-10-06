@@ -2,13 +2,17 @@
 //
 // MC WeatherEffectRenderer — see the header.
 #include "WeatherEffectRenderer.hpp"
+#include "client/renderer/core/DevRenderSkip.hpp"
 
 #include "EntityEnvironment.hpp"
 #include "EnvironmentState.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/LateDepthBands.hpp"
 #include "../core/RenderOrigin.hpp"
 #include "../mesh/ChunkRenderer.hpp"   // PortalClipPlane
 #include "../particle/MobParticleSystem.hpp"
+#include "../post/ImprovedTransparency.hpp"
+#include "client/renderer/core/WorldFramebuffer.hpp"
 #include "client/world/ClientBlockAccess.hpp"
 #include "client/world/ClientLevel.hpp"
 #include "client/world/ClientWeather.hpp"
@@ -19,6 +23,8 @@
 #include "common/world/lighting/LightCoords.hpp"
 #include "platform/GameDirectory.hpp"
 #include "stb_image.h"
+
+#include <GLFW/glfw3.h>
 
 #include <algorithm>
 #include <cmath>
@@ -32,6 +38,51 @@ namespace Render {
     WeatherEffectRenderer g_weatherEffectRenderer;
 
     namespace {
+
+        // OpenGL twin of shaders/weather_half_vk.frag (see there): the
+        // particle fragment shader with the world's depth test against the
+        // farthest of the four full-resolution texels and premultiplied
+        // output. Runs after MobParticleSystem's vertex shader.
+        const char* const kHalfFragSource = R"(
+#version 330 core
+in vec2 vUV;
+in vec4 vColor;
+in vec3 vRenderPos;
+out vec4 FragColor;
+
+uniform sampler2D uSprite;
+uniform sampler2D uSceneDepth;   // FBO 0's depth, copied (texture slot 1)
+uniform vec3 uEntityLight;
+uniform vec3 uCameraPos;
+uniform vec4 uFogColor;
+uniform vec4 uFogEnv;
+
+float linearFog(float d, float s, float e) {
+    if (d <= s) return 0.0;
+    if (d >= e) return 1.0;
+    return (d - s) / (e - s);
+}
+
+void main() {
+    vec4 c = texture(uSprite, vUV) * vColor;
+    if (c.a < 0.1) discard;
+    ivec2 full = ivec2(gl_FragCoord.xy) * 2;
+    ivec2 last = textureSize(uSceneDepth, 0) - 1;
+    float scene = max(max(texelFetch(uSceneDepth, min(full, last), 0).r,
+                          texelFetch(uSceneDepth, min(full + ivec2(1, 0), last), 0).r),
+                      max(texelFetch(uSceneDepth, min(full + ivec2(0, 1), last), 0).r,
+                          texelFetch(uSceneDepth, min(full + ivec2(1, 1), last), 0).r));
+    if (gl_FragCoord.z > scene) discard;
+    c.rgb *= uEntityLight;
+    vec3 fogDelta = vRenderPos - uCameraPos;
+    float sph = length(fogDelta);
+    float cyl = max(length(fogDelta.xz), abs(fogDelta.y));
+    float fogValue = max(linearFog(sph, uFogEnv.x, uFogEnv.y),
+                         linearFog(cyl, uFogEnv.z, uFogEnv.w));
+    c.rgb = mix(c.rgb, uFogColor.rgb, fogValue * uFogColor.a);
+    FragColor = vec4(c.rgb * c.a, c.a);
+}
+)";
 
         // Java int arithmetic: wraps on overflow (the column hashes rely on it).
         int32_t Mul(int32_t a, int32_t b) {
@@ -111,6 +162,12 @@ namespace Render {
             g_renderBackend->DestroyShader(m_shader);
             m_shader = INVALID_SHADER;
         }
+        ReleaseHalfResources();
+        g_renderBackend->SetFrameDepthPreserved(false, RenderBackend::FrameDepthUser::Weather);
+        g_renderBackend->SetFrameDepthCapable(false);
+        g_renderBackend->SetDepthHandoff(false);
+        m_aheadFrame = 0;
+        m_viewFrame = 0;
         m_rainColumns.clear();
         m_snowColumns.clear();
         m_vertices.clear();
@@ -219,27 +276,137 @@ namespace Render {
     }
 
     void WeatherEffectRenderer::Render(const glm::mat4& proj, const glm::mat4& view,
-                                       const glm::dvec3& cameraPos, float partialTick) {
+                                       const glm::dvec3& cameraPos, float partialTick, bool allowHalfResolution) {
         Render(proj, view, cameraPos, partialTick, Client::ClientLevels::BoundDimension(),
-               ChunkRenderer::PortalClipPlane());
+               ChunkRenderer::PortalClipPlane(), allowHalfResolution);
     }
 
     void WeatherEffectRenderer::Render(const glm::mat4& proj, const glm::mat4& view,
                                        const glm::dvec3& cameraPos, float partialTick,
-                                       Game::DimensionId dimension, const glm::vec4& clipPlane) {
+                                       Game::DimensionId dimension, const glm::vec4& clipPlane,
+                                       bool allowHalfResolution) {
         PROFILE_ZONE_N("WeatherEffects.Render");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (!Client::g_clientBlockAccess) return;
-        if (!Game::DimensionCanHaveWeather(dimension)) return;
+        RenderBackend& b = *g_renderBackend;
+        const bool vulkan = b.GetType() == BackendType::Vulkan;
 
+        // Vulkan, the main view: drawn ahead of the frame's pass this frame
+        // (RenderAhead) — only the composite is left.
+        if (allowHalfResolution && vulkan && m_aheadFrame != 0 && m_aheadFrame == b.FrameNumber()) {
+            int width = 0, height = 0;
+            if (!WorldFramebuffer::Get(width, height)) glfwGetFramebufferSize(b.GetWindow(), &width, &height);
+            CompositeHalf(m_halfTargets[b.FrameSlot() % m_halfTargets.size()], width, height);
+            RestoreDefaultState();
+            return;
+        }
+
+        // Rain Resolution: Half for the main view, unless Improved
+        // Transparency draws the weather (OBEY_SKIP=rainhalf: full in the
+        // skip phases, for A/B). On Vulkan it is drawn ahead of the frame
+        // (RenderAhead) or, without the previous frame's depth, at full
+        // resolution here; OpenGL splits the frame for it.
+        const bool halfWanted = allowHalfResolution && !vulkan && clipPlane == glm::vec4(0.0f) &&
+                                Platform::g_gameSettings.GetRainHalfResolution() && !m_halfFailed &&
+                                !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf");
+
+        const StreamSlot* slot = nullptr;
+        size_t rainVerts = 0, snowVerts = 0;
+        if (!BuildColumns(dimension, cameraPos, partialTick, slot, rainVerts, snowVerts)) return;
+
+        // ── render (RenderPipelines.WEATHER) ────────────────────────────
+        const glm::mat4 mvp = proj * view;
+        if (!(halfWanted && DrawHalfResolution(*slot, rainVerts, snowVerts, mvp, cameraPos))) {
+            PipelineState s;
+            s.depthTestEnabled  = true;
+            s.depthWriteEnabled = false;
+            s.colorWriteEnabled = true;
+            s.blendEnabled      = true;
+            s.srcBlendFactor    = BlendFactor::SrcAlpha;
+            s.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
+            s.cullMode          = CullMode::None;
+            s.primitiveType     = PrimitiveType::Triangles;
+            DrawColumns(m_shader, *slot, rainVerts, snowVerts, mvp, cameraPos, clipPlane, s);
+        }
+        RestoreDefaultState();
+    }
+
+    void WeatherEffectRenderer::RenderAhead(const glm::mat4& proj, const glm::mat4& view,
+                                            const glm::dvec3& cameraPos, float partialTick) {
+        PROFILE_ZONE_N("WeatherEffects.RenderAhead");
+        if (m_shader == INVALID_SHADER || !g_renderBackend) return;
+        RenderBackend& b = *g_renderBackend;
+        if (b.GetType() != BackendType::Vulkan) return;
+        const uint64_t frame = b.FrameNumber();
+
+        // The depth images can always be preserved while the option is on
+        // (built once, not when it starts raining), so the gate below may
+        // follow the rain frame by frame: turning preservation on or off is
+        // then a store op, never a device idle.
+        const bool halfOption = Platform::g_gameSettings.GetRainHalfResolution() && !m_halfFailed;
+        b.SetFrameDepthCapable(halfOption);
+
+        // The gate: Half, the main view, precipitation this frame, and the
+        // weather not drawn by Improved Transparency. Off, nothing below
+        // runs and the frame draws as it always has (OBEY_SKIP=rainhalf:
+        // off in the skip phases, for A/B).
+        const Game::DimensionId dimension = Client::ClientLevels::BoundDimension();
+        const bool canRain = Game::DimensionCanHaveWeather(dimension);
+        const float intensity = canRain ? Client::ClientWeather::RainLevelIn(dimension, partialTick) : 0.0f;
+        const bool gate = halfOption && Client::g_clientBlockAccess && intensity > 0.0f &&
+                          !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf") && !DevSkip("weather");
+        // This frame keeps its depth (store op), hands it to the next one,
+        // and its hand, portal gun and GUI items draw into depth bands
+        // instead of clearing it — the next frame's rain reads it.
+        b.SetFrameDepthPreserved(gate, RenderBackend::FrameDepthUser::Weather);
+        b.SetDepthHandoff(gate);
+        LateDepthBands::MarkFrame(gate, b.FrameDepthIsFloat());
+
+        // This view, for the next frame's reprojection; the previous one
+        // only if it is the frame just before.
+        const glm::mat4 mvp = proj * view;
+        const glm::dvec3 origin = RenderOrigin();
+        const bool havePrevious = m_viewFrame != 0 && m_viewFrame + 1 == frame;
+        const glm::mat4 previousMvp = m_viewMvp;
+        const glm::dvec3 previousOrigin = m_viewOrigin;
+        m_viewMvp = mvp;
+        m_viewOrigin = origin;
+        m_viewFrame = gate ? frame : 0;
+        if (!gate || !havePrevious) return;
+
+        // The previous frame's depth, if it was handed off and this frame's
+        // pass has not opened (nothing drawn yet). Otherwise the rain is
+        // drawn at full resolution in the frame (Render).
+        const TextureHandle previousDepth = b.PreviousFrameDepthTexture();
+        if (previousDepth == INVALID_TEXTURE) return;
+
+        const StreamSlot* slot = nullptr;
+        size_t rainVerts = 0, snowVerts = 0;
+        if (!BuildColumns(dimension, cameraPos, partialTick, slot, rainVerts, snowVerts)) return;
+
+        // That frame's view-projection over this frame's render space: the
+        // origin moved by (origin - previousOrigin) between them.
+        const glm::mat4 reprojection =
+            previousMvp * glm::translate(glm::mat4(1.0f), glm::vec3(origin - previousOrigin));
+        if (DrawAhead(*slot, rainVerts, snowVerts, mvp, reprojection, cameraPos, previousDepth)) m_aheadFrame = frame;
+        RestoreDefaultState();
+    }
+
+    bool WeatherEffectRenderer::BuildColumns(Game::DimensionId dimension, const glm::dvec3& cameraPos,
+                                             float partialTick, const StreamSlot*& slotOut,
+                                             size_t& rainVertsOut, size_t& snowVertsOut) {
         // ── extractRenderState ──────────────────────────────────────────
         // The view's level's weather: a portal into the Nether shows none.
-        const float intensity = Client::ClientWeather::RainLevelIn(dimension, partialTick);
+        const bool canRain = Game::DimensionCanHaveWeather(dimension);
+        const float intensity = canRain ? Client::ClientWeather::RainLevelIn(dimension, partialTick) : 0.0f;
         m_rainColumns.clear();
         m_snowColumns.clear();
-        if (!(intensity > 0.0f)) return;
+        if (!canRain || !(intensity > 0.0f)) return false;
 
-        const int radius = Platform::g_gameSettings.GetWeatherRadius();
+        int radius = Platform::g_gameSettings.GetWeatherRadius();
+        // OBEY_SKIP=weatherradius: radius 5 (MC's fast-graphics radius) in
+        // the skip phases — the Weather Radius option's cost, measured.
+        if (DevSkip("weatherradius")) radius = std::min(radius, 5);
         const int cameraBlockX = static_cast<int>(std::floor(cameraPos.x));
         const int cameraBlockY = static_cast<int>(std::floor(cameraPos.y));
         const int cameraBlockZ = static_cast<int>(std::floor(cameraPos.z));
@@ -295,7 +462,7 @@ namespace Render {
                 }
             }
         }
-        if (m_rainColumns.empty() && m_snowColumns.empty()) return;
+        if (m_rainColumns.empty() && m_snowColumns.empty()) return false;
 
         // ── prepare ─────────────────────────────────────────────────────
         m_vertices.clear();
@@ -303,49 +470,240 @@ namespace Render {
         const size_t rainVerts = m_vertices.size();
         PrepareInstances(m_vertices, m_snowColumns, cameraPos, 0.8f, radius, intensity);
         const size_t snowVerts = m_vertices.size() - rainVerts;
-        if (m_vertices.empty()) return;
+        if (m_vertices.empty()) return false;
 
         StreamSlot& slot = AcquireSlot(m_vertices.size());
         g_renderBackend->UpdateBufferStreaming(slot.vb, 0, m_vertices.size() * sizeof(Vertex), m_vertices.data());
+        slotOut = &slot;
+        rainVertsOut = rainVerts;
+        snowVertsOut = snowVerts;
+        return true;
+    }
 
-        // ── render (RenderPipelines.WEATHER) ────────────────────────────
-        g_renderBackend->BindShader(m_shader);
-        g_renderBackend->SetUniformMat4(m_shader, "uMVP", proj * view);
-        g_renderBackend->SetUniformInt(m_shader, "uSprite", 0);
-        EntityEnvironment::ApplyWorld(m_shader, cameraPos);
-        EntityEnvironment::SetEntityLight(m_shader, glm::vec3(1.0f));
-        // The view's clip plane (a portal view's far side only); set every
-        // draw — on Vulkan it rides a push-constant slot others write.
-        g_renderBackend->SetUniformVec4(m_shader, "uEntityClipPlane", clipPlane);
-
-        PipelineState s;
-        s.depthTestEnabled  = true;
-        s.depthWriteEnabled = false;
-        s.colorWriteEnabled = true;
-        s.blendEnabled      = true;
-        s.srcBlendFactor    = BlendFactor::SrcAlpha;
-        s.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
-        s.cullMode          = CullMode::None;
-        s.primitiveType     = PrimitiveType::Triangles;
-        g_renderBackend->SetPipelineState(s);
-
-        if (rainVerts > 0 && m_rainTexture != INVALID_TEXTURE) {
-            g_renderBackend->BindTexture(m_rainTexture, 0);
-            g_renderBackend->DrawArrays(slot.mesh, static_cast<uint32_t>(rainVerts), 0);
-        }
-        if (snowVerts > 0 && m_snowTexture != INVALID_TEXTURE) {
-            g_renderBackend->BindTexture(m_snowTexture, 0);
-            g_renderBackend->DrawArrays(slot.mesh, static_cast<uint32_t>(snowVerts),
-                                        static_cast<uint32_t>(rainVerts));
-        }
-        g_renderBackend->UnbindMesh();
-
+    void WeatherEffectRenderer::RestoreDefaultState() {
         PipelineState defaultState;
         defaultState.depthTestEnabled  = true;
         defaultState.depthWriteEnabled = true;
         defaultState.blendEnabled      = false;
         defaultState.cullMode          = CullMode::Back;
         g_renderBackend->SetPipelineState(defaultState);
+    }
+
+    void WeatherEffectRenderer::DrawColumns(ShaderHandle shader, const StreamSlot& slot, size_t rainVerts,
+                                            size_t snowVerts, const glm::mat4& mvp, const glm::dvec3& cameraPos,
+                                            const glm::vec4& clipPlane, const PipelineState& state,
+                                            TextureHandle sceneDepth, const glm::mat4* reprojection) {
+        RenderBackend& b = *g_renderBackend;
+        b.BindShader(shader);
+        b.SetUniformMat4(shader, "uMVP", mvp);
+        b.SetUniformInt(shader, "uSprite", 0);
+        EntityEnvironment::ApplyWorld(shader, cameraPos);
+        EntityEnvironment::SetEntityLight(shader, glm::vec3(1.0f));
+        // The view's clip plane (a portal view's far side only); set every
+        // draw — on Vulkan it rides a push-constant slot others write.
+        b.SetUniformVec4(shader, "uEntityClipPlane", clipPlane);
+        if (sceneDepth != INVALID_TEXTURE) {
+            b.BindTexture(sceneDepth, 1);
+            b.SetUniformInt(shader, "uSceneDepth", 1);
+        }
+        if (reprojection) {
+            // The previous frame's depth (weather_half_vk.frag): its
+            // view-projection, and the depth below which it holds a band.
+            b.SetUniformMat4(shader, "uModel", *reprojection);
+            b.SetUniformFloat(shader, "uAlphaTest", LateDepthBands::WorldNear());
+        }
+        b.SetPipelineState(state);
+
+        if (rainVerts > 0 && m_rainTexture != INVALID_TEXTURE) {
+            b.BindTexture(m_rainTexture, 0);
+            b.DrawArrays(slot.mesh, static_cast<uint32_t>(rainVerts), 0);
+        }
+        if (snowVerts > 0 && m_snowTexture != INVALID_TEXTURE) {
+            b.BindTexture(m_snowTexture, 0);
+            b.DrawArrays(slot.mesh, static_cast<uint32_t>(snowVerts), static_cast<uint32_t>(rainVerts));
+        }
+        b.UnbindMesh();
+    }
+
+    bool WeatherEffectRenderer::DrawHalfResolution(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                                                   const glm::mat4& mvp, const glm::dvec3& cameraPos) {
+        // OpenGL: the frame is split — FBO 0's depth copied while it is
+        // still bound, the columns drawn into the target against it, the
+        // target laid over the frame.
+        RenderBackend& b = *g_renderBackend;
+        // The level's size: the scaled scene's under Render Resolution.
+        int width = 0, height = 0;
+        if (!WorldFramebuffer::Get(width, height)) glfwGetFramebufferSize(b.GetWindow(), &width, &height);
+        if (width <= 0 || height <= 0) return false;
+        const int halfWidth = (width + 1) / 2, halfHeight = (height + 1) / 2;
+        if (!EnsureHalfResources(halfWidth, halfHeight)) return false;
+
+        if (m_sceneDepthCopy == INVALID_TEXTURE || m_sceneDepthWidth != width || m_sceneDepthHeight != height) {
+            if (m_sceneDepthCopy != INVALID_TEXTURE) b.DeferredDestroyTexture(m_sceneDepthCopy);
+            m_sceneDepthCopy = b.CreateTexture2D(width, height, TextureFormat::Depth24Stencil8, nullptr);
+            m_sceneDepthWidth = width;
+            m_sceneDepthHeight = height;
+            if (m_sceneDepthCopy == INVALID_TEXTURE) return false;
+            b.SetTextureFilter(m_sceneDepthCopy, TextureFilter::Nearest, TextureFilter::Nearest);
+            b.SetTextureWrap(m_sceneDepthCopy, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+        }
+        if (!b.CopyFramebufferDepthToTexture(m_sceneDepthCopy)) return false;
+
+        const RenderTargetHandle target = m_halfTargets[b.FrameSlot() % m_halfTargets.size()];
+        b.BindRenderTarget(target);
+        DrawIntoHalfTarget(slot, rainVerts, snowVerts, mvp, cameraPos, m_sceneDepthCopy, nullptr, halfWidth, halfHeight);
+        b.BindRenderTarget(INVALID_RENDER_TARGET);
+        CompositeHalf(target, width, height);
+        return true;
+    }
+
+    bool WeatherEffectRenderer::DrawAhead(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                                          const glm::mat4& mvp, const glm::mat4& reprojection,
+                                          const glm::dvec3& cameraPos, TextureHandle previousDepth) {
+        // Vulkan: the frame's pass has not opened, so the target's pass runs
+        // first in the frame's command buffer and the return leaves the
+        // frame's pass to open, clearing, on its first draw — no split.
+        RenderBackend& b = *g_renderBackend;
+        int width = 0, height = 0;
+        if (!WorldFramebuffer::Get(width, height)) glfwGetFramebufferSize(b.GetWindow(), &width, &height);
+        if (width <= 0 || height <= 0) return false;
+        const int halfWidth = (width + 1) / 2, halfHeight = (height + 1) / 2;
+        if (!EnsureHalfResources(halfWidth, halfHeight)) return false;
+
+        const RenderTargetHandle target = m_halfTargets[b.FrameSlot() % m_halfTargets.size()];
+        b.BindRenderTarget(target);
+        DrawIntoHalfTarget(slot, rainVerts, snowVerts, mvp, cameraPos, previousDepth, &reprojection,
+                           halfWidth, halfHeight);
+        b.BindRenderTarget(INVALID_RENDER_TARGET);
+        b.SetViewport(0, 0, width, height);
+        return true;
+    }
+
+    void WeatherEffectRenderer::DrawIntoHalfTarget(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                                                   const glm::mat4& mvp, const glm::dvec3& cameraPos,
+                                                   TextureHandle sceneDepth, const glm::mat4* reprojection,
+                                                   int halfWidth, int halfHeight) {
+        RenderBackend& b = *g_renderBackend;
+        b.SetViewport(0, 0, halfWidth, halfHeight);
+        // The state first: GL's clear honours the colour write mask the last
+        // draw left.
+        PipelineState flat;
+        flat.depthTestEnabled  = false;
+        flat.depthWriteEnabled = false;
+        flat.blendEnabled      = false;
+        flat.cullMode          = CullMode::None;
+        b.SetPipelineState(flat);
+        b.SetClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        b.Clear(true, false, false);
+
+        // The columns, premultiplied "over" into the cleared target; the
+        // world's depth test is the shader's (the target's own depth is not
+        // the world's).
+        // Alpha accumulates "over" too (Vulkan otherwise keeps only the last
+        // layer's): the composite darkens the frame by it, and a too-small
+        // alpha under the summed colour reads as light-blue / white streaks.
+        PipelineState columns = flat;
+        columns.blendEnabled   = true;
+        columns.srcBlendFactor = BlendFactor::One;
+        columns.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+        columns.blendAlphaLikeColor = true;
+        DrawColumns(m_halfShader, slot, rainVerts, snowVerts, mvp, cameraPos, glm::vec4(0.0f), columns,
+                    sceneDepth, reprojection);
+
+        // The frame's own clear colour (the fog), as the frame had it.
+        const glm::vec3 fog = EnvironmentState::Get().Frame().fogColor;
+        b.SetClearColor(fog.r, fog.g, fog.b, 1.0f);
+    }
+
+    void WeatherEffectRenderer::CompositeHalf(RenderTargetHandle target, int width, int height) {
+        // Over the frame in one draw, bilinear, premultiplied "over".
+        RenderBackend& b = *g_renderBackend;
+        b.SetViewport(0, 0, width, height);
+        PipelineState over;
+        over.depthTestEnabled  = false;
+        over.depthWriteEnabled = false;
+        over.blendEnabled      = true;
+        over.srcBlendFactor    = BlendFactor::One;
+        over.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
+        over.cullMode          = CullMode::None;
+        b.SetPipelineState(over);
+        b.BindShader(m_compositeShader);
+        b.BindTexture(b.GetRenderTargetColorTexture(target), 0);
+        b.SetUniformInt(m_compositeShader, "uInSampler", 0);
+        b.DrawArrays(m_quadMesh, 6, 0);
+        b.UnbindMesh();
+    }
+
+    bool WeatherEffectRenderer::EnsureHalfResources(int width, int height) {
+        RenderBackend& b = *g_renderBackend;
+        if (m_halfShader == INVALID_SHADER) {
+            m_halfShader = b.GetType() == BackendType::OpenGL
+                ? b.CreateShader(MobParticleSystem::VertexSource(), kHalfFragSource)
+                : EntityEnvironment::CreateShader("shaders/mob_particle.vert", "shaders/weather_half.frag",
+                                                  /*readsCommonMatrices=*/true);   // the reprojection
+            // The plain textured full-screen blit (entity_outline_post.vert
+            // mirrors v for Vulkan's flipped viewport).
+            m_compositeShader = b.CreateShaderFromFiles("shaders/entity_outline_post.vert",
+                                                        "shaders/entity_outline_blit.frag");
+            struct QuadVert { float x, y, z, u, v; uint8_t r, g, b, a; };
+            const QuadVert quad[6] = {
+                {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 255, 255, 255, 255},
+                { 1.0f, -1.0f, 0.0f, 1.0f, 0.0f, 255, 255, 255, 255},
+                { 1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, 255},
+                {-1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 255, 255, 255, 255},
+                { 1.0f,  1.0f, 0.0f, 1.0f, 1.0f, 255, 255, 255, 255},
+                {-1.0f,  1.0f, 0.0f, 0.0f, 1.0f, 255, 255, 255, 255},
+            };
+            m_quadVB = b.CreateBuffer(BufferUsage::Vertex, sizeof(quad), quad, BufferAccess::Static);
+            if (m_quadVB != INVALID_BUFFER) m_quadMesh = b.CreateMesh(m_quadVB, INVALID_BUFFER, GetBlockVertexLayout());
+            if (m_halfShader == INVALID_SHADER || m_compositeShader == INVALID_SHADER || m_quadMesh == INVALID_MESH) {
+                Log::Warning("[WeatherEffectRenderer] half-resolution rain unavailable (shaders or quad) - drawn at full resolution");
+                ReleaseHalfResources();
+                m_halfFailed = true;
+                return false;
+            }
+        }
+        if (m_halfWidth != width || m_halfHeight != height) {
+            for (RenderTargetHandle& t : m_halfTargets) {
+                if (t == INVALID_RENDER_TARGET) {
+                    RenderTargetDesc desc;
+                    desc.width = width;
+                    desc.height = height;
+                    desc.colorFormat = TextureFormat::RGBA8;
+                    t = b.CreateRenderTarget(desc);
+                } else {
+                    b.ResizeRenderTarget(t, width, height);
+                }
+                if (t == INVALID_RENDER_TARGET) {
+                    Log::Warning("[WeatherEffectRenderer] half-resolution rain target unavailable - drawn at full resolution");
+                    ReleaseHalfResources();
+                    m_halfFailed = true;
+                    return false;
+                }
+                const TextureHandle tex = b.GetRenderTargetColorTexture(t);
+                b.SetTextureFilter(tex, TextureFilter::Linear, TextureFilter::Linear);
+                b.SetTextureWrap(tex, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
+            }
+            m_halfWidth = width;
+            m_halfHeight = height;
+        }
+        return true;
+    }
+
+    void WeatherEffectRenderer::ReleaseHalfResources() {
+        if (!g_renderBackend) return;
+        RenderBackend& b = *g_renderBackend;
+        for (RenderTargetHandle& t : m_halfTargets) {
+            if (t != INVALID_RENDER_TARGET) b.DestroyRenderTarget(t);
+            t = INVALID_RENDER_TARGET;
+        }
+        if (m_quadMesh != INVALID_MESH) { b.DestroyMesh(m_quadMesh); m_quadMesh = INVALID_MESH; }
+        if (m_quadVB != INVALID_BUFFER) { b.DestroyBuffer(m_quadVB); m_quadVB = INVALID_BUFFER; }
+        if (m_halfShader != INVALID_SHADER) { b.DestroyShader(m_halfShader); m_halfShader = INVALID_SHADER; }
+        if (m_compositeShader != INVALID_SHADER) { b.DestroyShader(m_compositeShader); m_compositeShader = INVALID_SHADER; }
+        if (m_sceneDepthCopy != INVALID_TEXTURE) { b.DestroyTexture(m_sceneDepthCopy); m_sceneDepthCopy = INVALID_TEXTURE; }
+        m_halfWidth = m_halfHeight = 0;
+        m_sceneDepthWidth = m_sceneDepthHeight = 0;
     }
 
 } // namespace Render

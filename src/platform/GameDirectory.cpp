@@ -451,6 +451,7 @@ namespace Platform {
     //   prioritizeChunkUpdates  NONE          PLAYER_AFFECTED PLAYER_AFFECTED
     //   cloudRange (blocks)     64            128            256
     //   weatherRadius           5             10             10
+    //   rainHalfResolution      off           off            off  (engine row; see below)
     //   improvedTransparency    off           off            ON
     //   renderScale (engine)    100           100            100
     //
@@ -474,6 +475,12 @@ namespace Platform {
         SetPrioritizeChunkUpdates(fancy ? 1 : 0);
         SetCloudRange(fabulous ? 256 : (fancy ? 128 : 64));
         SetWeatherRadius(fancy ? 10 : 5);
+        // Rain Resolution stays Full on every preset — Minecraft's look; Half
+        // draws softer streaks. Half is the opt-in: on Vulkan drawn ahead of
+        // the frame from the previous frame's depth, 1.17 ms a frame faster
+        // than Full at radius 10 on an M4; on OpenGL it splits the frame's
+        // pass (+11 % at radius 10, -5 % at radius 5) (2026-10-05).
+        SetRainHalfResolution(false);
         SetImprovedTransparency(fabulous);
         // Engine row: every preset draws the world at the window's own
         // resolution (Render Resolution is a per-machine tuning knob).

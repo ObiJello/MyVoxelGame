@@ -6,6 +6,7 @@
 
 #include "PortalGunViewmodel.hpp"
 #include "HeldItemRenderer.hpp"
+#include "client/renderer/core/LateDepthBands.hpp"
 #include "../environment/EnvironmentState.hpp"
 #include "GltfLoader.hpp"
 #include "../backend/RenderBackend.hpp"
@@ -460,8 +461,11 @@ void main() {
 
         const glm::mat4 mvp = proj * view * model;
 
-        // Depth-clear so the gun sits on top regardless of world depth.
-        g_renderBackend->Clear(false, true, false);
+        // Depth-clear so the gun sits on top regardless of world depth —
+        // or its own depth band near 0, while the next frame reads this
+        // frame's depth (LateDepthBands.hpp).
+        const bool banded = LateDepthBands::Begin(LateDepthBands::Layer::PortalGun);
+        if (!banded) g_renderBackend->Clear(false, true, false);
 
         PipelineState opaque;
         opaque.depthTestEnabled  = true;
@@ -549,6 +553,7 @@ void main() {
         }
 
         g_renderBackend->UnbindMesh();
+        if (banded) LateDepthBands::End();
     }
 
 } // namespace Render

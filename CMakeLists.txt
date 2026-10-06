@@ -571,6 +571,9 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/oit_depth_bounds_cull_vk.frag
             ${VK_SHADER_DIR}/oit_blit_vk.frag
             ${VK_SHADER_DIR}/oit_blit_depth_vk.frag
+            ${VK_SHADER_DIR}/scene_upscale_vk.vert
+            ${VK_SHADER_DIR}/scene_upscale_vk.frag
+            ${VK_SHADER_DIR}/weather_half_vk.frag
             ${VK_SHADER_DIR}/beam_volume_vk.vert
             ${VK_SHADER_DIR}/beam_volume_vk.frag
             ${VK_SHADER_DIR}/beam_sprite_vk.vert

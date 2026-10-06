@@ -18,13 +18,14 @@
 
 namespace Render::EntityEnvironment {
 
-    ShaderHandle CreateShader(const std::string& vertexPath, const std::string& fragmentPath) {
+    ShaderHandle CreateShader(const std::string& vertexPath, const std::string& fragmentPath,
+                              bool readsCommonMatrices) {
         if (!g_renderBackend) return INVALID_SHADER;
         if (g_renderBackend->GetType() == BackendType::Vulkan) {
 #ifdef HAS_VULKAN
             auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
             const ShaderHandle shader = vk->CreateShaderFromFilesPortal(vertexPath, fragmentPath);
-            if (shader != INVALID_SHADER) vk->SetShaderIgnoresCommonMatrices(shader);
+            if (shader != INVALID_SHADER && !readsCommonMatrices) vk->SetShaderIgnoresCommonMatrices(shader);
             return shader;
 #else
             return INVALID_SHADER;

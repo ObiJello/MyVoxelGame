@@ -521,11 +521,58 @@ namespace Render {
         // target interrupts it. While preserved, the frame's depth is stored
         // and reloaded across interruptions and can be sampled (the OIT
         // passes depth-test against it, the clouds copy it). Applied from
-        // the next BeginFrame (it rebuilds the frame's depth images);
-        // FrameDepthPreserved() says whether it is in effect. OpenGL always
-        // keeps the default framebuffer's depth.
-        virtual void SetFrameDepthPreserved(bool /*preserved*/) {}
+        // the next BeginFrame; FrameDepthPreserved() says whether it is in
+        // effect this frame. OpenGL always keeps the default framebuffer's
+        // depth.
+        // Each user's wish is kept apart; the depth stays preserved while any
+        // one of them wants it.
+        enum class FrameDepthUser : uint8_t { ImprovedTransparency, Weather, Count };
+        virtual void SetFrameDepthPreserved(bool /*preserved*/,
+                                            FrameDepthUser /*user*/ = FrameDepthUser::ImprovedTransparency) {}
         virtual bool FrameDepthPreserved() const { return false; }
+        // Preserving needs sampleable depth images and keep-depth passes;
+        // building them idles the device. While capable, preservation turns
+        // on and off from one frame to the next as a store op alone — so a
+        // user that toggles it often (rain) asks for the capability up front.
+        // Applied from the next BeginFrame.
+        virtual void SetFrameDepthCapable(bool /*capable*/) {}
+
+        // ── Depth handoff (Vulkan): one frame's depth read by the next ──
+        // Set during a frame whose depth is preserved: its EndFrame leaves
+        // that depth readable for the next frame, and the next frame's pass
+        // opens on its first use rather than at BeginFrame, so a render
+        // target can be drawn ahead of it without breaking it. Reset every
+        // frame.
+        virtual void SetDepthHandoff(bool /*handoff*/) {}
+        // The previous frame's handed-off depth (nearest, clamped), while
+        // this frame's pass has not opened yet and nothing changed size since.
+        // INVALID_TEXTURE otherwise, and always on OpenGL.
+        virtual TextureHandle PreviousFrameDepthTexture() { return INVALID_TEXTURE; }
+        // Counts BeginFrames that went on to record (the handoff's stamp).
+        virtual uint64_t FrameNumber() const { return 0; }
+
+        // Viewport depth range (Vulkan): later draws map their depth into
+        // [minDepth, maxDepth] until reset; BeginFrame resets it to [0, 1].
+        // The viewmodels and GUI items draw into bands near 0 instead of
+        // clearing the frame's depth (LateDepthBands.hpp).
+        virtual void SetDepthRange(float /*minDepth*/, float /*maxDepth*/) {}
+        // Clears the bound pass's depth to `depth` inside a rect (pixels of
+        // the attachment, top-left origin); stencil is left alone (Vulkan).
+        virtual void ClearDepthRect(int /*x*/, int /*y*/, int /*width*/, int /*height*/, float /*depth*/) {}
+        // Whether the frame's depth is floating point (D32F) rather than 24-bit
+        // fixed point — the depth bands are sized by it.
+        virtual bool FrameDepthIsFloat() const { return false; }
+        // The frame's depth as a sampleable texture (nearest, clamped) for a
+        // render target drawn while the frame's pass is suspended: valid from
+        // BindRenderTarget(target) until the return to the frame, while
+        // FrameDepthPreserved(). INVALID_TEXTURE otherwise, and always on
+        // OpenGL, which copies FBO 0's depth instead
+        // (CopyFramebufferDepthToTexture). Half-resolution rain tests against it.
+        virtual TextureHandle FrameDepthTexture() { return INVALID_TEXTURE; }
+        // The frame slot being recorded (0 .. frames in flight - 1). A caller
+        // that rewrites a GPU resource every frame keeps one per slot, so a
+        // frame never writes what the previous one may still read.
+        virtual uint32_t FrameSlot() const { return 0; }
 
         // Cull inversion: while set, every SetPipelineState swaps Back and
         // Front culling. A mirror portal's reflection flips winding, so the

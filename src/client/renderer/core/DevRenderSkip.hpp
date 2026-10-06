@@ -19,7 +19,13 @@
 // what splits the GPU timeline into skip-on / skip-off frames exactly.
 //
 // Tokens: sky, opaque, cutout, translucent, players, items, mobs,
-//         blockentities, particles, clouds, helditem, outline, hud
+//         blockentities, particles, clouds, helditem, outline, hud,
+//         weather, post; and five that swap something instead of skipping:
+//         weatherradius (Weather Radius 5), scale50 (Render Resolution 50 %),
+//         sceneblit (Vulkan: Render Resolution upscales by blit, not draw),
+//         mailbox (Vulkan: every frame waits for its image and is shown),
+//         rainhalf (Rain Resolution: Half off — rain at full resolution; on
+//                   Vulkan also no depth handoff, bands or kept depth)
 #include <chrono>
 #include <cstdlib>
 #include <cstring>

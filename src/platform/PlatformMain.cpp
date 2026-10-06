@@ -7487,6 +7487,9 @@ static uint16_t     s_lastPresencePort = 0;
                 // scheduling — sees an ordinary moving player.
                 poseReplayer.Apply(player, camera, dt,
                     static_cast<int8_t>(Game::DimensionToRaw(Client::ClientLevels::ActiveDimension())));
+                // The replayed path stands in for the player's input: without
+                // this the AFK limiter caps a replay at 30 fps one minute in.
+                Client::FramerateLimitTracker::OnInputReceived();
             } else {
                 // A rider's view and seat follow the vehicle as it is drawn
                 // this frame (Client::Vehicles): the partial tick is the one
@@ -8641,7 +8644,8 @@ static uint16_t     s_lastPresencePort = 0;
             // panorama, which must match the title screen pixel for pixel.
             if (Render::g_renderBackend) {
                 int sceneReqW = 0, sceneReqH = 0;
-                const int scalePct = Platform::g_gameSettings.GetRenderScalePercent();
+                // OBEY_SKIP=scale50: Render Resolution 50 % in the skip phases.
+                const int scalePct = Render::DevSkip("scale50") ? 50 : Platform::g_gameSettings.GetRenderScalePercent();
                 if (scalePct != 100 && !leaveCapture.active && !leaveCapture.finished && !joinTransition.active) {
                     int fbW = 0, fbH = 0;
                     glfwGetFramebufferSize(window, &fbW, &fbH);
@@ -9752,6 +9756,25 @@ static uint16_t     s_lastPresencePort = 0;
             // culling below stays in world space (RenderOrigin.hpp).
             camera.PrepareRender();
             glm::mat4 view = camera.GetViewMatrix();
+            // The rain and snow's tick fraction. Held with the world's clock
+            // while paused (see envPartialTick): the streaks scroll by game
+            // time + partial, and game time stops with the pause (menu, or
+            // the join transition's hold); a cycling partial would jiggle
+            // them within one tick. Their splash/drip particles
+            // (ParticleTicks::TickWeather) already stop with the other
+            // animate ticks.
+            auto weatherPartialTickNow = [&]() {
+                const float remaining =
+                    std::chrono::duration<float>(nextClientTick - std::chrono::steady_clock::now()).count();
+                const float tickSeconds = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
+                return Client::g_clientTickRate.IsWorldPaused()
+                    ? 1.0f
+                    : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+            };
+            // Rain Resolution: Half on Vulkan — drawn now, before anything
+            // else opens the frame's render pass, from the previous frame's
+            // depth; the weather pass below lays it over the frame.
+            Render::g_weatherEffectRenderer.RenderAhead(proj, view, camera.position, weatherPartialTickNow());
             // What a shader pack's uniforms are built from this frame; set on
             // its gbuffers programs before the terrain draws, and given to
             // EndScene for the composites.
@@ -11078,20 +11101,7 @@ static uint16_t     s_lastPresencePort = 0;
             if (!Render::DevSkip("weather")) {
                 PROFILE_ZONE_N("WeatherPass");
                 DEBUG_PIE_ZONE("Weather");
-                const auto nowForPartial = std::chrono::steady_clock::now();
-                const float remaining =
-                    std::chrono::duration<float>(nextClientTick - nowForPartial).count();
-                const float tickSeconds =
-                    std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
-                // Held with the world's clock while paused (see envPartialTick):
-                // the streaks scroll by game time + partial, and game time
-                // stops with the pause (menu, or the join transition's hold);
-                // a cycling partial would jiggle them within one tick. Their
-                // splash/drip particles (ParticleTicks::TickWeather) already
-                // stop with the other animate ticks.
-                const float weatherPartialTick = Client::g_clientTickRate.IsWorldPaused()
-                    ? 1.0f
-                    : std::clamp(1.0f - remaining / tickSeconds, 0.0f, 1.0f);
+                const float weatherPartialTick = weatherPartialTickNow();
                 // Improved Transparency: drawn by the OIT stages at the end
                 // of the level (MC OIT_WEATHER) instead of here.
                 if (!Render::ImprovedTransparency::Get().Defer(
@@ -11099,7 +11109,8 @@ static uint16_t     s_lastPresencePort = 0;
                         [proj, view, pos = camera.position, weatherPartialTick] {
                             Render::g_weatherEffectRenderer.Render(proj, view, pos, weatherPartialTick);
                         })) {
-                    Render::g_weatherEffectRenderer.Render(proj, view, camera.position, weatherPartialTick);
+                    Render::g_weatherEffectRenderer.Render(proj, view, camera.position, weatherPartialTick,
+                                                           /*allowHalfResolution=*/true);
                 }
             }
             // Improved Transparency: MC LevelRenderer.executeOit — every

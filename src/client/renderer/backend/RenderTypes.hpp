@@ -239,6 +239,12 @@ namespace Render {
         bool blendEnabled = false;
         BlendFactor srcBlendFactor = BlendFactor::SrcAlpha;
         BlendFactor dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
+        // Vulkan writes the fragment's own alpha (One / Zero) unless set;
+        // set, alpha blends with the colour's factors — what OpenGL's
+        // glBlendFunc always does. A target composited later by its alpha
+        // (premultiplied layers accumulated "over") needs it, or its alpha
+        // is only the last layer's.
+        bool blendAlphaLikeColor = false;
 
         // Rasterizer
         CullMode cullMode     = CullMode::Back;

@@ -1333,7 +1333,15 @@ namespace Server {
                 }
                 break;
             case PacketId::PlayerAppearanceC2S:
-                if (m_phase == ConnectionPhase::PLAY && m_authenticated) {
+                // LOGIN as well as PLAY, for the reason
+                // ServerboundAcceptTeleportation gives below: the client sends
+                // its look the moment LoginSuccess lands, and on loopback (the
+                // integrated server's own host) that is before finalizeLogin
+                // has flipped the phase — or even marked the connection
+                // authenticated. Queued here, it is applied in FIFO order after
+                // LoginStart, by which point the PLAY listener exists. Gated on
+                // PLAY it was dropped, so a host's look never reached anyone.
+                if (m_phase == ConnectionPhase::LOGIN || m_phase == ConnectionPhase::PLAY) {
                     auto data = Network::Serialization::DeserializePlayerAppearanceC2S(payload);
                     return std::make_unique<Network::Packets::PlayerAppearanceC2SPacketImpl>(std::move(data));
                 }

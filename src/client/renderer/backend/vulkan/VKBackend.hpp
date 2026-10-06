@@ -13,6 +13,7 @@
 #include <string>
 #include <cstdint>
 #include <thread>
+#include <chrono>
 
 namespace Render {
 
@@ -112,8 +113,20 @@ namespace Render {
         void ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
         // Improved Transparency: MC 26.3 OIT (see RenderBackend.hpp and the
         // notes at m_frameDepthPreserved / m_oitSlots below).
-        void SetFrameDepthPreserved(bool preserved) override { m_frameDepthPreservedWanted = preserved; }
+        void SetFrameDepthPreserved(bool preserved,
+                                    FrameDepthUser user = FrameDepthUser::ImprovedTransparency) override;
         bool FrameDepthPreserved() const override { return m_frameDepthPreserved; }
+        TextureHandle FrameDepthTexture() override;
+        void SetFrameDepthCapable(bool capable) override { m_frameDepthCapableRequested = capable; }
+        void SetDepthHandoff(bool handoff) override { m_depthHandoff = handoff; }
+        TextureHandle PreviousFrameDepthTexture() override;
+        uint64_t FrameNumber() const override { return m_frameNumber; }
+        void SetDepthRange(float minDepth, float maxDepth) override;
+        void ClearDepthRect(int x, int y, int width, int height, float depth) override;
+        bool FrameDepthIsFloat() const override {
+            return m_depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT || m_depthFormat == VK_FORMAT_D32_SFLOAT;
+        }
+        uint32_t FrameSlot() const override { return static_cast<uint32_t>(m_currentFrame); }
         void SetOitStage(OitStage stage, const glm::vec4& projParams, bool depthBoundsWriteDepth) override;
         bool OitEnsureTargets(int width, int height) override;
         void OitDestroyTargets() override;
@@ -270,16 +283,72 @@ namespace Render {
         // to be copied out (each layer starts from it, the composite reads
         // it). While preserved: the frame begins and resumes in the
         // keep-depth variants below, and the per-slot depth images carry
-        // SAMPLED (m_depthSampleViews). SetFrameDepthPreserved only records the wish; the
-        // next BeginFrame rebuilds the depth images and framebuffers
-        // (ApplyFrameDepthPreserved, after a device idle — a settings
-        // toggle, never a per-frame cost). Off, everything is as before:
-        // the same passes, images and usage flags.
-        bool m_frameDepthPreserved       = false;
-        bool m_frameDepthPreservedWanted = false;
+        // SAMPLED (m_depthSampleViews).
+        // Two levels: CAPABLE is the resources — sampleable depth images and
+        // the keep-depth passes — rebuilt by ApplyFrameDepthCapable after a
+        // device idle (a settings toggle, never a per-frame cost); PRESERVED
+        // is this frame's choice of passes, set at BeginFrame while capable,
+        // free to change every frame (the passes differ in store ops only,
+        // so framebuffers and pipelines are shared). SetFrameDepthPreserved
+        // only records the wish. Neither, everything is as before: the same
+        // passes, images and usage flags.
+        bool m_frameDepthPreserved        = false;   // this frame
+        bool m_frameDepthPreservedWanted  = false;   // any user, for the next frame
+        bool m_frameDepthCapable          = false;   // resources built
+        bool m_frameDepthCapableRequested = false;   // SetFrameDepthCapable
         VkRenderPass m_renderPassKeepDepth     = VK_NULL_HANDLE;   // CLEAR, depth STORED
         VkRenderPass m_renderPassLoadKeepDepth = VK_NULL_HANDLE;   // LOAD,  depth STORED
-        void ApplyFrameDepthPreserved();
+        void ApplyFrameDepthCapable(bool capable);
+        // Who wants the depth preserved (SetFrameDepthPreserved), by user.
+        std::array<bool, static_cast<size_t>(FrameDepthUser::Count)> m_frameDepthUsers{};
+        // While a render target interrupts a preserved frame, the frame's
+        // depth sits in SHADER_READ_ONLY_OPTIMAL for FrameDepthTexture;
+        // BindRenderTarget moves it there on leaving the frame and back to an
+        // attachment before the frame's pass loads it again.
+        bool m_frameDepthReadable = false;
+        void SetFrameDepthReadable(VkCommandBuffer cmd, bool readable);
+        // FrameDepthTexture's per-slot texture entries over the frame's own
+        // depth views (not owned), from a pool of their own. Rebuilt when the
+        // slot's view or m_frameDepthGeneration changes — every rebuild of
+        // the depth images idles the device first, so the old entry is free.
+        struct FrameDepthTex {
+            VkImageView   view       = VK_NULL_HANDLE;
+            uint64_t      generation = 0;
+            TextureHandle texture    = INVALID_TEXTURE;
+        };
+        std::array<FrameDepthTex, MAX_FRAMES_IN_FLIGHT> m_frameDepthTextures{};
+        VkDescriptorPool m_frameDepthPool = VK_NULL_HANDLE;
+        uint64_t m_frameDepthGeneration = 1;   // bumped whenever a frame or scene depth view is (re)made
+        TextureHandle FrameDepthTextureFor(size_t slot);
+        void DropFrameDepthTexture(FrameDepthTex& entry);
+        // Depth handoff (SetDepthHandoff). A handing-off frame's EndFrame
+        // moves its stored depth to SHADER_READ_ONLY_OPTIMAL and stamps the
+        // slot; the next frame's pass opens lazily (m_framePassPending,
+        // EnsureFramePass) so a target can be drawn before it; the slot's
+        // own next frame moves the image back to an attachment before its
+        // pass. The stamp says what the depth was drawn as, so a resize,
+        // a Render Resolution change or a rebuild in between invalidates it.
+        struct DepthStamp {
+            uint64_t   frame      = 0;   // m_frameNumber it was drawn in; 0 = none
+            uint64_t   generation = 0;
+            bool       scene      = false;
+            VkExtent2D extent{0, 0};
+            VkImage    image      = VK_NULL_HANDLE;
+        };
+        std::array<DepthStamp, MAX_FRAMES_IN_FLIGHT> m_depthStamps{};
+        bool m_depthHandoff       = false;   // this frame hands its depth off
+        bool m_deferNextFramePass = false;   // the previous frame did
+        bool m_framePassPending   = false;   // this frame's pass not opened yet
+        std::array<VkClearValue, 2> m_pendingClear{};
+        void EnsureFramePass();
+        void ReclaimHandedOffDepth(VkCommandBuffer cmd);
+        void HandOffFrameDepth(VkCommandBuffer cmd, bool scene, VkExtent2D extent);
+        // SetDepthRange's [min, max], and the viewport last set (re-issued
+        // with a new range).
+        float m_depthRangeMin = 0.0f;
+        float m_depthRangeMax = 1.0f;
+        VkViewport m_lastViewport{};
+        void DestroyFrameDepthTextures();
         void DestroyKeepDepthPasses();
         // "The frame" is the swapchain image, or this frame's scaled scene
         // (m_sceneActive) until ResolveScaledScene — every pass, copy and
@@ -343,6 +412,43 @@ namespace Render {
         // flags. Sized in CreateSyncObjects / RecreateSwapchain.
         std::vector<VkSemaphore> m_renderFinishedSemaphores;
         std::vector<VkFence> m_inFlightFences;
+
+        // Mailbox present (vsync off; OBEY_VK_MAILBOX=0 turns it off). MoltenVK
+        // offers FIFO and IMMEDIATE only, and IMMEDIATE ties every frame to a
+        // free CAMetalDrawable: the frame renders INTO the drawable, so the
+        // GPU cannot start it until CoreAnimation hands one back — ~1 ms of
+        // every frame at RD 8, and a hard 2 x refresh (120 fps) whenever
+        // WindowServer composites the window instead of scanning the
+        // drawable out directly. In mailbox mode BeginFrame decides whether
+        // the frame will be shown: when a drawable is free right now
+        // (MailboxDrawableFree) it acquires an image and the frame draws
+        // straight into it, exactly as without the mailbox; otherwise the
+        // frame draws into its slot's stand-in image and is never presented,
+        // as with VK_PRESENT_MODE_MAILBOX_KHR. The stand-ins sit in front of
+        // the real images in m_swapchainImages (index < m_mailboxStandIns),
+        // so every pass, framebuffer, blit and read-back works on either.
+        bool m_mailboxWanted = true;
+        bool m_mailbox = false;                         // in effect for this swapchain
+        bool m_mailboxPresenting = false;               // this frame draws into a real image
+        uint32_t m_mailboxStandIns = 0;                 // stand-ins at the front of m_swapchainImages
+        std::vector<VkDeviceMemory> m_mailboxMemory;    // the stand-ins' memory
+        bool CreateMailboxImages();
+        void DestroyMailboxImages();
+        bool MailboxDrawableFree();
+        // When is a drawable free? MoltenVK's acquire hands out an image
+        // whether or not CoreAnimation has one, and the frame then blocks
+        // MoltenVK's queue thread in nextDrawable — and every frame
+        // submitted behind it. VK_KHR_present_wait says, without waiting,
+        // whether earlier presents have reached the screen (each frees its
+        // predecessor's drawable); the mailbox presents only once at most
+        // m_mailboxPending of its presents are still on their way, and no
+        // sooner than m_mailboxPresentInterval after the last one.
+        PFN_vkWaitForPresentKHR m_waitForPresent = nullptr;   // null: VK_KHR_present_wait unsupported
+        bool m_hasPhysicalDeviceProperties2 = false;          // instance has VK_KHR_get_physical_device_properties2
+        uint64_t m_presentId = 0;                              // last present id on this swapchain
+        int      m_mailboxPending = 1;
+        std::chrono::steady_clock::time_point m_lastMailboxPresent{};
+        std::chrono::steady_clock::duration m_mailboxPresentInterval{};   // 1 / (2 x refresh)
         bool CreateRenderFinishedSemaphores();
         void DestroyRenderFinishedSemaphores();
         // Monotonic frame number, advanced in BeginFrame once the frame is
@@ -1099,6 +1205,22 @@ namespace Render {
         VkRenderPass m_scenePassLoadKeepDepth = VK_NULL_HANDLE;   // LOAD,   depth stored
         VkRenderPass m_renderPassAfterScene          = VK_NULL_HANDLE;   // swapchain: colour LOAD, depth CLEAR
         VkRenderPass m_renderPassAfterSceneKeepDepth = VK_NULL_HANDLE;   // ...depth stored
+        // The upscale as a draw instead of the blit: the swapchain pass opens
+        // with its colour DONT_CARE and a full-screen triangle samples the
+        // scene into it (scene_upscale_vk.*). The blit wrote the whole image
+        // and the pass then loaded it all back — two full-resolution trips
+        // through memory this does without (OBEY_SKIP=sceneblit: the blit,
+        // for A/B). Built with the scene passes; the blit stays the fallback.
+        VkRenderPass m_renderPassAfterSceneDraw          = VK_NULL_HANDLE;   // colour DONT_CARE, depth CLEAR
+        VkRenderPass m_renderPassAfterSceneDrawKeepDepth = VK_NULL_HANDLE;   // ...depth stored
+        VkDescriptorSetLayout m_upscaleSetLayout = VK_NULL_HANDLE;
+        VkPipelineLayout      m_upscaleLayout    = VK_NULL_HANDLE;
+        VkPipeline            m_upscalePipeline  = VK_NULL_HANDLE;
+        VkSampler             m_upscaleSampler   = VK_NULL_HANDLE;
+        VkDescriptorPool      m_upscalePool      = VK_NULL_HANDLE;
+        std::array<VkDescriptorSet, MAX_FRAMES_IN_FLIGHT> m_upscaleSets{};   // slot i: m_sceneSlots[i]'s colour
+        bool CreateUpscalePipeline();
+        void DestroyUpscalePipeline();
         // One frame-shaped pass: colour load op / initial / final layout,
         // depth loaded (from DEPTH_STENCIL_ATTACHMENT_OPTIMAL) or cleared
         // (from UNDEFINED), depth stored or discarded.

@@ -289,6 +289,13 @@ namespace Platform {
             SetInt("weatherRadius", radius < 3 ? 3 : (radius > 10 ? 10 : radius));
             NoteGraphicsOptionChanged();
         }
+        // Engine option (Video Settings → Rain Resolution): rain and snow drawn
+        // at half the world's resolution, then laid over it in one pass
+        // (WeatherEffectRenderer). Full is MC's look; Half shades ~4x fewer
+        // weather pixels, but splits the frame's render pass for it, so it
+        // only pays at a large Weather Effect Radius. Every preset sets Full.
+        bool GetRainHalfResolution() const { return GetBool("rainHalfResolution", false); }
+        void SetRainHalfResolution(bool half) { SetBool("rainHalfResolution", half); NoteGraphicsOptionChanged(); }
         void SetCloudRange(int range) { SetInt("cloudRange", range); NoteGraphicsOptionChanged(); }
 
         // MC renderDistance 2..32. GetRenderDistance is the distance IN USE —

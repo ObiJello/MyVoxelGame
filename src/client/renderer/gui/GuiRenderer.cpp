@@ -2,10 +2,12 @@
 #include "GuiRenderer.hpp"
 #include "FontRenderer.hpp"
 #include "../backend/RenderBackend.hpp"
+#include "../core/LateDepthBands.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/core/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cmath>
 
 namespace Render {
 
@@ -449,6 +451,28 @@ void main() {
         guiBase.depthWriteEnabled = false;
         g_renderBackend->SetPipelineState(guiBase);
         bool currentDepthState = false;
+        // While the next frame reads this frame's depth (rain, Vulkan), the
+        // 3D items draw into the GUI's depth band near 0 and each depth zone
+        // clears only its own rect — the world's depth stays as it was
+        // around them (LateDepthBands.hpp).
+        const bool banded = LateDepthBands::Begin(LateDepthBands::Layer::Gui);
+        // A depth zone's screen bounds in framebuffer pixels: the batches from
+        // `first` while they keep depth on.
+        auto zoneRect = [&](size_t first, int& x0, int& y0, int& x1, int& y1) {
+            float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
+            for (size_t j = first; j < m_batches.size() && m_batches[j].useDepth; ++j) {
+                const DrawBatch& z = m_batches[j];
+                for (int k = z.firstIndex; k < z.firstIndex + z.indexCount; ++k) {
+                    const GuiVertex& v = m_vertices[m_indices[static_cast<size_t>(k)]];
+                    minX = std::min(minX, v.x); maxX = std::max(maxX, v.x);
+                    minY = std::min(minY, v.y); maxY = std::max(maxY, v.y);
+                }
+            }
+            x0 = static_cast<int>(std::floor(minX * guiScale)) - 1;
+            y0 = static_cast<int>(std::floor(minY * guiScale)) - 1;
+            x1 = static_cast<int>(std::ceil(maxX * guiScale)) + 1;
+            y1 = static_cast<int>(std::ceil(maxY * guiScale)) + 1;
+        };
         QuadBlendMode currentBlend = QuadBlendMode::AlphaBlend;
         CompareOp currentDepthFunc = CompareOp::LessEqual;
         bool currentDepthWrite = true;
@@ -468,7 +492,8 @@ void main() {
             g_renderBackend->SetPipelineState(s);
         };
 
-        for (const auto& batch : m_batches) {
+        for (size_t batchIndex = 0; batchIndex < m_batches.size(); ++batchIndex) {
+            const DrawBatch& batch = m_batches[batchIndex];
             // Flip depth state when any aspect changes (depth on/off, blend mode,
             // depth-compare function, or depth-write). Only clear the depth buffer
             // when ENTERING the depth zone from a no-depth batch — the glint pass
@@ -481,7 +506,14 @@ void main() {
                 batch.depthWrite != currentDepthWrite) {
                 applyState(batch.useDepth, batch.blendMode, batch.depthFunc, batch.depthWrite);
                 if (batch.useDepth && !currentDepthState) {
-                    g_renderBackend->Clear(/*color*/false, /*depth*/true);
+                    if (banded) {
+                        // The band's far edge, over this zone's items only.
+                        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                        zoneRect(batchIndex, x0, y0, x1, y1);
+                        g_renderBackend->ClearDepthRect(x0, y0, x1 - x0, y1 - y0, LateDepthBands::Width());
+                    } else {
+                        g_renderBackend->Clear(/*color*/false, /*depth*/true);
+                    }
                 }
                 currentDepthState = batch.useDepth;
                 currentBlend = batch.blendMode;
@@ -535,6 +567,7 @@ void main() {
         // Sticky state — leaving it set would clip everything drawn after the
         // GUI (and the whole next frame on GL).
         g_renderBackend->ClearScissorRect();
+        if (banded) LateDepthBands::End();
 
         g_renderBackend->UnbindMesh();
 

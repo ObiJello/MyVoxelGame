@@ -64,15 +64,30 @@ namespace Render {
         // Draws nothing unless the dimension can have weather and the rain
         // level is above 0. This form draws the BOUND level (the active one
         // outside a portal view) under the current portal clip plane.
+        // `allowHalfResolution`: the main view's pass may honour Rain
+        // Resolution: Half (OpenGL: DrawHalfResolution; Vulkan: the rain
+        // RenderAhead drew, laid over the frame here); every other caller —
+        // portal views, the OIT stages, the panorama faces — draws at full
+        // resolution, under the stencils, clip planes and viewports it set.
         void Render(const glm::mat4& proj, const glm::mat4& view,
-                    const glm::dvec3& cameraPos, float partialTick);
+                    const glm::dvec3& cameraPos, float partialTick, bool allowHalfResolution = false);
         // A portal view's form: `dimension` is the level the view shows (its
         // level bound — the heightmaps and biomes read the globals), and
         // `clipPlane` the view's clip plane in render space (zero = none).
         // The eye and the render origin are the view's.
         void Render(const glm::mat4& proj, const glm::mat4& view,
                     const glm::dvec3& cameraPos, float partialTick,
-                    Game::DimensionId dimension, const glm::vec4& clipPlane);
+                    Game::DimensionId dimension, const glm::vec4& clipPlane,
+                    bool allowHalfResolution = false);
+        // Vulkan, the main view, once a frame after its camera and render
+        // origin are final and before anything is drawn into the frame:
+        // Rain Resolution: Half drawn ahead of the frame's render pass from
+        // the previous frame's depth (see DrawAhead); the main view's
+        // Render then only lays it over the frame. Also where the frame is
+        // marked for it: depth kept and handed to the next frame, the
+        // viewmodels and GUI items in depth bands (LateDepthBands.hpp).
+        void RenderAhead(const glm::mat4& proj, const glm::mat4& view,
+                         const glm::dvec3& cameraPos, float partialTick);
 
     private:
         // MC WeatherEffectRenderer.ColumnInstance.
@@ -95,6 +110,13 @@ namespace Render {
 
         void PrepareInstances(std::vector<Vertex>& out, const std::vector<ColumnInstance>& columns,
                               const glm::dvec3& cameraPos, float maxAlpha, int radius, float intensity) const;
+        struct StreamSlot;
+        // extractRenderState + prepareInstances for `dimension` around the
+        // eye, uploaded into a stream slot: false when there is nothing to
+        // draw (no weather there, or no column in range).
+        bool BuildColumns(Game::DimensionId dimension, const glm::dvec3& cameraPos, float partialTick,
+                          const StreamSlot*& slot, size_t& rainVerts, size_t& snowVerts);
+        void RestoreDefaultState();
 
         // MC's columnSizeX / columnSizeZ: the half-quad direction for each
         // column relative to the camera's, 32 x 32 around it.
@@ -124,6 +146,63 @@ namespace Render {
         size_t m_slotCursor = 0;
         StreamSlot& AcquireSlot(size_t vertsNeeded);
         void DestroySlots();
+
+        // The columns' draw: `shader` bound with the world's uniforms, `state`
+        // set, rain then snow from `slot`; `sceneDepth` (half resolution) at
+        // texture slot 1, and with `reprojection` it is the previous
+        // frame's, seen through that frame's view-projection.
+        void DrawColumns(ShaderHandle shader, const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                         const glm::mat4& mvp, const glm::dvec3& cameraPos, const glm::vec4& clipPlane,
+                         const PipelineState& state, TextureHandle sceneDepth = INVALID_TEXTURE,
+                         const glm::mat4* reprojection = nullptr);
+
+        // ── Rain Resolution: Half ───────────────────────────────────────
+        // The columns drawn into a target half the world's size (one per
+        // frame slot: a frame never writes the one the previous frame's
+        // composite reads), depth-tested in the shader, colour premultiplied
+        // so the layers accumulate as "over" (One, OneMinusSrcAlpha); one
+        // full-screen draw then lays the target over the frame with the same
+        // blend — the result the full-resolution pass gets layer by layer,
+        // with a quarter of the pixels shaded. Not under Improved
+        // Transparency (its OIT stages draw the weather).
+        //  - Vulkan (DrawAhead, from RenderAhead): before the frame's render
+        //    pass opens, against the PREVIOUS frame's depth reprojected
+        //    (weather_half_vk.frag), so the frame's pass never breaks — a
+        //    break alone costs ~0.6 ms at 3420x2146. Without that depth (the
+        //    first frame of rain, a resize, something drawn first) the rain
+        //    is drawn at full resolution in the frame instead.
+        //  - OpenGL (DrawHalfResolution): FBO 0's depth copied at the
+        //    weather's place in the frame (m_sceneDepthCopy), the target
+        //    drawn, the frame resumed. False: nothing was drawn, the caller
+        //    draws at full resolution.
+        bool DrawHalfResolution(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                                const glm::mat4& mvp, const glm::dvec3& cameraPos);
+        bool DrawAhead(const StreamSlot& slot, size_t rainVerts, size_t snowVerts, const glm::mat4& mvp,
+                       const glm::mat4& reprojection, const glm::dvec3& cameraPos, TextureHandle previousDepth);
+        // Into the bound half target: cleared, then the columns.
+        void DrawIntoHalfTarget(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+                                const glm::mat4& mvp, const glm::dvec3& cameraPos, TextureHandle sceneDepth,
+                                const glm::mat4* reprojection, int halfWidth, int halfHeight);
+        // The half target over the frame (bound), `width` x `height`.
+        void CompositeHalf(RenderTargetHandle target, int width, int height);
+        bool EnsureHalfResources(int width, int height);
+        void ReleaseHalfResources();
+        ShaderHandle  m_halfShader      = INVALID_SHADER;
+        ShaderHandle  m_compositeShader = INVALID_SHADER;
+        BufferHandle  m_quadVB          = INVALID_BUFFER;
+        MeshHandle    m_quadMesh        = INVALID_MESH;
+        std::array<RenderTargetHandle, 2> m_halfTargets{INVALID_RENDER_TARGET, INVALID_RENDER_TARGET};
+        int           m_halfWidth = 0, m_halfHeight = 0;
+        TextureHandle m_sceneDepthCopy = INVALID_TEXTURE;   // OpenGL
+        int           m_sceneDepthWidth = 0, m_sceneDepthHeight = 0;
+        bool          m_halfFailed = false;
+        // RenderBackend::FrameNumber() of the frame whose rain DrawAhead drew
+        // (Render composites it), and the main view RenderAhead last saw —
+        // the next frame's reprojection, if it is the very next frame.
+        uint64_t   m_aheadFrame = 0;
+        uint64_t   m_viewFrame  = 0;
+        glm::mat4  m_viewMvp{1.0f};
+        glm::dvec3 m_viewOrigin{0.0};
     };
 
     extern WeatherEffectRenderer g_weatherEffectRenderer;
