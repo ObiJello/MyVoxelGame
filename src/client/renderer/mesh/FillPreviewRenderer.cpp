@@ -4,7 +4,6 @@
 #include "ChunkRenderer.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "../core/RenderOrigin.hpp"
-#include "../backend/vulkan/VKBackend.hpp"
 #include "../environment/EnvironmentState.hpp"
 #include "../environment/EntityEnvironment.hpp"
 #include "common/world/lighting/LightCoords.hpp"
@@ -53,19 +52,13 @@ namespace Render {
 
     bool FillPreviewRenderer::Initialize() {
         if (!g_renderBackend) return false;
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles("shaders/block.vert", "shaders/block.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[FillPreviewRenderer] block shader failed to load - no fill preview");
             return false;
         }
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, kMaxVerts * sizeof(ItemCubeVert),
                                                   nullptr, BufferAccess::Streaming);
             fb.ib = g_renderBackend->CreateBuffer(BufferUsage::Index, kMaxIdx * sizeof(uint32_t),
@@ -212,8 +205,8 @@ namespace Render {
         }
         if (idx.empty()) return;
 
-        m_parity ^= 1;
-        FrameBuffers& fb = m_frames[m_parity];
+        m_slot = (m_slot + 1) % EntityFrame::Slots();
+        FrameBuffers& fb = m_frames[m_slot];
         if (fb.mesh == INVALID_MESH) return;
         g_renderBackend->UpdateBuffer(fb.vb, 0, verts.size() * sizeof(ItemCubeVert), verts.data());
         g_renderBackend->UpdateBuffer(fb.ib, 0, idx.size() * sizeof(uint32_t), idx.data());

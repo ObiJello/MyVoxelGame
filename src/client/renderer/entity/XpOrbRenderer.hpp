@@ -66,7 +66,7 @@ namespace Render {
         int  m_packGeneration = -1;   // Resources::CacheStale
         bool LoadTexture();
 
-        // Two streaming vertex sets alternated per FRAME, each call in a
+        // One streaming vertex set per frame in flight, cycled per FRAME, each call in a
         // frame (main pass, portal recursions) appending at a cursor — see
         // EntityFrame.hpp. The index buffer is static: the quad pattern
         // 0,1,2,0,2,3 repeated kMaxOrbs times, so orb k's vertices at
@@ -76,7 +76,7 @@ namespace Render {
             BufferHandle vb   = INVALID_BUFFER;
             MeshHandle   mesh = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         // The upload and draw of m_verts (Render and RenderSingle share it).
         void SubmitOrbs(const glm::mat4& projection, const glm::mat4& view,
                         const glm::vec3& cameraPos, FrameBuffers& fb);

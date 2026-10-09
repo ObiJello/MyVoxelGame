@@ -6,8 +6,8 @@
 namespace Launcher {
 
     // Launch the game process. Returns true if the process was started successfully.
-    // extraArgs are appended to the command line (e.g., "--server 192.168.1.5:25565").
-    bool LaunchGame(const std::string& gamePath, bool useVulkan = false, const std::string& extraArgs = "");
+    // extraArgs are appended to the command line (e.g., "--metal --server 192.168.1.5:25565").
+    bool LaunchGame(const std::string& gamePath, const std::string& extraArgs = "");
 
     // Relaunch the launcher itself (for self-update).
     // On macOS: uses 'open' on the .app bundle, then exits.

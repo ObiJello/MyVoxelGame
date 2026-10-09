@@ -3411,6 +3411,7 @@ static uint16_t     s_lastPresencePort = 0;
 
         // Parse command-line arguments
         bool useVulkan = false;
+        bool useMetal = false;         // --metal: the native Metal backend (macOS); wins over --vulkan
         bool vanillaPortals = false;   // --vanilla-portals: block portals instead of immersive ones
         bool crashTest = false;
         // --crash-test=stack-overflow: unbounded recursion on a worker thread
@@ -3623,6 +3624,17 @@ static uint16_t     s_lastPresencePort = 0;
                 useVulkan = true;
                 Log::Info("Vulkan backend requested via --vulkan flag");
             }
+            if (arg == "--metal") {
+                useMetal = true;
+                Log::Info("Metal backend requested via --metal flag");
+            }
+            if (arg == "--metal4") {
+                // The Metal 4 runtime path where this Mac offers it; the
+                // Metal 3 backend otherwise (docs/metal4.md).
+                useMetal = true;
+                Render::SetMetal4Requested(true);
+                Log::Info("Metal 4 path requested via --metal4 flag");
+            }
             if (arg == "--vanilla-portals") {
                 vanillaPortals = true;
                 Log::Info("Vanilla (block) nether portals requested via --vanilla-portals");
@@ -3805,6 +3817,12 @@ static uint16_t     s_lastPresencePort = 0;
 
         Log::Info("Starting Voxel Engine");
 
+        // One backend: --metal wins over --vulkan; neither is OpenGL.
+        if (useMetal && useVulkan) {
+            Log::Info("Both --metal and --vulkan given: using Metal");
+            useVulkan = false;
+        }
+
 #if defined(__APPLE__) && defined(HAS_VULKAN)
         // Point the Vulkan loader to the bundled MoltenVK ICD manifest.
         // This makes Vulkan work without any system-wide Vulkan/MoltenVK installation.
@@ -3861,7 +3879,19 @@ static uint16_t     s_lastPresencePort = 0;
 #endif
         }
 
-        if (!useVulkan) {
+        if (useMetal) {
+#ifdef HAS_METAL
+            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);  // the backend attaches a CAMetalLayer
+            glfwWindowHint(GLFW_COCOA_RETINA_FRAMEBUFFER, retinaFramebuffer ? GLFW_TRUE : GLFW_FALSE);
+            Log::Info("Window configured for Metal (no OpenGL context)");
+#else
+            Log::Error("Metal backend not available (compiled without HAS_METAL). Falling back to OpenGL.");
+            useMetal = false;
+            // Fall through to OpenGL setup below
+#endif
+        }
+
+        if (!useVulkan && !useMetal) {
             glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, Config::OpenGLMajor);
             glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, Config::OpenGLMinor);
             glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -3917,7 +3947,7 @@ static uint16_t     s_lastPresencePort = 0;
         }
 #endif
 
-        if (!useVulkan) {
+        if (!useVulkan && !useMetal) {
             glfwMakeContextCurrent(window);
             if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
                 Log::Error("Failed to initialize GLAD");
@@ -3955,17 +3985,27 @@ static uint16_t     s_lastPresencePort = 0;
             glFrontFace(GL_CCW);
             glfwSwapInterval(Platform::g_gameSettings.GetVSync() ? 1 : 0); // VSync from settings
         } else {
-            Log::Info("Vulkan mode: skipping OpenGL initialization");
+            Log::Info("%s mode: skipping OpenGL initialization", useMetal ? "Metal" : "Vulkan");
         }
 
         // Initialize render backend abstraction
         {
-            Render::BackendType backendType = useVulkan ? Render::BackendType::Vulkan : Render::BackendType::OpenGL;
+            Render::BackendType backendType = useMetal  ? Render::BackendType::Metal
+                                            : useVulkan ? Render::BackendType::Vulkan
+                                                        : Render::BackendType::OpenGL;
             Render::g_renderBackend = Render::CreateRenderBackend(backendType);
+            // The streaming renderers version their buffers per frame in
+            // flight (EntityFrame::Slots()); told before any of them initialises.
+            if (Render::g_renderBackend) {
+                Render::EntityFrame::SetSlots(static_cast<int>(Render::g_renderBackend->FramesInFlight()));
+            }
             if (!Render::g_renderBackend) {
                 Log::Error("Failed to create render backend");
                 if (useVulkan) {
                     Log::Error("Vulkan backend creation failed. Try running without --vulkan");
+                }
+                if (useMetal) {
+                    Log::Error("Metal backend creation failed. Try running without --metal");
                 }
                 glfwDestroyWindow(window);
                 glfwTerminate();
@@ -4912,6 +4952,9 @@ static uint16_t     s_lastPresencePort = 0;
                 s_frameProfile.rows.clear();
                 return true;
             };
+            cb.captureGpuFrame = []() -> bool {
+                return Render::g_renderBackend && Render::g_renderBackend->RequestGpuCapture();
+            };
             Client::NetworkClient* const nc = networkClient.get();
             cb.sendCommand = [nc](const std::string& command) {
                 if (!nc) return;
@@ -5306,8 +5349,10 @@ static uint16_t     s_lastPresencePort = 0;
             leaveCapture.outroSpeed   = Platform::g_gameSettings.GetFloat("panoramaScrollSpeed", 1.0f);
             leaveCapture.clickYaw     = camera.yaw;
             leaveCapture.clickPitch   = camera.pitch;
-            // The pause menu goes on the click, as MC's does; with the
-            // faces captured under it the next frame is the title's.
+            // The pause menu goes on the click, as MC's does. (MC puts a
+            // "Saving world" screen in its place; tried on 2026-10-07 and
+            // reverted on 2026-10-08 by the user's choice — the bare world
+            // shows for the few teardown frames instead.)
             Render::GetScreenManager().Clear();
         };
 
@@ -6788,7 +6833,7 @@ static uint16_t     s_lastPresencePort = 0;
                     Client::LevelLoadTracker::ViewInfo loadView;
                     loadView.eye     = glm::dvec3(camera.position);
                     loadView.forward = camera.GetForward();
-                    Client::g_levelLoadTracker.Tick(player.physics.position, &loadView);
+                    { PROFILE_ZONE_N("Tick.LoadTracker"); Client::g_levelLoadTracker.Tick(player.physics.position, &loadView); }
                 }
                 // /morph: the own body's walk animation and creeper swell,
                 // per tick; a full swell is the creeper's bang, done by the
@@ -6819,9 +6864,9 @@ static uint16_t     s_lastPresencePort = 0;
                 //     physics half runs per frame; the attack cooldown that
                 //     feeds the crosshair indicator has to count in TICKS, or
                 //     the bar fills at frame rate.
-                player.Tick();
+                { PROFILE_ZONE_N("Tick.Player"); player.Tick(); }
                 // The elytra glide's looping sound (ClientFireworks.hpp).
-                Client::Fireworks::TickLocalPlayer(player);
+                { PROFILE_ZONE_N("Tick.Fireworks"); Client::Fireworks::TickLocalPlayer(player); }
                 // MC Hud.tick(pause) — the status bars' 20 Hz clock (heart
                 // blink, jitter, regeneration wave), stopped while paused.
                 if (!Client::g_clientTickRate.IsWorldPaused()) g_hudRenderer.Tick();
@@ -6842,7 +6887,7 @@ static uint16_t     s_lastPresencePort = 0;
                     // A moving cell that outlives the server's final block
                     // writes the carried block itself — a local write.
                     Client::ClientBlockAccess::LocalWriteScope scope(*Client::g_clientBlockAccess);
-                    Client::g_clientChunkManager->TickBlockEntities(*Client::g_clientBlockAccess);
+                    { PROFILE_ZONE_N("Tick.BlockEntities"); Client::g_clientChunkManager->TickBlockEntities(*Client::g_clientBlockAccess); }
                 }
 
                 // MC Gui.tick: a sleeping player gets the InBedChatScreen when
@@ -6947,7 +6992,7 @@ static uint16_t     s_lastPresencePort = 0;
 
                 // 3. Interpolate remote player positions (Minecraft's InterpolationHandler)
                 if (Client::g_remotePlayerManager) {
-                    Client::g_remotePlayerManager->Tick();
+                    { PROFILE_ZONE_N("Tick.RemotePlayers"); Client::g_remotePlayerManager->Tick(); }
                 }
                 // The skinned bodies' per-tick state — the cape physics (MC
                 // ClientAvatarState), the swim amount, and for your own body
@@ -6982,12 +7027,12 @@ static uint16_t     s_lastPresencePort = 0;
 
                 if (Client::g_itemEntityManager && !entitiesFrozen) {
                     // Feet position, for pickup animations to fly toward.
-                    Client::g_itemEntityManager->Tick(player.predictedPos);
+                    { PROFILE_ZONE_N("Tick.Items"); Client::g_itemEntityManager->Tick(player.predictedPos); }
                 }
                 if (Client::g_xpOrbManager && !entitiesFrozen) {
                     // Feet position again — the orbs' player pull and their
                     // pickup flights both aim at the local player.
-                    Client::g_xpOrbManager->Tick(player.predictedPos);
+                    { PROFILE_ZONE_N("Tick.XpOrbs"); Client::g_xpOrbManager->Tick(player.predictedPos); }
                 }
 
                 // Mobs run the same physics classes the server does, so
@@ -7023,11 +7068,11 @@ static uint16_t     s_lastPresencePort = 0;
                         // moved vehicle, its paddles and the keys go out
                         // after (Client::Vehicles).
                         Client::Vehicles::BeforeEntityTick(player, camera.yaw, camera.pitch);
-                        Client::g_clientMobManager->Tick();
+                        { PROFILE_ZONE_N("Tick.Mobs"); Client::g_clientMobManager->Tick(); }
                         Client::Vehicles::AfterEntityTick(player);
                         if (Client::g_clientFallingBlocks) {
                             Client::g_clientFallingBlocks->SetBlockAccess(Client::g_clientBlockAccess);
-                            Client::g_clientFallingBlocks->Tick();
+                            { PROFILE_ZONE_N("Tick.FallingBlocks"); Client::g_clientFallingBlocks->Tick(); }
                         }
                     }
 
@@ -7069,11 +7114,11 @@ static uint16_t     s_lastPresencePort = 0;
                                     // origin: the player's image in this level,
                                     // not their coordinates in another one.
                                     Client::g_clientMobManager->SetPickOrigin(imagePos);
-                                    Client::g_clientMobManager->Tick();
+                                    { PROFILE_ZONE_N("Tick.Mobs"); Client::g_clientMobManager->Tick(); }
                                 }
                                 if (Client::g_clientFallingBlocks) {
                                     Client::g_clientFallingBlocks->SetBlockAccess(Client::g_clientBlockAccess);
-                                    Client::g_clientFallingBlocks->Tick();
+                                    { PROFILE_ZONE_N("Tick.FallingBlocks"); Client::g_clientFallingBlocks->Tick(); }
                                 }
                             });
                         });
@@ -7094,6 +7139,7 @@ static uint16_t     s_lastPresencePort = 0;
                     if (!entitiesFrozen && Client::g_clientBlockAccess) {
                         static Game::JavaRandom s_animateRandom{0};
                         const glm::dvec3& camPos = player.visualPos;
+                        { PROFILE_ZONE_N("Tick.Animate");
                         Client::AnimateTick(
                             glm::ivec3(static_cast<int>(std::floor(camPos.x)),
                                        static_cast<int>(std::floor(camPos.y)),
@@ -7102,6 +7148,7 @@ static uint16_t     s_lastPresencePort = 0;
                             Client::g_clientMobManager->Level(),
                             s_animateRandom,
                             Client::MarkerParticleTarget(player));
+                        }
                         // MC ClientLevel.tickWeatherEffects' rain splashes and
                         // the client block-entity particle tickers (the
                         // campfires' smoke) — client/world/ClientParticleTicks.
@@ -7132,12 +7179,12 @@ static uint16_t     s_lastPresencePort = 0;
                 // freeze gate. Without it the sky keeps sliding while the
                 // server is paused and then snaps back on the next TimeUpdate.
                 if (Client::g_clientTickRate.RunsNormally()) {
-                    Render::EnvironmentState::Get().TickClient();
+                    { PROFILE_ZONE_N("Tick.Environment"); Render::EnvironmentState::Get().TickClient(); }
                 }
                 // Screen 20Hz tick (death-screen button delay, caret blink).
                 // The title phase has its own pump; in-game screens only got
                 // Update/Render before this.
-                Render::GetScreenManager().Tick();
+                { PROFILE_ZONE_N("Tick.Screens"); Render::GetScreenManager().Tick(); }
 
                 // World Options → Joinable / port changed: re-announce the
                 // Hosting presence so friends' Join buttons follow, and move
@@ -7329,6 +7376,7 @@ static uint16_t     s_lastPresencePort = 0;
                         player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN),
                         Game::Inventory::HotbarToIndex(player.inventory.GetSelectedSlot()),
                         Game::Inventory::OFFHAND_BEGIN);
+                    { PROFILE_ZONE_N("Tick.HeldItem");
                     Render::g_heldItemRenderer.Tick(
                         player.inventory.GetSelectedItem(),
                         player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).itemId,
@@ -7336,6 +7384,7 @@ static uint16_t     s_lastPresencePort = 0;
                         // MC ItemInHandRenderer.tick:564 — getItemSwapScale(1.0F).
                         player.GetItemSwapScale(1.0f),
                         heldPitch, heldYaw);
+                    }
                 }
 
                 // MC Minecraft.tick:1975 — musicManager.tick(); then
@@ -7360,7 +7409,7 @@ static uint16_t     s_lastPresencePort = 0;
                     // playBossMusic; a wither's does not).
                     soundContext.bossMusic = soundContext.dimension == Game::DimensionId::End &&
                                              Client::g_bossBars.ShouldPlayMusic();
-                    Client::SoundHost::Tick(soundContext);
+                    { PROFILE_ZONE_N("Tick.Sound"); Client::SoundHost::Tick(soundContext); }
                     // MC GameRenderer.tick: the boss overlay's world
                     // darkening (a wither's darken-screen bar) eases in at
                     // 0.05 a tick and out at 0.0125 — not while the world
@@ -8631,6 +8680,9 @@ static uint16_t     s_lastPresencePort = 0;
                 if (++s_loadingFrames >= 2 && !s_warmed) {
                     s_warmed = true;
                     Render::g_renderBackend->WarmPipelines();
+                    // Every mob model and texture too (MobRenderer::Prewarm):
+                    // first sightings cost 1–5 ms frames otherwise.
+                    mobRenderer.Prewarm();
                 }
             }
 
@@ -8659,6 +8711,9 @@ static uint16_t     s_lastPresencePort = 0;
 
             // Begin render backend frame (acquires swapchain image for Vulkan)
             if (Render::g_renderBackend) {
+                // The "GPU Pass Timers" toggle (ImGui) also drives the
+                // per-encoder GPU timestamps of a backend that has them.
+                Render::g_renderBackend->SetGpuTimersEnabled(Render::g_enableGpuPassTimers);
                 Render::g_renderBackend->BeginFrame();
             }
             // The particle systems' stream buffers: a fresh set per frame, so
@@ -8678,8 +8733,12 @@ static uint16_t     s_lastPresencePort = 0;
             // F3 gpu_utilization — MC times the whole frame on the GPU (one
             // TimerQuery) and divides by the CPU frame time, but only while
             // the entry is enabled: the query itself costs on Apple's GL.
+            // A backend that knows the last frame's GPU span without a
+            // query (Metal: the command buffer's GPUStart/EndTime) answers
+            // from that, which keeps the Metal HUD's encoder timing usable.
             {
                 const bool wantGpu = Render::DebugScreen::Entries().IsCurrentlyEnabled(Render::DebugScreen::Ids::GpuUtilization);
+                const float lastGpuMs = Render::g_renderBackend ? Render::g_renderBackend->GetLastFrameGpuMs() : -1.0f;
                 if (Render::g_renderBackend && s_frameGpuPending != Render::INVALID_GPU_TIMER) {
                     const float gpuMs = Render::g_renderBackend->GetGPUTimerResultMs(s_frameGpuPending);
                     if (gpuMs >= 0.0f) {
@@ -8689,6 +8748,8 @@ static uint16_t     s_lastPresencePort = 0;
                 }
                 if (!wantGpu) {
                     s_debugContext.gpuUtilization = -1.0;
+                } else if (lastGpuMs >= 0.0f) {
+                    s_debugContext.gpuUtilization = metrics.frameTime > 0.0f ? lastGpuMs * 100.0 / metrics.frameTime : 0.0;
                 } else if (Render::g_renderBackend && s_frameGpuPending == Render::INVALID_GPU_TIMER) {
                     s_frameGpuTimer = Render::g_renderBackend->BeginGPUTimer("frame");
                 }
@@ -9469,7 +9530,13 @@ static uint16_t     s_lastPresencePort = 0;
                     const Render::Camera faceCam = makeFaceCamera(faceIndex, leaveCapture.baseYaw,
                                                                   /*publishOrigin=*/true);
                     const glm::mat4 faceView = faceCam.GetViewMatrix();
+                    // The faces are taken under the pause menu, whose frame
+                    // holds the partial at 1 (envPartialTick,
+                    // weatherPartialTickNow): the same here, or the rain,
+                    // clouds and entity poses in the panorama sit up to a
+                    // tick behind what the paused frame showed.
                     const float facePartial = [&] {
+                        if (Client::g_clientTickRate.IsWorldPaused()) return 1.0f;
                         const float remaining = std::chrono::duration<float>(
                             nextClientTick - std::chrono::steady_clock::now()).count();
                         const float tickSeconds = std::chrono::duration<float>(CLIENT_TICK_INTERVAL).count();
@@ -9590,14 +9657,13 @@ static uint16_t     s_lastPresencePort = 0;
                                     // draws it (bodies straddling the plane
                                     // are drawn whole: a still picture).
                                     // The tile's projection, exactly (see
-                                    // renderLevelView). On Vulkan the plain
-                                    // one, as the frame's gun pass effectively
-                                    // uses: the oblique near plane breaks VK's
-                                    // depth there, and the far-side clip rides
+                                    // renderLevelView): the pass's own — on
+                                    // Vulkan and Metal the plain tile
+                                    // projection, as the frame's gun pass
+                                    // uses (PortalRenderer::SceneRenderFn),
+                                    // with the far-side clip on
                                     // gl_ClipDistance (uPortalClipPlane).
-                                    const bool vk = Render::g_renderBackend &&
-                                        Render::g_renderBackend->GetType() == Render::BackendType::Vulkan;
-                                    Render::RenderChunksAll(virtCam, virtFrust, vk ? gunBaseProj : obliqueProj,
+                                    Render::RenderChunksAll(virtCam, virtFrust, obliqueProj,
                                                             /*exactProjection=*/true);
                                     const glm::mat4 virtView = virtCam.GetViewMatrix();
                                     itemEntityRenderer.Render(obliqueProj, virtView, virtCam.position, facePartial);
@@ -9879,19 +9945,40 @@ static uint16_t     s_lastPresencePort = 0;
                     !Render::ShaderPipeline::Get().Active(),
                 width, height);
 
-            // Sky pass (MC addSkyPass): camera-centered, before terrain.
-            // Own projection — the 512-radius sky disc would be clipped by
-            // the main far plane at low render distances.
-            {
+            // Sky pass (MC addSkyPass): camera-centered. Own projection — the
+            // 512-radius sky disc would be clipped by the main far plane at
+            // low render distances.
+            //
+            // MC draws it BEFORE the terrain. Here it is drawn right AFTER the
+            // opaque and cutout terrain, depth-tested at the far plane
+            // (SkyRenderer::SetDepthTested, sky_vk.vert): the output is the
+            // same — the sky lands exactly on the pixels the terrain leaves,
+            // and everything blended (translucent terrain, entities' glass,
+            // particles, clouds, weather) comes later in the frame and finds
+            // it there — but the GPU no longer shades a full screen of sky
+            // for the terrain to cover: 17 % of a clear-weather frame on the
+            // M4 (2026-10-08). OBEY_LATE_SKY=0 restores MC's order; the
+            // `latesky` phase token pairs the two.
+            static const bool s_lateSkyEnabled = [] {
+                const char* v = std::getenv("OBEY_LATE_SKY");
+                return !(v && std::strcmp(v, "0") == 0);
+            }();
+            const bool lateSky = s_lateSkyEnabled && !Render::DevSkip("latesky");
+            auto drawSkyPass = [&]() {
                 PROFILE_ZONE_N("SkyPass");
                 DEBUG_PIE_ZONE("Sky");
                 glm::mat4 skyProj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, 2048.0f);
                 glm::mat4 viewRotation = glm::mat4(glm::mat3(view));
                 // MC Camera.doesMobEffectBlockSky: BLINDNESS / DARKNESS leave
                 // the sky undrawn — the darkened fog clear colour shows.
-                if (!Render::DevSkip("sky") && !Render::MobEffectBlocksSky())
+                if (!Render::DevSkip("sky") && !Render::MobEffectBlocksSky()) {
+                    Render::GpuDebugGroup gpuGroup("Sky");
+                    Render::g_skyRenderer.SetDepthTested(lateSky);
                     Render::g_skyRenderer.Render(skyProj, viewRotation);
-            }
+                    Render::g_skyRenderer.SetDepthTested(false);
+                }
+            };
+            if (!lateSky) drawSkyPass();
 
             // Main chunk rendering (includes frustum culling and all render passes)
             // MC's "Main" frame-graph pass: solid terrain, the solid
@@ -9907,6 +9994,7 @@ static uint16_t     s_lastPresencePort = 0;
                 }
             }
             }
+            if (lateSky) drawSkyPass();
             // Flicker diagnostics: the MAIN pass's numbers, read here and not
             // at frame end — a portal view into this same level re-enters
             // the renderer later in the frame and overwrites them.
@@ -10090,12 +10178,13 @@ static uint16_t     s_lastPresencePort = 0;
                     // drawn up to the surface here and from it in the
                     // portal view, instead of whole on this side with the
                     // front half out the back of the frame.
-                    if (!Render::DevSkip("players")) { PROFILE_ZONE_N("Render.RemotePlayers");
+                    if (!Render::DevSkip("players")) { PROFILE_ZONE_N("Render.RemotePlayers"); Render::GpuDebugGroup gpuGroup("Players");
                     playerRenderer.Render(proj, view, camera.position, frustum,
                                           *Client::g_remotePlayerManager, partialTick, bulkSkipIds,
                                           Render::ChunkRenderer::PortalClipPlane());
                     g_playerDrawDiag.Add(g_playerDrawDiag.main, playerRenderer.LastTally()); }
                     if (!Render::DevSkip("items")) {
+                    Render::GpuDebugGroup gpuGroup("Item entities");
                     { PROFILE_ZONE_N("Render.ItemEntities");
                     // Improved Transparency: drawn by the OIT stages at the
                     // end of the level (MC OIT_ITEM) instead of here.
@@ -10113,6 +10202,7 @@ static uint16_t     s_lastPresencePort = 0;
                     xpOrbRenderer.Render(proj, view, camera.position, frustum, partialTick); }
                     }
                     if (Client::g_clientMobManager && !Render::DevSkip("mobs")) {
+                        Render::GpuDebugGroup gpuGroup("Mobs");
                         // The main frustum: MC extractVisibleEntities culls
                         // against the same frustum the chunk pass used.
                         PROFILE_ZONE_N("Render.Mobs");
@@ -10516,6 +10606,7 @@ static uint16_t     s_lastPresencePort = 0;
             // through a portal).
             if (Render::g_blockEntityRenderDispatcher && Client::g_clientChunkManager
                 && !Render::DevSkip("blockentities")) {
+                Render::GpuDebugGroup gpuGroup("Block entities");
                 PROFILE_ZONE_N("BlockEntities");
                 DEBUG_PIE_ZONE("renderSolidFeatures");
                 // Fraction of the current client tick elapsed — the same
@@ -10798,9 +10889,15 @@ static uint16_t     s_lastPresencePort = 0;
                     [&](const Render::Camera& virtCam,
                         const Frustum& virtFrust,
                         const glm::mat4& obliqueProj) {
-                        // Chunks from the virtual camera (stencil + oblique
-                        // projection both honored).
-                        Render::RenderChunksAll(virtCam, virtFrust, obliqueProj);
+                        // Chunks from the virtual camera (stencil + the
+                        // pass's projection both honored). On Vulkan and
+                        // Metal the portal renderer hands the PLAIN
+                        // projection (PortalRenderer::SceneRenderFn) and
+                        // the terrain takes it exactly, so the terrain and
+                        // every entity below share one depth space.
+                        Render::RenderChunksAll(virtCam, virtFrust, obliqueProj,
+                                                /*exactProjection=*/Render::g_renderBackend &&
+                                                    Render::g_renderBackend->UsesVkShaders());
 
                         const glm::mat4 virtView = virtCam.GetViewMatrix();
 
@@ -11045,6 +11142,7 @@ static uint16_t     s_lastPresencePort = 0;
                                                camera.position);
             }
             if (!Render::DevSkip("particles")) {
+                Render::GpuDebugGroup gpuGroup("Particles");
                 PROFILE_ZONE_N("Particles.Render");
                 DEBUG_PIE_ZONE("renderTranslucentFeatures");
                 // Improved Transparency: drawn by the OIT stages at the end
@@ -11068,6 +11166,7 @@ static uint16_t     s_lastPresencePort = 0;
             // clouds across the Nether's ceiling would be very obviously wrong,
             // and the Hush's fixed night has none either (HasClouds).
             if (Render::g_skyRenderer.HasClouds() && !Render::DevSkip("clouds")) {
+                Render::GpuDebugGroup gpuGroup("Clouds");
                 PROFILE_ZONE_N("CloudPass");
                 DEBUG_PIE_ZONE("Clouds");
                 const auto nowForPartial = std::chrono::steady_clock::now();
@@ -11099,6 +11198,7 @@ static uint16_t     s_lastPresencePort = 0;
             // no depth write. Nothing unless the active dimension can have
             // weather and the rain level is above 0 (the renderer checks).
             if (!Render::DevSkip("weather")) {
+                Render::GpuDebugGroup gpuGroup("Weather");
                 PROFILE_ZONE_N("WeatherPass");
                 DEBUG_PIE_ZONE("Weather");
                 const float weatherPartialTick = weatherPartialTickNow();
@@ -11200,6 +11300,7 @@ static uint16_t     s_lastPresencePort = 0;
                 (renderMainHand ||
                  !player.inventory.GetSlot(Game::Inventory::OFFHAND_BEGIN).IsEmpty());
             if (drawHeldItem && !Render::DevSkip("helditem")) {
+                Render::GpuDebugGroup gpuGroup("Held item");
                 PROFILE_ZONE_N("HeldItem");
                 DEBUG_PIE_ZONE("hand");
                 const float fbAspect = (height > 0)
@@ -11276,12 +11377,14 @@ static uint16_t     s_lastPresencePort = 0;
             // this interrupts the frame's pass (its depth is not kept), which
             // is why it waits until nothing in the world needs depth.
             if (!Render::DevSkip("outline")) {
+                Render::GpuDebugGroup gpuGroup("Entity outline");
                 Render::EntityOutline::Get().Composite(width, height);
             }
             // MC GameRenderer.render: applyPostEffects right after the outline
             // blit, before the GUI — the spectated creeper / spider / enderman
             // view (Render::PostEffects). Not into the leave panorama.
             if (!leavingWorld && !Render::DevSkip("post")) {
+                Render::GpuDebugGroup gpuGroup("Post effects");
                 Render::PostEffects::Get().Apply(width, height, Render::ShaderPipeline::Get().Active());
             }
             // The level is done: a scaled scene is stretched over the window
@@ -11406,6 +11509,7 @@ static uint16_t     s_lastPresencePort = 0;
             // "world" ends before the GUI (MC GameRenderer.render: "world", then "gui").
             Render::DebugScreen::FrameProfiler::Pop();   // world
             if (!Render::DevSkip("hud")) {
+                Render::GpuDebugGroup gpuGroup("HUD");
                 PROFILE_ZONE_N("HudRender");
                 DEBUG_PIE_ZONE("gui");
                 {
@@ -12325,7 +12429,7 @@ static uint16_t     s_lastPresencePort = 0;
         Log::Info("Cleaning up rendering resources...");
         try {
             // Clear any remaining OpenGL errors (only if GL context exists)
-            if (!useVulkan && glfwGetCurrentContext() == window) {
+            if (!useVulkan && !useMetal && glfwGetCurrentContext() == window) {
                 while (glGetError() != GL_NO_ERROR) {}
             }
         } catch (const std::exception& e) {

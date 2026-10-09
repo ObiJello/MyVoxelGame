@@ -1,6 +1,7 @@
 // File: src/launcher/ui/LauncherUI.hpp
 #pragma once
 
+#include "launcher/GameRenderer.hpp"
 #include "launcher/appearance/AppearanceSettings.hpp"
 #include "launcher/appearance/AppearanceView.hpp"
 
@@ -49,7 +50,7 @@ namespace Launcher {
         std::string downloadSizeText;
         bool gameInstalled = false;
         bool launcherUpdateReady = false;  // true when a launcher update has been installed
-        bool useVulkan = false;            // launch game with --vulkan
+        GameRenderer renderer = GameRenderer::OpenGL;   // the backend the game starts with (GameRenderer.hpp)
 
         // ── Release metadata (set by the update-check drain) ──
         std::string publishedAt;        // ISO 8601 timestamp of the latest game release
@@ -150,6 +151,8 @@ namespace Launcher {
         void DrawSignedInPane(LauncherUIState& state);
         void DrawChangePwPane(LauncherUIState& state);
         void DrawGameRows(LauncherUIState& state);
+        // The renderer select (Play view controls row and Settings row).
+        void DrawRendererPicker(LauncherUIState& state, const char* id, ImVec2 pos, ImVec2 size);
         void DrawUsernameRow(LauncherUIState& state);
 
         // Sync account-pane navigation with auth state changes coming from the app.

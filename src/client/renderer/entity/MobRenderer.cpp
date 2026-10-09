@@ -1231,7 +1231,8 @@ namespace Render {
             return false;
         }
 
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, kMaxVertices * sizeof(ModelVertex),
                 nullptr, BufferAccess::Streaming);
@@ -1379,6 +1380,40 @@ namespace Render {
     }
     BabyModelLook GetBabyModelLook() { return s_babyLook; }
     int BabyModelLookGeneration() { return s_babyLookGeneration; }
+
+    void MobRenderer::Prewarm() {
+        if (!m_initialized || !g_renderBackend) return;
+        PROFILE_ZONE_N("MobRender.Prewarm");
+        const auto t0 = std::chrono::steady_clock::now();
+        int built = 0;
+        for (uint16_t raw = 0; raw < static_cast<uint16_t>(Game::EntityTypeId::Count); ++raw) {
+            if (GetModelFor(static_cast<Game::EntityTypeId>(raw))) ++built;
+        }
+        // Every entity texture too — the per-type pass covers the base
+        // sheets, but variants (villager types and professions, parrot and
+        // horse colours, fish patterns, eye and clothing layers, armour) are
+        // chosen at draw time at 37 call sites, each a decode + upload on
+        // first sight (1–3 ms frames on the tour). The whole directory is
+        // 956 files, 18 MB decoded, no file over 512²: decoded here, under
+        // the loading overlay. Already-cached entries (the pass above) are
+        // skipped by LoadTexture's cache.
+        int sheets = 0;
+        {
+            namespace fs = std::filesystem;
+            const std::string prefix = "assets/textures/entity";
+            const fs::path root = PlatformMain::GetAssetPath(prefix);
+            std::error_code ec;
+            for (fs::recursive_directory_iterator it(root, ec), end; !ec && it != end; it.increment(ec)) {
+                if (!it->is_regular_file(ec) || it->path().extension() != ".png") continue;
+                const std::string rel = prefix + "/" + fs::relative(it->path(), root, ec).generic_string();
+                if (ec) break;
+                if (LoadTexture(rel) != INVALID_TEXTURE) ++sheets;
+            }
+        }
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        Log::Info("[MobRenderer] prewarmed %d mob models and %d entity textures (%zu cached) in %.1f ms",
+                  built, sheets, m_textureCache.size(), ms);
+    }
 
     MobRenderer::ModelEntry* MobRenderer::GetModelFor(Game::EntityTypeId type) {
         const auto key = static_cast<uint16_t>(type);
@@ -2178,7 +2213,7 @@ namespace Render {
             m_vertCursor = 0;
             m_idxCursor  = 0;
         }
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (!guiCapture) {
             if (fb.mesh == INVALID_MESH) return;
             // Room left in this frame's set. Nothing to do when a previous
@@ -5386,7 +5421,7 @@ namespace Render {
             m_vertCursor = 0;
             m_idxCursor  = 0;
         }
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH) return;
         if (m_vertCursor + 4096 >= kMaxVertices || m_idxCursor + 8192 >= kMaxIndices) return;
         const size_t vertRoom = kMaxVertices - m_vertCursor;

@@ -20,6 +20,10 @@ namespace Render {
         bool Initialize(GLFWwindow* window) override;
         void Shutdown() override;
         BackendType GetType() const override { return BackendType::OpenGL; }
+        // UpdateBufferUnsynchronized maps with GL_MAP_UNSYNCHRONIZED_BIT: the
+        // driver queues about a frame of work, so two alternating sets (what
+        // every streaming renderer kept before the count came from here).
+        uint32_t FramesInFlight() const override { return 2; }
         const char* GetName() const override { return "OpenGL 3.3"; }
         GpuDeviceInfo GetDeviceInfo() const override { return m_deviceInfo; }
         GLFWwindow* GetWindow() const override { return m_window; }
@@ -60,6 +64,13 @@ namespace Render {
                                   int width, int height, const void* data) override;
         void UpdateTexture2DLevelStaged(TextureHandle handle, int level, int x, int y,
                                         int width, int height, const void* data) override;
+        TextureHandle CreateTexture2DArray(int width, int height, int layers, int mipLevels,
+                                           TextureFormat format) override;
+        int MaxTextureArrayLayers() const override;
+        void UpdateTextureArrayLevel(TextureHandle handle, int layer, int level, int x, int y,
+                                     int width, int height, const void* data) override;
+        void UploadTextureArrayLevel(TextureHandle handle, int level, int width, int height, int layers,
+                                     const void* data) override;
         void DestroyTexture(TextureHandle handle) override;
         void BindTexture(TextureHandle handle, uint32_t slot) override;
         TextureHandle CreateBufferTexture(BufferHandle buffer, TextureFormat format) override;
@@ -210,9 +221,10 @@ namespace Render {
             GLenum internalFormat = GL_RGBA8;
             GLenum dataFormat     = GL_RGBA;
             GLenum dataType       = GL_UNSIGNED_BYTE;
-            // GL_TEXTURE_2D, or GL_TEXTURE_BUFFER for CreateBufferTexture —
-            // BindTexture binds whichever the texture is. LAST on purpose:
-            // CreateTexture2D initialises this struct positionally.
+            // GL_TEXTURE_2D, GL_TEXTURE_BUFFER for CreateBufferTexture or
+            // GL_TEXTURE_2D_ARRAY for CreateTexture2DArray — BindTexture and
+            // the parameter setters bind whichever the texture is. LAST on
+            // purpose: CreateTexture2D initialises this struct positionally.
             GLenum target = GL_TEXTURE_2D;
         };
         std::unordered_map<uint32_t, GLTextureInfo> m_textures;
@@ -272,7 +284,8 @@ namespace Render {
         // Render target (FBO + color texture + depth attachment).
         struct GLRenderTargetInfo {
             GLuint        fbo               = 0;
-            GLuint        depthRBO          = 0;  // renderbuffer for depth (if no depth texture)
+            GLuint        depthRBO          = 0;  // renderbuffer for depth (if no depth texture); 0 = none (RenderTargetDesc::depth false)
+            bool          hasDepth          = true;
             TextureHandle colorTexture      = INVALID_TEXTURE;
             // CreateRenderTargetFromTextures: the framebuffer only borrows
             // its attachments, so Destroy leaves them alone.
@@ -388,6 +401,11 @@ namespace Render {
         GLuint     m_uploadPbo = 0;
         size_t     m_uploadSlotSize = 0;
         UploadSlot m_uploadSlots[kUploadSlots];
+        // The staged copy itself: a 2D texture's level (`layer` < 0) or an
+        // array's layer, through the ring, with the direct sub-image as the
+        // fallback when the ring cannot take it.
+        void StagedSubImage(TextureHandle handle, int layer, int level, int x, int y,
+                            int width, int height, const void* data);
         int        m_uploadSlot = 0;
         bool       m_uploadSlotReady = false;   // this frame's region waited on
         void EndUploadFrame();

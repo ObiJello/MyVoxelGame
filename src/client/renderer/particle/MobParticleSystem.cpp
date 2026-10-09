@@ -196,6 +196,7 @@ void main() {
             if (slot.vb   != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slot.vb);
             slot.vb   = g_renderBackend->CreateBuffer(BufferUsage::Vertex, newCap * 24, nullptr,
                                                       BufferAccess::Streaming);
+            g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, slot.vb, "Mob particles stream");
             slot.mesh = g_renderBackend->CreateMesh(slot.vb, INVALID_BUFFER, GetBlockVertexLayout());
             slot.capacityVerts = newCap;
         }

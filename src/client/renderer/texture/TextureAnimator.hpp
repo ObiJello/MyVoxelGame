@@ -28,6 +28,7 @@
 // OBEY_CPU_SPRITE_ANIM=1 still means cpu.
 #pragma once
 
+#include <array>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -52,9 +53,20 @@ namespace Render {
 
         // Every frame of the sheet, level by level: frameChains[frame][level].
         // Built once, with the sprite's .mcmeta mipmap strategy, so a frame
-        // carries the same chain the atlas build would give it.
+        // carries the same chain the atlas build would give it — and as
+        // deep as the sprite array's layer needs when the chain is longer.
         std::vector<std::vector<Mipmap::Image>> frameChains;
         int levels = 1;                          // levels every frame has (chain length)
+        int atlasLevels = 0;                     // levels the atlas takes: 0..atlasLevels
+
+        // The sprite's layer of the block atlas's sprite array
+        // (AtlasBuilder::GetSpriteArrayHandle), -1 without one; the layer is
+        // redrawn with the atlas rect. arrayShift = log2(array side / frame
+        // side): the frame's level k lands on the array's level k + shift,
+        // and the levels below are the frame upscaled, as BuildSpriteArray
+        // lays a still sprite out.
+        int arrayLayer = -1;
+        int arrayShift = 0;
 
         // MC AnimationState: the entry in animation.frames, the ticks spent
         // on it, and whether the last tick moved to a different frame.
@@ -79,18 +91,26 @@ namespace Render {
         static SpriteUploadMode Mode();
 
         // A (re)built atlas: drops the previous atlas's sprites — they would
-        // write into freed memory at old offsets.
-        void Initialize(TextureHandle atlasTexture);
+        // write into freed memory at old offsets. `spriteArray` (INVALID_
+        // TEXTURE for none) with its level count: the array whose layers
+        // the animated sprites registered with a layer redraw.
+        void Initialize(TextureHandle atlasTexture,
+                        const std::array<TextureHandle, AtlasBuilder::kSpriteArrays>& spriteArrays =
+                            {INVALID_TEXTURE, INVALID_TEXTURE},
+                        int spriteArrayCap = 0, int spriteArrayLevels = 0);
 
         // `frames` are the sheet's frames in order, animation.width x height
         // each. `mipLevels` 0 = the atlas has no chain (level 0 only).
+        // `arrayLayer` >= 0: also the sprite array's layer, at `arrayShift`
+        // (AnimatedTexture).
         void RegisterAnimatedTexture(const std::string& textureKey,
                                      const TextureAnimation& animation,
                                      const std::vector<std::vector<unsigned char>>& frames,
                                      int atlasX, int atlasY, int padding,
                                      const std::string& mipmapStrategy = "",
                                      float alphaCutoffBias = 0.0f,
-                                     int mipLevels = 0);
+                                     int mipLevels = 0,
+                                     int arrayLayer = -1, int arrayShift = 0);
 
         // Once per rendered frame: runs the client ticks `deltaTime` covers
         // (MC's cycleAnimationFrames per tick, at most 10 per call like MC's
@@ -107,6 +127,18 @@ namespace Render {
 
     private:
         TextureHandle m_atlasTexture = INVALID_TEXTURE;
+        // The sprite arrays (AtlasBuilder): sprite id s = layer s % cap of
+        // array s / cap.
+        std::array<TextureHandle, AtlasBuilder::kSpriteArrays> m_spriteArrays{INVALID_TEXTURE, INVALID_TEXTURE};
+        int m_spriteArrayCap = 0;
+        int m_spriteArrayLevels = 0;
+        TextureHandle SpriteArrayFor(int layer, int& outLayer) const {
+            if (m_spriteArrayCap <= 0 || layer < 0) return INVALID_TEXTURE;
+            const int index = layer / m_spriteArrayCap;
+            if (index >= AtlasBuilder::kSpriteArrays) return INVALID_TEXTURE;
+            outLayer = layer % m_spriteArrayCap;
+            return m_spriteArrays[static_cast<size_t>(index)];
+        }
         bool animationEnabled;
         float m_tickAccumulator = 0.0f;
         std::unordered_map<std::string, std::unique_ptr<AnimatedTexture>> animatedTextures;

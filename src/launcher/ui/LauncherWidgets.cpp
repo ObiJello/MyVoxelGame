@@ -5,6 +5,7 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <cfloat>
 #include <cmath>
 #include <cstring>
@@ -179,6 +180,80 @@ namespace Launcher::Widgets {
         }
         ImGui::PopID();
         return clickedIndex;
+    }
+
+    int Dropdown(const char* id, const char* const* labels, const char* const* notes, int count,
+                 int selected, ImVec2 pos, ImVec2 size) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        ImGui::PushID(id);
+        const bool open = ImGui::IsPopupOpen("##menu");
+
+        // ── The field: rail fill, the selection, a chevron ──
+        ImGui::SetCursorScreenPos(pos);
+        if (ImGui::InvisibleButton("##field", size)) ImGui::OpenPopup("##menu");
+        const bool hovered = ImGui::IsItemHovered();
+        dl->AddRectFilled(pos, pos + size, hovered || open ? BgHover : Rail, 9.0f);
+        dl->AddRect(pos, pos + size, open ? Accent : hovered ? BorderHover : Border, 9.0f);
+        const char* current = selected >= 0 && selected < count ? labels[selected] : "";
+        const ImVec2 ts = Measure(g_fontSmallMed, current);
+        Txt(dl, g_fontSmallMed, ImVec2(pos.x + 12.0f, pos.y + (size.y - ts.y) * 0.5f), TextPrimary, current);
+        {
+            // Down when closed, up when open.
+            const ImVec2 c(pos.x + size.x - 15.0f, pos.y + size.y * 0.5f);
+            const float dy = open ? -2.0f : 2.0f;
+            dl->AddLine(ImVec2(c.x - 4.0f, c.y - dy), ImVec2(c.x, c.y + dy), TextMuted, 1.5f);
+            dl->AddLine(ImVec2(c.x, c.y + dy), ImVec2(c.x + 4.0f, c.y - dy), TextMuted, 1.5f);
+        }
+
+        // ── The menu ──
+        constexpr float kPad = 5.0f;
+        constexpr float kRowH = 40.0f;
+        const float menuH = kPad * 2.0f + kRowH * static_cast<float>(count);
+        const float below = pos.y + size.y + 4.0f;
+        const bool fitsBelow = below + menuH <= ImGui::GetIO().DisplaySize.y - 4.0f;
+        const float menuW = std::max(size.x, 200.0f);
+        ImGui::SetNextWindowPos(ImVec2(pos.x + size.x - menuW, fitsBelow ? below : pos.y - 4.0f - menuH));
+        ImGui::SetNextWindowSize(ImVec2(menuW, menuH));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(kPad, kPad));
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupBorderSize, 1.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 10.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 0));
+        ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGui::ColorConvertU32ToFloat4(Rail));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImGui::ColorConvertU32ToFloat4(Border));
+        int picked = -1;
+        if (ImGui::BeginPopup("##menu", ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+                                        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings)) {
+            ImDrawList* mdl = ImGui::GetWindowDrawList();
+            const ImVec2 origin = ImGui::GetCursorScreenPos();
+            const float rowW = menuW - kPad * 2.0f;
+            for (int i = 0; i < count; ++i) {
+                const ImVec2 rp(origin.x, origin.y + kRowH * static_cast<float>(i));
+                ImGui::SetCursorScreenPos(rp);
+                ImGui::PushID(i);
+                const bool clicked = ImGui::InvisibleButton("##opt", ImVec2(rowW, kRowH));
+                const bool rowHover = ImGui::IsItemHovered();
+                ImGui::PopID();
+                if (i == selected) mdl->AddRectFilled(rp, rp + ImVec2(rowW, kRowH), BgActive, 7.0f);
+                else if (rowHover) mdl->AddRectFilled(rp, rp + ImVec2(rowW, kRowH), BgHover, 7.0f);
+                Txt(mdl, g_fontSmallMed, rp + ImVec2(11.0f, 5.0f), i == selected ? TextPrimary : TextBody, labels[i]);
+                if (notes && notes[i]) Txt(mdl, g_fontMono10, rp + ImVec2(11.0f, 23.0f), TextFaint, notes[i]);
+                if (i == selected) {
+                    // An accent check mark on the right.
+                    const ImVec2 c(rp.x + rowW - 17.0f, rp.y + kRowH * 0.5f);
+                    mdl->AddLine(ImVec2(c.x - 5.0f, c.y), ImVec2(c.x - 1.5f, c.y + 3.5f), Accent, 2.0f);
+                    mdl->AddLine(ImVec2(c.x - 1.5f, c.y + 3.5f), ImVec2(c.x + 5.0f, c.y - 4.0f), Accent, 2.0f);
+                }
+                if (clicked) {
+                    picked = i;
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(4);
+        ImGui::PopID();
+        return picked;
     }
 
     void SectionLabel(ImDrawList* dl, const ImVec2& pos, const char* text) {

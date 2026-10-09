@@ -41,9 +41,9 @@
 //
 //   * the previous frame's command buffer may still be executing while this
 //     frame's CPU writes into the same buffer — so a buffer must not be
-//     rewritten until the frame that last read it has retired (two sets,
-//     alternated per FRAME, with two frames in flight — GuiRenderer's
-//     pattern);
+//     rewritten until the frame that last read it has retired (one set per
+//     frame in flight — EntityFrame::Slots(), 2 on OpenGL/Vulkan, 3 on
+//     Metal — cycled per FRAME; GuiRenderer's pattern);
 //   * within ONE frame, every draw sees the LAST write — so a renderer that is
 //     called more than once per frame (the main pass, then once per portal
 //     recursion level) must give each call its own RANGE of the frame's

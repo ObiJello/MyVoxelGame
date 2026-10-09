@@ -1,5 +1,6 @@
 // File: src/client/renderer/debug/DebugSystem.cpp
 #include "DebugSystem.hpp"
+#include <cstdlib>
 #include "common/core/Log.hpp"
 #include "common/core/Mth.hpp"
 #include "platform/GameDirectory.hpp"
@@ -100,7 +101,9 @@ namespace Debug {
     ChunkPipelineSnapshot DebugSystem::s_pipelineSnap;
     WorldInfoSnapshot DebugSystem::s_worldInfoSnap;
 #ifdef NDEBUG
-    bool DebugSystem::s_debugEnabled = false; // Release: hidden until debug modifier + K
+    // Release: hidden until debug modifier + K; OBEY_DEBUG_UI=1 shows it from
+    // the start (a scripted run can exercise the overlay path).
+    bool DebugSystem::s_debugEnabled = std::getenv("OBEY_DEBUG_UI") != nullptr;
 #else
     bool DebugSystem::s_debugEnabled = true;  // Debug: always visible
 #endif
@@ -1363,16 +1366,34 @@ namespace Debug {
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Sync frame rate with monitor refresh\n(same setting as Options > Video Settings)");
 
-        // GPU pass timers (GL_TIME_ELAPSED around opaque/cutout/translucent).
+        // GPU pass timers (GL_TIME_ELAPSED around opaque/cutout/translucent;
+        // Metal: per-ENCODER timestamps, see MetalBackend.hpp m_gpu).
         // Default OFF: glEndQuery flushes cost ~2.3ms each on Apple's GL
-        // (~7ms/frame for three passes) — measured via Tracy 2026-08.
+        // (~7ms/frame for three passes) — measured via Tracy 2026-08 — and
+        // on Metal an attached sample buffer blanks the Metal HUD's encoder
+        // timing.
         ImGui::Checkbox("GPU Pass Timers", &Render::g_enableGpuPassTimers);
         ImGui::SameLine();
         ImGui::TextDisabled("(?)");
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Measures per-pass GPU time (shown in Performance panel).\n"
                               "COSTS ~7ms/frame on macOS GL (query flushes) — enable\n"
-                              "briefly to read GPU load, then turn back off.");
+                              "briefly to read GPU load, then turn back off.\n"
+                              "Metal: times each ENCODER (frame, render targets, OIT\n"
+                              "passes, blits) into the Tracy Gpu/* plots; the terrain\n"
+                              "passes share the frame encoder and read 0 unless\n"
+                              "OBEY_MTL_GPU_TIMERS=split. Blanks the Metal HUD's\n"
+                              "encoder timing while on.");
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Capture GPU frame")) {
+            if (!(Render::g_renderBackend && Render::g_renderBackend->RequestGpuCapture())) {
+                Log::Warning("GPU capture unavailable: launch with MTL_CAPTURE_ENABLED=1 in the environment (Metal only)");
+            }
+        }
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Writes the next frame as a .gputrace under the game\n"
+                              "directory's captures/ for Xcode's Metal debugger (F3+U).\n"
+                              "Needs MTL_CAPTURE_ENABLED=1 in the launch environment.");
 
         // Rendering mode
         ImGui::Separator();

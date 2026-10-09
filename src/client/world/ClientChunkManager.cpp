@@ -245,6 +245,7 @@ namespace Client {
             if (fromPlayer) sectionInfo.dirtyFromPlayer = true;
             it->second->AddDirty(sectionY);
             m_chunksWithDirtySections.insert(chunkPos);
+            if (fromPlayer) m_urgentDirtyChunks.insert(chunkPos);
             m_schedulerSkip = 0;
             // Mass destruction: after enough section changes, force one
             // authoritative full BFS rebuild. The incremental path only ADDS
@@ -368,6 +369,7 @@ namespace Client {
         si.meshingVersion = 0;
         chunk.AddDirty(sectionY);
         m_chunksWithDirtySections.insert(chunkPos);
+        m_urgentDirtyChunks.insert(chunkPos);
         m_schedulerSkip = 0;
         return true;
     }
@@ -1405,14 +1407,24 @@ namespace Client {
         // so block edits and chunk loads are never delayed; only a camera
         // turn onto already-dirty sections can wait up to 3 frames.
         if (m_schedulerSkip > 0) { --m_schedulerSkip; return; }
-        // Eligibility pre-pass over the DIRTY set (small: hundreds), before
-        // the visible walk (large: every section in view). A loaded view keeps
-        // its outer ring dirty forever (no neighbours -> cannot mesh), so
-        // "dirty set empty" never happens; "no dirty section is eligible" is
-        // the steady state, and then the visible walk has nothing to find.
+        // Which walk (below): the views' columns + the player's surroundings
+        // + the urgent chunks (the default), or every dirty chunk
+        // (OBEY_SCHEDULE_WALK=all, and whenever there is no renderer).
+        static const bool s_walkAll = [] {
+            const char* v = std::getenv("OBEY_SCHEDULE_WALK");
+            return v && std::strcmp(v, "all") == 0;
+        }();
+        const bool walkAll = s_walkAll || !m_renderer;
+        // Eligibility pre-pass over the DIRTY set, before the visible walk —
+        // only for the full walk: it is itself a walk of every dirty chunk
+        // (3,300 at a 32-chunk view, nearly every loaded chunk, since
+        // out-of-view sections stay dirty until looked at). A loaded view
+        // keeps its outer ring dirty forever (no neighbours -> cannot mesh),
+        // so "dirty set empty" never happens; "no dirty section is eligible"
+        // is the steady state, and then the visible walk has nothing to find.
         // Eligibility changes only through MarkSectionDirty / chunk loads
         // (which re-dirty neighbours), so skipping is exact.
-        {
+        if (walkAll) {
             size_t eligible = 0;
             for (const auto& chunkPos : m_chunksWithDirtySections) {
                 auto chunkIt = m_chunks.find(chunkPos);
@@ -1503,23 +1515,21 @@ namespace Client {
         // compile, at every re-mesh, and for sections that arrive later.
         const ::Render::MeshPriority::Field priorityField = workerPool->GetMeshPriorityField(m_dimension);
         { PROFILE_ZONE_N("MeshSchedule.DirtyWalk");
-        for (auto dirtyIt = m_chunksWithDirtySections.begin();
-             dirtyIt != m_chunksWithDirtySections.end(); ) {
-            const Game::Math::ChunkPos chunkPos = *dirtyIt;
+        ++m_schedulePass;
+        // One chunk's examination: the per-chunk admission below, unchanged.
+        // A chunk is examined at most once per pass (schedulePass); a clean
+        // or unloaded one leaves the dirty index here.
+        auto examine = [&](const Game::Math::ChunkPos chunkPos) {
             auto chunkIt = m_chunks.find(chunkPos);
             ClientChunk* chunk = (chunkIt != m_chunks.end()) ? chunkIt->second.get() : nullptr;
-
             if (!chunk || !chunk->chunkData || chunk->dirtySections.empty()) {
-                // Unloaded or fully clean — drop from the index. Only advance via
-                // erase's return iterator; nothing below mutates the set.
-                if (!chunk || chunk->dirtySections.empty()) {
-                    dirtyIt = m_chunksWithDirtySections.erase(dirtyIt);
-                } else {
-                    ++dirtyIt;  // Loaded but no CPU data yet — keep for later
-                }
-                continue;
+                // Unloaded or fully clean — drop from the index; loaded but
+                // no CPU data yet — keep for later.
+                if (!chunk || chunk->dirtySections.empty()) m_chunksWithDirtySections.erase(chunkPos);
+                return;
             }
-            ++dirtyIt;
+            if (chunk->schedulePass == m_schedulePass) return;
+            chunk->schedulePass = m_schedulePass;
 
             const float dx = chunkPos.x * 16.0f + 8.0f - playerPosition.x;
             const float dz = chunkPos.z * 16.0f + 8.0f - playerPosition.z;
@@ -1597,6 +1607,64 @@ namespace Client {
                 // gets a SNAPSHOT first when the budget below binds.
                 m_meshCandidates.push_back({chunkPos, sectionY, distSq, chunk});
             }
+        };
+
+        if (walkAll) {
+            // Every dirty chunk, asking each "are you in view?" (the walk
+            // this function had until 2026-10-08).
+            for (auto dirtyIt = m_chunksWithDirtySections.begin(); dirtyIt != m_chunksWithDirtySections.end(); ) {
+                const Game::Math::ChunkPos chunkPos = *dirtyIt;
+                ++dirtyIt;   // examine may erase chunkPos; the iterator has moved past it
+                examine(chunkPos);
+            }
+        } else {
+            // The question inverted: the admission test below admits a far
+            // section only where a view reaches it (or a route through a
+            // portal), the player's own edits and relocations anywhere, and
+            // everything within 48 blocks. So walk exactly those places —
+            // the views' columns (a few thousand mask reads), the chunks
+            // around the player and around each portal route's far point,
+            // and the urgent set — and examine the ones that are dirty. The
+            // dirty index at a 32-chunk view is ~3,300 chunks (nearly the
+            // loaded world: out-of-view sections stay dirty until looked
+            // at), and walking it cost 0.6 ms a pass, mostly to answer "no".
+            auto examineIfDirty = [&](const Game::Math::ChunkPos chunkPos) {
+                if (m_chunksWithDirtySections.count(chunkPos)) examine(chunkPos);
+            };
+            // Urgent: player edits and relocations. An entry stays while its
+            // chunk still holds such a section (in flight, or waiting for its
+            // neighbours); the rest are dropped — a new edit re-inserts.
+            for (auto it = m_urgentDirtyChunks.begin(); it != m_urgentDirtyChunks.end(); ) {
+                const Game::Math::ChunkPos chunkPos = *it;
+                examineIfDirty(chunkPos);
+                bool stillUrgent = false;
+                if (auto chunkIt = m_chunks.find(chunkPos); chunkIt != m_chunks.end() && chunkIt->second) {
+                    const ClientChunk& c = *chunkIt->second;
+                    for (uint32_t bits = c.dirtyMask; bits && !stillUrgent; bits &= bits - 1) {
+                        const int sectionY = std::countr_zero(bits);
+                        if (sectionY >= Game::Math::SECTIONS_PER_CHUNK) break;
+                        const auto& si = c.sectionInfos[sectionY];
+                        stillUrgent = si.dirty && (si.dirtyFromPlayer || si.relocate);
+                    }
+                }
+                it = stillUrgent ? std::next(it) : m_urgentDirtyChunks.erase(it);
+            }
+            // Near: 48 blocks around the player (the admission radius below,
+            // measured from column centres: 4 chunks each way covers it),
+            // and the same around each portal route's far point.
+            auto window = [&](float wx, float wz) {
+                const int cx = static_cast<int>(std::floor(wx / 16.0f));
+                const int cz = static_cast<int>(std::floor(wz / 16.0f));
+                for (int dz = -4; dz <= 4; ++dz)
+                    for (int dx = -4; dx <= 4; ++dx)
+                        examineIfDirty(Game::Math::ChunkPos{cx + dx, cz + dz});
+            };
+            window(playerPosition.x, playerPosition.z);
+            for (int i = 0; i < priorityField.count; ++i) {
+                window(priorityField.routes[i].farPoint.x, priorityField.routes[i].farPoint.z);
+            }
+            // The views.
+            m_renderer->ForEachViewColumn(examineIfDirty);
         }
 
         PROFILE_PLOT("MeshSchedule/DirtyChunks", static_cast<int64_t>(m_chunksWithDirtySections.size()));
@@ -2277,8 +2345,17 @@ namespace Client {
 namespace Client {
 
     void ClientChunkManager::RegisterTickingBlockEntity(const glm::ivec3& pos) {
-        for (const glm::ivec3& p : m_tickingBlockEntities) if (p == pos) return;
-        m_tickingBlockEntities.push_back(pos);
+        // A moving piston also joins the per-frame landing list
+        // (RetireLandedBlockEntities) — checked before the dedupe below,
+        // since the cell may have ticked as something else before.
+        if (dynamic_cast<Game::PistonMovingBlockEntity*>(RawBlockEntityAt(pos))) {
+            bool listed = false;
+            for (const glm::ivec3& p : m_landingPistons) if (p == pos) { listed = true; break; }
+            if (!listed) m_landingPistons.push_back(pos);
+        }
+        if (!m_tickingSet.insert(pos).second) return;   // already listed
+        if (m_tickingInProgress) m_registeredDuringTick.push_back(pos);
+        else                     m_tickingBlockEntities.push_back(pos);
     }
 
     Game::BlockEntity* ClientChunkManager::RawBlockEntityAt(const glm::ivec3& pos) {
@@ -2289,22 +2366,25 @@ namespace Client {
 
     void ClientChunkManager::RetireLandedBlockEntities() {
         ASSERT_MAIN_THREAD();
-        if (m_tickingBlockEntities.empty()) return;
+        // Only the moving pistons (m_landingPistons), not the whole ticking
+        // list: walking every furnace, hopper, bell and spawner in RD 32
+        // with a chunk lookup and a dynamic_cast each, every FRAME, was
+        // 0.6 ms (2026-10-07) for a list that is empty nearly always.
+        if (m_landingPistons.empty()) return;
         std::vector<glm::ivec3> keep;
-        keep.reserve(m_tickingBlockEntities.size());
-        for (const glm::ivec3& pos : m_tickingBlockEntities) {
+        keep.reserve(m_landingPistons.size());
+        for (const glm::ivec3& pos : m_landingPistons) {
             const Game::Math::ChunkPos cp{pos.x >> 4, pos.z >> 4};
             ClientChunk* chunk = GetChunk(cp);
             if (!chunk || !chunk->chunkData) continue;
             const int lx = pos.x & 0xF, lz = pos.z & 0xF;
             auto* piston = dynamic_cast<Game::PistonMovingBlockEntity*>(
                 chunk->chunkData->GetBlockEntity(lx, pos.y, lz));
-            // Only a landed moving piston retires here. Everything else on
-            // the list (a chest whose lid is moving) stays: TickBlockEntities
-            // drops it once it is at rest. Dropping it here left a chest
-            // lid ticking once per block event — a jerky climb while open,
-            // and hung part-open after the close event.
-            if (!piston) { keep.push_back(pos); continue; }
+            // Replaced or gone: off this list. Its ticking entry prunes
+            // itself (TickBlockEntities), as a chest whose lid is moving
+            // leaves once it is at rest — nothing but a landed moving
+            // piston retires here.
+            if (!piston) continue;
             if (piston->IsLanded()) {
                 const int sectionY = (pos.y + 64) >> 4;
                 const auto& info = chunk->sectionInfos[static_cast<size_t>(sectionY)];
@@ -2331,9 +2411,10 @@ namespace Client {
                         if (type && type->IsValidFor(here) && !chunk->chunkData->GetBlockEntity(lx, pos.y, lz)) {
                             carried->MoveCarriedTo(pos);
                             carried->RebindBlock(here);
-                            const bool ticks = carried->NeedsTicking();
+                            // The cell's ticking entry stays as it was:
+                            // TickBlockEntities keeps it while the carried
+                            // entity ticks and drops it otherwise.
                             chunk->chunkData->SetBlockEntity(lx, pos.y, lz, std::move(carried));
-                            if (ticks) keep.push_back(pos);
                         }
                     }
                     continue;
@@ -2341,47 +2422,54 @@ namespace Client {
             }
             keep.push_back(pos);
         }
-        m_tickingBlockEntities = std::move(keep);
+        m_landingPistons = std::move(keep);
     }
 
     void ClientChunkManager::TickBlockEntities(Game::ILevelWrite& level) {
         ASSERT_MAIN_THREAD();
         ++m_clientTicks;
         if (m_tickingBlockEntities.empty()) return;
-        // Snapshot: a tick may write blocks and remove entities, including
-        // itself, and may register new ones.
-        std::vector<glm::ivec3> positions = m_tickingBlockEntities;
-        std::vector<glm::ivec3> keep;
+        // The list is ticked in place; a tick may write blocks and remove
+        // entities, including itself, and may register new ones — those go
+        // to m_registeredDuringTick (RegisterTickingBlockEntity) and join
+        // the list below. One lookup per entity; the moving-piston test is
+        // on that entity, not a second lookup.
+        std::vector<glm::ivec3> positions = std::move(m_tickingBlockEntities);
+        m_tickingBlockEntities.clear();
+        m_tickingBlockEntities.reserve(positions.size());
+        m_registeredDuringTick.clear();
+        m_tickingInProgress = true;
         for (const glm::ivec3& pos : positions) {
+            Game::BlockEntity* be = RawBlockEntityAt(pos);
+            if (!be) { m_tickingSet.erase(pos); continue; }
             // The cell's own entity, not the level's answer: a landed moving
             // piston reads through the level as the entity it carries
             // (ClientBlockAccess::GetBlockEntity), but the bridge itself must
             // stay listed until RetireLandedBlockEntities lets it go. Its
             // carried entity animates meanwhile (a chest lid closing as it
             // lands).
-            if (auto* landed = dynamic_cast<Game::PistonMovingBlockEntity*>(RawBlockEntityAt(pos));
-                landed && landed->IsLanded()) {
+            if (auto* landed = dynamic_cast<Game::PistonMovingBlockEntity*>(be); landed && landed->IsLanded()) {
                 if (Game::BlockEntity* carried = landed->Carried(); carried && carried->NeedsTicking()) {
                     carried->ClientTick(level);
                 }
-                keep.push_back(pos);
+                m_tickingBlockEntities.push_back(pos);
                 continue;
             }
-            Game::BlockEntity* be = RawBlockEntityAt(pos);
-            if (!be || !be->NeedsTicking()) continue;
+            if (!be->NeedsTicking()) { m_tickingSet.erase(pos); continue; }
             be->ClientTick(level);
             // Still the cell's — a moving piston whose own landing write
             // just landed it in place included.
-            if (RawBlockEntityAt(pos) == be) keep.push_back(pos);
+            if (RawBlockEntityAt(pos) == be) m_tickingBlockEntities.push_back(pos);
+            else                             m_tickingSet.erase(pos);
         }
-        // Registrations made during the ticks survive; retired ones do not.
-        std::vector<glm::ivec3> merged = keep;
-        for (const glm::ivec3& p : m_tickingBlockEntities) {
-            bool known = false;
-            for (const glm::ivec3& q : positions) if (q == p) { known = true; break; }
-            if (!known) merged.push_back(p);
+        m_tickingInProgress = false;
+        // Registrations made during the ticks: in the set already (the
+        // dedupe happened there), so a retired-then-re-registered cell is
+        // listed once.
+        for (const glm::ivec3& p : m_registeredDuringTick) {
+            if (m_tickingSet.count(p)) m_tickingBlockEntities.push_back(p);
         }
-        m_tickingBlockEntities = std::move(merged);
+        m_registeredDuringTick.clear();
     }
 
 } // namespace Client

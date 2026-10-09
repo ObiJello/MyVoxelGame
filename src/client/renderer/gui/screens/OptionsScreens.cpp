@@ -15,6 +15,7 @@
 #include "../GuiGraphics.hpp"
 #include "../FontRenderer.hpp"
 #include "../../environment/SkyRenderer.hpp"
+#include "../../environment/WeatherEffectRenderer.hpp"   // HalfResolutionAvailable
 #include "../../entity/MobRenderer.hpp"
 #include "platform/GameDirectory.hpp"
 #include "server/world/storage/anvil/WorldFolder.hpp"
@@ -587,8 +588,11 @@ namespace Render {
             ValueSlider("Weather Effect Radius", s.GetWeatherRadius(), 3, 10, 1,
                 [](double v) { return std::to_string(static_cast<int>(v)) + " blocks"; },
                 [](double v) { Settings().SetWeatherRadius(static_cast<int>(v)); }),
-            [this, &s] {
+            [this, &s]() -> AbstractWidget* {
                 // Engine option: rain and snow at half the world's resolution.
+                // Not on Metal, where Full is faster (WeatherEffectRenderer::
+                // HalfResolutionAvailable) — no control, the slot stays empty.
+                if (!WeatherEffectRenderer::HalfResolutionAvailable()) return nullptr;
                 auto* rain = Cycle("Rain Resolution", {"Full", "Half"}, s.GetRainHalfResolution() ? 1 : 0,
                                    [](int i) { Settings().SetRainHalfResolution(i == 1); });
                 rain->SetTooltip({"Draws rain and snow at half the",

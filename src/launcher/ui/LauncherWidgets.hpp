@@ -64,6 +64,15 @@ namespace Launcher::Widgets {
                ImGuiInputTextFlags flags = 0, ImGuiInputTextCallback cb = nullptr,
                float rounding = 10.0f, float padX = 14.0f);
 
+    // A click-to-open select: a field at `pos` (exact `size`) showing the
+    // selected option's label and a chevron; a click opens a menu of the
+    // `count` options (label + one-line note) under the field — or over it
+    // when the window has no room below — with the selection marked. Picking
+    // one closes it; a click elsewhere closes it unchanged. Returns the
+    // picked index, -1 otherwise.
+    int Dropdown(const char* id, const char* const* labels, const char* const* notes, int count,
+                 int selected, ImVec2 pos, ImVec2 size);
+
     // The Settings view's tab box: a bordered rail-coloured box holding
     // pills, one active. Drawn with its TOP-RIGHT corner at `topRight` when
     // `alignRight`, else its top-left at `pos`. Returns the clicked index or

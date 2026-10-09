@@ -213,9 +213,6 @@ namespace Render {
             }
         }
         if (m_shader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
-        m_visibleChunks.clear();
-        m_visibleChunks.shrink_to_fit();
-        m_seen.clear();
         m_initialized = false;
     }
 
@@ -306,7 +303,7 @@ namespace Render {
 
         PROFILE_ZONE_N("Beds");
 
-        BlockEntityRenderDispatcher::CollectVisibleChunks(chunkMgr, m_visibleChunks, m_seen);
+        const std::vector<Client::ClientChunk*>& visibleChunks = BlockEntityRenderDispatcher::CollectVisibleChunks(chunkMgr);
         const ChunkRenderer* sections = g_chunkRenderer;
         const float maxDistSq = kViewDistance * kViewDistance;
         const glm::mat4 viewProj = projection * view;
@@ -314,7 +311,7 @@ namespace Render {
         bool pipelineSet = false;
         TextureHandle boundTexture = INVALID_TEXTURE;
 
-        for (const Client::ClientChunk* chunk : m_visibleChunks) {
+        for (const Client::ClientChunk* chunk : visibleChunks) {
             if (!chunk || chunk->beds.empty()) continue;   // the cull that matters: a size() check
 
             for (const glm::ivec3& block : chunk->beds) {

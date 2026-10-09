@@ -112,6 +112,12 @@ namespace Render {
         ~MobRenderer();
 
         bool Initialize();
+        // Every mob type's model and texture built now, during the level
+        // load, so the first sighting of a type costs the frame nothing: the
+        // tour showed 1–5 ms main-thread hitches on first sight (CreateModel
+        // + PNG decode + texture upload, 2026-10-08). A type that has no
+        // model caches its miss, as GetModelFor does.
+        void Prewarm();
         void Shutdown();
 
         // `frustum` is the one the chunk pass of THIS view was culled with
@@ -801,7 +807,7 @@ namespace Render {
 
         ShaderHandle m_shader = INVALID_SHADER;
 
-        // Two streaming sets alternated per FRAME, each call within a frame
+        // One streaming set per frame in flight, cycled per FRAME, each call within a frame
         // appending at a cursor — the scheme EntityCulling.hpp's frame-serial
         // note lays out. One set rewritten every call was a Vulkan hazard
         // twice over: the previous frame's commands could still be reading
@@ -812,7 +818,7 @@ namespace Render {
             BufferHandle ib   = INVALID_BUFFER;
             MeshHandle   mesh = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
         size_t m_vertCursor = 0;   // vertices already written this frame
         size_t m_idxCursor  = 0;   // indices already written this frame

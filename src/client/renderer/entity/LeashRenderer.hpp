@@ -100,7 +100,7 @@ namespace Render {
             BufferHandle ib   = INVALID_BUFFER;
             MeshHandle   mesh = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
         size_t m_vertCursor = 0;
         size_t m_idxCursor  = 0;

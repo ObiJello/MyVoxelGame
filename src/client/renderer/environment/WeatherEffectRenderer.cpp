@@ -28,6 +28,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 
@@ -92,21 +94,22 @@ void main() {
             return static_cast<int32_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b));
         }
 
-        TextureHandle LoadWeatherTexture(const char* relPath) {
+        // The decoded RGBA of a weather texture (stbi_image_free it), or null.
+        unsigned char* DecodeWeatherTexture(const char* relPath, int& w, int& h) {
             const std::string full = PlatformMain::GetAssetPath(relPath);
             if (!std::filesystem::exists(full)) {
                 Log::Warning("WeatherEffectRenderer: missing texture %s", full.c_str());
-                return INVALID_TEXTURE;
+                return nullptr;
             }
-            int w = 0, h = 0, ch = 0;
+            int ch = 0;
             stbi_set_flip_vertically_on_load(0);
             unsigned char* pixels = stbi_load(full.c_str(), &w, &h, &ch, STBI_rgb_alpha);
-            if (!pixels) {
-                Log::Warning("WeatherEffectRenderer: cannot decode %s", full.c_str());
-                return INVALID_TEXTURE;
-            }
+            if (!pixels) Log::Warning("WeatherEffectRenderer: cannot decode %s", full.c_str());
+            return pixels;
+        }
+
+        TextureHandle MakeWeatherTexture(const unsigned char* pixels, int w, int h) {
             TextureHandle t = g_renderBackend->CreateTexture2D(w, h, TextureFormat::RGBA8, pixels);
-            stbi_image_free(pixels);
             if (t != INVALID_TEXTURE) {
                 // The V coordinate runs to y / 4 blocks and scrolls without
                 // bound, and snow's U drifts: the texture repeats, nearest.
@@ -115,6 +118,53 @@ void main() {
             }
             return t;
         }
+
+        // OpenGL twin of shaders/weather_streak_vk.vert (see there for the
+        // contract); the fragment shaders are the quads'.
+        const char* const kStreakVertSource = R"(
+#version 330 core
+layout(location = 0) in vec3 aPos;      // u0, v0, copy
+layout(location = 1) in vec2 aUV;       // u1, v1
+layout(location = 2) in vec4 aColor;    // r = corner / 255
+layout(location = 3) in vec4 aColumn;   // cx, cz, hx, hz
+layout(location = 4) in vec4 aSpan;     // bottomY, topY, uOffset, vOffset
+layout(location = 5) in vec4 aTint;
+layout(location = 6) in vec4 aRepeat;   // R
+
+uniform mat4 uMVP;
+uniform vec4 uEntityClipPlane;
+
+out vec2 vUV;
+out vec4 vColor;
+out vec3 vRenderPos;
+
+void main() {
+    int corner = int(aColor.r * 255.0 + 0.5);
+    float u0 = aPos.x, v0 = aPos.y, u1 = aUV.x, v1 = aUV.y;
+    float uOffset = aSpan.z, vOffset = aSpan.w;
+    float w = fract(u0 - uOffset);
+    float dw = u1 - u0;
+    float fx0, fx1, tu0;
+    if (aPos.z < 0.5) { fx0 = w; fx1 = min(w + dw, 1.0); tu0 = u0; }
+    else { fx0 = 0.0; fx1 = max(w + dw - 1.0, 0.0); tu0 = u0 + (1.0 - w); }
+    float sum = aSpan.x + aSpan.y;
+    float yHi = clamp(sum - 4.0 * (aRepeat.x + v0 - vOffset), aSpan.x, aSpan.y);
+    float yLo = clamp(sum - 4.0 * (aRepeat.x + v1 - vOffset), aSpan.x, aSpan.y);
+    bool top = corner == 0 || corner == 1;
+    bool right = corner == 1 || corner == 2;
+    float fx = right ? fx1 : fx0;
+    float y = top ? yHi : yLo;
+    float across = 2.0 * fx - 1.0;
+    vec3 pos = vec3(aColumn.x + across * aColumn.z, y, aColumn.y + across * aColumn.w);
+    gl_Position = uMVP * vec4(pos, 1.0);
+    vUV = vec2(tu0 + (fx - fx0), (sum - y) * 0.25 + vOffset);
+    vColor = aTint;
+    vRenderPos = pos;
+    gl_ClipDistance[0] = (any(notEqual(uEntityClipPlane.xyz, vec3(0.0))))
+        ? dot(uEntityClipPlane.xyz, pos) + uEntityClipPlane.w
+        : 1.0;
+}
+)";
 
     } // namespace
 
@@ -136,6 +186,14 @@ void main() {
 
     WeatherEffectRenderer::~WeatherEffectRenderer() = default;
 
+    bool WeatherEffectRenderer::HalfResolutionAvailable() {
+        // Metal: Full is the faster path (see the header) — the setting is
+        // ignored and the control hidden; the other backends keep it.
+        // OBEY_RAIN_HALF=1 lets Metal take the setting again, for the A/B.
+        static const bool s_forceAvailable = std::getenv("OBEY_RAIN_HALF") != nullptr;
+        return s_forceAvailable || !g_renderBackend || g_renderBackend->GetType() != BackendType::Metal;
+    }
+
     bool WeatherEffectRenderer::Initialize() {
         if (!g_renderBackend) return false;
         // MC's WEATHER pipeline runs the particle shader (PARTICLE_SNIPPET).
@@ -150,7 +208,39 @@ void main() {
                          g_renderBackend->GetName());
             return false;
         }
+        if (const char* streaks = std::getenv("OBEY_RAIN_STREAKS")) m_streaksWanted = std::strcmp(streaks, "0") != 0;
+        if (m_streaksWanted && !CreateStreakShaders()) m_streaksWanted = false;
         LoadTextures();
+        return true;
+    }
+
+    bool WeatherEffectRenderer::CreateStreakShaders() {
+        RenderBackend& b = *g_renderBackend;
+        // Locations 3..6: four vec4 per instance (StreakInstance).
+        m_streakInstanceLayout = VertexLayout{};
+        m_streakInstanceLayout.stride = sizeof(StreakInstance);
+        for (uint32_t k = 0; k < 4; ++k) {
+            VertexAttribute attr;
+            attr.location        = 3 + k;
+            attr.componentCount  = 4;
+            attr.offset          = k * 16;
+            attr.type            = AttribType::Float;
+            attr.instanceDivisor = 1;
+            m_streakInstanceLayout.attributes.push_back(attr);
+        }
+        if (b.GetType() == BackendType::OpenGL) {
+            m_streakShader = b.CreateShader(kStreakVertSource, MobParticleSystem::FragmentSource());
+        } else {
+            m_streakShader = EntityEnvironment::CreateShader("shaders/weather_streak.vert", "shaders/mob_particle.frag");
+            if (m_streakShader != INVALID_SHADER) {
+                b.RegisterShaderVertexLayout(m_streakShader, GetBlockVertexLayout());
+                b.RegisterShaderInstanceLayout(m_streakShader, m_streakInstanceLayout);
+            }
+        }
+        if (m_streakShader == INVALID_SHADER) {
+            Log::Warning("[WeatherEffectRenderer] streak shader unavailable - drawing MC's column quads");
+            return false;
+        }
         return true;
     }
 
@@ -158,9 +248,16 @@ void main() {
         if (!g_renderBackend) return;
         DestroySlots();
         DestroyTextures(/*deferred=*/false);
+        DestroyStreakSet(m_rainStreaks, /*deferred=*/false);
+        DestroyStreakSet(m_snowStreaks, /*deferred=*/false);
+        m_instances.clear();
         if (m_shader != INVALID_SHADER) {
             g_renderBackend->DestroyShader(m_shader);
             m_shader = INVALID_SHADER;
+        }
+        if (m_streakShader != INVALID_SHADER) {
+            g_renderBackend->DestroyShader(m_streakShader);
+            m_streakShader = INVALID_SHADER;
         }
         ReleaseHalfResources();
         g_renderBackend->SetFrameDepthPreserved(false, RenderBackend::FrameDepthUser::Weather);
@@ -180,8 +277,164 @@ void main() {
 
     void WeatherEffectRenderer::LoadTextures() {
         DestroyTextures(/*deferred=*/true);
-        m_rainTexture = LoadWeatherTexture("assets/textures/environment/rain.png");
-        m_snowTexture = LoadWeatherTexture("assets/textures/environment/snow.png");
+        DestroyStreakSet(m_rainStreaks, /*deferred=*/true);
+        DestroyStreakSet(m_snowStreaks, /*deferred=*/true);
+        ++m_streakGeneration;   // the slots' instanced meshes point at the old templates
+        struct Load { const char* path; TextureHandle* texture; StreakSet* streaks; int copies; };
+        // Rain's u offset is always 0 (one copy of every rect); snow's u
+        // drifts per column, so a rect may wrap the column's edge (two).
+        const Load loads[] = {
+            {"assets/textures/environment/rain.png", &m_rainTexture, &m_rainStreaks, 1},
+            {"assets/textures/environment/snow.png", &m_snowTexture, &m_snowStreaks, 2},
+        };
+        for (const Load& load : loads) {
+            int w = 0, h = 0;
+            unsigned char* pixels = DecodeWeatherTexture(load.path, w, h);
+            if (!pixels) continue;
+            *load.texture = MakeWeatherTexture(pixels, w, h);
+            if (m_streaksWanted) BuildStreakSet(*load.streaks, pixels, w, h, load.copies);
+            stbi_image_free(pixels);
+        }
+        if (m_streaksWanted) {
+            const auto area = [](const StreakSet& set) {
+                size_t a = 0;
+                for (const StreakRect& r : set.rects) a += static_cast<size_t>(r.w) * r.h;
+                return a;
+            };
+            Log::Info("[WeatherEffectRenderer] streaks: rain %zu rects (%zu texels)%s, snow %zu rects (%zu texels)%s",
+                      m_rainStreaks.rects.size(), area(m_rainStreaks), m_rainStreaks.usable ? "" : " (quads)",
+                      m_snowStreaks.rects.size(), area(m_snowStreaks), m_snowStreaks.usable ? "" : " (quads)");
+        }
+    }
+
+    void WeatherEffectRenderer::BuildStreakSet(StreakSet& set, const unsigned char* rgba, int width, int height,
+                                               int copies) {
+        set = StreakSet{};
+        set.copies = copies;
+        if (width <= 0 || height <= 0 || width > 65535 || height > 65535) return;
+        // Greedy rectangles over alpha > 0 (the shader's cutout is on
+        // texture alpha x vertex alpha, so an alpha-0 texel never draws and
+        // every other one may): a run down from each unclaimed texel, then
+        // widened while whole runs match.
+        const auto alpha = [&](int x, int y) { return rgba[(static_cast<size_t>(y) * width + x) * 4 + 3]; };
+        std::vector<uint8_t> used(static_cast<size_t>(width) * height, 0);
+        size_t covered = 0;
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                if (alpha(x, y) == 0 || used[static_cast<size_t>(y) * width + x]) continue;
+                int y1 = y;
+                while (y1 + 1 < height && alpha(x, y1 + 1) != 0 && !used[static_cast<size_t>(y1 + 1) * width + x]) ++y1;
+                int x1 = x;
+                for (;;) {
+                    if (x1 + 1 >= width) break;
+                    bool whole = true;
+                    for (int yy = y; yy <= y1; ++yy) {
+                        if (alpha(x1 + 1, yy) == 0 || used[static_cast<size_t>(yy) * width + x1 + 1]) { whole = false; break; }
+                    }
+                    if (!whole) break;
+                    ++x1;
+                }
+                for (int yy = y; yy <= y1; ++yy) {
+                    for (int xx = x; xx <= x1; ++xx) used[static_cast<size_t>(yy) * width + xx] = 1;
+                }
+                set.rects.push_back({static_cast<uint16_t>(x), static_cast<uint16_t>(y),
+                                     static_cast<uint16_t>(x1 - x + 1), static_cast<uint16_t>(y1 - y + 1)});
+                covered += static_cast<size_t>(x1 - x + 1) * static_cast<size_t>(y1 - y + 1);
+            }
+        }
+        if (set.rects.empty() || covered * 4 > static_cast<size_t>(width) * height || set.rects.size() > 4096) {
+            return;   // nothing to draw, or dense: the quads are the cheaper draw
+        }
+
+        // Fewer, looser rects. On a tile GPU the rects' vertex work is on
+        // the serial vertex chain of the frame (the rain target's vertex
+        // stage runs before the frame's own) while their fragments overlap
+        // it, so a rect costs more than the transparent texels it would
+        // enclose: pairs are merged into their bounding box, least added
+        // area first, while the total stays within kSlack times the opaque
+        // area. A merge whose box would overlap another rect is refused —
+        // the rects stay disjoint, so no pixel is drawn twice.
+        // kSlack: the merged area may grow to this many times the lit area.
+        // 3 was chosen while the rain drew into its own half-res target
+        // (its vertex stage on the frame's serial chain); OBEY_RAIN_SLACK
+        // overrides for the A/B.
+        static const float s_slack = [] {
+            const char* v = std::getenv("OBEY_RAIN_SLACK");
+            return v ? static_cast<float>(std::atof(v)) : 3.0f;
+        }();
+        const size_t maxArea = static_cast<size_t>(static_cast<float>(covered) * s_slack);
+        size_t total = covered;
+        const auto area = [](const StreakRect& r) { return static_cast<size_t>(r.w) * r.h; };
+        const auto overlaps = [](const StreakRect& a, const StreakRect& b) {
+            return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+        };
+        for (;;) {
+            size_t bestCost = SIZE_MAX, bi = 0, bj = 0;
+            StreakRect bestBox{};
+            for (size_t i = 0; i < set.rects.size(); ++i) {
+                for (size_t j = i + 1; j < set.rects.size(); ++j) {
+                    const StreakRect& a = set.rects[i];
+                    const StreakRect& b = set.rects[j];
+                    const uint16_t x0 = std::min(a.x, b.x), y0 = std::min(a.y, b.y);
+                    const uint16_t x1 = std::max<uint16_t>(a.x + a.w, b.x + b.w);
+                    const uint16_t y1 = std::max<uint16_t>(a.y + a.h, b.y + b.h);
+                    const StreakRect box{x0, y0, static_cast<uint16_t>(x1 - x0), static_cast<uint16_t>(y1 - y0)};
+                    const size_t cost = area(box) - area(a) - area(b);
+                    if (cost >= bestCost) continue;
+                    bool clear = true;
+                    for (size_t k = 0; k < set.rects.size() && clear; ++k) {
+                        if (k != i && k != j && overlaps(box, set.rects[k])) clear = false;
+                    }
+                    if (clear) { bestCost = cost; bi = i; bj = j; bestBox = box; }
+                }
+            }
+            if (bestCost == SIZE_MAX || total + bestCost > maxArea) break;
+            total += bestCost;
+            set.rects[bi] = bestBox;
+            set.rects.erase(set.rects.begin() + static_cast<std::ptrdiff_t>(bj));
+        }
+
+        // The template: per rect and copy, four block-layout vertices
+        // (u0, v0, copy | u1, v1 | corner) and two triangles.
+        std::vector<Vertex> verts;
+        std::vector<uint32_t> indices;
+        verts.reserve(set.rects.size() * copies * 4);
+        indices.reserve(set.rects.size() * copies * 6);
+        const float sx = 1.0f / static_cast<float>(width), sy = 1.0f / static_cast<float>(height);
+        for (const StreakRect& r : set.rects) {
+            const float u0 = r.x * sx, v0 = r.y * sy, u1 = (r.x + r.w) * sx, v1 = (r.y + r.h) * sy;
+            for (int c = 0; c < copies; ++c) {
+                const uint32_t base = static_cast<uint32_t>(verts.size());
+                for (uint8_t corner = 0; corner < 4; ++corner) {
+                    verts.push_back(Vertex{u0, v0, static_cast<float>(c), u1, v1, corner, 0, 0, 255});
+                }
+                for (uint32_t i : {0u, 1u, 2u, 0u, 2u, 3u}) indices.push_back(base + i);
+            }
+        }
+        RenderBackend& b = *g_renderBackend;
+        set.vb = b.CreateBuffer(BufferUsage::Vertex, verts.size() * sizeof(Vertex), verts.data(), BufferAccess::Static);
+        set.ib = b.CreateBuffer(BufferUsage::Index, indices.size() * sizeof(uint32_t), indices.data(), BufferAccess::Static);
+        if (set.vb == INVALID_BUFFER || set.ib == INVALID_BUFFER) {
+            DestroyStreakSet(set, /*deferred=*/false);
+            set.copies = copies;
+            return;
+        }
+        b.SetDebugLabel(DebugLabelKind::Buffer, set.vb, copies == 1 ? "Rain streak template" : "Snow streak template");
+        b.SetDebugLabel(DebugLabelKind::Buffer, set.ib, copies == 1 ? "Rain streak indices" : "Snow streak indices");
+        set.indexCount = static_cast<uint32_t>(indices.size());
+        set.usable = true;
+    }
+
+    void WeatherEffectRenderer::DestroyStreakSet(StreakSet& set, bool deferred) {
+        for (BufferHandle* buffer : {&set.vb, &set.ib}) {
+            if (*buffer == INVALID_BUFFER) continue;
+            if (deferred) g_renderBackend->DeferredDestroyBuffer(*buffer);
+            else          g_renderBackend->DestroyBuffer(*buffer);
+            *buffer = INVALID_BUFFER;
+        }
+        set.rects.clear();
+        set.indexCount = 0;
+        set.usable = false;
     }
 
     void WeatherEffectRenderer::DestroyTextures(bool deferred) {
@@ -195,28 +448,52 @@ void main() {
         }
     }
 
-    WeatherEffectRenderer::StreamSlot& WeatherEffectRenderer::AcquireSlot(size_t vertsNeeded) {
+    WeatherEffectRenderer::StreamSlot& WeatherEffectRenderer::AcquireSlot(size_t bytesNeeded, bool streaks) {
         StreamSlot& slot = m_slots[m_slotCursor];
         m_slotCursor = (m_slotCursor + 1) % kStreamSlots;
-        if (slot.vb == INVALID_BUFFER || slot.capacityVerts < vertsNeeded) {
-            // 21 x 21 columns x 6 vertices at the widest radius.
-            size_t newCap = std::max<size_t>(slot.capacityVerts, 2646);
-            while (newCap < vertsNeeded) newCap *= 2;
-            if (slot.mesh != INVALID_MESH)  g_renderBackend->DeferredDestroyMesh(slot.mesh);
-            if (slot.vb   != INVALID_BUFFER) g_renderBackend->DeferredDestroyBuffer(slot.vb);
-            slot.vb   = g_renderBackend->CreateBuffer(BufferUsage::Vertex, newCap * sizeof(Vertex), nullptr,
-                                                      BufferAccess::Streaming);
-            slot.mesh = g_renderBackend->CreateMesh(slot.vb, INVALID_BUFFER, GetBlockVertexLayout());
-            slot.capacityVerts = newCap;
+        RenderBackend& b = *g_renderBackend;
+        if (slot.vb == INVALID_BUFFER || slot.capacityBytes < bytesNeeded) {
+            // 21 x 21 columns x 6 vertices at the widest radius, or the same
+            // columns x ~6 repeats as 64-byte instances: the larger.
+            size_t newCap = std::max<size_t>(slot.capacityBytes, 2646 * 64);
+            while (newCap < bytesNeeded) newCap *= 2;
+            for (MeshHandle* mesh : {&slot.mesh, &slot.rainMesh, &slot.snowMesh}) {
+                if (*mesh != INVALID_MESH) b.DeferredDestroyMesh(*mesh);
+                *mesh = INVALID_MESH;
+            }
+            if (slot.vb != INVALID_BUFFER) b.DeferredDestroyBuffer(slot.vb);
+            slot.vb = b.CreateBuffer(BufferUsage::Vertex, newCap, nullptr, BufferAccess::Streaming);
+            b.SetDebugLabel(DebugLabelKind::Buffer, slot.vb, "Weather stream");
+            slot.capacityBytes = newCap;
+        }
+        if (!streaks) {
+            if (slot.mesh == INVALID_MESH) slot.mesh = b.CreateMesh(slot.vb, INVALID_BUFFER, GetBlockVertexLayout());
+        } else if (slot.rainMesh == INVALID_MESH || slot.snowMesh == INVALID_MESH ||
+                   slot.meshGeneration != m_streakGeneration) {
+            // The instanced meshes: the templates (this generation's) over
+            // this buffer's instances.
+            for (MeshHandle* mesh : {&slot.rainMesh, &slot.snowMesh}) {
+                if (*mesh != INVALID_MESH) b.DeferredDestroyMesh(*mesh);
+                *mesh = INVALID_MESH;
+            }
+            slot.rainMesh = b.CreateInstancedMesh(m_rainStreaks.vb, m_rainStreaks.ib, slot.vb,
+                                                  GetBlockVertexLayout(), m_streakInstanceLayout);
+            slot.snowMesh = b.CreateInstancedMesh(m_snowStreaks.vb, m_snowStreaks.ib, slot.vb,
+                                                  GetBlockVertexLayout(), m_streakInstanceLayout);
+            slot.meshGeneration = m_streakGeneration;
         }
         return slot;
     }
 
     void WeatherEffectRenderer::DestroySlots() {
         for (StreamSlot& slot : m_slots) {
-            if (slot.mesh != INVALID_MESH)  { g_renderBackend->DestroyMesh(slot.mesh);  slot.mesh = INVALID_MESH; }
-            if (slot.vb   != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
-            slot.capacityVerts = 0;
+            for (MeshHandle* mesh : {&slot.mesh, &slot.rainMesh, &slot.snowMesh}) {
+                if (*mesh != INVALID_MESH) g_renderBackend->DestroyMesh(*mesh);
+                *mesh = INVALID_MESH;
+            }
+            if (slot.vb != INVALID_BUFFER) { g_renderBackend->DestroyBuffer(slot.vb); slot.vb = INVALID_BUFFER; }
+            slot.capacityBytes = 0;
+            slot.meshGeneration = 0;
         }
         m_slotCursor = 0;
     }
@@ -275,6 +552,64 @@ void main() {
         }
     }
 
+    void WeatherEffectRenderer::PrepareStreakInstances(std::vector<StreakInstance>& out,
+                                                       const std::vector<ColumnInstance>& columns,
+                                                       const glm::dvec3& cameraPos, float maxAlpha, int radius,
+                                                       float intensity) const {
+        // prepareInstances, as (column, texture repeat) instances. Per column
+        // the quad MC would draw (PrepareInstances: the same alpha, size,
+        // light and corners); per repeat the shader lays the rects.
+        const float radiusSq = static_cast<float>(radius * radius);
+        const int camBlockX = static_cast<int>(std::floor(cameraPos.x));
+        const int camBlockZ = static_cast<int>(std::floor(cameraPos.z));
+        // v = (bottomY + topY - y) / 4 + vOffset in WORLD y; in render space
+        // (y - origin.y) that gains origin.y / 4, of which only the
+        // fractional part matters to the texture (it repeats every 1) — and
+        // the integer render origin makes it one of 0, .25, .5, .75: exact.
+        const long long originY = static_cast<long long>(std::floor(RenderOrigin().y));
+        const float originTerm = static_cast<float>(((originY % 4) + 4) % 4) * 0.25f;
+        for (const ColumnInstance& column : columns) {
+            const float relativeX = static_cast<float>(static_cast<double>(column.x) + 0.5 - cameraPos.x);
+            const float relativeZ = static_cast<float>(static_cast<double>(column.z) + 0.5 - cameraPos.z);
+            const float distanceSq = relativeX * relativeX + relativeZ * relativeZ;
+            const float lerpT = std::min(distanceSq / radiusSq, 1.0f);
+            const float alpha = (maxAlpha + lerpT * (0.5f - maxAlpha)) * intensity;
+            const int index = (column.z - camBlockZ + 16) * 32 + column.x - camBlockX + 16;
+            if (index < 0 || index >= 1024) continue;
+            const float halfSizeX = m_columnSizeX[static_cast<size_t>(index)] / 2.0f;
+            const float halfSizeZ = m_columnSizeZ[static_cast<size_t>(index)] / 2.0f;
+            if (std::isnan(halfSizeX) || std::isnan(halfSizeZ)) continue;
+
+            // The quad's RGBA8 as the shader sees it (x / 255, the UNORM
+            // conversion the vertex colour went through).
+            const int a8 = std::clamp(static_cast<int>(std::floor(alpha * 255.0f)), 0, 255);
+            const glm::vec3 light = EntityEnvironment::LightColor(column.lightCoords);
+            const float r = static_cast<float>(static_cast<uint8_t>(std::clamp(light.r, 0.0f, 1.0f) * 255.0f)) / 255.0f;
+            const float g = static_cast<float>(static_cast<uint8_t>(std::clamp(light.g, 0.0f, 1.0f) * 255.0f)) / 255.0f;
+            const float bl = static_cast<float>(static_cast<uint8_t>(std::clamp(light.b, 0.0f, 1.0f) * 255.0f)) / 255.0f;
+            const float a = static_cast<float>(a8) / 255.0f;
+
+            const double cx = static_cast<double>(column.x) + 0.5;
+            const double cz = static_cast<double>(column.z) + 0.5;
+            const glm::vec3 bottom = ToRender(glm::dvec3(cx, static_cast<double>(column.bottomY), cz));
+            const glm::vec3 top = ToRender(glm::dvec3(cx, static_cast<double>(column.topY), cz));
+            const float vOffset = column.vOffset + originTerm;
+            // The texture repeats this column spans: v from bottomY / 4 +
+            // vOffset (at the top corner) to topY / 4 + vOffset (bottom).
+            const float vLo = bottom.y * 0.25f + vOffset, vHi = top.y * 0.25f + vOffset;
+            const int repeatFirst = static_cast<int>(std::floor(vLo));
+            const int repeatLast = static_cast<int>(std::floor(vHi));
+            for (int repeat = repeatFirst; repeat <= repeatLast; ++repeat) {
+                StreakInstance inst;
+                inst.column[0] = bottom.x; inst.column[1] = bottom.z; inst.column[2] = halfSizeX; inst.column[3] = halfSizeZ;
+                inst.span[0] = bottom.y; inst.span[1] = top.y; inst.span[2] = column.uOffset; inst.span[3] = vOffset;
+                inst.tint[0] = r; inst.tint[1] = g; inst.tint[2] = bl; inst.tint[3] = a;
+                inst.repeat[0] = static_cast<float>(repeat); inst.repeat[1] = inst.repeat[2] = inst.repeat[3] = 0.0f;
+                out.push_back(inst);
+            }
+        }
+    }
+
     void WeatherEffectRenderer::Render(const glm::mat4& proj, const glm::mat4& view,
                                        const glm::dvec3& cameraPos, float partialTick, bool allowHalfResolution) {
         Render(proj, view, cameraPos, partialTick, Client::ClientLevels::BoundDimension(),
@@ -289,7 +624,8 @@ void main() {
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         if (!Client::g_clientBlockAccess) return;
         RenderBackend& b = *g_renderBackend;
-        const bool vulkan = b.GetType() == BackendType::Vulkan;
+        // Vulkan / Metal: the half-res rain is drawn ahead of the frame.
+        const bool vulkan = b.UsesVkShaders();
 
         // Vulkan, the main view: drawn ahead of the frame's pass this frame
         // (RenderAhead) — only the composite is left.
@@ -307,16 +643,15 @@ void main() {
         // (RenderAhead) or, without the previous frame's depth, at full
         // resolution here; OpenGL splits the frame for it.
         const bool halfWanted = allowHalfResolution && !vulkan && clipPlane == glm::vec4(0.0f) &&
-                                Platform::g_gameSettings.GetRainHalfResolution() && !m_halfFailed &&
-                                !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf");
+                                HalfResolutionAvailable() && Platform::g_gameSettings.GetRainHalfResolution() &&
+                                !m_halfFailed && !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf");
 
-        const StreamSlot* slot = nullptr;
-        size_t rainVerts = 0, snowVerts = 0;
-        if (!BuildColumns(dimension, cameraPos, partialTick, slot, rainVerts, snowVerts)) return;
+        Batch batch;
+        if (!BuildColumns(dimension, cameraPos, partialTick, batch)) return;
 
         // ── render (RenderPipelines.WEATHER) ────────────────────────────
         const glm::mat4 mvp = proj * view;
-        if (!(halfWanted && DrawHalfResolution(*slot, rainVerts, snowVerts, mvp, cameraPos))) {
+        if (!(halfWanted && DrawHalfResolution(batch, mvp, cameraPos))) {
             PipelineState s;
             s.depthTestEnabled  = true;
             s.depthWriteEnabled = false;
@@ -326,7 +661,7 @@ void main() {
             s.dstBlendFactor    = BlendFactor::OneMinusSrcAlpha;
             s.cullMode          = CullMode::None;
             s.primitiveType     = PrimitiveType::Triangles;
-            DrawColumns(m_shader, *slot, rainVerts, snowVerts, mvp, cameraPos, clipPlane, s);
+            DrawColumns(/*half=*/false, batch, mvp, cameraPos, clipPlane, s);
         }
         RestoreDefaultState();
     }
@@ -336,14 +671,16 @@ void main() {
         PROFILE_ZONE_N("WeatherEffects.RenderAhead");
         if (m_shader == INVALID_SHADER || !g_renderBackend) return;
         RenderBackend& b = *g_renderBackend;
-        if (b.GetType() != BackendType::Vulkan) return;
+        if (!b.UsesVkShaders()) return;
+        GpuDebugGroup gpuGroup("Rain (half-res, ahead of the frame)");
         const uint64_t frame = b.FrameNumber();
 
         // The depth images can always be preserved while the option is on
         // (built once, not when it starts raining), so the gate below may
         // follow the rain frame by frame: turning preservation on or off is
         // then a store op, never a device idle.
-        const bool halfOption = Platform::g_gameSettings.GetRainHalfResolution() && !m_halfFailed;
+        const bool halfOption = HalfResolutionAvailable() && Platform::g_gameSettings.GetRainHalfResolution() &&
+                                !m_halfFailed;
         b.SetFrameDepthCapable(halfOption);
 
         // The gate: Half, the main view, precipitation this frame, and the
@@ -360,7 +697,18 @@ void main() {
         // instead of clearing it — the next frame's rain reads it.
         b.SetFrameDepthPreserved(gate, RenderBackend::FrameDepthUser::Weather);
         b.SetDepthHandoff(gate);
-        LateDepthBands::MarkFrame(gate, b.FrameDepthIsFloat());
+        // The bands every frame on Metal, rain or not: the three full-screen
+        // depth clears they stand in for cost 0.22 ms serial (4 % of a 5.4 ms
+        // frame) and −9..19 % of the live GPU frame (Xcode + ABBA on the M4,
+        // 2026-10-07); a band is a viewport change. Not on Vulkan: MoltenVK's
+        // vkCmdClearAttachments measured equal or slightly better than the
+        // bands there (ABBA 178 vs 175 fps, within noise), so it keeps MC's
+        // clears outside the rain. OBEY_DEPTH_CLEARS=1 restores the clears on
+        // Metal (the A/B).
+        static const bool s_bandsAlways = std::getenv("OBEY_DEPTH_CLEARS") == nullptr &&
+                                          b.GetType() == BackendType::Metal;
+        // OBEY_SKIP=bands: the skip phases go back to the clears (the phase A/B).
+        LateDepthBands::MarkFrame(gate || (s_bandsAlways && !DevSkip("bands")), b.FrameDepthIsFloat());
 
         // This view, for the next frame's reprojection; the previous one
         // only if it is the frame just before.
@@ -380,21 +728,19 @@ void main() {
         const TextureHandle previousDepth = b.PreviousFrameDepthTexture();
         if (previousDepth == INVALID_TEXTURE) return;
 
-        const StreamSlot* slot = nullptr;
-        size_t rainVerts = 0, snowVerts = 0;
-        if (!BuildColumns(dimension, cameraPos, partialTick, slot, rainVerts, snowVerts)) return;
+        Batch batch;
+        if (!BuildColumns(dimension, cameraPos, partialTick, batch)) return;
 
         // That frame's view-projection over this frame's render space: the
         // origin moved by (origin - previousOrigin) between them.
         const glm::mat4 reprojection =
             previousMvp * glm::translate(glm::mat4(1.0f), glm::vec3(origin - previousOrigin));
-        if (DrawAhead(*slot, rainVerts, snowVerts, mvp, reprojection, cameraPos, previousDepth)) m_aheadFrame = frame;
+        if (DrawAhead(batch, mvp, reprojection, cameraPos, previousDepth)) m_aheadFrame = frame;
         RestoreDefaultState();
     }
 
     bool WeatherEffectRenderer::BuildColumns(Game::DimensionId dimension, const glm::dvec3& cameraPos,
-                                             float partialTick, const StreamSlot*& slotOut,
-                                             size_t& rainVertsOut, size_t& snowVertsOut) {
+                                             float partialTick, Batch& out) {
         // ── extractRenderState ──────────────────────────────────────────
         // The view's level's weather: a portal into the Nether shows none.
         const bool canRain = Game::DimensionCanHaveWeather(dimension);
@@ -465,18 +811,33 @@ void main() {
         if (m_rainColumns.empty() && m_snowColumns.empty()) return false;
 
         // ── prepare ─────────────────────────────────────────────────────
+        out = Batch{};
+        if (StreaksActive() && !DevSkip("streaks")) {   // OBEY_SKIP=streaks: MC's quads in the skip phases
+            m_instances.clear();
+            PrepareStreakInstances(m_instances, m_rainColumns, cameraPos, 1.0f, radius, intensity);
+            out.rainCount = m_instances.size();
+            PrepareStreakInstances(m_instances, m_snowColumns, cameraPos, 0.8f, radius, intensity);
+            out.snowCount = m_instances.size() - out.rainCount;
+            if (m_instances.empty()) return false;
+            StreamSlot& slot = AcquireSlot(m_instances.size() * sizeof(StreakInstance), /*streaks=*/true);
+            if (slot.rainMesh == INVALID_MESH || slot.snowMesh == INVALID_MESH) return false;
+            g_renderBackend->UpdateBufferStreaming(slot.vb, 0, m_instances.size() * sizeof(StreakInstance),
+                                                   m_instances.data());
+            out.slot = &slot;
+            out.streaks = true;
+            return true;
+        }
         m_vertices.clear();
         PrepareInstances(m_vertices, m_rainColumns, cameraPos, 1.0f, radius, intensity);
-        const size_t rainVerts = m_vertices.size();
+        out.rainCount = m_vertices.size();
         PrepareInstances(m_vertices, m_snowColumns, cameraPos, 0.8f, radius, intensity);
-        const size_t snowVerts = m_vertices.size() - rainVerts;
+        out.snowCount = m_vertices.size() - out.rainCount;
         if (m_vertices.empty()) return false;
 
-        StreamSlot& slot = AcquireSlot(m_vertices.size());
+        StreamSlot& slot = AcquireSlot(m_vertices.size() * sizeof(Vertex), /*streaks=*/false);
+        if (slot.mesh == INVALID_MESH) return false;
         g_renderBackend->UpdateBufferStreaming(slot.vb, 0, m_vertices.size() * sizeof(Vertex), m_vertices.data());
-        slotOut = &slot;
-        rainVertsOut = rainVerts;
-        snowVertsOut = snowVerts;
+        out.slot = &slot;
         return true;
     }
 
@@ -489,11 +850,16 @@ void main() {
         g_renderBackend->SetPipelineState(defaultState);
     }
 
-    void WeatherEffectRenderer::DrawColumns(ShaderHandle shader, const StreamSlot& slot, size_t rainVerts,
-                                            size_t snowVerts, const glm::mat4& mvp, const glm::dvec3& cameraPos,
+    void WeatherEffectRenderer::DrawColumns(bool half, const Batch& batch,
+                                            const glm::mat4& mvp, const glm::dvec3& cameraPos,
                                             const glm::vec4& clipPlane, const PipelineState& state,
                                             TextureHandle sceneDepth, const glm::mat4* reprojection) {
+        if (!batch.slot) return;
         RenderBackend& b = *g_renderBackend;
+        const StreamSlot& slot = *batch.slot;
+        const ShaderHandle shader = batch.streaks ? (half ? m_streakHalfShader : m_streakShader)
+                                                  : (half ? m_halfShader : m_shader);
+        if (shader == INVALID_SHADER) return;
         b.BindShader(shader);
         b.SetUniformMat4(shader, "uMVP", mvp);
         b.SetUniformInt(shader, "uSprite", 0);
@@ -514,19 +880,35 @@ void main() {
         }
         b.SetPipelineState(state);
 
-        if (rainVerts > 0 && m_rainTexture != INVALID_TEXTURE) {
-            b.BindTexture(m_rainTexture, 0);
-            b.DrawArrays(slot.mesh, static_cast<uint32_t>(rainVerts), 0);
-        }
-        if (snowVerts > 0 && m_snowTexture != INVALID_TEXTURE) {
-            b.BindTexture(m_snowTexture, 0);
-            b.DrawArrays(slot.mesh, static_cast<uint32_t>(snowVerts), static_cast<uint32_t>(rainVerts));
+        if (batch.streaks) {
+            // Every rect of the template per instance; snow's instances
+            // follow rain's in the slot's buffer.
+            if (batch.rainCount > 0 && m_rainTexture != INVALID_TEXTURE) {
+                b.BindTexture(m_rainTexture, 0);
+                b.DrawIndexedInstanced(slot.rainMesh, m_rainStreaks.indexCount, 0,
+                                       static_cast<uint32_t>(batch.rainCount), 0);
+            }
+            if (batch.snowCount > 0 && m_snowTexture != INVALID_TEXTURE) {
+                b.BindTexture(m_snowTexture, 0);
+                b.DrawIndexedInstanced(slot.snowMesh, m_snowStreaks.indexCount, 0,
+                                       static_cast<uint32_t>(batch.snowCount),
+                                       static_cast<uint32_t>(batch.rainCount * sizeof(StreakInstance)));
+            }
+        } else {
+            if (batch.rainCount > 0 && m_rainTexture != INVALID_TEXTURE) {
+                b.BindTexture(m_rainTexture, 0);
+                b.DrawArrays(slot.mesh, static_cast<uint32_t>(batch.rainCount), 0);
+            }
+            if (batch.snowCount > 0 && m_snowTexture != INVALID_TEXTURE) {
+                b.BindTexture(m_snowTexture, 0);
+                b.DrawArrays(slot.mesh, static_cast<uint32_t>(batch.snowCount), static_cast<uint32_t>(batch.rainCount));
+            }
         }
         b.UnbindMesh();
     }
 
-    bool WeatherEffectRenderer::DrawHalfResolution(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
-                                                   const glm::mat4& mvp, const glm::dvec3& cameraPos) {
+    bool WeatherEffectRenderer::DrawHalfResolution(const Batch& batch, const glm::mat4& mvp,
+                                                   const glm::dvec3& cameraPos) {
         // OpenGL: the frame is split — FBO 0's depth copied while it is
         // still bound, the columns drawn into the target against it, the
         // target laid over the frame.
@@ -551,14 +933,13 @@ void main() {
 
         const RenderTargetHandle target = m_halfTargets[b.FrameSlot() % m_halfTargets.size()];
         b.BindRenderTarget(target);
-        DrawIntoHalfTarget(slot, rainVerts, snowVerts, mvp, cameraPos, m_sceneDepthCopy, nullptr, halfWidth, halfHeight);
+        DrawIntoHalfTarget(batch, mvp, cameraPos, m_sceneDepthCopy, nullptr, halfWidth, halfHeight);
         b.BindRenderTarget(INVALID_RENDER_TARGET);
         CompositeHalf(target, width, height);
         return true;
     }
 
-    bool WeatherEffectRenderer::DrawAhead(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
-                                          const glm::mat4& mvp, const glm::mat4& reprojection,
+    bool WeatherEffectRenderer::DrawAhead(const Batch& batch, const glm::mat4& mvp, const glm::mat4& reprojection,
                                           const glm::dvec3& cameraPos, TextureHandle previousDepth) {
         // Vulkan: the frame's pass has not opened, so the target's pass runs
         // first in the frame's command buffer and the return leaves the
@@ -572,17 +953,15 @@ void main() {
 
         const RenderTargetHandle target = m_halfTargets[b.FrameSlot() % m_halfTargets.size()];
         b.BindRenderTarget(target);
-        DrawIntoHalfTarget(slot, rainVerts, snowVerts, mvp, cameraPos, previousDepth, &reprojection,
-                           halfWidth, halfHeight);
+        DrawIntoHalfTarget(batch, mvp, cameraPos, previousDepth, &reprojection, halfWidth, halfHeight);
         b.BindRenderTarget(INVALID_RENDER_TARGET);
         b.SetViewport(0, 0, width, height);
         return true;
     }
 
-    void WeatherEffectRenderer::DrawIntoHalfTarget(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
-                                                   const glm::mat4& mvp, const glm::dvec3& cameraPos,
-                                                   TextureHandle sceneDepth, const glm::mat4* reprojection,
-                                                   int halfWidth, int halfHeight) {
+    void WeatherEffectRenderer::DrawIntoHalfTarget(const Batch& batch, const glm::mat4& mvp,
+                                                   const glm::dvec3& cameraPos, TextureHandle sceneDepth,
+                                                   const glm::mat4* reprojection, int halfWidth, int halfHeight) {
         RenderBackend& b = *g_renderBackend;
         b.SetViewport(0, 0, halfWidth, halfHeight);
         // The state first: GL's clear honours the colour write mask the last
@@ -607,8 +986,7 @@ void main() {
         columns.srcBlendFactor = BlendFactor::One;
         columns.dstBlendFactor = BlendFactor::OneMinusSrcAlpha;
         columns.blendAlphaLikeColor = true;
-        DrawColumns(m_halfShader, slot, rainVerts, snowVerts, mvp, cameraPos, glm::vec4(0.0f), columns,
-                    sceneDepth, reprojection);
+        DrawColumns(/*half=*/true, batch, mvp, cameraPos, glm::vec4(0.0f), columns, sceneDepth, reprojection);
 
         // The frame's own clear colour (the fog), as the frame had it.
         const glm::vec3 fog = EnvironmentState::Get().Frame().fogColor;
@@ -641,6 +1019,24 @@ void main() {
                 ? b.CreateShader(MobParticleSystem::VertexSource(), kHalfFragSource)
                 : EntityEnvironment::CreateShader("shaders/mob_particle.vert", "shaders/weather_half.frag",
                                                   /*readsCommonMatrices=*/true);   // the reprojection
+            // The streaks' twin over the same fragment shader.
+            if (m_streaksWanted && m_streakHalfShader == INVALID_SHADER) {
+                if (b.GetType() == BackendType::OpenGL) {
+                    m_streakHalfShader = b.CreateShader(kStreakVertSource, kHalfFragSource);
+                } else {
+                    m_streakHalfShader = EntityEnvironment::CreateShader("shaders/weather_streak.vert",
+                                                                         "shaders/weather_half.frag",
+                                                                         /*readsCommonMatrices=*/true);
+                    if (m_streakHalfShader != INVALID_SHADER) {
+                        b.RegisterShaderVertexLayout(m_streakHalfShader, GetBlockVertexLayout());
+                        b.RegisterShaderInstanceLayout(m_streakHalfShader, m_streakInstanceLayout);
+                    }
+                }
+                if (m_streakHalfShader == INVALID_SHADER) {
+                    Log::Warning("[WeatherEffectRenderer] half-resolution streak shader unavailable - quads");
+                    m_streaksWanted = false;
+                }
+            }
             // The plain textured full-screen blit (entity_outline_post.vert
             // mirrors v for Vulkan's flipped viewport).
             m_compositeShader = b.CreateShaderFromFiles("shaders/entity_outline_post.vert",
@@ -670,7 +1066,9 @@ void main() {
                     desc.width = width;
                     desc.height = height;
                     desc.colorFormat = TextureFormat::RGBA8;
+                    desc.depth = false;   // the world's depth test is the shader's
                     t = b.CreateRenderTarget(desc);
+                    b.SetDebugLabel(DebugLabelKind::RenderTarget, t, "Rain half-res");
                 } else {
                     b.ResizeRenderTarget(t, width, height);
                 }
@@ -700,6 +1098,7 @@ void main() {
         if (m_quadMesh != INVALID_MESH) { b.DestroyMesh(m_quadMesh); m_quadMesh = INVALID_MESH; }
         if (m_quadVB != INVALID_BUFFER) { b.DestroyBuffer(m_quadVB); m_quadVB = INVALID_BUFFER; }
         if (m_halfShader != INVALID_SHADER) { b.DestroyShader(m_halfShader); m_halfShader = INVALID_SHADER; }
+        if (m_streakHalfShader != INVALID_SHADER) { b.DestroyShader(m_streakHalfShader); m_streakHalfShader = INVALID_SHADER; }
         if (m_compositeShader != INVALID_SHADER) { b.DestroyShader(m_compositeShader); m_compositeShader = INVALID_SHADER; }
         if (m_sceneDepthCopy != INVALID_TEXTURE) { b.DestroyTexture(m_sceneDepthCopy); m_sceneDepthCopy = INVALID_TEXTURE; }
         m_halfWidth = m_halfHeight = 0;

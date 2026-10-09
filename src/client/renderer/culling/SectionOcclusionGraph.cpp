@@ -58,14 +58,16 @@ namespace Render {
 
         if (!m_chunks) return;
 
-        for (int rz = 0; rz < diameter; ++rz) {
-            for (int rx = 0; rx < diameter; ++rx) {
-                const int cx = job.playerChunkX - renderDistance + rx;
-                const int cz = job.playerChunkZ - renderDistance + rz;
-                const Client::ClientChunk* chunk =
-                    m_chunks->GetChunk({cx, cz});
-                if (!chunk || chunk->state != Client::ChunkState::LOADED) continue;
-
+        // The loaded chunks, walked once (ForEachLoadedChunk) and placed in
+        // the grid — not a hash probe per grid cell: 4,225 of them at RD 32,
+        // most answering a chunk that is loaded anyway (2026-10-08).
+        m_chunks->ForEachLoadedChunk([&](const Game::Math::ChunkPos pos, const Client::ClientChunk& chunkRef) {
+            const Client::ClientChunk* chunk = &chunkRef;
+            const int cx = pos.x, cz = pos.z;
+            const int rx = cx - (job.playerChunkX - renderDistance);
+            const int rz = cz - (job.playerChunkZ - renderDistance);
+            if (rx < 0 || rx >= diameter || rz < 0 || rz >= diameter) return;
+            {
                 const int ci = rz * diameter + rx;
                 job.chunkLoaded[ci] = 1;
 
@@ -91,8 +93,16 @@ namespace Render {
                     BfsJob::Cell& cell = job.cells[static_cast<size_t>(sy) * chunkGridSize + ci];
                     const auto& si = chunk->sectionInfos[sy];
                     // MC's emptySections test: an all-air section is traversable
-                    // but is never a draw candidate; everything else is.
-                    cell.renderable = inViewDistance && !si.isAllAir;
+                    // but is never a draw candidate; everything else is. Decided
+                    // first: it is most of a column, and it needs none of the
+                    // GPU-data load below (a 65x65x24-cell snapshot at RD 32
+                    // took 1–2 ms on the main thread, 2026-10-08).
+                    if (si.isAllAir) {
+                        cell.renderable = false;
+                        cell.visBits = VisibilitySet::kAllVisibleBits;
+                        continue;
+                    }
+                    cell.renderable = inViewDistance;
                     GPUSectionData* gpu = si.gpuData.load(std::memory_order_acquire);
                     if (gpu && gpu->HasGeometry()) {
                         // The pointer is dereferenced HERE, on the main thread,
@@ -177,7 +187,7 @@ namespace Render {
                     // terrain.
                 }
             }
-        }
+        });
 
         job.centerLoaded =
             job.chunkLoaded[static_cast<size_t>(renderDistance) * diameter + renderDistance] != 0;

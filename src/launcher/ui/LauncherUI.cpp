@@ -8,6 +8,7 @@
 #define IMGUI_DEFINE_MATH_OPERATORS
 #include "LauncherUI.hpp"
 #include "LauncherTheme.hpp"
+#include "LauncherWidgets.hpp"
 #include "launcher/LauncherConfig.hpp"
 #include "platform/GameDirectory.hpp"
 #include "common/entity/PlayerColors.hpp"
@@ -151,17 +152,6 @@ namespace Launcher {
         }
 
         // ── Widget helpers ──
-
-        // 34×19 pill toggle. Returns true when clicked (caller flips the value).
-        bool Toggle(const char* id, bool value) {
-            ImVec2 p = ImGui::GetCursorScreenPos();
-            bool pressed = ImGui::InvisibleButton(id, ImVec2(34, 19));
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            dl->AddRectFilled(p, p + ImVec2(34, 19), value ? Accent : SwitchOff, 9.5f);
-            float cx = value ? p.x + 34 - 2.5f - 7.0f : p.x + 2.5f + 7.0f;
-            dl->AddCircleFilled(ImVec2(cx, p.y + 9.5f), 7.0f, Knob);
-            return pressed;
-        }
 
         // Text pill button sized to its label. Returns true when clicked.
         bool Pill(const char* id, const char* label, ImFont* font, ImVec2 pad,
@@ -711,16 +701,17 @@ namespace Launcher {
             ImGui::EndChild();
         }
 
-        // ── Controls row: Vulkan toggle (or restart note) + asset meta ──
+        // ── Controls row: renderer picker (or restart note) + asset meta ──
         if (restart) {
             char keep[64];
             std::snprintf(keep, sizeof(keep), "Game %s stays installed.",
                           state.installedVersion.c_str());
             Txt(dl, g_fontSmall, ImVec2(x0, ctrlY + 2), TextMuted, keep);
         } else {
-            ImGui::SetCursorScreenPos(ImVec2(x0, ctrlY));
-            if (Toggle("##vulkanPlay", state.useVulkan)) state.useVulkan = !state.useVulkan;
-            Txt(dl, g_fontSmall, ImVec2(x0 + 34 + 9, ctrlY + 2), TextMuted, "Vulkan renderer");
+            const float labelW = Measure(g_fontSmall, "Renderer").x;
+            Txt(dl, g_fontSmall, ImVec2(x0, ctrlY + 2), TextMuted, "Renderer");
+            DrawRendererPicker(state, "##rendererPlay",
+                               ImVec2(x0 + labelW + 10.0f, ctrlY + ctrlH * 0.5f - 14.0f), ImVec2(132.0f, 28.0f));
         }
         {
             const std::string& meta = restart ? state.launcherAssetMeta : state.gameAssetMeta;
@@ -1339,6 +1330,18 @@ namespace Launcher {
 
     // ── Settings rows (username / password / vulkan / game dir) ──
 
+    void LauncherUI::DrawRendererPicker(LauncherUIState& state, const char* id, ImVec2 pos, ImVec2 size) {
+        const char* labels[kGameRendererCount];
+        const char* notes[kGameRendererCount];
+        for (int i = 0; i < kGameRendererCount; ++i) {
+            labels[i] = kGameRenderers[i].label;
+            notes[i] = kGameRenderers[i].note;
+        }
+        const int picked = Widgets::Dropdown(id, labels, notes, kGameRendererCount,
+                                             GameRendererIndex(state.renderer), pos, size);
+        if (picked >= 0) state.renderer = kGameRenderers[picked].id;
+    }
+
     void LauncherUI::DrawGameRows(LauncherUIState& state) {
         ImDrawList* dl = ImGui::GetWindowDrawList();
         float w = ImGui::GetContentRegionAvail().x;
@@ -1375,14 +1378,15 @@ namespace Launcher {
 
         DrawUsernameRow(state);
 
-        // Vulkan row
+        // Renderer row
         {
             ImVec2 p = ImGui::GetCursorScreenPos();
             float rowH = 52.0f;
-            Txt(dl, g_fontSmall, p + ImVec2(0, 10), TextBody, "Vulkan renderer");
-            Txt(dl, g_fontMono10, p + ImVec2(0, 29), TextFaint, "--vulkan");
-            ImGui::SetCursorScreenPos(ImVec2(p.x + w - 34, p.y + (rowH - 19) * 0.5f));
-            if (Toggle("##vulkanRow", state.useVulkan)) state.useVulkan = !state.useVulkan;
+            const GameRendererInfo& info = GameRendererInfoFor(state.renderer);
+            Txt(dl, g_fontSmall, p + ImVec2(0, 10), TextBody, "Renderer");
+            Txt(dl, g_fontMono10, p + ImVec2(0, 29), TextFaint, info.arg[0] ? info.arg : "default (no flag)");
+            const ImVec2 size(150.0f, 30.0f);
+            DrawRendererPicker(state, "##rendererRow", ImVec2(p.x + w - size.x, p.y + (rowH - size.y) * 0.5f), size);
             ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
             dl->AddLine(ImVec2(p.x, p.y + rowH), ImVec2(p.x + w, p.y + rowH), BorderSoft);
             ImGui::Dummy(ImVec2(0, 0));

@@ -464,6 +464,14 @@ namespace Render {
     }
     static std::atomic<uint64_t> s_greedyEligibleIn{0};
     static std::atomic<uint64_t> s_greedyRectsOut{0};
+    // Rectangles of more than one block, and of those the ones whose blocks
+    // do not all tile the same sprite (the merge rule ignores the sprite:
+    // a per-block record carries it) — the case for or against a
+    // per-rectangle sprite whose atlas rect the vertex stage could fetch
+    // once (2026-10-08). Logged with the layer census.
+    static std::atomic<uint64_t> s_greedyRectsMulti{0};
+    static std::atomic<uint64_t> s_greedyRectsMixedSprite{0};
+    static std::atomic<uint64_t> s_greedyCellsMixedSprite{0};
 
     void Mesher::SetGreedyDebugColors(bool enable) {
         // exchange, not store: the palette generation must move only when the
@@ -2215,6 +2223,11 @@ namespace Render {
                       (unsigned long long)c[1][0], (unsigned long long)c[1][1], (unsigned long long)c[1][2],
                       (unsigned long long)c[2][0], (unsigned long long)c[2][1], (unsigned long long)c[2][2],
                       PerBlockLayers() ? " (OBEY_BLOCK_LAYERS: rule layer in use)" : "");
+            Log::Info("[GreedyCensus] rectangles %llu, multi-block %llu, of them mixed-sprite %llu (%llu blocks)",
+                      (unsigned long long)s_greedyRectsOut.load(std::memory_order_relaxed),
+                      (unsigned long long)s_greedyRectsMulti.load(std::memory_order_relaxed),
+                      (unsigned long long)s_greedyRectsMixedSprite.load(std::memory_order_relaxed),
+                      (unsigned long long)s_greedyCellsMixedSprite.load(std::memory_order_relaxed));
         }
 
         using Greedy::PendingQuad;
@@ -2350,9 +2363,11 @@ namespace Render {
             const uint32_t recordTexel = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerTexel);
             faceMap.resize(faceMap.size() +
                            static_cast<size_t>(w * h) * TerrainVertex::kFaceMapWordsPerRecord);
+            bool mixedSprite = false;
             for (int dv = 0; dv < h; ++dv) {
                 for (int du = 0; du < w; ++du) {
                     const PendingQuad& cq = Greedy::t_pending[static_cast<size_t>(grid[v0 + dv][u0 + du] - 1)];
+                    if (cq.spriteId != q.spriteId) mixedSprite = true;
                     int tu, tv;
                     cellTile(u0 + du, v0 + dv, tu, tv);
                     const size_t rec = (recordBase + static_cast<size_t>((tu - tu0) + (tv - tv0) * w)) *
@@ -2365,6 +2380,13 @@ namespace Render {
                 }
             }
 
+            if (w * h > 1) {
+                s_greedyRectsMulti.fetch_add(1, std::memory_order_relaxed);
+                if (mixedSprite) {
+                    s_greedyRectsMixedSprite.fetch_add(1, std::memory_order_relaxed);
+                    s_greedyCellsMixedSprite.fetch_add(static_cast<uint64_t>(w * h), std::memory_order_relaxed);
+                }
+            }
             // local[] is already section-relative and on integer grid
             // coordinates, as is the tile-space uv — both encode exactly.
             for (int k = 0; k < 4; ++k) {

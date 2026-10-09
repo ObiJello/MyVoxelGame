@@ -134,7 +134,8 @@ namespace Render {
             Log::Warning("[FishingHookRenderer] failed to load the entity shader — bobbers will not render");
             return false;
         }
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, kMaxVertices * sizeof(ModelVertex),
                                                   nullptr, BufferAccess::Streaming);
             fb.ib = g_renderBackend->CreateBuffer(BufferUsage::Index, kMaxIndices * sizeof(uint32_t),
@@ -350,7 +351,7 @@ namespace Render {
             m_vertCursor = 0;
             m_idxCursor  = 0;
         }
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH) return;
         if (m_vertCursor >= kMaxVertices || m_idxCursor >= kMaxIndices) return;
         const size_t vertRoom = kMaxVertices - m_vertCursor;

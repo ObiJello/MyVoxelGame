@@ -67,10 +67,13 @@ namespace Render {
         // here; keeping them as members is what makes a steady-state frame
         // allocation-free. EndPortalRenderer calls this too, with its own
         // scratch, so both passes walk the same set. MAIN THREAD ONLY.
-        using ChunkSet = std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash>;
-        static void CollectVisibleChunks(Client::ClientChunkManager* chunkMgr,
-                                         std::vector<Client::ClientChunk*>& out,
-                                         ChunkSet& seen);
+        // Computed once per visible-sections pass (ChunkRenderer::
+        // VisiblePassSerial, within one frame) from the chunk renderer's
+        // unique column list, and shared by every walker of that pass —
+        // this dispatcher, EndPortalRenderer, BedRenderer: three walks of
+        // ~3,000 sections with a set insert each were 0.5 ms a frame at
+        // RD 32 (2026-10-07). Valid until the next pass. MAIN THREAD ONLY.
+        static const std::vector<Client::ClientChunk*>& CollectVisibleChunks(Client::ClientChunkManager* chunkMgr);
 
     private:
         // The off-screen pass (BlockEntityRenderer::ShouldRenderOffScreen):
@@ -89,9 +92,15 @@ namespace Render {
         // draw off-screen; 0 = no off-screen pass. Kept by Register.
         int m_offScreenReach = 0;
 
-        // Per-frame scratch for CollectVisibleChunks.
-        std::vector<Client::ClientChunk*> m_visibleChunks;
-        ChunkSet m_seen;
+        // CollectVisibleChunks' answer and what it was derived from.
+        struct VisibleChunkCache {
+            std::vector<Client::ClientChunk*> chunks;
+            uint64_t passSerial = 0;
+            uint32_t frameSerial = 0;
+            const void* chunkMgr = nullptr;
+            bool valid = false;
+        };
+        static VisibleChunkCache s_visibleChunks;
     };
 
     extern std::unique_ptr<BlockEntityRenderDispatcher> g_blockEntityRenderDispatcher;

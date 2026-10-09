@@ -16,9 +16,6 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/entity/LightningBolt.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <cstdint>
 #include <vector>
@@ -74,16 +71,7 @@ namespace Render {
         // The block shader (the XpOrbRenderer / ItemEntityRenderer choice, and
         // the same VK portal-layout caveat): texture × vertex colour, the
         // world's fog, the portal clip plane.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/block.vert", "shaders/block.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[LightningBoltRenderer] failed to load block shader — "
                          "lightning will not render");
@@ -113,7 +101,8 @@ namespace Render {
                 BufferUsage::Index, indices.size() * sizeof(uint32_t),
                 indices.data(), BufferAccess::Static);
         }
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, kMaxQuads * 4 * sizeof(ItemCubeVert),
                 nullptr, BufferAccess::Streaming);
@@ -145,7 +134,7 @@ namespace Render {
         if (!m_initialized || !g_renderBackend) return;
 
         if (m_frameCursor.Advance()) m_quadCursor = 0;
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH || m_quadCursor >= kMaxQuads) return;
         const size_t quadRoom = kMaxQuads - m_quadCursor;
 

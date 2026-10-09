@@ -703,6 +703,7 @@ namespace Render {
         m_lastCameraY          = cameraY;
         m_lastRenderDistChunks = renderDistChunks;
         m_lastFogEnabled       = fogEnabled;
+        m_frame.fogEnabled     = fogEnabled;
         ApplyPendingSync();
         const double dayTimeF = DayTimeF(partialTick);
 

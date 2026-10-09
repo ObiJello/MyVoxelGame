@@ -225,7 +225,12 @@ namespace Render {
         // tv0, 0..15) and size (w, h, 1..16), and the texel index of its
         // first face-map record within the section layer's record array.
         // `lightWord` is carried but unread: light is per block, in the
-        // records.
+        // records. Two uses of the word were measured losses on 2026-10-08
+        // and reverted: a "uniform light" flag (one lightmap sample per
+        // rectangle; the flat branch cost registers, 44 → 52) and the
+        // rectangle's first sprite id (its atlas rect fetched per vertex
+        // and passed flat; the 8-byte varying cost the fetch-bound vertex
+        // stage more than the fragment's sprite-table fetch saved, −3 %).
         static TerrainVertex Mapped(const glm::vec3& rel, int tileU, int tileV,
                                     int tu0, int tv0, int w, int h, uint32_t recordTexel,
                                     uint32_t lightWord) {

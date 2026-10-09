@@ -61,7 +61,7 @@ namespace Launcher {
         std::string installedVersion;
         std::string launcherVersion;
         bool autoUpdate = true;
-        bool useVulkan = false;
+        GameRenderer renderer = GameRenderer::OpenGL;
         std::string playerName;             // Empty → server auto-assigns "PlayerN"
         std::string playerColor;            // "" or "default" → neon green; otherwise palette slug ("pink", "blue"...)
         std::string lastJoinIP;             // Pre-fill the quick-connect fields
@@ -90,7 +90,11 @@ namespace Launcher {
                 installedVersion = json.value("installed_version", "");
                 launcherVersion = json.value("launcher_version", "");
                 autoUpdate = json.value("auto_update", true);
-                useVulkan = json.value("use_vulkan", false);
+                // "renderer" (opengl / vulkan / metal); a config from before
+                // the picker has only the Vulkan toggle.
+                renderer = GameRendererFromSlug(json.value("renderer", std::string()),
+                                                json.value("use_vulkan", false) ? GameRenderer::Vulkan
+                                                                                : GameRenderer::OpenGL);
                 playerName = json.value("player_name", "");
                 playerColor = json.value("player_color", "");
                 lastJoinIP = json.value("last_join_ip", "");
@@ -128,7 +132,8 @@ namespace Launcher {
                 json["installed_version"] = installedVersion;
                 json["launcher_version"] = launcherVersion;
                 json["auto_update"] = autoUpdate;
-                json["use_vulkan"] = useVulkan;
+                json["renderer"] = GameRendererInfoFor(renderer).slug;
+                json["use_vulkan"] = renderer == GameRenderer::Vulkan;   // read by older launchers
                 json["player_name"] = playerName;
                 json["player_color"] = playerColor;
                 json["last_join_ip"] = lastJoinIP;
@@ -406,7 +411,7 @@ namespace Launcher {
 #endif
 
         uiState.gameInstalled = std::filesystem::exists(gameExePath);
-        uiState.useVulkan = config.useVulkan;
+        uiState.renderer = config.renderer;
         uiState.playerName = config.playerName;
         uiState.playerColor = config.playerColor;
         uiState.appearance = Appearance::Settings::FromJson(config.appearance);
@@ -692,6 +697,11 @@ namespace Launcher {
             if (appearanceFiles.stickFigurePath.empty()) return "";
             return " --stick-figure " + Appearance::QuoteArg(appearanceFiles.stickFigurePath);
         };
+        // The renderer picker: --vulkan / --metal, nothing for OpenGL.
+        auto buildRendererArg = [&]() -> std::string {
+            const char* arg = GameRendererInfoFor(uiState.renderer).arg;
+            return arg[0] ? std::string(" ") + arg : std::string();
+        };
         auto buildAppearanceArgs = [&]() -> std::string {
             prepareAppearance();
             return buildSkinModeArg() + buildSkinModelArg() + buildSkinArg() + buildCapeArg() +
@@ -717,10 +727,12 @@ namespace Launcher {
             // crash before clean exit still keeps what the user typed/picked.
             config.playerName = uiState.playerName;
             config.playerColor = uiState.playerColor;
+            config.renderer = uiState.renderer;
             uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
-            std::string args = buildNameArg() + buildColorArg() + buildAppearanceArgs() + buildSessionArgs();
-            if (LaunchGame(gameExePath, uiState.useVulkan, args)) {
+            std::string args = buildRendererArg() + buildNameArg() + buildColorArg() + buildAppearanceArgs() +
+                               buildSessionArgs();
+            if (LaunchGame(gameExePath, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -741,12 +753,13 @@ namespace Launcher {
             config.lastJoinIP = uiState.lastJoinIP;
             config.lastJoinPort = uiState.lastJoinPort;
             config.servers = uiState.servers;
+            config.renderer = uiState.renderer;
             uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
             std::string serverArg = "--server " + host + ":" + std::to_string(port)
-                                  + buildNameArg() + buildColorArg() + buildAppearanceArgs()
+                                  + buildRendererArg() + buildNameArg() + buildColorArg() + buildAppearanceArgs()
                                   + buildSessionArgs();
-            if (LaunchGame(gameExePath, uiState.useVulkan, serverArg)) {
+            if (LaunchGame(gameExePath, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
                 uiState.state = LauncherState::Error;
@@ -1181,7 +1194,7 @@ namespace Launcher {
         // reference and must not publish results after this scope unwinds.
         ++pingGeneration;
 
-        config.useVulkan = uiState.useVulkan;
+        config.renderer = uiState.renderer;
         config.playerName = uiState.playerName;
         config.playerColor = uiState.playerColor;
         config.lastJoinIP = uiState.lastJoinIP;

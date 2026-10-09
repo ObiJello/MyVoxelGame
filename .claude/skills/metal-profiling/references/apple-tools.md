@@ -1,0 +1,44 @@
+# Apple Metal tooling facts (verified 2026-10-06, macOS 26.6.2 / Xcode 26.2)
+
+## Counter sampling in the app (what the engine's GPU timers use)
+- Sets: `MTLCommonCounterSetTimestamp`, `…StageUtilization`, `…Statistic`; query `device.counterSets`, `counterSet.counters`. https://developer.apple.com/documentation/metal/mtlcommoncounterset — https://developer.apple.com/documentation/metal/confirming-which-counters-and-counter-sets-a-gpu-supports
+- Sampling points: `supportsCounterSampling:` with `AtStageBoundary` / `AtDrawBoundary` / `AtDispatchBoundary` / `AtTileDispatchBoundary` / `AtBlitBoundary`. Apple: "Apple silicon supports sampling at the stage boundary because it processes fragments after processing every primitive for a render pass." https://developer.apple.com/documentation/metal/sampling-gpu-data-into-counter-sample-buffers
+- This M4 (`scripts/metal_device_probe.swift`): sets = `timestamp` only; `atStageBoundary` true, draw/blit/dispatch false.
+- Per pass: `MTLRenderPassDescriptor.sampleBufferAttachments[i]` → `sampleBuffer`, `startOfVertexSampleIndex`, `endOfVertexSampleIndex`, `startOfFragmentSampleIndex`, `endOfFragmentSampleIndex` (`MTLCounterDontSample` to skip); `MTLBlitPassDescriptor` / `MTLComputePassDescriptor` have `startOfEncoderSampleIndex`/`endOfEncoderSampleIndex`. Resolve with `-resolveCounterRange:` → `MTLCounterResultTimestamp`; failed samples are `MTLCounterErrorValue`.
+- GPU ticks → ns: two `sampleTimestamps:gpuTimestamp:` pairs, interpolate on the slope; call it sparingly (may trap to the kernel). https://developer.apple.com/documentation/metal/converting-gpu-timestamps-into-cpu-time
+- Metal 4: `MTL4CounterHeap` (timestamp type only), `writeTimestampWithGranularity:`.
+
+## Programmatic capture
+- `MTLCaptureManager.sharedCaptureManager`, `MTLCaptureDescriptor` (`captureObject` = device / queue / `MTLCaptureScope`, `destination = GPUTraceDocument`, `outputURL`), check `supportsDestination:` first. Enable with Info.plist `MetalCaptureEnabled = YES` or env `MTL_CAPTURE_ENABLED=1` at launch. https://developer.apple.com/documentation/xcode/capturing-a-metal-workload-programmatically
+- A `.gputrace` replays only on the same GPU + OS. https://developer.apple.com/documentation/xcode/replaying-a-gpu-trace-file
+- Xcode 26 has no CLI to replay/profile a trace. macOS 27 adds `gpucapture`, `gpudebug` (navigate a trace, `info pipeline`, attachments to PNG, a `performance` node) and `metalperftrace`. https://developer.apple.com/documentation/xcode/debugging-with-interactive-command-line-tools — https://developer.apple.com/metal/tools/
+
+## Instruments / xctrace
+- Counter sets are chosen in Recording Options (hold Record) → Counter Set → **Performance Limiters**; "Enable Shader Timeline" is under the Metal Application instrument. https://developer.apple.com/documentation/xcode/analyzing-the-performance-of-your-metal-app
+- Templates on Xcode 26: Metal System Trace, Game Performance, Game Performance Overview, Game Memory. Instruments: Metal Application, GPU, Metal GPU Counters, Metal Performance Overview, Metal Resource Events, Display. A saved `.tracetemplate` stores `counterprofile` (13 = limiters here) and `shaderprofiler`.
+- `xctrace record --template T --attach <pid|name> | --all-processes | --launch -- cmd` (`--env` only with launch), `--time-limit`, `--output`; `xctrace export --input X --toc` / `--xpath '/trace-toc/run[@number="1"]/data/table[@schema="S"]'`.
+- Schemas (from `Instruments.app/Contents/Packages/*.instrdst/Contents/Documentation/fulldoc.html`): GPU package `metal-gpu-intervals`, `metal-application-intervals`, `metal-application-encoders-list`, `metal-application-command-buffer-submissions`, `metal-driver-intervals`, `metal-gpu-execution-points`, `metal-gpu-state-intervals`, `metal-shader-profiler-intervals` / `-shader-list` / `-pso-list`, `display-surface-swap`, `display-vsyncs-interval`, `gpu-performance-state-intervals`; GPUBase `gpu-counter-info`, `gpu-counter-value`, `gpu-shader-profiler-sample` / `-interval`, `metal-resource-allocations`, `metal-residency-set-*`; GPUCounters `metal-gpu-counter-intervals`, `metal-gpu-counter-profile`. (`gpu-counter-intervals` without the `metal-` prefix does not exist.)
+- M3/A17+ (Apple family 9) added the shader cost graph, heat maps, execution history and occupancy-manager counters. https://developer.apple.com/videos/play/tech-talks/111374/
+
+## Metal Performance HUD
+- Enable: `MTL_HUD_ENABLED=1`, Xcode scheme "Show Graphics Overview", Info.plist `MetalHudEnabled`, UserDefaults `MetalHUDForceEnabled`, or `CAMetalLayer.developerHUDProperties`. https://developer.apple.com/documentation/xcode/monitoring-your-metal-apps-graphics-performance
+- Customize: `MTL_HUD_ALIGNMENT` (topleft … bottomright), `MTL_HUD_POSITION_X/Y`, `MTL_HUD_SCALE`, `MTL_HUD_OPACITY`, `MTL_HUD_ELEMENTS` (device, rosetta, layersize, layerscale, memory, fps, frameinterval, gputime, thermal, frameintervalgraph, presentdelay, frameintervalhistogram, metalcpu, gputimeline, shaders, framenumber, disk, fpsgraph, toplabeledcommandbuffers, toplabeledencoders), `MTL_HUD_SHOW_ZERO_METRICS`, `MTL_HUD_SHOW_METRICS_RANGE`, `MTL_HUD_ENCODER_TIMING_ENABLED` (per-encoder GPU time; unavailable while the app uses counter sample buffers), `MTL_HUD_ENCODER_GPU_TIMELINE_FRAME_COUNT`, `MTL_HUD_LOG_ENABLED` (per-frame CSV `metal-HUD:` lines, once a second), `MTL_HUD_LOG_SHADER_ENABLED`, `MTL_HUD_INSIGHTS_ENABLED` / `_INSIGHT_TIMEOUT` / `_INSIGHT_REPORT_INTERVAL`, `MTL_HUD_REPORT_URL` (offline reports 5 s–30 min), `MTL_HUD_CONFIG_FILE`. https://developer.apple.com/documentation/xcode/customizing-metal-performance-hud
+- Insights (macOS 26): too many encoders per frame, blit-induced encoder splits, serial shader compilation, CPU bottleneck. https://developer.apple.com/documentation/xcode/gaining-performance-insights-with-metal-performance-hud
+
+## Validation (`man MetalValidation`)
+- `MTL_DEBUG_LAYER=1`, `MTL_DEBUG_LAYER_ERROR_MODE=assert|ignore|nslog`, `MTL_DEBUG_LAYER_WARNING_MODE`, `MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS=1` (fuchsia), `MTL_DEBUG_LAYER_VALIDATE_STORE_ACTIONS=1` (checkerboard), `MTL_DEBUG_LAYER_VALIDATE_UNRETAINED_RESOURCES`.
+- `MTL_SHADER_VALIDATION=1` with `_REPORT_TO_STDERR=1`, `_FAIL_MODE=zerofill|allow`, `_ENABLE_PIPELINES` / `_DISABLE_PIPELINES`, `_GLOBAL_MEMORY`, `_TEXTURE_USAGE`, `_RESOURCE_USAGE`, `_STACK_OVERFLOW`, `_NAN_INF`, `_ABORT_ON_FAULT`. Not compatible with binary archives.
+- All must be set before the device is created → launch env (`open --env`).
+
+## Metal toolchain
+- `xcrun metal -std=macos-metal2.4 -mmacosx-version-min=X -gline-tables-only -frecord-sources[=flat|bundle]` (flat/bundle: companion symbol file), `-ffast-math` (default math mode fast), `-fmetal-math-mode=safe`, `-fpreserve-invariance`; `xcrun metallib` links. Xcode's "Produce Debugging Information: Yes, include source code" is the GUI equivalent. https://developer.apple.com/documentation/xcode/building-your-project-with-embedded-shader-sources
+- `metal-nt` / `applegpu-nt -arch <applegpu_gNNx>` compile AIR to native code offline (`-archs` lists; `applegpu_g16g` family on this M4); `metal-objdump`, `metal-source --extract`.
+
+## Metal 4 (macOS 26, M1+/A14+)
+- `MTL4CommandQueue/CommandBuffer/CommandAllocator/ArgumentTable/Compiler/CounterHeap` are `API_AVAILABLE(macos(26.0))`; `MTLResidencySet` is macOS 15+. Argument tables: 31 buffers, 128 textures, 16 samplers; no automatic hazard tracking (explicit barriers); encoders suspend/resume across threads; command allocators avoid per-encode allocation. https://developer.apple.com/videos/play/wwdc2025/205/ — https://developer.apple.com/videos/play/wwdc2025/254/
+
+## CPU-side best practice (Apple)
+- `setVertexBytes`/`setFragmentBytes` for < 4 KB; otherwise one buffer + `setVertexBufferOffset`. Triple buffering with a semaphore signalled in `addCompletedHandler`. Hold drawables briefly; `maximumDrawableCount` 2 or 3; `allowsNextDrawableTimeout` NO blocks forever. https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/
+- Synchronization, smallest scope first: intra-pass barrier → `MTLFence` → queue barrier → `MTLEvent` → `MTLSharedEvent`; heap resources default untracked. https://developer.apple.com/documentation/metal/resource-synchronization
+- Argument buffers tier 2 (`gpuAddress`/`gpuResourceID`), indirect command buffers (encode once / GPU-generated), residency sets (≤ 32 per queue/command buffer, attach to the queue, `requestResidency` early). https://developer.apple.com/documentation/metal/simplifying-gpu-resource-management-with-residency-sets
+- TBDR guidance (WWDC20 10632): opaque → feedback (discard / depth-writing) → translucent; `[[early_fragment_tests]]`; write all attachments; `DontCare` / memoryless transients; never split a pass on the same attachments; overdraw = FS invocations ÷ pixels stored.

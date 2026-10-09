@@ -18,20 +18,19 @@
 
 namespace Launcher {
 
-    bool LaunchGame(const std::string& gamePath, bool useVulkan, const std::string& extraArgs) {
+    bool LaunchGame(const std::string& gamePath, const std::string& extraArgs) {
         if (!std::filesystem::exists(gamePath)) {
             Log::Error("Game not found at: %s", gamePath.c_str());
             return false;
         }
 
-        Log::Info("Launching game: %s (vulkan=%d, extraArgs='%s')", gamePath.c_str(), useVulkan, extraArgs.c_str());
+        Log::Info("Launching game: %s (args='%s')", gamePath.c_str(), extraArgs.c_str());
 
 #ifdef __APPLE__
         // On macOS, use 'open' command for .app bundles
         std::string command = "open \"" + gamePath + "\"";
         // Collect all args
         std::string allArgs;
-        if (useVulkan) allArgs += " --vulkan";
         if (!extraArgs.empty()) allArgs += " " + extraArgs;
         if (!allArgs.empty()) {
             command += " --args" + allArgs;
@@ -46,9 +45,7 @@ namespace Launcher {
 #elif defined(_WIN32)
         // On Windows, use ShellExecute with the game's own directory as working dir
         std::string gameDir = std::filesystem::path(gamePath).parent_path().string();
-        std::string args;
-        if (useVulkan) args += "--vulkan ";
-        if (!extraArgs.empty()) args += extraArgs;
+        std::string args = extraArgs;
         HINSTANCE result = ShellExecuteA(nullptr, "open", gamePath.c_str(),
                                           args.empty() ? nullptr : args.c_str(),
                                           gameDir.c_str(), SW_SHOWNORMAL);

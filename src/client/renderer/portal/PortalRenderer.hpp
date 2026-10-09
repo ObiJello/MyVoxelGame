@@ -40,11 +40,15 @@ namespace Render {
         // Callback the see-through pass invokes once per recursion level.
         // Implementation should draw the scene (chunks, players, anything
         // else that should be visible THROUGH the portal) using the supplied
-        // virtual camera + oblique projection. The portal renderer manages
-        // stencil setup before/after the call — the callback just renders.
+        // virtual camera + projection — EVERYTHING with that one projection
+        // (on OpenGL the oblique one, whose near plane is the portal plane;
+        // on Vulkan and Metal the plain one, with the far side clipped at
+        // the plane through gl_ClipDistance), so every draw's depth is in
+        // one space. The portal renderer manages stencil setup before/after
+        // the call — the callback just renders.
         using SceneRenderFn = std::function<void(const Camera& virtualCam,
                                                   const Frustum& virtualFrustum,
-                                                  const glm::mat4& obliqueProjection)>;
+                                                  const glm::mat4& projection)>;
 
         // Walk the global ClientPortalManager and draw every active portal.
         //

@@ -31,9 +31,6 @@
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/chunk/IBlockAccess.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -199,23 +196,15 @@ namespace Render {
         // caveat: the block shaders declare the Common UBO, so on VK they must
         // be created through the UBO-aware (portal) layout or pipeline
         // creation fails.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/block.vert", "shaders/block.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[BlockCubeEntityRenderer] failed to load block shader — "
                          "falling blocks and TNT will not render");
             return false;
         }
 
-        for (FrameBuffers& fb : m_cubeFrames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_cubeFrames[slot];
             fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, kItemCubeMaxVerts * sizeof(ItemCubeVert),
                 nullptr, BufferAccess::Streaming);
@@ -232,22 +221,15 @@ namespace Render {
         // loaded through the plain path and not the Vulkan portal path: Vulkan
         // has no CreateInstancedMesh, so it never gets here anyway.
         {
-            if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-                // Portal layout, like m_shader: block_vk.frag reads the
-                // fog/environment CommonUBO at set=1. Resolves to
-                // block_instanced_vk.vert.spv + block_vk.frag.spv.
-                auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-                m_instShader = vk->CreateShaderFromFilesPortal(
-                    "shaders/block_instanced.vert", "shaders/block.frag");
-#endif
-            } else {
-                m_instShader = g_renderBackend->CreateShaderFromFiles(
-                    "shaders/block_instanced.vert", "shaders/block.frag");
-            }
+            // Portal layout, like m_shader: block_vk.frag reads the
+            // fog/environment CommonUBO at set=1. Resolves to
+            // block_instanced_vk.vert.spv + block_vk.frag.spv.
+            m_instShader = g_renderBackend->CreateShaderFromFilesPortal(
+                "shaders/block_instanced.vert", "shaders/block.frag");
 
             if (m_instShader != INVALID_SHADER) {
-                for (FrameBuffers& fb : m_cubeFrames) {
+                for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+                    FrameBuffers& fb = m_cubeFrames[slot];
                     fb.inst = g_renderBackend->CreateBuffer(
                         BufferUsage::Vertex, kInitialInstances * sizeof(Instance),
                         nullptr, BufferAccess::Streaming);
@@ -255,7 +237,12 @@ namespace Render {
                 }
             }
 
-            if (m_cubeFrames[0].inst != INVALID_BUFFER && m_cubeFrames[1].inst != INVALID_BUFFER) {
+            // Every live set or none (see below).
+            auto allSets = [this](auto pred) {
+                for (int slot = 0; slot < EntityFrame::Slots(); ++slot) if (!pred(m_cubeFrames[slot])) return false;
+                return true;
+            };
+            if (allSets([](const FrameBuffers& fb) { return fb.inst != INVALID_BUFFER; })) {
                 // Location 3: one vec4 per instance — xyz the world
                 // translation, w the uniform scale (see Instance). The
                 // divisor of 1 is what makes it per-instance. Locations 4-7:
@@ -284,17 +271,14 @@ namespace Render {
                     instanceLayout.attributes.push_back(attr);
                 }
 
-#ifdef HAS_VULKAN
-                if (g_renderBackend->GetType() == BackendType::Vulkan) {
-                    // Pipelines bake the vertex input, so the shader must
-                    // know both the per-vertex and per-instance layouts.
-                    auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-                    vk->RegisterShaderVertexLayout(m_instShader, GetBlockVertexLayout());
-                    vk->RegisterShaderInstanceLayout(m_instShader, instanceLayout);
-                }
-#endif
+                // Vulkan / Metal pipelines bake the vertex input, so the
+                // shader must know both the per-vertex and per-instance
+                // layouts.
+                g_renderBackend->RegisterShaderVertexLayout(m_instShader, GetBlockVertexLayout());
+                g_renderBackend->RegisterShaderInstanceLayout(m_instShader, instanceLayout);
                 m_instanceLayout = instanceLayout;
-                for (FrameBuffers& fb : m_cubeFrames) {
+                for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+                    FrameBuffers& fb = m_cubeFrames[slot];
                     fb.instMesh = g_renderBackend->CreateInstancedMesh(
                         fb.vb, fb.ib, fb.inst,
                         GetBlockVertexLayout(), instanceLayout);
@@ -302,8 +286,7 @@ namespace Render {
                 // Both or neither: a set without its instanced mesh would
                 // flip paths mid-frame, and the two are not interchangeable
                 // within a pass (see Render's useInstanced).
-                if (m_cubeFrames[0].instMesh == INVALID_MESH ||
-                    m_cubeFrames[1].instMesh == INVALID_MESH) {
+                if (!allSets([](const FrameBuffers& fb) { return fb.instMesh != INVALID_MESH; })) {
                     for (FrameBuffers& fb : m_cubeFrames) {
                         if (fb.instMesh != INVALID_MESH) {
                             g_renderBackend->DestroyMesh(fb.instMesh);
@@ -437,7 +420,7 @@ namespace Render {
             m_idxCursor  = 0;
             m_instCursor = 0;
         }
-        FrameBuffers& fb = m_cubeFrames[m_frameCursor.parity];
+        FrameBuffers& fb = m_cubeFrames[m_frameCursor.slot];
         // The slot was last written two frames ago; nothing this frame has
         // drawn from it yet, so this is where it may shrink.
         if (newFrame) MaybeShrinkInstanceBuffer(fb);

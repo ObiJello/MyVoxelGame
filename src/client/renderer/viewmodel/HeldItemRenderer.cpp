@@ -9,9 +9,6 @@
 #include "HeldItemSpriteMesh.hpp"
 
 #include "../backend/RenderBackend.hpp"
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 #include "../environment/EnvironmentState.hpp"
 #include "../environment/EntityEnvironment.hpp"
 #include "../core/Vertex.hpp"
@@ -320,22 +317,13 @@ namespace Render {
         // 2D texture with vertex-colour multiply and supports alpha
         // testing, which is exactly the requirements for both the
         // voxelised sprite and the textured cube paths.
-        // On Vulkan the block shaders now declare the Common UBO (set=1,
-        // fog + sky-brightness fields), which requires the UBO-aware
-        // (portal) pipeline layout — plain CreateShaderFromFiles bakes the
+        // The _vk block shaders declare the Common block (set=1, fog +
+        // sky-brightness fields), which requires the UBO-aware (portal)
+        // pipeline layout — plain CreateShaderFromFiles bakes the
         // texture-only layout and vkCreateGraphicsPipelines fails with
-        // VK_ERROR_INITIALIZATION_FAILED. Same cast pattern as
-        // ChunkRenderer/SkyRenderer.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/block.vert", "shaders/block.frag");
-        }
+        // VK_ERROR_INITIALIZATION_FAILED.
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal(
+            "shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[HeldItemRenderer] failed to load block shader — "
                          "held items will not render");

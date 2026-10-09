@@ -20,9 +20,13 @@
 // default 5 cm). The rain reads any stored depth below 3w as no occluder,
 // so last frame's hand or hotbar never cuts a hole in this frame's rain.
 //
-// Active only on frames the weather renderer marks (Vulkan, Half, raining):
-// every other frame clears as it always has. w is 0.01 on a float depth
-// buffer and 0.05 on a 24-bit one.
+// Active on every Metal frame (WeatherEffectRenderer::RenderAhead marks
+// it; OBEY_DEPTH_CLEARS=1 restores the clears): the three full-screen depth
+// clears they replace cost 0.22 ms serial and −9..19 % of the live GPU frame
+// on the M4 (Xcode + ABBA, 2026-10-07), a band is a viewport change. On
+// Vulkan only while the half-res rain reads the depth (MoltenVK's clears
+// measured no worse than the bands); OpenGL clears as it always has. w is
+// 0.01 on a float depth buffer and 0.05 on a 24-bit one.
 
 #include "client/renderer/backend/RenderBackend.hpp"
 

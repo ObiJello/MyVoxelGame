@@ -911,13 +911,25 @@ namespace Render {
         // No lock: the mega-buffers and this set are main-thread state, and
         // the renderer may already hold m_gpuDataMutex when it calls this.
         constexpr uint8_t kReason = ChunkMegaBuffer::kNoBridgeOutsideView;
+        // Only the sections that have a mesh: a fence flip touched every
+        // section of every chunk that crossed the ring — 24 sections × three
+        // mega-buffer lookups each, ~130 chunks per camera-chunk move, 1.1 ms
+        // (2026-10-08) — when most of a column is air with nothing to fence.
+        auto flip = [&](::Game::Math::ChunkPos pos, bool on) {
+            const Client::ClientChunk* chunk = m_chunkManager ? m_chunkManager->GetChunk(pos) : nullptr;
+            if (!chunk) return;
+            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) {
+                if (chunk->sectionInfos[sy].gpuData.load(std::memory_order_acquire) == nullptr) continue;
+                SetMegaBufferNoBridge(pos, sy, kReason, on);
+            }
+        };
         for (const auto& pos : m_outsideViewChunks) {
             if (chunks.count(pos)) continue;
-            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) SetMegaBufferNoBridge(pos, sy, kReason, false);
+            flip(pos, false);
         }
         for (const auto& pos : chunks) {
             if (m_outsideViewChunks.count(pos)) continue;
-            for (int sy = 0; sy < Game::Math::SECTIONS_PER_CHUNK; ++sy) SetMegaBufferNoBridge(pos, sy, kReason, true);
+            flip(pos, true);
         }
         m_outsideViewChunks = std::move(chunks);
     }

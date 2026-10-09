@@ -10,17 +10,26 @@
 // to attribute GPU time per stage. Same idea as OBEY_VK_NO_INDIRECT.
 //
 // OBEY_SKIP_PERIOD=<sec> alternates the skip on/off every <sec> seconds
-// inside ONE run and logs each transition ("[DevSkip] phase=on|off"). A
-// fanless Mac throttles within a minute of sustained load, so two separate
-// runs are not comparable — interleaving gives both phases the same clock
-// state. Pair the per-second "[Harness]" fps lines with the phase log.
+// inside ONE run and logs each transition ("[DevSkip] phase=on|off", and the
+// Tracy plot DevSkip/On, which splits a capture's frames exactly). A fanless
+// Mac throttles within a minute of sustained load, so two separate runs are
+// not comparable — interleaving gives both phases the same clock state. Pair
+// the per-second "[Harness]" fps lines with the phase log.
 // On macOS each transition is also a Points-of-Interest signpost ("DevSkip",
 // "on"/"off"), which a Metal System Trace records on its own clock — that is
 // what splits the GPU timeline into skip-on / skip-off frames exactly.
 //
 // Tokens: sky, opaque, cutout, translucent, players, items, mobs,
 //         blockentities, particles, clouds, helditem, outline, hud,
-//         weather, post; and five that swap something instead of skipping:
+//         weather, post; latesky (the sky drawn after the opaque and cutout
+//         terrain, depth-tested at the far plane — off: MC's sky-first
+//         order); spritearray (the block atlas's sprite array — off: every
+//         greedy quad samples the atlas through the sprite table, the
+//         array stays resident, so it is a pure fragment-path A/B);
+//         fogskip / lightskip (with fog / World Lighting OFF in the options:
+//         the terrain shaders' skip of the fog math / the lightmap samples
+//         is suspended, so the run A/Bs the skip itself);
+//         and five that swap something instead of skipping:
 //         weatherradius (Weather Radius 5), scale50 (Render Resolution 50 %),
 //         sceneblit (Vulkan: Render Resolution upscales by blit, not draw),
 //         mailbox (Vulkan: every frame waits for its image and is shown),
@@ -32,6 +41,7 @@
 #include <string>
 #include <vector>
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #ifdef __APPLE__
 #include <os/signpost.h>
 #endif
@@ -87,6 +97,9 @@ namespace Render {
         if (on != cfg.lastPhase) {
             cfg.lastPhase = on;
             Log::Info("[DevSkip] phase=%s", on ? "on" : "off");
+            // Tracy's view of the same switch: the frames on each side of it
+            // are classified exactly (a log line's second is too coarse).
+            PROFILE_PLOT("DevSkip/On", static_cast<int64_t>(on ? 1 : 0));
 #ifdef __APPLE__
             static os_log_t s_log = os_log_create("com.obeycraft.dev", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
             if (on) os_signpost_event_emit(s_log, OS_SIGNPOST_ID_EXCLUSIVE, "DevSkip", "on");

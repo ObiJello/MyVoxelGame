@@ -386,7 +386,7 @@ void main() {
         // staging uploads plus two vkQueueWaitIdle pipeline drains per frame,
         // measured at ~4.6ms/frame (HudRender was 25% of a Tracy capture).
         FrameBuffers& fb = m_frames[m_frameIndex];
-        m_frameIndex = (m_frameIndex + 1) % 2;
+        m_frameIndex = (m_frameIndex + 1) % EntityFrame::Slots();
 
         if (fb.mesh == INVALID_MESH ||
             fb.vboCapacity < vertexDataSize || fb.iboCapacity < indexDataSize) {
@@ -433,7 +433,7 @@ void main() {
         // same per-vertex Z values land in the visible clip range either way.
         float guiWidth = static_cast<float>(fbWidth) / guiScale;
         float guiHeight = static_cast<float>(fbHeight) / guiScale;
-        glm::mat4 projection = (g_renderBackend && g_renderBackend->GetType() == BackendType::Vulkan)
+        glm::mat4 projection = (g_renderBackend && g_renderBackend->UsesVkShaders())
             ? glm::orthoRH_ZO(0.0f, guiWidth, guiHeight, 0.0f, -1000.0f, 1000.0f)
             : glm::ortho     (0.0f, guiWidth, guiHeight, 0.0f, -1000.0f, 1000.0f);
 

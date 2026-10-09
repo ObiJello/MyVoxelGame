@@ -1,39 +1,59 @@
 #!/usr/bin/env python3
 """GPU-side report for an Instruments Metal System Trace recorded by
-tools/play.sh --gpu-trace (or any xctrace 'Metal System Trace' of the game).
+tools/play.sh --gpu-trace (or any xctrace trace of the game that carries the
+Metal GPU tables).
 
     tools/gpu_report.py gpu-03-47-19.trace                       # GPU timeline only
     tools/gpu_report.py gpu-03-47-19.trace --tracy Untitled.tracy  # + aligned Tracy capture
+    tools/gpu_report.py gpu-03-47-19.trace --hud-log hud.log      # + Metal HUD per-second CSV
     tools/gpu_report.py gpu-03-47-19.trace --no-cpu               # skip the CPU sample profile
 
 What it prints, in order:
   DEVICE           GPU name, thermal state, performance state (throttling check)
   GPU FRAMES       per-frame Vertex/Fragment execution time (the real GPU cost),
                    encoders per frame, GPU-side fps, worst frames
+  GPU ENCODERS     per encoder LABEL ("Frame", "Target 12 (1710x1073)", "OIT pass
+                   3", "Texture flush", ...): vertex / fragment ms per frame,
+                   how often it runs, and how much of it overlaps other encoders —
+                   the native Metal backend labels every encoder, so this is the
+                   per-stage breakdown for passes that own an encoder
+  GPU COUNTERS     (template with a counter set) mean / p95 of every limiter and
+                   utilization counter over the recording
   GPU UTILISATION  Active vs Idle from the driver's state track
-  CPU-SIDE WAITS   CAMetalLayer drawable waits, Instruments' hang detector
+  CPU-SIDE WAITS   "Wait for Next Drawable" and the other Metal application
+                   waits (from metal-application-intervals — the CAMetalLayer
+                   client-wait table does NOT show the drawable waits),
+                   Instruments' hang detector
   PER SECOND       vertex/fragment ms per frame over the session (+ Tracy columns)
   TRACY ALIGNMENT  (--tracy) cross-correlates frame times to find the clock offset,
                    then regresses GPU vertex time against Sections/Visible and, when
                    the capture has them, Geom/Vertices and Geom/Indices — which one
                    predicts the GPU tells you what to shrink
+  HUD LOG          (--hud-log) summary of Metal Performance HUD `metal-HUD:` lines
   CPU SAMPLES      Instruments' 1 kHz time profile of the game with REAL symbols
                    (dladdr-free, unlike Tracy's ghost zones): per-thread shares,
                    main-thread leaf functions, and where the samples land inside
                    the functions named by --cpu-fn
 
 Tables are exported once with `xcrun xctrace export` into <trace>.export/ and
-reused on later runs (delete the folder to re-export). Facts worth knowing,
-all verified on the 2026-09-04 trace:
-  * Only the Vertex and Fragment channels are GPU execution. The 'Compute'
-    channel carries one interval per MoltenVK command buffer (labelled
-    'GL/CL', tens of ms, stacked dozens deep): that is the buffer's lifetime
-    from commit to completion, not work — the state track shows two channels
-    active while they "run". They are reported as submission lifetimes only.
+reused on later runs (delete the folder to re-export). Facts worth knowing:
+  * Only the Vertex and Fragment channels are GPU execution. Through MoltenVK
+    the 'Compute' channel carries one interval per command buffer (labelled
+    'GL/CL', tens of ms, stacked dozens deep): commit-to-completion lifetime,
+    not work. Native Metal has no such intervals; its blit encoders
+    ("Uploads", "Texture flush", "Readback", "Copy framebuffer") show on
+    the Blit channel.
+  * On a tile GPU vertex (tiling) and fragment work of different encoders —
+    and of consecutive frames — overlap; the per-frame union is what the
+    frame costs, the per-encoder sums are what each pass costs in isolation.
+    Live overlapped per-encoder numbers also come from the Metal HUD
+    (MTL_HUD_ENCODER_TIMING_ENABLED=1, --hud-log).
   * Trace time 0 is when xctrace attached (~20 s after launch with play.sh),
     not game start; --tracy finds the offset itself.
   * The stock template records one useless counter ('RT Unit Active') on
-    Apple silicon; the 3 GB gpu-counter-value table is skipped on purpose.
+    Apple silicon; counters need the GUI-saved gpu-limiters.tracetemplate.
+    The 3 GB gpu-counter-value table is skipped; the derived
+    metal-gpu-counter-intervals table (GPUCounters package) is read instead.
   * The time profile records RUNNING samples only: main-thread running time
     below 100% is time blocked in the fence / drawable / vsync waits.
 """
@@ -45,23 +65,29 @@ import xml.etree.ElementTree as ET
 # ── xctrace export ──────────────────────────────────────────────────────────
 TABLES = ["metal-gpu-intervals", "metal-object-label", "metal-gpu-state-intervals",
           "gpu-performance-state-intervals", "device-thermal-state-intervals",
-          "ca-client-buffer-wait-interval", "potential-hangs", "device-gpu-info"]
+          "metal-application-intervals", "potential-hangs", "device-gpu-info"]
+# Present only when the template records counters; an empty export is fine.
+OPTIONAL_TABLES = ["metal-gpu-counter-intervals"]
 CPU_TABLE = "time-profile"
 
-def export_tables(trace, outdir, tables):
+def export_tables(trace, outdir, tables, optional=()):
     os.makedirs(outdir, exist_ok=True)
-    for t in tables:
+    for t in list(tables) + list(optional):
         path = os.path.join(outdir, t + ".xml")
-        if os.path.exists(path) and os.path.getsize(path) > 0: continue
+        if os.path.exists(path) and (os.path.getsize(path) > 0 or t in optional): continue
         sys.stderr.write(f"exporting {t} ...\n")
         with open(path, "w") as out:
             r = subprocess.run(["xcrun", "xctrace", "export", "--input", trace, "--xpath",
                                 f'/trace-toc/run[@number="1"]/data/table[@schema="{t}"]'],
                                stdout=out, stderr=subprocess.PIPE, text=True)
         if r.returncode != 0:
+            if t in optional:
+                open(path, "w").close()   # mark as "not in this trace"
+                continue
             os.remove(path)
             sys.exit(f"xctrace export failed for {t}: {r.stderr.strip()}\n"
-                     "(a trace that is still being finalised by xctrace gives 'Document Missing Template Error' — wait for it)")
+                     "(a trace that is still being finalised by xctrace gives 'Document Missing Template Error' — wait for it;"
+                     " a trace whose recording crashed, or whose game quit before the time limit, stays unreadable)")
 
 def _text(el):
     if el.attrib.get("fmt") is not None and len(el) > 0: return el.attrib["fmt"]
@@ -69,6 +95,7 @@ def _text(el):
 
 def read_table(path, want=None):
     """Rows as dicts keyed by column mnemonic. xctrace dedups values with id=/ref=."""
+    if not os.path.exists(path) or os.path.getsize(path) == 0: return
     ids, cols = {}, []
     for _, el in ET.iterparse(path, events=("end",)):
         if el.tag == "schema":
@@ -116,25 +143,35 @@ def corr(xs, ys):
     if sxx == 0 or syy == 0: return 0.0, 0.0, my
     return sxy / (sxx * syy) ** 0.5, sxy / sxx, my - (sxy / sxx) * mx
 
+BLIT_WORDS = ("Copy", "Blit", "Upload", "Texture flush", "Readback", "Clear RT")
+
+def encoder_key(label):
+    """One row per KIND of encoder: digits (target handles, OIT pass numbers,
+    sizes) become #, so 'Target 573 (1710x1073)' and 'Target 574 (1710x1073)'
+    fold together while 'Frame' and 'Frame (resumed)' stay apart."""
+    return re.sub(r"\d+", "#", label or "?")
+
 # ── main ────────────────────────────────────────────────────────────────────
 def main():
     args = sys.argv[1:]
     if not args or args[0].startswith("-"): print(__doc__); sys.exit(1)
-    trace = args[0].rstrip("/"); tracy = None; do_cpu = True; export_dir = None
+    trace = args[0].rstrip("/"); tracy = None; do_cpu = True; export_dir = None; hud_log = None
     process = "MyVoxelGame"
     cpu_fns = ["ScheduleMeshBuildsWithSnapshots", "PrepareVisibleSections", "RenderLayerPass",
-               "ImmersivePortalRenderer", "vkQueueSubmit", "glfwPollEvents", "ClientChunkManager::Update"]
+               "ImmersivePortalRenderer", "vkQueueSubmit", "MetalBackend::EndFrame",
+               "SubmitMergedRuns", "glfwPollEvents", "ClientChunkManager::Update"]
     i = 1
     while i < len(args):
         a = args[i]
         if a == "--tracy": tracy = args[i + 1]; i += 2
+        elif a == "--hud-log": hud_log = args[i + 1]; i += 2
         elif a == "--no-cpu": do_cpu = False; i += 1
         elif a == "--export-dir": export_dir = args[i + 1]; i += 2
         elif a == "--process": process = args[i + 1]; i += 2
         elif a == "--cpu-fn": cpu_fns = args[i + 1].split(","); i += 2
         else: sys.exit(f"unknown option {a}")
     export_dir = export_dir or trace + ".export"
-    export_tables(trace, export_dir, TABLES + ([CPU_TABLE] if do_cpu else []))
+    export_tables(trace, export_dir, TABLES + ([CPU_TABLE] if do_cpu else []), OPTIONAL_TABLES)
     T = lambda name: os.path.join(export_dir, name + ".xml")
     W = 100
     print("=" * W)
@@ -155,25 +192,35 @@ def main():
     print("  GPU performance state:  " + ", ".join(f"{k} {v:.1f}s" for k, v in perf.most_common()))
     print(f"  trace length {span_end:.1f}s (time 0 = xctrace attach, ~20 s after launch with play.sh)")
 
-    # ── GPU FRAMES ──────────────────────────────────────────────────────
+    # ── GPU FRAMES + ENCODERS ───────────────────────────────────────────
     labels = {}
     for r in read_table(T("metal-object-label"), want={"object-id", "label"}):
         labels[r["object-id"]] = r["label"] or ""
     frames = collections.defaultdict(lambda: {"V": [], "F": [], "encV": 0, "encF": 0})
+    # per encoder (object id): channel -> [(s, e)], label, frame
+    encs = collections.defaultdict(lambda: {"V": [], "F": [], "B": [], "label": "?", "frame": None})
     lifetimes = collections.defaultdict(list); blits = []
     for r in read_table(T("metal-gpu-intervals"),
-                        want={"process", "channel-name", "frame-number", "start", "duration", "cmdbuffer-id"}):
+                        want={"process", "channel-name", "frame-number", "start", "duration", "cmdbuffer-id", "encoder-id", "event-label"}):
         if process not in (r["process"] or ""): continue
         s = int(r["start"]) / 1e6; d = int(r["duration"]) / 1e6; ch = r["channel-name"]
-        lab = re.sub(r"\d+", "#", labels.get(r["cmdbuffer-id"], "?"))
+        enc_id = r.get("encoder-id"); cb_lab = labels.get(r["cmdbuffer-id"], "?")
+        enc_lab = labels.get(enc_id) or r.get("event-label") or cb_lab
         if ch in ("Vertex", "Fragment"):
             if r["frame-number"] is None: continue   # a stray interval with no frame (seen once per channel)
             f = frames[int(r["frame-number"])]
             if ch == "Vertex": f["V"].append((s, s + d)); f["encV"] += 1
             else: f["F"].append((s, s + d)); f["encF"] += 1
-        elif "Copy" in lab or "Blit" in lab: blits.append(d)
-        else: lifetimes[lab].append(d)
-    rows = []   # (start, vert, frag, encV, encF)
+            if enc_id:
+                e = encs[enc_id]; e["label"] = enc_lab; e["frame"] = int(r["frame-number"])
+                e["V" if ch == "Vertex" else "F"].append((s, s + d))
+        elif ch == "Blit" or any(w in (enc_lab or "") for w in BLIT_WORDS) or any(w in cb_lab for w in BLIT_WORDS):
+            blits.append(d)
+            if enc_id:
+                e = encs[enc_id]; e["label"] = enc_lab; e["B"].append((s, s + d))
+                if r["frame-number"] is not None: e["frame"] = int(r["frame-number"])
+        else: lifetimes[encoder_key(cb_lab)].append(d)
+    rows = []   # (start, vert, frag, encV, encF, frame)
     for n, f in sorted(frames.items()):
         allv = f["V"] + f["F"]
         if not allv: continue
@@ -181,24 +228,70 @@ def main():
     if not rows: sys.exit(f"no Vertex/Fragment intervals for process '{process}' (use --process)")
     vert = [r[1] for r in rows]; frag = [r[2] for r in rows]; both = [r[1] + r[2] for r in rows]
     starts = [r[0] for r in rows]; iv = [b - a for a, b in zip(starts, starts[1:])]
+    nframes = len(rows)
     print("=" * W)
-    print(f"GPU FRAMES — {len(rows)} frames with GPU work for {process}")
+    print(f"GPU FRAMES — {nframes} frames with GPU work for {process}")
+    print("  a 'frame' here is Metal's frame-number = one PRESENT (drawable); with the vsync-off mailbox several")
+    print("  rendered frames land in one present, so divide the per-frame ms by 'encoders per frame' for a rendered")
+    print("  frame, and multiply the fps by it for the rendered rate (Tracy's FrameMark counts rendered frames).")
     print("  per frame, execution time on the channel (overlapping encoders merged):")
     print(dist("Vertex (tiler: vertex shading + binning)", vert))
     print(dist("Fragment (pixel shading + resolve)", frag))
     print(dist("Vertex + Fragment", both))
     print(f"  encoders per frame: vertex {st.mean(r[3] for r in rows):.2f}  fragment {st.mean(r[4] for r in rows):.2f}"
-          f"   (one render pass = one of each; portals are stencil layers inside it)")
+          f"   (native Metal: 'Frame' + one per render target / OIT pass; MoltenVK: one render pass = one of each)")
     print(dist("GPU frame interval", iv) + f"   -> {1000 / st.mean(iv):.0f} fps mean, 1%-worst {1000 / pct(iv, .99):.0f} fps")
-    bound = "VERTEX-bound" if st.mean(vert) > st.mean(frag) * 1.3 else ("FRAGMENT-bound" if st.mean(frag) > st.mean(vert) * 1.3 else "balanced")
-    print(f"  verdict: {bound} — vertex {st.mean(vert):.2f} ms vs fragment {st.mean(frag):.2f} ms per frame;"
-          f" GPU throughput ceiling ~{1000 / max(st.mean(vert), st.mean(frag)):.0f} fps at this load")
-    if blits: print(dist("Blit encoders (texture uploads)", blits) + "   [not per frame]")
+    bound = "VERTEX-heavier" if st.mean(vert) > st.mean(frag) * 1.3 else ("FRAGMENT-heavier" if st.mean(frag) > st.mean(vert) * 1.3 else "balanced")
+    print(f"  verdict: {bound} — vertex {st.mean(vert):.2f} ms vs fragment {st.mean(frag):.2f} ms per frame"
+          f" (the channels overlap on a tile GPU; the frame interval, not their sum, is the ceiling:"
+          f" ~{1000 / max(st.mean(vert), st.mean(frag)):.0f} fps at this load if the longer channel were the only limit)")
+    if blits: print(dist("Blit encoders (uploads, copies)", blits) + "   [not per frame]")
     for lab, v in sorted(lifetimes.items(), key=lambda kv: -len(kv[1])):
         print(f"  submission lifetimes, not execution: {lab[:48]:48s} n={len(v):6d} mean {st.mean(v):6.2f} p99 {pct(v, .99):7.2f} max {max(v):7.2f} ms")
     print("  worst frames by vertex+fragment time:")
     for r in sorted(rows, key=lambda r: -(r[1] + r[2]))[:8]:
         print(f"    t={r[0] / 1000:6.2f}s  frame {r[5]:6d}  vertex {r[1]:6.2f} ms  fragment {r[2]:6.2f} ms")
+
+    if encs:
+        per = collections.defaultdict(lambda: {"V": [], "F": [], "B": [], "n": 0, "overlap": []})
+        # Overlap: how much of this encoder's span is also covered by OTHER encoders of the same frame.
+        by_frame = collections.defaultdict(list)
+        for eid, e in encs.items():
+            if e["frame"] is not None: by_frame[e["frame"]].append(eid)
+        for eid, e in encs.items():
+            k = encoder_key(e["label"]); p = per[k]; p["n"] += 1
+            p["V"].append(union_ms(e["V"])); p["F"].append(union_ms(e["F"])); p["B"].append(union_ms(e["B"]))
+            own = e["V"] + e["F"] + e["B"]
+            if own and e["frame"] is not None:
+                others = [iv_ for o in by_frame[e["frame"]] if o != eid for iv_ in encs[o]["V"] + encs[o]["F"] + encs[o]["B"]]
+                span = union_ms(own)
+                if span > 0:
+                    s0 = min(s for s, _ in own); e0 = max(e_ for _, e_ in own)
+                    clipped = [(max(s, s0), min(e_, e0)) for s, e_ in others if e_ > s0 and s < e0]
+                    p["overlap"].append(100 * union_ms(clipped) / (e0 - s0) if e0 > s0 else 0.0)
+        print("=" * W)
+        print(f"GPU ENCODERS — per encoder label, ms per FRAME (n/frame = how many such encoders a frame has)")
+        print(f"  {'encoder':34s} {'n/frame':>8s} {'vertex':>8s} {'fragment':>9s} {'blit':>7s} {'p99 V+F':>8s} {'overlap':>8s}")
+        for k, p in sorted(per.items(), key=lambda kv: -(sum(kv[1]['V']) + sum(kv[1]['F']) + sum(kv[1]['B']))):
+            vf = [a + b for a, b in zip(p["V"], p["F"])]
+            print(f"  {k[:34]:34s} {p['n'] / nframes:8.2f} {sum(p['V']) / nframes:8.3f} {sum(p['F']) / nframes:9.3f}"
+                  f" {sum(p['B']) / nframes:7.3f} {pct(vf, .99):8.3f} {st.mean(p['overlap']) if p['overlap'] else 0:7.0f}%")
+        print("  overlap = share of the encoder's GPU span during which other encoders of the same frame were also"
+              " executing; a pass that overlaps 100% costs the frame less than its own ms")
+
+    # ── GPU COUNTERS ────────────────────────────────────────────────────
+    cnt = collections.defaultdict(list)
+    for r in read_table(T("metal-gpu-counter-intervals"), want={"name", "value", "percent-value", "is-percentage"}) or []:
+        name = r.get("name") or "?"
+        v = r.get("percent-value") if (r.get("is-percentage") in ("1", "true", "True")) else r.get("value")
+        try: cnt[name].append(float(str(v).replace(",", "").rstrip("%")))
+        except (TypeError, ValueError): pass
+    if cnt:
+        print("=" * W)
+        print("GPU COUNTERS (template counter set over the whole recording; limiters are % of the unit's peak)")
+        print(f"  {'counter':44s} {'n':>7s} {'mean':>8s} {'p95':>8s} {'max':>8s}")
+        for name, vs in sorted(cnt.items(), key=lambda kv: -st.mean(kv[1])):
+            print(f"  {name[:44]:44s} {len(vs):7d} {st.mean(vs):8.1f} {pct(vs, .95):8.1f} {max(vs):8.1f}")
 
     # ── GPU UTILISATION ────────────────────────────────────────────────
     state = collections.Counter(); chans = collections.Counter()
@@ -213,13 +306,20 @@ def main():
     print("  Active above ~90% with vertex+fragment near the frame interval = the GPU is the frame-rate ceiling")
 
     # ── CPU-SIDE WAITS ─────────────────────────────────────────────────
-    waits = [int(r["duration"]) / 1e6 for r in read_table(T("ca-client-buffer-wait-interval"))]
-    waits = [w for w in waits if w > 0.01]
+    waits = collections.defaultdict(list)
+    for r in read_table(T("metal-application-intervals"), want={"process", "event-label", "duration"}):
+        if process not in (r["process"] or ""): continue
+        lab = r["event-label"] or "?"
+        if "Wait" in lab or "wait" in lab:
+            waits[encoder_key(lab)].append(int(r["duration"]) / 1e6)
     print("=" * W)
-    print("CPU-SIDE WAITS")
-    print(dist("CAMetalLayer drawable waits (in vkQueueSubmit/Present)", waits) +
-          f"   total {sum(waits) / 1000:.2f}s = {100 * sum(waits) / (span_end * 1000):.0f}% of the trace")
-    hangs = list(read_table(T("potential-hangs")))
+    print("CPU-SIDE WAITS (Metal application intervals of the game)")
+    if waits:
+        for lab, v in sorted(waits.items(), key=lambda kv: -sum(kv[1])):
+            print(dist(lab[:36], v) + f"   total {sum(v) / 1000:.2f}s = {100 * sum(v) / (span_end * 1000):.0f}% of the trace")
+    else:
+        print("  no wait intervals recorded")
+    hangs = list(read_table(T("potential-hangs")) or [])
     if hangs:
         print("  Instruments hang detector (main thread unresponsive):")
         for r in hangs:
@@ -231,19 +331,19 @@ def main():
     if tracy:
         ex = tracy_tools.export(tracy)
         main_tid = next((t["tid"] for t in ex.threads if t["name"] == "Main thread"), None)
-        frames = ex.frames("Frames")
-        if main_tid is None or not frames: sys.exit("no main thread / FrameMark frames in the Tracy capture")
+        tframes_raw = ex.frames("Frames")
+        if main_tid is None or not tframes_raw: sys.exit("no main thread / FrameMark frames in the Tracy capture")
         # Main-thread time per frame (ms) of a zone, stamped with the frame's start (ms).
-        wanted = {"Vk.FenceWait", "Present", "ImmersivePortalRender", "ChunkPass.Main"}
+        wanted = {"Vk.FenceWait", "Mtl.FrameWait", "Mtl.NextDrawable", "Present", "ImmersivePortalRender", "ChunkPass.Main"}
         per = collections.defaultdict(dict)
         for r in ex.rows("frame_zones"):
             if r["frame_set"] == "Frames" and r["name"] in wanted and int(r["thread"]) == main_tid:
-                per[r["name"]][int(r["frame"])] = int(r["total_ns"]) / 1e6
+                per[r["name"]][int(r["frame"])] = per[r["name"]].get(int(r["frame"]), 0.0) + int(r["total_ns"]) / 1e6
         def tracy_rows(name):
-            return [(s / 1e6, per[name].get(i, 0.0)) for i, (s, _) in enumerate(frames)]
+            return [(s / 1e6, per[name].get(i, 0.0)) for i, (s, _) in enumerate(tframes_raw)]
         plots = {k: [(t / 1e6, v) for t, v in pts] for k, pts in
                  ex.plots(["Sections/Visible", "Geom/Vertices", "Geom/Indices"]).items()}
-        tframes = [s / 1e6 for s, _ in frames]
+        tframes = [s / 1e6 for s, _ in tframes_raw]
         B = 50.0
         span = max(tframes[-1], starts[-1]) + 60000
         def bins(ts):
@@ -260,8 +360,10 @@ def main():
         off, c = best
         print("=" * W)
         print(f"TRACY ALIGNMENT — {os.path.basename(tracy)}: Tracy time = GPU time + {off / 1000:.2f}s (frame-rate correlation {c:.3f}; below 0.8 = not the same session)")
-        tr = {"off": off,
-              "fence": tracy_rows("Vk.FenceWait" if per.get("Vk.FenceWait") else "Present"),
+        fence_name = next((n for n in ("Vk.FenceWait", "Mtl.FrameWait") if per.get(n)), "Present")
+        drawable = tracy_rows("Mtl.NextDrawable") if per.get("Mtl.NextDrawable") else None
+        tr = {"off": off, "fence_name": fence_name,
+              "fence": tracy_rows(fence_name), "drawable": drawable,
               "portal": tracy_rows("ImmersivePortalRender"),
               "chunk": tracy_rows("ChunkPass.Main"), "frames": tframes,
               "vis": plots.get("Sections/Visible", []), "verts": plots.get("Geom/Vertices", []),
@@ -311,7 +413,10 @@ def main():
     # ── PER SECOND ─────────────────────────────────────────────────────
     print("=" * W)
     hdr = f"{'sec':>4} {'fps':>4} {'vert/fr':>8} {'frag/fr':>8}"
-    if tr: hdr += f" {'fence':>6} {'portal':>7} {'chunk':>6} {'sect/fr':>8}"
+    if tr:
+        hdr += f" {tr['fence_name'][:7]:>7s}"
+        if tr["drawable"]: hdr += f" {'drawbl':>6s}"
+        hdr += f" {'portal':>7} {'chunk':>6} {'sect/fr':>8}"
     print("PER SECOND (trace time; ms per frame" + (", Tracy columns are main-thread CPU ms per frame" if tr else "") + ")")
     print(hdr)
     gs = bucket([(r[0], (r[1], r[2])) for r in rows], 1000)
@@ -322,8 +427,29 @@ def main():
         v = gs[s]; line = f"{s:4d} {len(v):4d} {st.mean(x[0] for x in v):8.2f} {st.mean(x[1] for x in v):8.2f}"
         if tr:
             vis = [x for t, x in tr["vis"] if s * 1000 <= t - tr["off"] < (s + 1) * 1000]
-            line += f" {sec_mean(tr['fence'], s):6.2f} {sec_mean(tr['portal'], s):7.2f} {sec_mean(tr['chunk'], s):6.2f} {sum(vis) / max(1, len(v)):8.0f}"
+            line += f" {sec_mean(tr['fence'], s):7.2f}"
+            if tr["drawable"]: line += f" {sec_mean(tr['drawable'], s):6.2f}"
+            line += f" {sec_mean(tr['portal'], s):7.2f} {sec_mean(tr['chunk'], s):6.2f} {sum(vis) / max(1, len(v)):8.0f}"
         print(line)
+
+    # ── HUD LOG ────────────────────────────────────────────────────────
+    if hud_log:
+        print("=" * W)
+        print(f"HUD LOG — {hud_log} (Metal Performance HUD, per PRESENTED frame; encoder times need MTL_HUD_ENCODER_TIMING_ENABLED=1)")
+        header = None; cols = collections.OrderedDict()
+        for line in open(hud_log, errors="replace"):
+            m = re.search(r"metal-HUD:\s*(.*)$", line)
+            if not m: continue
+            fields = [f.strip() for f in m.group(1).split(",")]
+            if header is None and any(f and not re.fullmatch(r"-?[\d.]+(e[-+]?\d+)?", f) for f in fields):
+                header = fields; continue
+            names = header if header and len(header) == len(fields) else [f"col{i}" for i in range(len(fields))]
+            for n, v in zip(names, fields):
+                try: cols.setdefault(n, []).append(float(v))
+                except ValueError: pass
+        if not cols: print("  no metal-HUD lines found")
+        for n, vs in cols.items():
+            print(f"  {n[:40]:40s} n={len(vs):5d}  mean {st.mean(vs):10.3f}  p95 {pct(vs, .95):10.3f}  max {max(vs):10.3f}")
 
     # ── CPU SAMPLES ────────────────────────────────────────────────────
     if do_cpu:

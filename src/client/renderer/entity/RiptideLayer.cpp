@@ -118,7 +118,7 @@ namespace Render {
             m_vertCursor = 0;
             m_idxCursor  = 0;
         }
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH) return;
         if (m_vertCursor + 4096 >= kMaxVertices || m_idxCursor + 8192 >= kMaxIndices) return;
         const size_t vertRoom = kMaxVertices - m_vertCursor;

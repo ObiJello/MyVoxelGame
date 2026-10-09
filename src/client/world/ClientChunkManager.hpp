@@ -215,6 +215,7 @@ namespace Client {
         // chunk that enters or leaves LOADED (TransitionChunkState), which
         // is the only way the answer changes.
         int8_t neighborsAllLoaded = -1;
+        uint32_t schedulePass = 0;   // the mesh scheduler's pass that last examined this chunk
 
         // WORLD-space positions of every BlockID::EndPortal in this chunk.
         //
@@ -454,6 +455,14 @@ namespace Client {
                 if (chunk && chunk->state == ChunkState::LOADED) fn(pos);
             }
         }
+        // The same walk with the chunk: what the BFS snapshot reads, one
+        // map step per loaded chunk instead of a hash probe per grid cell.
+        template <typename F>
+        void ForEachLoadedChunk(F&& fn) const {
+            for (const auto& [pos, chunk] : m_chunks) {
+                if (chunk && chunk->state == ChunkState::LOADED) fn(pos, *chunk);
+            }
+        }
         
         // NEW: Direct section access for lock-free rendering
         SectionInfo* GetSectionInfo(Game::Math::ChunkPos chunkPos, int sectionY);
@@ -524,6 +533,12 @@ namespace Client {
         // chunk is gone or fully clean are lazily erased during scheduling, so
         // erase sites don't need to maintain it.
         std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_chunksWithDirtySections;
+        // Chunks with a section the scheduler admits wherever it is: dirtied
+        // by the player's own edit, or a relocation re-mesh. Examined every
+        // pass; the rest of the dirty set is examined only where a view
+        // reaches or near the player (ScheduleMeshBuildsWithSnapshots).
+        std::unordered_set<Game::Math::ChunkPos, Game::Math::ChunkPosHash> m_urgentDirtyChunks;
+        uint32_t m_schedulePass = 0;
         // Loaded chunks with sky blocks (SkyBlockChunks). Kept exact at every
         // place a chunk's index changes or the chunk comes and goes:
         // arrival (after RebuildEndPortalIndex), SetBlockLocal's patch,
@@ -678,6 +693,28 @@ namespace Client {
         ::Render::ClientMeshManager* m_meshes   = nullptr;
         ::Render::ChunkRenderer*     m_renderer = nullptr;
         std::vector<glm::ivec3> m_tickingBlockEntities;
+        // Its membership, for O(1) registration and retirement: the list
+        // used to be deduplicated by a linear scan per registration and
+        // rebuilt by a quadratic merge per tick — 2.2 ms a tick at RD 32
+        // with its thousands of chests, furnaces and spawners, the whole
+        // of the client tick's cost (2026-10-08). Registrations made WHILE
+        // the list is being ticked land in m_registeredDuringTick and join
+        // it afterwards.
+        struct IVec3Hash {
+            size_t operator()(const glm::ivec3& v) const noexcept {
+                uint64_t h = (static_cast<uint64_t>(static_cast<uint32_t>(v.x)) * 0x9E3779B97F4A7C15ull) ^
+                             (static_cast<uint64_t>(static_cast<uint32_t>(v.y)) * 0xC2B2AE3D27D4EB4Full) ^
+                             (static_cast<uint64_t>(static_cast<uint32_t>(v.z)) * 0x165667B19E3779F9ull);
+                return static_cast<size_t>(h ^ (h >> 29));
+            }
+        };
+        std::unordered_set<glm::ivec3, IVec3Hash> m_tickingSet;
+        std::vector<glm::ivec3> m_registeredDuringTick;
+        bool m_tickingInProgress = false;
+        // The moving-piston cells among them: what RetireLandedBlockEntities
+        // walks each frame (empty nearly always). Kept by RegisterTicking-
+        // BlockEntity; an entry leaves when its piston retires or is gone.
+        std::vector<glm::ivec3> m_landingPistons;
         int64_t                 m_clientTicks = 0;
     };
 

@@ -280,6 +280,14 @@ namespace Render::DebugScreen {
             if (m_cb.reloadResourcePacks) m_cb.reloadResourcePacks();
             debugAction = true;
         }
+        if (Matches(Binds::DebugGpuCapture, glfwKey)) {
+            if (m_cb.captureGpuFrame && m_cb.captureGpuFrame()) {
+                Feedback("GPU capture: the next frame is written to captures/");
+            } else {
+                Warning("GPU capture unavailable: launch with MTL_CAPTURE_ENABLED=1 in the environment (Metal only)");
+            }
+            debugAction = true;
+        }
         if (Matches(Binds::DebugProfiling, glfwKey)) {
             if (m_cb.toggleProfiling && m_cb.toggleProfiling()) {
                 Feedback(Fmt("Profiling started for %d seconds. Use %s + %s to stop early", 10,

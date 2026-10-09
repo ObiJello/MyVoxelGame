@@ -204,12 +204,16 @@ namespace Client::AmbientSounds {
             }
 
             const glm::dvec3 feet = player.physics.position;
-            const AudioAttributes::AmbientSounds& ambient = AudioAttributes::AmbientSoundsAt(
-                ctx.dimension, AudioAttributes::BiomeAt(feet));
+            const AudioAttributes::AmbientSounds* ambientAt = nullptr;
+            { PROFILE_ZONE_N("Sound.BiomeLookup");
+            ambientAt = &AudioAttributes::AmbientSoundsAt(ctx.dimension, AudioAttributes::BiomeAt(feet));
+            }
+            const AudioAttributes::AmbientSounds& ambient = *ambientAt;
 
             const std::optional<std::string> currentLoop =
                 ambient.loop.empty() ? std::nullopt : std::optional<std::string>(ambient.loop);
             if (currentLoop != g_previousLoopSound) {
+                PROFILE_ZONE_N("Sound.LoopChange");
                 g_previousLoopSound = currentLoop;
                 for (auto& [id, loop] : g_loopSounds) { (void)id; loop->FadeOut(); }
                 if (currentLoop) {
@@ -227,11 +231,13 @@ namespace Client::AmbientSounds {
 
             for (const AudioAttributes::AmbientAdditionsSettings& additions : ambient.additions) {
                 if (g_random.NextDouble() < additions.tickChance && !stilled) {
+                    PROFILE_ZONE_N("Sound.Addition");
                     GetSoundManager().Play(SimpleSoundInstance::ForAmbientAddition(additions.sound));
                 }
             }
 
             if (ambient.mood) {
+                PROFILE_ZONE_N("Sound.Mood");
                 const AudioAttributes::AmbientMoodSettings& mood = *ambient.mood;
                 const int searchSpan = mood.blockSearchExtent * 2 + 1;
                 const glm::dvec3 eye = player.GetEyePosition();
@@ -286,13 +292,12 @@ namespace Client::AmbientSounds {
         PROFILE_ZONE_N("Sound.Ambient");
         if (!ctx.player || !ctx.blocks) return;
         TickStillness(ctx);
-        LocalPlayerSounds::Tick(ctx);
+        { PROFILE_ZONE_N("Sound.Local"); LocalPlayerSounds::Tick(ctx); }
         if (ctx.levelLoading) return;
         const Game::ClientPlayer& player = *ctx.player;
         UpdateIsUnderwater(player);
-        TickUnderwater();
-        TickBubbleColumn(player, *ctx.blocks);
-        TickBiome(ctx, player, *ctx.blocks);
+        { PROFILE_ZONE_N("Sound.Underwater"); TickUnderwater(); TickBubbleColumn(player, *ctx.blocks); }
+        { PROFILE_ZONE_N("Sound.Biome"); TickBiome(ctx, player, *ctx.blocks); }
     }
 
     void Reset() {

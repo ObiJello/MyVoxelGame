@@ -2405,6 +2405,15 @@ namespace Server {
             if (SimulationRuns()) {
                 if (m_weather) m_weather->Tick(*this);
                 TickSleep();
+            } else if (m_weather) {
+                // The cycle holds while paused or frozen, but a player who
+                // just joined still gets the level's weather: MC's
+                // PlayerList.sendLevelInfo goes out in placeNewPlayer, pause
+                // or not. The owner's join hold keeps this server paused
+                // until the hand-over frame, so without this the hand-over
+                // drew a clear sky and the rain arrived a tick later — a
+                // white flash on every join into rain.
+                m_weather->SyncPlayers(*this);
             }
 
             // Maps: every carrier's MapItem.inventoryTick + the update packets
@@ -2857,7 +2866,13 @@ namespace Server {
         }
 
         // === 5b. TIME SYNC every 20 ticks (MC MinecraftServer.tickChildren) ===
-        if (serverTick % 20 == 0) {
+        // Not while paused: MC's IntegratedServer.tickServer runs tickPaused()
+        // instead of tickChildren() then, and resyncs once on resume (step
+        // 2b). A sync sent into a paused world lands on clients whose own
+        // tick count stopped a tick or two away from the server's — the
+        // rain, the sky and every game-time animation froze, then skipped
+        // by that difference a second after the menu opened.
+        if (serverTick % 20 == 0 && !m_paused.load(std::memory_order_relaxed)) {
             ForceTimeSync();
         }
         m_stress.Mark(ServerStressStats::Phase::Broadcast);

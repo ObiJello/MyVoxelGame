@@ -14,9 +14,6 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <stb_image.h>
 #include <glm/gtc/matrix_transform.hpp>
@@ -51,16 +48,7 @@ namespace Render {
 
         // Same block shader (and the same VK caveat) as ItemEntityRenderer —
         // single 2D texture, vertex-colour multiply, fog environment.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/block.vert", "shaders/block.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[XpOrbRenderer] failed to load block shader — "
                          "experience orbs will not render");
@@ -87,7 +75,8 @@ namespace Render {
                 BufferUsage::Index, indices.size() * sizeof(uint32_t),
                 indices.data(), BufferAccess::Static);
         }
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, kMaxOrbs * 4 * sizeof(ItemCubeVert),
                 nullptr, BufferAccess::Streaming);
@@ -127,7 +116,7 @@ namespace Render {
 
         // Which set this call writes, and where in it — see EntityFrame.hpp.
         if (m_frameCursor.Advance()) m_orbCursor = 0;
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH || m_orbCursor >= kMaxOrbs) return;
         const size_t orbRoom = kMaxOrbs - m_orbCursor;
 
@@ -265,7 +254,7 @@ namespace Render {
         if (m_initialized && g_renderBackend && Resources::CacheStale(m_packGeneration)) LoadTexture();
         if (!m_initialized || !g_renderBackend) return;
         if (m_frameCursor.Advance()) m_orbCursor = 0;
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.mesh == INVALID_MESH || m_orbCursor >= kMaxOrbs) return;
         const glm::mat3 billboard = glm::transpose(glm::mat3(view));
         m_verts.clear();

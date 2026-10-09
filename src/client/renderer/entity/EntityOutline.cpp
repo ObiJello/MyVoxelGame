@@ -121,10 +121,14 @@ namespace Render {
             RenderTargetDesc desc;
             desc.width = width;
             desc.height = height;
-            // MC's TextureTarget("Entity Outline", ..., RGBA8_UNORM).
+            // MC's TextureTarget("Entity Outline", ..., RGBA8_UNORM); no
+            // depth anywhere in the chain (see Composite).
             desc.colorFormat = TextureFormat::RGBA8;
+            desc.depth = false;
             if (m_outlineTarget == INVALID_RENDER_TARGET) m_outlineTarget = b.CreateRenderTarget(desc);
             if (m_swapTarget == INVALID_RENDER_TARGET)    m_swapTarget = b.CreateRenderTarget(desc);
+            b.SetDebugLabel(DebugLabelKind::RenderTarget, m_outlineTarget, "Entity outline");
+            b.SetDebugLabel(DebugLabelKind::RenderTarget, m_swapTarget, "Entity outline swap");
             if (m_outlineTarget == INVALID_RENDER_TARGET || m_swapTarget == INVALID_RENDER_TARGET) {
                 Log::Warning("[EntityOutline] render targets unavailable — glowing entities will not be outlined");
                 ReleaseResources();

@@ -102,7 +102,7 @@ void main() {
         m_shader = g_renderBackend->CreateShaderFromFiles(
             PlatformMain::GetAssetPath("shaders/sky_block.vert"),
             PlatformMain::GetAssetPath("shaders/sky_block.frag"));
-        if (m_shader == INVALID_SHADER && g_renderBackend->GetType() != BackendType::Vulkan) {
+        if (m_shader == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
             m_shader = g_renderBackend->CreateShader(kVertSource, kFragSource);
         }
         if (m_shader == INVALID_SHADER) {
@@ -119,7 +119,8 @@ void main() {
             }
         }
         // 36 verts per fully exposed block; grown on demand.
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.capacityVerts = 36 * 64;
             fb.usedVerts = 0;
             fb.vb = g_renderBackend->CreateBuffer(BufferUsage::Vertex, fb.capacityVerts * sizeof(Vert),
@@ -207,8 +208,8 @@ void main() {
 
         // A new frame restarts the set's cursor; a later view of the same
         // frame appends after what the earlier views drew (see the header).
-        if (m_frameCursor.Advance()) m_frames[m_frameCursor.parity].usedVerts = 0;
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        if (m_frameCursor.Advance()) m_frames[m_frameCursor.slot].usedVerts = 0;
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
         if (fb.usedVerts + m_verts.size() > fb.capacityVerts) {
             size_t newCap = std::max<size_t>(fb.capacityVerts, 36);
             while (newCap < m_verts.size() * 2) newCap *= 2;

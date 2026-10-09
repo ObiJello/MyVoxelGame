@@ -7,6 +7,8 @@
 // a cube its six sides, whatever its size.
 #pragma once
 
+#include "client/renderer/entity/EntityFrame.hpp"
+
 #include "../backend/RenderTypes.hpp"
 #include "common/world/block/BlockState.hpp"
 
@@ -33,8 +35,8 @@ namespace Render {
             BufferHandle ib   = INVALID_BUFFER;
             MeshHandle   mesh = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
-        int          m_parity = 0;
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
+        int          m_slot = 0;
     };
 
     extern FillPreviewRenderer g_fillPreviewRenderer;

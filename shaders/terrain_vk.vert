@@ -10,6 +10,27 @@
 // ChunkMegaBuffer::BindSlab with the slab's 16 KB window as dynamic offset.
 #version 450
 
+// Half-precision varyings (TERRAIN_F16 — terrain_f16_vk.vert.spv, paired with
+// the _f16 fragment variants on Metal and on a Vulkan device with
+// shaderFloat16 + storageInputOutput16): the interpolated colour and the
+// two fog distances go out as float16, 24 bytes a vertex fewer in the
+// post-transform stream the TBDR writes and the fragment stage reads
+// back (the "shaded vertex read" limiter, 2026-10-08). Texture coordinates
+// stay float: tile space runs to 16 and half's step there is a quarter
+// texel. Fog in half: a 0.25-block step at 512 blocks, 0.0025 of the fog
+// band.
+#ifdef TERRAIN_F16
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_16bit_storage : require
+#define hvec2 f16vec2
+#define hvec3 f16vec3
+#define hvec4 f16vec4
+#else
+#define hvec2 vec2
+#define hvec3 vec3
+#define hvec4 vec4
+#endif
+
 layout (location = 0) in vec4 aPosSlot;   // px py pz slot (R16G16B16A16_UNORM)
 layout (location = 1) in vec2 aTexCoord;  // u v (R16G16_UNORM)
 layout (location = 2) in vec4 aColor;     // RGBA8 normalized
@@ -68,13 +89,11 @@ layout (std140, set = 1, binding = 0) uniform Common {
 
 // Output to fragment shader
 layout (location = 0) out vec2 fragTexCoord;
-layout (location = 1) out vec3 fragWorldPos;
-layout (location = 2) out vec4 fragColor;
+layout (location = 1) out hvec2 fragFog;        // MC terrain.vsh: (spherical, cylindrical) fog distance, interpolated
+layout (location = 2) out hvec4 fragColor;
 layout (location = 3) flat out int fragSprite;   // see the decode below; -1 = untiled
 layout (location = 4) flat out int fragRecord;   // face-mapped: texel index of the first record
-layout (location = 5) flat out int fragAux;      // two-sided: back mapping (alpha byte)
-layout (location = 6) flat out float fragVisibility;   // MC ChunkVisibility: the section's fade-in, 0..1
-layout (location = 7) out vec3 fragLight;              // 1: face-mapped rectangles light per block in the fragment shader
+layout (location = 5) flat out int fragAux;      // two-sided: back mapping (alpha byte); bits 16..23 = MC ChunkVisibility (the section's fade-in, 0..255)
 
 // Explicit gl_PerVertex redeclaration so gl_ClipDistance[0] actually lands —
 // see the long note in block_vk.vert.
@@ -99,7 +118,7 @@ void main() {
     // the clock now and U.uScalarsC_.z the fade length, in milliseconds.
     int fadeStart = uOrigins[slot].w;
     int fadeMs    = int(U.uScalarsC_.z);
-    fragVisibility = (fadeMs <= 0 || fadeStart == 0)
+    float visibility = (fadeMs <= 0 || fadeStart == 0)
         ? 1.0
         : clamp(float(U.uRenderOrigin_.w - fadeStart) / float(fadeMs), 0.0, 1.0);
 
@@ -143,6 +162,15 @@ void main() {
             fragSprite = (spriteV & 0x7FFF) | 0x20000 | (((packedTile >> 10) & 0x3F) << 19)
                        | ((spriteV & 0x8000) << 10);
             fragAux = int(aColor.a * 255.0 + 0.5);
+            // Bit 8: the camera is behind the quad. dot(n, cam - p) has
+            // one sign over a plane, so the fragment shader's per-pixel
+            // test moves here, flat (terrain_opaque_vk.frag mirrors u/v
+            // on the back from it).
+            int code = (packedTile >> 10) & 0x3F;
+            vec3 n = vec3(float((code & 3) == 1) - float((code & 3) == 3),
+                          float(((code >> 2) & 3) == 1) - float(((code >> 2) & 3) == 3),
+                          float(((code >> 4) & 3) == 1) - float(((code >> 4) & 3) == 3));
+            if (dot(n, U.uCamPosBright_.xyz - worldPos) < 0.0) fragAux |= 0x100;
         } else {
             fragTexCoord = vec2(float(packedTile & 0xFF), float(packedTile >> 8));
             fragSprite = int(aTexCoord.y * 65535.0 + 0.5);
@@ -151,11 +179,25 @@ void main() {
         fragTexCoord = aTexCoord;
         fragSprite = -1;
     }
-    fragWorldPos = worldPos;
-    fragColor = aColor;
+    // MC terrain.vsh: fog_spherical_distance / fog_cylindrical_distance are
+    // PER VERTEX and interpolated (fog.glsl); the fragment shader only
+    // applies them. Two varying floats instead of the position's three,
+    // and no length() per fragment.
+    // Fog off (uFogColor.a = 0): no distances to measure, the fragment
+    // shader skips the fog on the same flag.
+    if (U.uFogColor_.a > 0.0) {
+        vec3 camDelta = worldPos - U.uCamPosBright_.xyz;
+        fragFog = hvec2(vec2(length(camDelta), max(length(camDelta.xz), abs(camDelta.y))));
+    } else {
+        fragFog = hvec2(0.0);
+    }
+    vec4 color = aColor;
     // MC terrain.vsh: vertexColor = Color * sample_lightmap(Sampler2, UV2);
     // a face-mapped rectangle lights per block in the fragment shader (see
-    // terrain.vert).
-    fragLight = vec3(1.0);
-    if (!mapped) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
+    // terrain.vert). World Lighting off (U.uScalarsD_.w = 0): the lightmap
+    // is white, so the sample is skipped.
+    if (!mapped && U.uScalarsD_.w > 0.5) color.rgb *= sampleLightmap(aLight.rg * 255.0);
+    fragColor = hvec4(color);
+    // The fade rides in fragAux's bits 16..23 (a flat varying fewer).
+    fragAux |= int(visibility * 255.0 + 0.5) << 16;
 }

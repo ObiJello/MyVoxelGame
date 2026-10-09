@@ -179,6 +179,7 @@ namespace Input {
         extern KeyMapping* DebugDumpDynamicTextures;
         extern KeyMapping* DebugReloadResourcePacks;
         extern KeyMapping* DebugProfiling;
+        extern KeyMapping* DebugGpuCapture;
         extern KeyMapping* DebugCopyLocation;
         extern KeyMapping* DebugDumpVersion;
         extern KeyMapping* DebugProfilingChart;

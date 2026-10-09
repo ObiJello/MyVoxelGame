@@ -393,8 +393,8 @@ A/B (GL 96 fps vs Vulkan 128) put it at `AnimFrameUpload` (median 12 us,
 
 ## Frame overlap on MoltenVK (2026-09-25)
 
-A Metal System Trace with hardware counters (template
-`gpu-counters.tracetemplate`, Performance Limiters) showed every Vulkan frame
+A Metal System Trace with hardware counters (the Performance Limiters
+template, `gpu-limiters.tracetemplate` today) showed every Vulkan frame
 as one Metal command buffer — ~5 ms vertex, then ~2.5 ms fragment — and the
 next frame's vertex work never starting before the previous frame's fragment
 work ended: **0.0% vertex/fragment overlap**, against 19-33% on GL. On a tile
@@ -488,6 +488,286 @@ Center banner ("Tips", "Game Mode: On") — drawables come back at exactly
   version copied a stand-in onto the drawable on present; deciding at
   `BeginFrame` removed that copy (+1.3 ms per presented frame at 100 %).
 
+## Metal backend (2026-10-06)
+
+`--metal` selects `MetalBackend` (`src/client/renderer/backend/metal/`,
+Objective-C++ with ARC, `ENABLE_METAL`, on by default on macOS). It is the
+Vulkan backend's design without the Vulkan machinery:
+
+- **Shaders.** One source: the `_vk` GLSL → SPIR-V (glslc) → MSL
+  (`tools/gen_metal_shaders.py`, spirv-cross from the Vulkan SDK, run by the
+  build after `compile_shaders`). The script rewrites every (descriptor set,
+  binding) to a fixed Metal index first — the table is in its docstring and in
+  `metal/MetalBindings.hpp`; a binding with no row fails the generation. The
+  `.metal` files are committed. With Apple's Metal toolchain
+  (`xcodebuild -downloadComponent MetalToolchain`) CMake compiles each to AIR
+  with `-gline-tables-only -frecord-sources` and links one
+  `shaders.metallib` into the bundle — what the backend loads, and what lets
+  the Metal debugger's shader profiler map GPU cost to source lines. Without
+  the toolchain the game compiles the `.metal` sources at startup
+  (`newLibraryWithSource`; the OS caches the result). Every shader's entry
+  point is named after its file (`terrain_vk.vert` → `terrain_vk_vert`) so
+  they link into one library. Each output records the SHA-256 of its SPIR-V
+  plus the generator version, so the build-time run costs a hash per file.
+- **Uniforms.** The `SetUniform*` name routing onto the push constants and the
+  Common / Bones blocks is shared with Vulkan (`backend/SpirvUniforms`). Push
+  constants go inline (`setVertexBytes`), Common / Bones into a per-slot ring
+  (256-byte windows, a new window only when the data changed — Vulkan's rule).
+- **Clip space.** Vulkan's viewport `(x, y, w, h)` lands like Metal's
+  `(x, y + h, w, -h)` (`ToMetalViewport`): the flipped viewport every world
+  draw uses on Vulkan is a plain one on Metal, so the image is upright and
+  counter-clockwise stays front, as on GL. The upscale draw (a plain Vulkan
+  viewport) becomes a flipped Metal one.
+- **Passes.** A pass is begun as a descriptor and opened on first use
+  (`EnsureEncoder`); a `Clear` before that is its load action, after it a
+  full-rect quad (Metal has no in-pass clear). The frame's own pass staying
+  unopened is what lets the half-res rain draw ahead of it from the previous
+  frame's depth, as Vulkan's `EnsureFramePass` does.
+- **Invariants kept.** Two frames in flight; per-slot depth, scene and mailbox
+  stand-in images; per-frame copies of textures updated while in use (the
+  same replay-from-staging-ring scheme, `kStagingSlots` = 2 x frames). Metal's
+  hazard tracking would serialise frames exactly as on MoltenVK otherwise.
+- **What Metal does for us.** No barriers or layouts; a command buffer retains
+  what it uses, so every destroy (deferred or not) is immediate and safe;
+  depth/stencil, cull, winding, fill, bias and clip are encoder state, so a
+  pipeline keys on shader + blend + attachment formats only.
+- **Presentation.** `CAMetalLayer` on GLFW's content view, untagged colour
+  space (Vulkan's PASS_THROUGH look), `framebufferOnly = NO` (read-backs, the
+  post chains' copy). Vsync off is the same mailbox as Vulkan's, natively: the
+  drawable is asked for only when the frame first needs its colour, and only
+  if `MailboxDrawableFree` (presented-handler count + half-refresh spacing;
+  `OBEY_MTL_MAILBOX=0` off, `OBEY_MTL_MAILBOX_PENDING`); otherwise the frame
+  draws into its slot's stand-in. `OBEY_SKIP=mailbox` works as on Vulkan.
+- **Intel / AMD Macs.** Depth is `Depth32Float_Stencil8` everywhere (no 24-bit
+  depth on Apple GPUs); CPU-written buffers are managed instead of shared on a
+  discrete GPU. Nothing Apple-only (memoryless, framebuffer fetch) is used.
+- **GPU timers.** Apple GPUs sample counters only at encoder boundaries, so a
+  timer measures the frame's command buffer: the first one begun in a frame
+  gets it, later ones that frame return `INVALID_GPU_TIMER`.
+- **Pipeline warm-up.** `<obeycraft>/cache/mtl_pipeline_manifest.txt`, the
+  Vulkan manifest's format plus the attachment config; `WarmPipelines`
+  rebuilds it behind the loading screen.
+
+**Apple's tools on this backend.** The full recipes, scripts and traps are
+the project skill `.claude/skills/metal-profiling/` (its `references/`
+hold Apple's counter definitions and the TBDR cost model); this is the
+summary.
+- GPU frame capture for Xcode's Metal debugger: launch with the capture layer
+  on and a time, `open --env MTL_CAPTURE_ENABLED=1 <app> --args --metal ...
+  --env OBEY_MTL_CAPTURE_AT=40` → `<obeycraft>/captures/metal-<time>.gputrace`
+  (one frame; double-click to open), or F3+U at runtime. `MTL_CAPTURE_ENABLED`
+  must be in the launch environment — Metal reads it when the framework
+  loads. In Xcode, "Profile after replay" gives per-pipeline cost, 226
+  counters per encoder (share → Export Encoder Counters), per-draw counters
+  (~1 h, leave Xcode idle), per-line shader costs (only with a metallib built
+  for the host OS: `METAL_SHADER_PROFILING=ON` in CLion's tracy CMake
+  profile — an ad-hoc `cmake -D` is reset by CLion's next configure), the
+  heat map and the memory/dependency views. Two rules for reading it: the
+  replay profiles ONE frame (its own encoders overlapped, but with no
+  neighbouring frames — live, frame N+1's vertex work runs under frame N's
+  fragments), so its percentages are shares of that frame's GPU work and
+  never "percent of a live frame"; and it runs at the Medium performance
+  state unless the profiler session popover (clock icon, Performance view)
+  is set to Maximum, so quote percentages, not milliseconds, unless you set
+  Maximum.
+- Render stages are debug groups (`Render::GpuDebugGroup`: opaque, cutout and
+  translucent terrain, sky, players, mobs, items, block entities, particles,
+  clouds, weather, the rain drawn ahead of the frame, held item, outline,
+  post, HUD); encoders and pipelines carry labels. The capture shows the
+  frame as those named stages with Xcode's GPU time per stage and draw;
+  Vulkan's labels (VK_EXT_debug_utils, on whenever the loader has it) reach
+  Metal captures through MoltenVK the same way.
+- Metal Performance HUD (`tools/play.sh tracy --hud`, or `open --env
+  MTL_HUD_ENABLED=1 --env MTL_HUD_ENCODER_TIMING_ENABLED=1 --env
+  MTL_HUD_LOG_ENABLED=1 ...`): live GPU time per ENCODER with real overlap,
+  logged once a second as `metal-HUD:` CSV lines — the cheapest honest
+  per-encoder number. Its FPS and GPU time are per PRESENTED frame — with
+  vsync off the mailbox renders several frames per present, so its GPU time
+  is their sum, not one frame's. Encoder timing is blank while the app
+  attaches counter sample buffers, which is why the engine's own
+  per-encoder timestamps (`OBEY_MTL_GPU_TIMERS=1`, Tracy `Gpu/*` plots) are
+  off by default.
+- Instruments live: only the "Performance Limiters" counter set exists on
+  this M4 (13 counters), and it must be recorded ATTACHED — all-process and
+  launched recordings with it crashed GPUPlugin; the shader timeline
+  template records anywhere but has yielded no samples (details under "GPU
+  profiling" below). Instruments' "Launch" and `xctrace --launch` resolve
+  the app by name through LaunchServices and started the installed game
+  even after the `~/Applications` copies got their own
+  `com.yourcompany.MyVoxelGame.<cfg>` bundle id: launch with `open`, then
+  attach.
+- Capture `metal-21-15-41` (2026-10-06, RD 32, rain, the labelled build,
+  profiled at the **Maximum** state): 5.59 ms for the frame, 3,966 draws,
+  3.95 M vertices, 1.31 M primitives; encoders Frame 72 %, rain half-res
+  target 27 %, texture flush 1 %. Per pipeline (share of the frame's GPU
+  work): `weather_half` fragment 24.9 %, `terrain_opaque` fragment 18.2 %,
+  terrain vertex 14.2 % (+ 9.8 % under cutout, 1.7 % under translucent),
+  `terrain_cutout` fragment 11.6 %, the rain composite (`entity_outline_blit`)
+  8.4 %, `terrain_solid` (translucent) 4.5 %, sky 2.2 %. Registers: the
+  terrain fragment shaders allocate 64, the vertex shader 42, the rain
+  fragment 40. The rain target is launch-bound (Fragment Shader Launch
+  Limiter 94 %, FS occupancy 82 %, 12x overdraw, ~23 k pixels per primitive):
+  the lever is fewer covered pixels, not a cheaper shader. The frame encoder
+  has no limiter above 37 % (instruction throughput 36 %, fragment launch
+  32 %, texture read 27 %, texture filtering 23 %); 31 % of its primitives
+  are back-face culled and 9 % zero-area; 47 % of samples take the
+  explicit-gradient (greedy `textureGrad`) path; 44 % of vertices are
+  reused through the index buffer. Per line (`terrain_vk_vert`): the
+  function entry (stage-in fetch) 38 %, the world position from the
+  section-origins UBO 11 %, the lightmap sample 8.5 %, `gl_Position` 3.8 %,
+  the slot decode 3.1 %, the clip plane 1.4 %. OIT (off in normal settings)
+  opens an empty full-res frame pass between every OIT pass.
+
+Validation: a run under `MTL_DEBUG_LAYER=1` (stderr captured by running the
+bundle's executable directly — `open` drops it) reports no errors, only
+"unused binding" notes (Common / user-UBO / face-map bindings kept across
+draws of shaders that do not read them). Shader validation
+(`MTL_SHADER_VALIDATION=1`) runs at ~8 fps and is clean.
+
+**Where Metal and Vulkan differ in cost.** The GPU work is the same — MoltenVK
+already runs these shaders as Metal — and the scene is GPU-bound, so the two
+are within a few percent of each other. Native Metal encodes every draw on the
+main thread (~130 ns each), where MoltenVK records them cheaply and encodes on
+its own submit thread: `MergeRuns.Flush` (≈1,900 terrain draws) is ~0.25 ms on
+Metal against 0.04 ms on Vulkan. Moving encoding off the main thread (a
+recorded command list, or an indirect command buffer) is the lever if the CPU
+side ever matters.
+
+**Benchmark (2026-10-06, tour replay, RD 32, vsync off, rain, full screen,
+Game Mode, M4 Air).** Interleaved, 60 s apart:
+
+| run (in order) | fps | 1%-low | p99 ms | >16.7 ms |
+|---|---|---|---|---|
+| Metal | 251.7 | 119.4 | 7.64 | 0 % |
+| Vulkan | 233.4 | 105.4 | 8.68 | 0 % |
+| OpenGL | 93.0 | 52.2 | 17.87 | 2.0 % |
+| Metal | 211.0 | 95.4 | 9.81 | 0 % |
+| Vulkan | 200.3 | 90.7 | 10.19 | 0 % |
+| OpenGL | 90.7 | 47.4 | 19.80 | 4.0 % |
+
+The Air loses ~5 % a run slot as it heats, which flatters whichever backend
+runs first; a symmetric Vulkan, Metal, Metal, Vulkan block cancels that:
+Metal 226.8 vs Vulkan 221.0 fps (+2.6 %), 1%-low 105.7 vs 101.6, 0.1%-low
+95.1 vs 85.4, p99 8.92 vs 9.23 ms, worst frame 10.9-12.0 vs 13.4-13.9 ms;
+main-thread CPU 2.47 vs 2.30 ms. Metal and Vulkan are within noise on
+average with Metal's lows and spikes slightly better; OpenGL is ~2.4x
+slower (driver-bound: `Present` waits 6 ms a frame).
+
+The same session found a Vulkan bug worth remembering: `PipelineState::
+blendAlphaLikeColor` (the half-res rain) was packed past bit 63 of
+`VKBackend::HashPipelineState`'s 64-bit key and wrapped onto the depth-test
+bit, so two rain pipelines shared a key and rebuilt each other on every draw
+— `Vk.CreateGraphicsPipeline` 134 times / 9 ms per frame while it rained,
+75-84 → 236 fps at RD 32 once fixed. `pack()` now asserts the bit budget, and
+the pipeline layout left the key (the shader handle already determines it).
+
+### Streaming buffers and frames in flight (2026-10-07)
+
+Every renderer that rewrites a Dynamic/Streaming buffer each frame (mobs, players, XP orbs, block cubes, leashes, lightning, fishing hooks, End portals, sky blocks, the GUI, fill preview, clouds) kept TWO buffer sets alternated per frame — Vulkan's `MAX_FRAMES_IN_FLIGHT`. Metal's frame pacing (Tier 5) moved to three frames in flight, and `UpdateBuffer` on a host-visible buffer is a bare memcpy on both backends, so frame N+2 overwrote the set frame N was still drawing: entities flashed dark and jumped (a stale set from before the render origin moved is displaced by whole blocks), End portals vanished and shifted, only at vsync off where the frames actually pile up. The count now comes from the backend (`RenderBackend::FramesInFlight`: OpenGL 2, Vulkan 2, Metal 3) into `EntityFrame::Slots()`; the rings are sized `EntityFrame::kMaxSlots` and only `Slots()` sets are created; `EntityFrame::Cursor` cycles `slot` over them. A new streaming renderer uses the cursor, never a hard-coded pair. `ChunkMegaBuffer::kFreeDelayFrames` (3) and the Metal deferred-destroy delay already matched.
+
+### Tear-free vsync off (2026-10-07)
+
+With vsync off the Metal layer now keeps `displaySyncEnabled`: the mailbox already renders every frame and presents only when CoreAnimation can take one, so leaving display sync on changes just WHEN the presented frame flips — at the next refresh instead of mid-scan. Frame rate is unchanged (tour, clear weather, RD 32: tear-free 282.9 fps / tearing 236.0 fps in that heat order; `Mtl/DrawableWaitUs` ≈ 0 µs in both, the loop never waits for a drawable), a shown frame is at most one refresh old (half on average, ~8 ms at 60 Hz) — what Fast Sync / Enhanced Sync give on the PC drivers. `OBEY_MTL_TEARING=1` restores the tearing present for latency tests. Vulkan (MoltenVK) still tears with vsync off.
+
+### Pipeline compiles are not a hitch here (2026-10-07)
+
+Measured before building async pipeline creation + `MTLBinaryArchive`: on the tour (RD 32, clear) the warm-up builds ~25 pipelines in 3–14 ms from the manifest, and the 3–4 pipelines first met mid-run (`Mtl.CreatePipeline` zones after warm-up) cost 0.06–0.10 ms EACH — macOS keeps a compiled-pipeline cache per app (`/private/var/folders/.../com.apple.metal`), and even a fresh metallib (every Tracy build) compiles that fast from AIR on Apple GPUs. There is nothing for an archive or a background build to take off the frame; the item is closed with the numbers. If a future shader rewrite ever shows `Mtl/PipelinesBuilt` with multi-ms zones, revisit.
+
+### Knowing whether a change is real (2026-10-07)
+
+What decides it, in order of trust on this fanless Air:
+
+1. **Within-run phase A/B** (`OBEY_SKIP=<token> OBEY_SKIP_PERIOD=<s>`, `tracy_report.py --phase`): the change is switched on and off every few seconds inside ONE run, so both sides share the machine's clock state and the drift that makes two runs 25 % apart cancels. The report now pairs consecutive (off, on) segments and prints the mean paired fps delta with a 95 % interval — a delta inside its interval is "within noise", not a result. With 5 s periods on the tour the interval is ±13 % because the scene changes between segments; `OBEY_SKIP_PERIOD=2` with `--settle 0.3` gives ~28 pairs and a usable ±4 %. Every change that can have a runtime switch should be measured this way. Today's GPU-driven numbers re-read with it: hot/rain "+3.6 %" → −1.7 % ± 13 % (noise); cooled/clear "−10 %" → −13.4 % ± 13.1 % (barely real).
+2. **Same-frame Xcode capture** at one performance state: deterministic serial GPU cost per encoder and shader. It says what the GPU does, not what a frame costs live (the TBDR overlaps stages), so it explains and ranks; it does not accept or reject.
+3. **Counters that explain the mechanism** (commands, indices, bytes, SIMD groups, the Tracy plots): a result without a mechanism is suspect; a mechanism without a live result is parked, not shipped.
+4. **ABBA across builds** only when no switch is possible, cooled, and only for effects well above 10 %.
+
+**The still-frame paired test** (`STILL=1 ab_run.sh <label> --env OBEY_SKIP=<token> --env OBEY_SKIP_PERIOD=2`, `tracy_report.py --phase --settle 0.3 --window 12:58`): the tour's first pose held for the whole run, the change alternating every 2 s. No scene variation and the pairing cancels heat, so the interval is ±0.3–0.9 % even while the absolute frame rate drifts 394 → 291 fps across a series — the number that does not care about heat. It answers one pose; the tour (±10 %) says whether the gain survives a flight. Re-checks made with it on 2026-10-08 (skip phase = the OLD behaviour): `OBEY_SPLIT_MIN` 900 vs 0 on Metal −1.7 % ± 0.4 % (0 stays); stand-in colour stored vs DontCare −0.6 % ± 0.4 % (a real win, once called null); depth clears vs bands −1.6 % ± 0.3 % (bands stay; clear weather); GPU-driven terrain vs CPU path: CPU +7.8 % ± 0.8 % (the ICB path loses even with nothing moving); half-res rain vs full on Metal (rain, `RAINHALF=1 OBEY_RAIN_HALF=1`): full +4.5 % ± 0.9 % on the mean BUT full's 1 %-low 118 vs 165 fps and p99 7.6 vs 5.7 ms — the mean favours Full, the lows favour Half; the control is hidden on Metal by the user's decision and this is the case for showing it again. Phase tokens now: `gpudraw`, `splitmin`, `standin`, `bands`, `rainhalf`, `mailbox`, `sky`, `weather`, `particles`.
+
+Decisions from before the phase tool existed that rest on ABBA deltas under ~5 % and deserve a re-check when their subject is next on the table: Half-res rain removed on Metal (3 % ABBA, hot), `OBEY_SPLIT_MIN` 0 on Metal (2–3 % in a sweep), Tier 3's fragment work (serial −7 %, live "neutral" on a throttling series). The ones judged null but kept for their serial or bandwidth saving (vertex-stage trims, stand-in DontCare) cost nothing and are not at risk. Three frames in flight was first rejected by heat order and then accepted by a cleaner series — the kind of reversal the paired test exists to prevent.
+
+### Metal 4 path: first measurements (2026-10-08)
+
+`--metal4` (docs/metal4.md; `MetalFour.mm`) against the Metal 3 path, same build, flag only. A cooled ABBA of four still-frame runs was useless: the frame rate fell 412 → 356 → 312 → 296 fps across the four, heat alone. The usable method for a cross-backend comparison is an ALTERNATING series at the thermal plateau (two warm-up runs, then A B A B …) read with `scripts/pair_runs.py`, which pairs adjacent runs the way the phase report pairs segments. Still frame, four pairs each:
+
+| regime | Metal 4 vs Metal 3 | verdict |
+|---|---|---|
+| render scale 50 % (GPU-light: frame waits ~0.9 ms, CPU work ~1.5 ms) | +8.0 % ± 5.7 % fps, every pair positive (+4.7 … +12.3) | real |
+| render scale 100 % (GPU-bound: waits ~2.2 ms) | −0.7 % ± 9.6 % | neutral |
+
+CPU work per frame is the same on both (1.4–1.9 ms either way): the Metal 4 gain at the lighter load is not fewer CPU cycles but shorter frame waits — the GPU finishes frames sooner with the Metal 4 submission (argument tables, no hazard tracking, explicit barriers). GPU-bound at full resolution nothing changes, as expected: same shaders, same passes. Finished path (pacing gate, counter heaps, compiler pipelines, overlay), plateau series on a throttled machine (2026-10-08 01:45–02:10, 200–310 fps): Metal 4 **with its pacing gate** vs Metal 3: −7.1 % ± 3.8 % fps (real), 1 %-low +11.5 % ± 21 %; Metal 4 unpaced vs paced: +6.1 % ± 11 % fps, lows equal — the "previous frame completed" gate costs the mean and buys nothing, so Metal 4 runs unpaced unless `OBEY_MTL_PACING=1`; half resolution: −0.1 % ± 33 % (noise at that heat). Net: Metal 4 unpaced ≈ Metal 3 paced at full resolution. Tour of the unpaced default, two warm-ups then four pairs on the throttled machine (150–176 fps): −1.9 % ± 18.5 % fps, 1 %-low −5.6 % ± 11.6 % — within noise. Verdict 2026-10-08: the complete Metal 4 path is equal to the Metal 3 path on this Mac in every regime measured (full res, half res, tour) with the pacing gate off, and behind it with the gate on; it stays opt-in (`--metal4`) — nothing to gain for players here, the platform work is in place for Macs where the CPU is the limit. Earlier tour (milestones 0–4), three pairs after one warm-up: −5.4 % ± 33.6 % — within noise; the first pair sat on the heating slope (262 → 207 fps), the two at the plateau read +3.2 % and +1.5 %. Verdict for now: Metal 4 is at least neutral everywhere and ahead when the GPU is not the limit; it stays behind `--metal4` until the counter heaps, the pacing gate and the overlay are in and a longer plateau series has run.
+
+### Fragment stage: the late sky, half precision, one lightmap sample (2026-10-08)
+
+The clear-weather tour frame at RD 32 (Xcode, Medium state, overlapping): terrain vertex 37 %, opaque terrain fragment 24 % (58 registers, FS occupancy 33 %), **sky fragment 17.6 %**, cutout fragment 6 %. The sky's two pipelines ran 230 k + 76 k SIMD groups — 7.4 M + 2.4 M fragments, the whole screen and a third of it again — with depth test off, as MC's sky pass draws it, before the terrain covered most of them. The TBDR's hidden-surface removal only spares fragments of opaque, depth-writing, discard-free draws, and the sky is none of those (the sky shader discards on alpha 0, the pack layers blend).
+
+**Late sky.** The main view now draws the sky right AFTER the opaque and cutout terrain (before entities, block entities, translucent terrain and everything blended), depth-tested `LessEqual` with no depth write, and `sky_vk.vert` / the GL twin put every sky vertex on the far plane (`gl_Position.z = gl_Position.w`, depth 1.0 = the clear) — so the sky lands exactly where the terrain left nothing and the early depth test rejects the rest before shading. Output identical by construction (no MSAA; cutout holes keep depth 1.0 and get sky, as before). `SkyRenderer::SetDepthTested` is on only for that call: a portal or panorama view draws its sky first with the test off, as today, because its depth is not cleared under the silhouette. Still-frame paired test (`latesky` token, skip = MC's order): **−7.8 % ± 0.2 % fps for the old order** (23 pairs; GPU frame +10.6 %), i.e. +8.5 % for the late sky at the tour's first pose. `OBEY_LATE_SKY=0` restores MC's order.
+
+**Half-precision terrain fragment shaders.** `terrain_{opaque,cutout,solid}_vk.frag` carry a `TERRAIN_F16` build (`<name>_f16_vk.frag.spv`, CMake `VK_F16_SHADERS`; `h*` types are float16 under the define, float otherwise, so the GL twins and the float .spv read the same source): the atlas texel, the lightmap colours, AO, tint and the fog mixes in half; texture coordinates, fog distances and the record's integer fields stay 32-bit. Metal loads the variant always (`MetalBackend::LoadFunction` tries `<name>_f16_vk_<stage>` first), Vulkan when the device has `shaderFloat16` (`VK_KHR_shader_float16_int8`, enabled in `CreateLogicalDevice`; MoltenVK, AMD GCN3+, NVIDIA Turing+, Intel Gen9+ — Pascal and older take the float .spv; `OBEY_VK_F16=0` forces it). Registers 58 → 44 (opaque/cutout/solid alike); the F32 limiter 22 → 15 % with F16 at 6 %. MC's `clamp` in `sampleLightmap` is gone from the fragment shaders: every light word the mesher writes is a MC light coord (0..240 per axis), so the coordinate is inside the clamp by construction — six ops × four samples per fragment. spirv-cross emits native `half` for `float16_t`; the samples come back `half4(tex.sample(...))`.
+
+**One lightmap sample for a uniformly lit rectangle — tried twice, dropped.** First as a per-fragment test (the record's four corner light words equal → one sample): the same-pose serial capture showed nothing, because in the forest pose a SIMD group straddles blocks with and without uniform light and runs both sides — five samples instead of four. Then decided in the mesher (every corner of every block in a greedy rectangle shares one light word → the word in the vertex's light bytes with a flag byte, bit 19 of `fragSprite` + `fragAux` in the shaders, a flat branch that samples once and skips the light texel): registers 44 → 52 for the two code paths, opaque fragment serial cost +20 %, and live, same bundle, `OBEY_UNIFORM_LIGHT=0` alternating at the still pose: **−0.7 % and −4.6 % fps for the flag** in the two valid pairs (a third pair sat on a cooling gap). The saved samples do not pay for the occupancy the second path costs at this pose; the four-sample path stays, in half precision. The vertex's light word for a mapped rectangle is back to "carried but unread".
+
+**Same pose, serial (Xcode, Medium), old build → late sky + f16:** 4.26 → 3.91 ms; FS invocations 26.0 M → 17.7 M; texture samples 65.1 M → 48.9 M. The capture-to-capture composition is not constant (the world time advances by each run's 45 s and is saved, so the sky-pack layer fades differ), which is why the live paired series decides and the serial numbers only explain. Live, still frame, hot machine (280–340 fps), old build vs late sky + f16, three alternating pairs: **+9.6 / +16.0 / +13.6 % fps (mean +13.1 % ± 8.0 %)**, 1 %-low up in every pair.
+
+Counters after the change (still pose): texture read limiter 31–34 %, texture filtering 25–28 %, instruction throughput 36 %, F32 14 %, FS occupancy 32–36 % at 52 registers. The terrain fragment shaders are texture-bound now, not ALU-bound: 44 % of samples anisotropic, 54 % with explicit gradients (the greedy tiling's `textureGrad`).
+
+**Alpha test before the lighting (cutout, translucent).** The cutout pass shades every layer (no hidden-surface removal with `discard`) and a cross plant is mostly transparent, so the atlas sample and the alpha test now come first and the record's light texel + the four lightmap samples run only for the texels that stay (`FaceRecord` carries the record's texel index, the light is fetched in `shadedVertexColor`); the translucent shader tests `textureColor.a * vertexAlpha` the same way. Exact. Measured against a twin build with the old order once the staging lag was fixed (below): **+4.5 / +1.8 / +3.2 % fps** in three alternating pairs at the plateau — a real small win; kept.
+
+**The bundle's shaders lagged a shader-only build (found 2026-10-08, fixed).** The `.spv` files and `shaders.metallib` were staged into the app bundle by POST_BUILD steps of the executable, which run only when the executable relinks; a build that changes only shaders rebuilds the SPIR-V and the metallib but never relinks, so the bundle kept the previous build's shaders. Every Metal measurement of a shader-only change was therefore of the build before — and a fresh `.spv` next to a stale metallib (the `fragRect` varying) drew no terrain at all before it was understood. Staging is now its own rule (`stage_shaders`, a stamp that depends on the shader outputs, which `MyVoxelGame` depends on), so the bundle is refreshed in the same build whether or not the executable relinks; the generator also became a stamped custom command the `.air` rules depend on. Windows/Linux stage the same way through `$<TARGET_FILE_DIR>` copies and would need the same rule if shader-only builds matter there. Verdicts that were void: the cutout reorder's "neutral" and the eager light fetch's "−1..−2.5 %" (both bundles carried the same lagging shaders); the sky + half-precision series stands (new files not yet in the metallib compiled at startup from the current source) and so does the uniform-light series (one bundle, a mesh-time switch). Check before trusting a Metal shader number: `xcrun metal-source shaders.metallib -o dir` and grep the embedded source for the change.
+
+**Anisotropic filtering is not a lever here**: 16× vs 4× at the still pose, three alternating pairs, −11.9 / −6.9 / +8.1 % — noise on a machine that fell 429 → 235 fps across the series; the hardware's adaptive level averages 2.7 taps, so the setting stays at the user's 16.
+
+**Metal 4, after the changes, still pose (Xcode, Medium):** RD 32 3.93 ms — terrain vertex 41 %, opaque fragment 25 %, cutout fragment 17 %, translucent 6 %, sky 6 %, texture flush 2 %; RD 12 1.76 ms — opaque fragment 34 %, vertex 20 %, cutout 17 %, sky 14 %, translucent 10 %. Tour (Metal 4, clear): RD 32 394.8 fps / GPU frame 5.07 ms (was 375.9 / 5.88 in the morning), RD 12 793.8 fps / 2.85 ms (was 696.0 / 3.34). At RD 32 the vertex stage is the largest serial item and fetch-bound (VS device bandwidth 60 %); at RD 12 the two terrain fragment shaders are half the frame and launch/throughput-bound (FS occupancy 59 %).
+
+**Per-line costs of the opaque fragment shader** (Xcode, still pose, after the changes; opened from a draw's Bound Resources → FragmentFunction, see the skill): `shadedVertexColor` 42.6 %, `fetchFaceRecord` 14.1 %, `sampleTerrainAtlas` 12.0 %, the two-sided mirror and stage-in ~7 %, fog + three mixes ~7 %. Inside them the cost lands on the first USE of each fetch's result — `r.color` (5.5 %) waits for the record texel, `atlasUV` (8.9 %) for the sprite-table rect, the four `param` lines (13 %) for the light texel, the two blends (7.5 %) for the lightmap samples: the shader is bound by a three-deep dependent chain (record → rect → atlas, record → light texel → lightmap) at 32 % occupancy, not by arithmetic. Two things followed. Reading the light texel together with the record in the opaque shader (both in flight at once): −2.5 % / −1.0 % live at the plateau — the compiler already schedules the reads; reverted. Taking the sprite rect out of the chain was tried and reverted: the vertex carried the rectangle's first block's sprite (the mapped vertex's otherwise unread light word), fetched its rect from the sprite table once per vertex and passed it flat as two 16.16-fixed words, and the fragment shader read the table only for a block whose sprite differs (the greedy census on the tour: 8.6 M rectangles, 3.9 M multi-block, 650 k of those mix sprites — 17 %). Live, three plateau pairs: **−1.2 / −3.4 / −4.9 %** — the 8-byte flat varying costs the fetch-bound vertex stage (shaded-vertex writes at 60 % of device bandwidth) more than the fragment's cached table fetch costs. The eager light read, re-measured on correct metallibs: +3.9 / −3.0 / −3.0 %, null; reverted. Both experiments say the dependent fetches are hidden well enough by the other SIMD groups: the per-line stalls are where the shader waits, not what the frame pays for.
+
+What is left on the fragment side, in order of expected value: (1) occupancy — 52 registers in the half-precision build (44 on the Metal 3 compile of the same source; the mapped path keeps the rect, the record, four light words, the uv and its derivatives live), which the per-line view would pin down; (2) the dependent fetch chain record → sprite table → atlas, which only a per-rectangle sprite (merging across sprites off, the rect fetched per vertex) removes, at the cost of fewer merges in mixed-block caves; (3) the sky's two layers over the real sky pixels (disc + pack layer: 6–14 %), which only a pack with an opaque base layer could collapse; (4) a sprite texture array with hardware repeat instead of `fract` + `textureGrad` + the sprite table — a different atlas design, not a tweak. The lightmap's four samples are the look (MC's per-vertex colour interpolation reproduced per block) and stay.
+
+### Main-thread pass after the fragment work (2026-10-08)
+
+Tour at RD 32 on the M4 (Metal 4, clear): 1.58 ms of CPU work per frame against a GPU that delivers one every 2.5 ms. What was there, by self time: the draw submission loop 0.34 ms (2 to 4 thousand `drawIndexedPrimitives` at ~0.12 µs each — the API floor; only fewer draws help, and the draw count is a GPU decision, `OBEY_SPLIT_MIN`), the mesh scheduler's dirty walk 0.20 ms, the three per-layer draw-list builds 0.12 ms (16 ns per section per layer), the frustum filter 0.11 ms, the client tick 0.10 ms, mob rendering 0.08 ms. Two changes:
+
+- **The scheduler's walk inverted.** `ScheduleMeshBuildsWithSnapshots` walked every chunk in the dirty index each pass — 3,355 of them at RD 32, nearly the loaded world, because out-of-view sections stay dirty until looked at — and asked each "is a view reaching you?", 0.6 ms a pass. The admission rule admits a far section only where a view reaches it, the player's own edits and relocations anywhere, and everything within 48 blocks, so the walk now visits exactly those places: the views' columns (`ChunkRenderer::ForEachViewColumn`, a few thousand mask reads), a 9×9 window around the player and around each portal route's far point, and an urgent set fed where a section is dirtied by the player or marked for relocation; a chunk is examined at most once per pass (`ClientChunk::schedulePass`). `OBEY_SCHEDULE_WALK=all` restores the full walk. Draws per frame, sections per frame and uploads per frame are unchanged (3,945 vs 4,019 entries, 1.9 vs 1.7 uploads/frame); the walk fell from 1.8× the frustum filter's time to 0.4× (0.20 → ~0.05 ms per frame).
+- **Mob models and textures prewarmed at level load** (`MobRenderer::Prewarm`, after `WarmPipelines` under the loading overlay): every entity type's model and the base sheet, then every PNG under `assets/textures/entity` (956 files, 18 MB decoded, none over 512²) — the variants chosen at draw time at 37 call sites (villager types and professions, parrot and horse colours, fish patterns, eye and clothing layers, armour) each cost a decode and upload on first sight, 1 to 5 ms frames on the tour. 80 ms at load; the mob render zone's worst frame fell 8.5 → 1.4 ms.
+
+**Reading CPU zones:** their times scale with the CPU clock. The same tour an hour later, machine hot, showed every untouched zone +40–50 % (frustum filter 0.111 → 0.162 ms). A CPU change is judged by its zone's ratio to an unchanged zone in the same capture, or by alternating runs, never by absolute milliseconds across two runs. What remains on the main thread is the submission loop at its floor, the draw-list builds and the frustum filter at tens of nanoseconds per section, and occasional load-phase bursts (region snapshots and uploads when a streaming batch lands, the BFS snapshot at 3–4 ms when it runs synchronously).
+
+### The remaining spikes, instrumented and fixed (2026-10-08, evening)
+
+A tour capture after the CPU pass still had frames of 8 to 11 ms whose main-thread time sat in zones with no children. Zones were added until every one attributed, then each source was fixed; the final capture (RD 32, Metal 4, clear, quiet machine) is 390.8 fps, 1 %-low 169.5, 0.1 %-low 129.9, two frames over 8.3 ms (both GPU waits), max 11.0 ms, draws and uploads per frame unchanged.
+
+- **Metal 4 residency commit, 5–10 ms on the main thread.** `Mtl.M4ResidencyCommit` was the 7 ms inside `Mtl.BeginFrame`. Its cost is not the set's allocation count: shrinking the set from ~1,460 allocations to ~415 (sampled textures from 64 MB `MTLHeap`s, `M4HeapTexture`) left the median at 0.6 ms and the peaks at 8–10 ms. It is the page mapping of what became resident since the last commit — a 32 MB terrain slab, with the commit sitting between frames. Three things now: staging buffers live in a second, small residency set (`Metal4::residencyTransient`, commits of 8 µs), so the main set changes only when a real resource comes or goes; allocations of 4 MB and more are added and committed on a serial background queue (`Metal4::residencyQueue`, every mutation under `residencyMutex`), and a command buffer is committed only after `M4WaitResidency` finds the group drained; and `ChunkMegaBuffer` keeps one spare slab created ahead of need once a pool has two live slabs (`PrefersBufferPrefetch`, Metal 4 only; one slab of memory per growing buffer), so the mapping is done by the time the pool grows into it. Result: background commits 0.4–3.6 ms on their own thread, main-thread commits median 63 µs / p99 0.4 ms, the wait zone never fired on the tour. Plots `Mtl/M4Adds`, `Mtl/M4Removes`, `Mtl/M4Commits`, `Mtl/M4Allocations`.
+- **Client block-entity tick, 2.2 ms a tick.** `Tick.BlockEntities` was the whole of the client tick's cost and invisible to the overlap tool (present in every tick, so no lift). `TickBlockEntities` deduplicated registrations by a linear scan and rebuilt its list after each tick by a quadratic merge (every listed position against every snapshot position: thousands × thousands at RD 32), with two or three chunk lookups and a `dynamic_cast` per entity. Now: an `unordered_set` mirror for O(1) registration and retirement, registrations made during a tick collected directly (`m_registeredDuringTick`), one lookup per entity, the list rebuilt in O(N). 2.17 → 0.57 ms per tick (p99 3.0 → 0.8); the client tick's p99 1.35 ms.
+- **Outside-view fence, 1.1 ms per camera-chunk move.** `SetOutsideViewChunks` flipped the no-bridge flag of all 24 sections of every chunk that crossed the ring, three mega-buffer lookups each, when most of a column is air. Now only sections with GPU data. 1.1 ms → 0.11 ms median.
+- **BFS snapshot, 1.6–2.1 ms.** The all-air case first (no GPU-pointer load for most sections) and the loaded chunks walked once (`ForEachLoadedChunk`) instead of a hash probe per grid cell. 1.6 → 1.2 ms median; the rest is the 101 k cells themselves, MC's own snapshot structure.
+- **Not a cost: the sound tick.** The overlap tool blamed `Sound.Ambient` for the slow ticks; sub-zones put the whole biome lookup at 1 µs median with one 2 ms first-call load. The blame was coincidence of presence, which is what the lift metric cannot distinguish from cost when the real cost (the block-entity tick) has no zone of its own. Zone the suspect before believing the overlap.
+
+**Trap:** two captures in this pass read 192 and 262 fps with every main-thread zone 3–5× slower and the GPU idle — a Zoom call, then CLion and Rider indexing after the edits. The run script now waits for the 1-minute load average to fall under 1.8 before launching, and a capture whose unchanged zones moved together is a loaded machine, not a change.
+
+### GPU structural work, step 1: half varyings (2026-10-08, evening)
+
+The terrain vertex shader now has a `TERRAIN_F16` twin (`terrain_f16_vk.vert.spv`) whose interpolated outputs — the colour and the two fog distances — are float16 (`StorageInputOutput16`; spirv-cross emits `half4` / `half2` interpolants, native on Apple GPUs), and the chunk-fade visibility rides in `fragAux`'s bits 16..23 instead of its own flat varying: 48 bytes of post-transform vertex instead of 64. The `_f16` fragment variants declare the same inputs, so a pipeline pairs f16 with f16 or float with float, never mixed — which is why the translucent shader's Improved Transparency variants got `_f16` twins too (`terrain_solid_oit_<stage>_f16_vk.frag.spv`), the Vulkan backend selects the f16 family only with `shaderFloat16` AND `storageInputOutput16` (`VK_KHR_16bit_storage`), and `OBEY_VK_F16=0` turns the whole family off. The OpenGL twins keep float varyings and fold the visibility the same way.
+
+Same pose, serial (Xcode, Medium): the frame 3.91–4.04 → 3.67 ms, vertex-stage writes 43.7 → 34.0 MB (−22 %), fragment-stage reads 29.1 → 25.9 MB, device bandwidth 45 → 37 % of budget, and every terrain shader at 40 registers (from 52). Live, still frame, cool machine (455–472 fps), three alternating pairs against the pre-change bundle: **−2.1 / −2.5 / −0.9 % fps (−1.8 % ± 2.1)** — zero inside the interval. The M4 at this pose is not bandwidth-bound, so the saving does not become frames here; it is kept as the structural saving it is for GPUs that are (the bandwidth share is where an Intel iGPU lives), at no measured cost beyond noise. Look parity: panorama diff against the pre-change build within the old-vs-old control. Two generator/build traps met on the way: the generator's source check matched the plain `_f16_vk.frag` suffix before the OIT one and skipped the OIT twins (order fixed), and new `.metal` files enter the metallib only after the glob's re-configure — the next build. The lesson of Tier 2 holds: a vertex-stage saving shows live only if the vertex stage is the critical path, and after the fragment work it still is not on this Mac.
+
+### GPU structural work, step 2: the sprite array (2026-10-08, night)
+
+A greedy-merged terrain quad used to find its texels through the longest fetch chain in the fragment stage: the face record (texel buffer) → the sprite table (its rect in the atlas) → `fract()` → `textureGrad` on the atlas with the derivatives rescaled, 54 % of the opaque shader's samples with explicit gradients and the atlas padding ring doing the wrap. The block atlas now also builds **sprite arrays** (`AtlasBuilder::BuildSpriteArray`, texture slots 4 and 5 — GL units 4/5, Vulkan set 7 bindings 0/1, Metal textures 7/8 — two `sampler2DArray`s in the three terrain fragment shaders): one 16×16 layer per sprite, sprite id s = layer s % cap of array s / cap (cap = the backend's layer limit, `RenderBackend::MaxTextureArrayLayers`, 2048 on Metal; the second array is the overflow, bound as the first again when nothing overflows), sampled with hardware REPEAT and the hardware's own mip selection (`texture(uSpriteArray, vec3(uv, layer))`). The sprite ids are renumbered so the arrays' sprites come first (`BuildSpriteTable`: square, power-of-two, no larger than the pack's usual sprite side, from a texture file before generated variants), `uSpriteLayers` / `uSpriteArrayCap` (Common `uSpriteArray.xy`, the former `_pad`) tell the shader where they end and where the split is, and everything past the count — the 47 32-px sign/shelf sprites and the non-square ones — keeps the atlas path. On Vulkan set 7 is its own two-binding layout with one set per frame slot (`BindSpriteArraySet`: rewritten in the slot's frame when an array's per-frame copy or a rebuilt atlas changes the views — a second per-texture set would have been the ninth set, past MoltenVK's eight); Metal's argument tables grew to nine texture indices. An animated sprite's layer is redrawn by the `TextureAnimator` with its atlas rect (`RenderBackend::UpdateTextureArrayLevel`, the same staged path as the atlas's rect: Vulkan and Metal queue it into the next frame and the array gets per-frame copies once drawn with, OpenGL goes through the pixel-unpack ring), its frame chain built as deep as the layer needs. A layer's chain is the sprite's own (`Mipmap::GenerateMipLevels`, so the cutout rewrites match the atlas's), and a sprite smaller than the array's side is upscaled by a whole power of two into the lower levels so the GPU's LOD lands on the same texels; the array's side is the pack's mode on purpose (vanilla 16) because an upscaled level 0 makes every magnified near sample read 4× the texels. Vanilla: 2349 sprites in 2048 + 301 layers, 5 levels, 3.1 MB (+6 MB of per-frame copies on Metal once the animator writes them). Rebuilt with the mip chain (the options), destroyed with the atlas; `OBEY_SPRITE_ARRAY=0` builds none, `OBEY_SKIP=spritearray` is the in-run phase A/B (arrays resident, unused).
+
+Still-frame paired phase test (the verdict tool; cool machine, 23 pairs), static sprites only: **array 522.9 fps vs atlas path 499.2 — the atlas path is −4.6 % ± 0.3 % (REAL)**; `Gpu/EncFrameUs` 4.34 vs 4.57 ms. With the animated sprites in the array too (water, lava, fire, magma, prismarine, the stems…): **545.7 vs 504.0 fps — the atlas path is −7.9 % ± 1.0 %**, `Gpu/EncFrameUs` 4.22 vs 4.62 ms (−8.6 %). With the overflow array as well (every square sprite in): **548.7 vs 501.5 fps — the atlas path is −8.8 % ± 1.1 %**, `Gpu/EncFrameUs` 4.18 vs 4.62 ms (−9.6 %). Tour (static-only build): +1.2 % ± 7.7 % (noise, as every moving-scene test is), GPU frame 4.62 vs 4.80 ms. The first live fragment-stage win since the late sky: the fetch chain lost a dependent texel fetch, the `fract`, and the explicit-gradient sample. Look: panoramas from one build (array, `OBEY_SPRITE_ARRAY=0`, array again; sprites frozen, time fixed) — array vs atlas 0.02–0.6 % of pixels differ by more than 2 levels (mean ≤ 0.34 of 255) against a 0.0–0.24 % same-path control: at sprite seams and in the distance, where the hardware wraps the sprite exactly while the atlas path's anisotropic footprint ran into the padding ring; two live-animation captures match each other to 0.02 % and differ from the frozen one on the animated blocks, so the layers are being redrawn. (An earlier triple read 5 % vs 2 % — that pair of runs had not finished streaming the same sections; take the control seriously.)
+
+### Fog off and World Lighting off skip their work (2026-10-08, night)
+
+Both switches used to change values only: fog off pushed the distances to 1e9 and the shaders still ran the two ramps and the mix per fragment and the two `length()`s per vertex; World Lighting off filled the lightmap with white and the shaders still sampled it (once per vertex, four times plus the light texel per face-mapped fragment). Now `uFogColor.a` is 0 with fog off and `uWorldLighting` (Common `uScalarsD.w`) is 0 with lighting off, and the terrain shaders branch on them (uniform branches: no divergence, no new permutations; the output is identical because the skipped work was a no-op). Still-frame paired tests with the setting OFF, the skip suspended (`OBEY_SKIP=fogskip` / `lightskip`, which keep the old path) vs active: **fog skip +0.8 % fps ± 0.2 (GPU frame −0.9 %)**; **lightmap skip +7.5 % fps ± 1.9 (GPU frame −8.8 %)** — four samples per fragment were that much. With both settings on (the measurement default) nothing changes. `ab_run.sh` takes `FOG=0` / `WORLDLIGHT=0`.
+
+### GPU-driven terrain submission (2026-10-07)
+
+Opaque and cutout terrain on Metal are drawn from indirect command buffers filled by a compute kernel (`shaders/metal/terrain_cull.metal`, hand-written, linked into the metallib with a source fallback). The CPU keeps its BFS + frustum pass and hands the kernel one visibility byte per section slot of a slab; the kernel reads the slab's `ChunkMegaBuffer::CullEntry` row (origin, face-group index ranges, 48 B, written at upload), does the same facing test as the CPU path (`kFacingGroupOrder`: a +X group is visible iff `eye.x > minX`, -X iff `eye.x < minX + 16`), and appends one `render_command` per run of visible groups (at most three per section) with an atomic on the slab's `MTLIndirectCommandBufferExecutionRange`. The render pass then runs `executeCommandsInBuffer:indirectBuffer:` per slab with the slab's vertex stream bound; pipeline and buffers are inherited, so a command is only the draw's arguments. One indirect command buffer per layer and frame slot, sized to the layer's demand (three commands per visible section, +25 %, regrown at `BeginGpuTerrainCull` before any dispatch of that layer) — ~690 B a command on this driver, ~48 MB in all at RD 32; the first design (1024 slots × 3 per slab, every slab) was 219 MB. The culling is its own command buffer committed ahead of the frame's. Translucent, directional (back-to-front) and second views (portals) stay on the CPU path. `OBEY_GPU_DRAW=0` restores the CPU path; `OBEY_SKIP=gpudraw` is the phase A/B.
+
+Two Metal rules met on the way: (1) a pipeline with `supportIndirectCommandBuffers` may not take textures (or texture buffers) as direct function arguments — "Fragment shader cannot be used with indirect command buffers" — so the three terrain shaders (`gen_metal_shaders.py` `ICB_SHADERS`) take theirs through one argument buffer at `MetalBindings::kTextureArgs` (buffer 7; slot k at `[[id(2k)]]`, its sampler at `[[id(2k+1)]]`), encoded by `MetalBackend::BindTextureArgs` for every draw with those shaders, GPU-driven or not (the first panorama check found the CPU path drawing no terrain because the encoding was tied to the switch). spirv-cross cannot be told those ids with `--msl-decoration-binding` (a texture and its sampler would share one id: "Full mutable aliasing ... only works on Metal 3+"), so the generator translates them without it and pins the member ids — in ascending order, which the Metal compiler requires — and the direct buffers' indices from the SPIR-V's own names. (2) Samplers reached through an argument buffer need `supportArgumentBuffers` at creation (validation layer: 825 k messages in one run).
+
+Phase A/B (`OBEY_SKIP=gpudraw OBEY_SKIP_PERIOD=5`, tour, RD 32, rain, hot machine at ~220 fps, GPU-bound): GPU-driven 221.1 fps / 4.52 ms vs CPU 213.5 / 4.68 (+3.6 %), 1 %-low 101.7 vs 82.4 (+23 %), p99 8.80 vs 10.67 ms, frames > 8.3 ms 1.7 % vs 5.0 %; `Mtl/FrameWaitUs` 0.43 vs 1.87 ms, i.e. CPU work per frame 2.65 vs 4.25 ms (−1.6 ms); `Gpu/EncFrameUs` equal (6.75 vs 6.77 ms — the GPU does the same work). Draw calls from the CPU 1005 vs 8932 a frame. Look: still-frame panoramas GPU vs CPU differ by 0.5–5.6 % of pixels (> 31 levels), the CPU path against itself by 0.5–5.9 % — single-pixel edge ties in draw order, run-to-run noise. Validation layer clean. Cooled, CLEAR weather (the second phase A/B, ~330 fps): the GPU path LOSES — 308.3 vs 343.8 fps (−10 %), 1 %-low equal (145 vs 143), `Mtl/GpuFrameUs` 6.41 vs 5.97 ms although the frame encoder itself is shorter (5.12 vs 5.74 ms): the culling command buffer plus ~47 `executeCommandsInBuffer` a frame are a fixed GPU cost that a 3 ms frame cannot hide, and the CPU saving (FrameWait 1.67 vs 0.79 ms) buys nothing while the GPU is the limit. **Back to opt-in (`OBEY_GPU_DRAW=1`)** until the execute count comes down: the candidates are one execute per layer (commands binding their slab's vertex stream and origins themselves — `inheritBuffers` off, so every buffer per command, the push block in a ring instead of `setBytes`) and the cull dispatched into the frame's own command buffer before the pass opens instead of a command buffer of its own. Xcode, same frame on both paths (`metal-20-40-20` GPU-driven, `metal-20-47-58` CPU, both at the Medium state): 4.96 ms vs 3.72 ms serial. Not fixed overhead: the cull encoder is 0.22 ms (4.4 %), the rest is the Frame encoder doing MORE terrain — `terrain_vk_vert` 71,166 vs 51,142 SIMD groups (+39 %), `terrain_opaque_vk_frag` 230,409 vs 188,427 (+22 %), cutout vertex +33 %, 8,659 vs 5,689 GPU commands — while the sky shader is identical (230,179 vs 229,958), so it is the same view. The kernel's facing test is the CPU's line for line, so the extra work is not back-facing groups; the candidates are the ~3,000 extra draw commands (the CPU path fuses exact-adjacent runs, the kernel never does — a per-draw cost in the tiler that shows up as vertex-stage time) and the draw order (slab/slot order instead of the CPU's nearest-first; hidden-surface removal should make opaque shading order-independent, yet the opaque fragment count rose). Next read: the GPU capture's encoder counters (its CSV export failed in the automation) for primitives, overdraw and bytes, then fuse adjacent runs in the kernel (a run that ends where the next slot's begins continues it) and draw slabs in the CPU's distance order. Follow-up the same night, each step measured with the 2 s-period paired phase A/B (±10 %): (1) the kernel now fuses runs across empty groups and across touching neighbours (each slab's visible slots sorted by index offset, `GroupVisibility` + chain ownership) — commands 7,989 → 7,369 a frame, fewer than the CPU path's ~8,400 draws, indices 4.1 M vs 4.5 M; (2) each layer's cull committed as soon as encoded; (3) the cull as the frame command buffer's first compute encoder, before the sky (`PrepareGpuTerrainCull`); (4) the cull on its own queue with an `MTLEvent` the frame waits on (async compute). Results, GPU path vs CPU path: (2) cooled −11.6 % ± 14 %, (3) −27 % ± 10 %, (4) −20 % ± 9.5 % — every variant loses although the GPU path's frame encoder does the same or less work and the CPU does 0.1–1.6 ms less. The frame command buffer's span stays 1.3–2.3 ms longer than its encoder on the GPU path, so frame N's vertex stage is not overlapping frame N−1's fragment stage the way the CPU path's does; the per-command cost of an indirect command buffer on this GPU (Xcode: +39 % vertex-stage SIMD groups for fewer indices) is a second, independent loss. **Conclusion: GPU-driven submission through indirect command buffers is not viable for this workload on this driver** — thousands of small draws whose only saving is CPU time the machine does not lack. The path stays opt-in (`OBEY_GPU_DRAW=1`) for the record and should be removed unless Apple's ICB execution changes; the terrain shaders' argument-buffer textures (made for it) cost nothing measurable and are harmless either way.
+
 ## GPU cost per render stage (2026-09-25)
 
 Metal cannot time stages inside one render pass on a tile GPU, so each stage
@@ -568,6 +848,14 @@ Last two measured, then rain was left alone (2026-10-05):
 - Option "previous frame's depth, no split": a prototype (a second command
   buffer submitted ahead of the frame's) measured 0.82 ms over full
   resolution — then built properly, below.
+
+**Metal has no Half (2026-10-07).** Once the rain's streak instancing removed
+the ~97 % of launched fragments that failed the alpha cutout, Half's own
+target pass, composite and previous-depth reprojection cost more than the
+fragments it still saves: ABBA on the tour at RD 32, Full 217.1 fps / 4.61 ms
+vs Half 209.9 fps / 4.77 ms. `WeatherEffectRenderer::HalfResolutionAvailable()`
+is false on Metal — the setting is ignored and Video Settings shows no
+control; OpenGL and Vulkan keep it (unmeasured there with the streaks).
 
 ### Rain from the previous frame's depth (Vulkan, Rain Resolution: Half)
 
@@ -1007,7 +1295,11 @@ The fixes, in the order they became the bottleneck:
   `/tp` run (join: player restored in the saved area; teleport: `/tp` to the
   other saved area); `sample` cannot profile startup (attaching early stalls
   the process in dyld) - use `xctrace record --template 'Time Profiler'
-  --launch` and export the `time-profile` table.
+  --launch` and export the `time-profile` table — with the caveat that
+  `--launch` resolves the app by name through LaunchServices and started
+  the INSTALLED game instead of the given build-tree executable (2026-10-06,
+  even with a distinct bundle id on the copy); check the process path in
+  the trace, or launch with `open` and attach.
 
 ## Section meshing (2026-09-26)
 
@@ -1236,10 +1528,12 @@ a newer viewer than the pin fails with an explicit "bump GIT_TAG" message
 Game Mode needs `LSApplicationCategoryType` = a games category in Info.plist
 (done) and the window in a NATIVE full-screen Space (`ToggleFullscreen` does
 that on macOS; F11 needs Fn on a Mac keyboard, Control-Command-F also works).
-It will NEVER engage for a bundle run from this build tree: `gamepolicyd`
-identifies a game by reading the bundle's Info.plist, has no Full Disk Access,
-and `~/Desktop` is TCC-gated, so the daemon files the app as "not a game"
-(seen in its log: no `Found game` line). `tools/play.sh tracy --vulkan` copies
+It never engaged for a bundle run from the build tree while it sat under
+`~/Desktop`: `gamepolicyd` identifies a game by reading the bundle's
+Info.plist, has no Full Disk Access, and `~/Desktop` is TCC-gated, so the
+daemon filed the app as "not a game" (seen in its log: no `Found game`
+line). The tree moved to `~/Developer` on 2026-09-25 (in-place launches
+untested since); the copy stays the proven path. `tools/play.sh tracy --vulkan` copies
 the built bundle to `~/Applications` and launches it there through
 LaunchServices with no debugger — Tracy still connects. `--force-game-mode`
 forces the policy on via Xcode's `gamepolicyctl` (no menu-bar icon then; the
@@ -1281,7 +1575,13 @@ per-second `[Harness]` fps lines: this MacBook Air is fanless and throttles with
 baselines measured 153 vs 128 fps back-to-back). Pin the camera with `/tp` — the
 player otherwise gets shoved by mobs and the saved position drifts run to run.
 
-### GPU profiling: Metal System Trace via `tools/play.sh --gpu-trace` (2026-09-04)
+### GPU profiling: Metal System Trace via `tools/play.sh --gpu-trace` (2026-09-04, MoltenVK era)
+
+Written against the Vulkan backend through MoltenVK. The native Metal
+backend's own profiling story (Xcode capture, HUD encoder timing, the
+engine's per-encoder timestamps) is in "Apple's tools on this backend"
+under the Metal backend section; what follows still applies to the trace
+mechanics.
 
 `tools/play.sh tracy --gpu-trace[=SECONDS] --vulkan` attaches Instruments'
 Metal System Trace (xctrace) to the running game 20 s after launch and
@@ -1302,16 +1602,24 @@ times to align the two clocks and regresses GPU vertex time against the
   channel shows one 'GL/CL' interval per MoltenVK command buffer, tens of
   ms long and stacked dozens deep: that is commit-to-completion lifetime,
   not work (the driver's state track shows two channels active meanwhile).
-- **No GPU counters from the command line.** The stock template records one
-  useless counter (`RT Unit Active`) in a 3 GB table; adding `--instrument
-  'Metal GPU Counters'` fails with "Selected counter profile is not
-  supported on target device". The GUI-saved `gpu-counters.tracetemplate`
-  (project root: Performance Limiters + shader timeline) works with
+- **GPU counters only through a GUI-saved template.** The stock template
+  records one useless counter (`RT Unit Active`) in a 3 GB table; adding
+  `--instrument 'Metal GPU Counters'` fails with "Selected counter profile
+  is not supported on target device". A template saved from the Instruments
+  GUI with Counter Set = Performance Limiters (the only live set this M4
+  offers; `gpu-limiters.tracetemplate` in the project root) works with
   `--gpu-template=`: 68 counters every ~22-34 us, ~90 MB per second of
   recording — keep those runs to ~10 s (a 50 s one failed to save). The
   shader-core counters are stamped on a GPU clock (ns, fixed offset from
   trace time); align them by matching VS/FS occupancy > 0 against the
-  Vertex/Fragment channels.
+  Vertex/Fragment channels. Record it ATTACHED only: with the limiter
+  counter set, every all-process or launched recording crashed Instruments'
+  GPUPlugin (xctrace four times, Instruments.app once, 2026-10-06, Xcode
+  26.2) while the same recordings with counters off survived. The shader
+  timeline is its own template (`gpu-shaders.tracetemplate`, counters off):
+  it records in any mode but has produced no samples in attached,
+  all-process or launched recordings — per-line costs come from the Xcode
+  capture instead.
 - **xctrace leaves a raw `instruments*.ktrace` (0.5-2 GB) in `$TMPDIR` per
   recording and never deletes it** — 36 GB of them filled the disk on
   2026-09-25. `play.sh` now deletes the ones its recording made.

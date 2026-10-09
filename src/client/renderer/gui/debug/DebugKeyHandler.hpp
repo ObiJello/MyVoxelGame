@@ -11,6 +11,8 @@
 //   F3+S         dump dynamic textures   F3+T  reload packs    F3+L  start/stop profiling
 //   F3+V         version info            F3+1/2/3/4 charts     F3+X  improved transparency
 //   F3+M         fill in the held map / again: cancel (not vanilla: /mapfill, cheats only)
+//   F3+U         capture the next frame with the GPU debugger (not vanilla: Metal, needs
+//                MTL_CAPTURE_ENABLED=1 in the launch environment)
 //   F3+Esc       pause without the pause menu
 //
 // Every key that fired a chord is cancelled as a gameplay binding for that
@@ -53,6 +55,9 @@ namespace Render::DebugScreen {
         std::function<bool(std::string& displayPath, std::string& absolutePath)> dumpDynamicTextures;
         // F3+L: start (true) or stop (false) the 10-second frame profile.
         std::function<bool()> toggleProfiling;
+        // F3+U: ask the render backend to capture the next frame for the
+        // platform's GPU debugger; false when it cannot (no capture layer).
+        std::function<bool()> captureGpuFrame;
         // A chat command, sent to the server ("/gamemode spectator").
         std::function<void(const std::string&)> sendCommand;
         // Whether a level and a connection exist (MC canSwitchGameMode).

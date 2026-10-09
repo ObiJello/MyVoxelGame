@@ -57,11 +57,11 @@ namespace Client::SoundHost {
         // MC JukeboxBlockEntity.setRemoved on the client: a song whose
         // jukebox left this client's world (broken, replaced, its chunk
         // unloaded) stops, and the entities near it are told.
-        if (context.inWorld) JukeboxSongPlayback::Tick(context.paused);
+        if (context.inWorld) { PROFILE_ZONE_N("Sound.Jukebox"); JukeboxSongPlayback::Tick(context.paused); }
 
         // MC Minecraft.tick: musicManager.tick(); soundManager.tick(pause).
-        MusicManager::Get().Tick(context);
-        manager.Tick(context.paused);
+        { PROFILE_ZONE_N("Sound.Music"); MusicManager::Get().Tick(context); }
+        { PROFILE_ZONE_N("Sound.Manager"); manager.Tick(context.paused); }
     }
 
     void OnSessionStart(const Game::ClientPlayer* localPlayer) {

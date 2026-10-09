@@ -28,7 +28,7 @@ namespace Render {
     // BACKEND TYPE
     // ========================================================================
 
-    enum class BackendType { OpenGL, Vulkan };
+    enum class BackendType { OpenGL, Vulkan, Metal };
 
     // Index element width for indexed draws. Chunk terrain uses Uint16 (indices
     // are relative to each section's baseVertex, so 16 bits always suffice —
@@ -68,9 +68,13 @@ namespace Render {
         // the memory of 32F, full HDR range).
         RGBA16F,
         RGBA32F,
-        // 16-bit unorm per channel. Buffer textures only today: the terrain
-        // face map reads one 8-byte record per texelFetch.
+        // 16-bit unorm per channel. Buffer textures only today.
         RGBA16,
+        // 16-bit unsigned integer per channel (usamplerBuffer /
+        // texture_buffer<uint>). Buffer textures only: the terrain face map
+        // reads one 8-byte record texel per fetch as integers — no unorm →
+        // float → int round trip in the fragment shader.
+        RGBA16UI,
         R11G11B10F
     };
 
@@ -105,6 +109,14 @@ namespace Render {
         int           height       = 0;
         TextureFormat colorFormat  = TextureFormat::RGBA16F;
         TextureFormat depthFormat  = TextureFormat::Depth24Stencil8;
+        // false: no depth/stencil attachment at all. For a target whose draws
+        // never depth-test (post passes, the half-res rain, the outline): on
+        // a tile GPU a depth attachment is loaded and stored with every pass
+        // over the target (8.75 MB each way for the half-res rain at
+        // 1710x1073, every frame) whether or not anything reads it. Depth
+        // and stencil tests are forced off while such a target is bound.
+        // Vulkan keeps the attachment (one shared target render pass).
+        bool          depth        = true;
     };
 
     // ========================================================================
@@ -300,7 +312,29 @@ namespace Render {
         size_t textureCount    = 0;  // Number of active textures
         size_t meshCount       = 0;  // Number of active mesh objects
         size_t shaderCount     = 0;  // Number of active shaders
+        // The driver's own numbers where the backend can ask (Metal:
+        // MTLDevice.currentAllocatedSize / recommendedMaxWorkingSetSize);
+        // 0 = unknown. totalAllocated above is the backend's bookkeeping.
+        size_t deviceAllocated      = 0;
+        size_t deviceRecommendedMax = 0;
     };
+
+    // One GPU encoder (Metal: render / blit command encoder) of a resolved
+    // frame, from RenderBackend::GetGpuEncoderTimings. On a tile GPU the
+    // encoder is the unit the hardware times; a stage (debug group) that
+    // owns its own encoder — a render target, an OIT pass — is exact, the
+    // frame's own encoder carries every stage drawn into it.
+    struct GpuEncoderTiming {
+        const char* label = "";      // the encoder's label ("Frame", "Target 12 (1710x1073)", "Texture flush")
+        const char* stage = nullptr; // the top debug group when it opened, or null
+        uint8_t     kind = 0;        // 0 frame, 1 render target, 2 OIT pass, 3 upscale, 4 blit
+        bool        shared = false;  // the encoder kept running past `stage` (the frame's pass)
+        float       vertexMs = 0.0f, fragmentMs = 0.0f, totalMs = 0.0f;   // blits: totalMs only
+        uint64_t    frame = 0;
+    };
+
+    // RenderBackend::SetDebugLabel targets.
+    enum class DebugLabelKind : uint8_t { Buffer, Texture, RenderTarget };
 
     // ========================================================================
     // GPU TIMER QUERY

@@ -5,6 +5,7 @@
 
 #include "common/world/math/WorldMath.hpp"
 #include "../backend/RenderTypes.hpp"
+#include <optional>
 #include <vector>
 #include <map>
 #include <unordered_map>
@@ -192,6 +193,8 @@ namespace Render {
         bool DebugGetRegionInfo(const MegaBufferSectionKey& key, uint32_t& outSlab,
                                 size_t& outVtxOff, size_t& outVtxCnt,
                                 size_t& outIdxOff, size_t& outIdxCnt) const;
+
+        static constexpr uint32_t kSlotsPerSlab = 1024;   // origin-table rows per slab (see the tables below)
         BufferHandle DebugGetSlabVbo(uint32_t slab) const;
         BufferHandle DebugGetSlabIbo(uint32_t slab) const;
 
@@ -396,6 +399,13 @@ namespace Render {
         // per-slab hot-range cache on demand.
         mutable std::vector<Slab> m_slabs;
         size_t m_slabVertexCapacity = 0;
+        // A slab created ahead of need, outside the pool (RenderBackend::
+        // PrefersBufferPrefetch): on Metal 4 its buffers' residency is
+        // committed on a background queue, so when the pool grows into it
+        // the 5–10 ms page mapping of a new slab is already done. Made once
+        // the pool has two live slabs (a growing pool), one at a time.
+        std::optional<Slab> m_spareSlab;
+        void PrefetchSpareSlab();
         size_t m_slabIndexCapacity = 0;
         bool m_perSectionIndexBuffers = false;
 
@@ -564,7 +574,6 @@ namespace Render {
         // descriptor change. A slab therefore holds at most kSlotsPerSlab
         // sections; TryUploadToSlab moves on to the next slab when the rows
         // run out before the vertices do (cutout slabs, small sections).
-        static constexpr uint32_t kSlotsPerSlab    = 1024;
         static constexpr size_t   kOriginEntryBytes = 16;                       // ivec4
         static constexpr size_t   kSlotBytes        = kSlotsPerSlab * kOriginEntryBytes;
         static constexpr uint32_t kMaxSlabs         = 128;                      // 2 MB of tables

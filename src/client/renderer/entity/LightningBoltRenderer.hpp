@@ -59,7 +59,7 @@ namespace Render {
             BufferHandle vb   = INVALID_BUFFER;
             MeshHandle   mesh = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         BufferHandle m_ib = INVALID_BUFFER;
         EntityFrame::Cursor m_frameCursor;
         size_t m_quadCursor = 0;   // quads already written this frame

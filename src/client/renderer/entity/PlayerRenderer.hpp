@@ -140,7 +140,7 @@ namespace Render {
         ShaderHandle  m_bubbleShader = INVALID_SHADER;
         TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
-        // Two streaming sets alternated per FRAME, every call in a frame
+        // One streaming set per frame in flight, cycled per FRAME, every call in a frame
         // (the bulk pass, each RenderSingle ghost, the portal pass's repeat
         // of all of them) appending at a cursor — the scheme EntityFrame.hpp
         // describes. One set rewritten per call was a Vulkan hazard: draws
@@ -155,7 +155,7 @@ namespace Render {
             BufferHandle triVB    = INVALID_BUFFER;
             MeshHandle   triMesh  = INVALID_MESH;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
         size_t m_lineCursor = 0;   // strip vertices written this frame
         size_t m_triCursor  = 0;   // triangle vertices written this frame

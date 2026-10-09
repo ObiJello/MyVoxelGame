@@ -34,6 +34,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -75,5 +76,21 @@ namespace Render::Mipmap {
                                          Strategy strategy,
                                          float alphaCutoffBias,
                                          bool isItemTexture);
+
+    // Nearest upscale by a whole factor into `dst` ((w*f) x (h*f) RGBA):
+    // every source texel an f x f block — what the GPU's nearest
+    // magnification of the source reads, so a level built this way for the
+    // sprite array (AtlasBuilder) samples at LOD l exactly as the source
+    // does at LOD l - log2(f).
+    inline void UpscaleNearest(const Image& src, int factor, uint8_t* dst) {
+        const int dw = src.width * factor;
+        for (int y = 0; y < src.height * factor; ++y) {
+            const uint8_t* srow = src.pixels.data() + static_cast<size_t>(y / factor) * src.width * 4u;
+            uint8_t* drow = dst + static_cast<size_t>(y) * dw * 4u;
+            for (int x = 0; x < dw; ++x) {
+                std::memcpy(drow + static_cast<size_t>(x) * 4u, srow + static_cast<size_t>(x / factor) * 4u, 4u);
+            }
+        }
+    }
 
 } // namespace Render::Mipmap

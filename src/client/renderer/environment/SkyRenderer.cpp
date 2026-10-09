@@ -16,9 +16,6 @@
 #include "HushAtmosphere.hpp"
 #include "JavaRandom.hpp"
 #include "../backend/RenderBackend.hpp"
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -62,6 +59,8 @@ out float vCyl;
 
 void main() {
     gl_Position = uMVP * vec4(aPos, 1.0);
+    // The far plane (depth 1.0, the clear) — see shaders/sky_vk.vert.
+    gl_Position.z = gl_Position.w;
     vUV = aUV;
     vColor = aColor;
     // MC sky.vsh: fog distances from the RAW buffer position (the sky is
@@ -132,18 +131,10 @@ void main() {
         }
 
         ShaderHandle CreateSkyShader(const char* vertSrc, const char* fragSrc) {
-            // Vulkan needs the UBO-aware (portal) pipeline layout for
-            // uFogColor/uFogEnv — same backend-cast pattern as PortalRenderer.
-            if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-                auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-                return vk->CreateShaderFromFilesPortal("shaders/sky.vert", "shaders/sky.frag");
-#else
-                return INVALID_SHADER;
-#endif
-            }
-            ShaderHandle s = g_renderBackend->CreateShaderFromFiles("shaders/sky.vert", "shaders/sky.frag");
-            if (s == INVALID_SHADER) {
+            // The _vk shaders need the UBO-aware (portal) pipeline layout
+            // for uFogColor/uFogEnv; OpenGL falls back to the inline source.
+            ShaderHandle s = g_renderBackend->CreateShaderFromFilesPortal("shaders/sky.vert", "shaders/sky.frag");
+            if (s == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
                 s = g_renderBackend->CreateShader(vertSrc, fragSrc);
             }
             return s;
@@ -730,9 +721,11 @@ void main() {
     void SkyRenderer::DestroyOptiFinePack() {
         for (auto& layers : m_pack.layers) {
             for (OptiFineLayer& layer : layers) {
-                for (auto& face : layer.faces) {
-                    if (face != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(face); face = INVALID_TEXTURE; }
-                }
+                // A decode in flight owns its DecodedLayer through the
+                // shared_ptr; it finishes on its own (ReapAbandonedDecodes).
+                if (layer.decode.valid()) m_abandonedDecodes.push_back(std::move(layer.decode));
+                layer.pending.reset();
+                ReleaseLayerFaces(layer);
             }
             layers.clear();
         }
@@ -778,10 +771,21 @@ void main() {
         DestroyOptiFinePack();
         for (int d = 0; d < 2; ++d) {
             for (DecodedLayer& slot : pack.layers[d]) {
-                if (!slot.uploaded) UploadDecodedLayer(slot);
-                if (slot.faceSize > 0 && slot.layer.faces[0] != INVALID_TEXTURE) {
-                    m_pack.layers[d].push_back(std::move(slot.layer));
+                if (slot.faceSize <= 0 && !slot.uploaded) continue;   // unreadable
+                OptiFineLayer layer = std::move(slot.layer);
+                if (slot.uploaded) {
+                    if (layer.faces[0] == INVALID_TEXTURE) continue;
+                    layer.resident = true;
+                } else {
+                    // Decoded, not uploaded: residency uploads it when it
+                    // is needed, and drops the pixels when it is not.
+                    auto pending = std::make_shared<DecodedLayer>();
+                    pending->pixels = std::move(slot.pixels);
+                    pending->faceSize = slot.faceSize;
+                    pending->blur = slot.blur;
+                    layer.pending = std::move(pending);
                 }
+                m_pack.layers[d].push_back(std::move(layer));
             }
             pack.layers[d].clear();
             pack.ready[d].clear();
@@ -861,27 +865,11 @@ void main() {
         bool complete = false;
         {
             std::lock_guard<std::mutex> lock(pack.mutex);
-            // One layer a frame: six 1024² uploads is a frame's worth.
-            bool uploadedOne = false;
-            bool allUploaded = true;
-            for (int d = 0; d < 2 && !uploadedOne; ++d) {
-                for (size_t i = 0; i < pack.layers[d].size(); ++i) {
-                    if (!pack.ready[d][i]) { allUploaded = false; continue; }
-                    DecodedLayer& slot = pack.layers[d][i];
-                    if (slot.uploaded) continue;
-                    { PROFILE_ZONE_N("Sky.PrefetchUploadLayer"); UploadDecodedLayer(slot); }
-                    uploadedOne = true;
-                    break;
-                }
-            }
-            if (!uploadedOne && pack.decoded) {
-                for (int d = 0; d < 2; ++d) {
-                    for (const DecodedLayer& slot : pack.layers[d]) {
-                        if (!slot.uploaded) allUploaded = false;
-                    }
-                }
-                complete = allUploaded;
-            }
+            // Decode only: which layers the join needs on the GPU depends on
+            // the world's time and weather, so the upload is residency's
+            // (PumpLayerResidency), one needed layer a frame from the
+            // decoded pixels this pack hands over.
+            complete = pack.decoded;
         }
         if (!complete) return;
         // Everything is on the GPU: make it the resident pack now, so the
@@ -1013,6 +1001,8 @@ void main() {
     void SkyRenderer::DecodeOptiFineLayer(const std::string& file, const std::string& setDir,
                                           const std::string& skyDir, DecodedLayer& out) {
         OptiFineLayer& layer = out.layer;
+        layer.file = file;      // residency re-decodes from these
+        layer.skyDir = skyDir;
         std::string source, startIn, endIn, startOut, endOut, weather;
         for (const auto& [key, value] : ReadProperties(file)) {
             if      (key == "source")       source   = value;
@@ -1464,7 +1454,8 @@ void main() {
         const float sunAngleRad = glm::radians(env.sunAngleDeg);
 
         PipelineState state;
-        state.depthTestEnabled = false;
+        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
+        state.depthCompareOp = CompareOp::LessEqual;
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1610,7 +1601,8 @@ void main() {
         const glm::mat4 vp = proj * viewRotation;
 
         PipelineState state;
-        state.depthTestEnabled = false;
+        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
+        state.depthCompareOp = CompareOp::LessEqual;
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1691,7 +1683,8 @@ void main() {
         const glm::mat4 vp = proj * viewRotation;
 
         PipelineState state;
-        state.depthTestEnabled = false;
+        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
+        state.depthCompareOp = CompareOp::LessEqual;
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1748,6 +1741,91 @@ void main() {
         g_renderBackend->SetPipelineState(defaultState);
     }
 
+    bool SkyRenderer::LayerNeeded(const OptiFineLayer& layer, int64_t dayTime, int timeOfDay,
+                                  float rain, float thunder) const {
+        // The render loop's day / fade / weather tests (RenderOptiFineLayers),
+        // with the fade window opened kResidencyLookaheadTicks early so the
+        // decode lands before the layer's first non-zero alpha. Biome and
+        // height conditions are left out: they ease in over `transition`
+        // seconds, which covers a decode.
+        if (!layer.days.empty()) {
+            const long long rel = dayTime - (layer.fadeAlwaysOn ? 0 : layer.startFadeIn);
+            long long day = rel / 24000;
+            if (rel < 0 && rel % 24000 != 0) --day;
+            const int loop = std::max(1, layer.daysLoop);
+            const int idx  = static_cast<int>(((day % loop) + loop) % loop);
+            if (!InRanges(layer.days, idx)) return false;
+        }
+        if (!layer.fadeAlwaysOn) {
+            const int begin = ((layer.startFadeIn - kResidencyLookaheadTicks) % 24000 + 24000) % 24000;
+            if (!InTimeInterval(timeOfDay, begin, layer.endFadeOut)) return false;
+        }
+        float weather = 0.0f;
+        if (layer.weatherClear)   weather += 1.0f - rain;
+        if (layer.weatherRain)    weather += rain - thunder;
+        if (layer.weatherThunder) weather += thunder;
+        return weather > 1e-4f;
+    }
+
+    void SkyRenderer::ReleaseLayerFaces(OptiFineLayer& layer) {
+        for (auto& face : layer.faces) {
+            if (face != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(face); face = INVALID_TEXTURE; }
+        }
+        layer.resident = false;
+    }
+
+    size_t SkyRenderer::PumpLayerResidency(std::vector<OptiFineLayer>& layers, bool active, int64_t dayTime,
+                                           int timeOfDay, float rain, float thunder,
+                                           std::chrono::steady_clock::time_point now) {
+        size_t resident = 0;
+        bool uploadedOne = false;   // one layer's six faces a frame
+        for (OptiFineLayer& layer : layers) {
+            const bool needed = active && LayerNeeded(layer, dayTime, timeOfDay, rain, thunder);
+            if (needed) layer.lastNeeded = now;
+            // A decode that finished: upload it if still wanted, else drop it.
+            if (layer.decode.valid() && layer.decode.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+                layer.decode.get();
+            }
+            if (needed && !layer.resident) {
+                if (layer.pending && !layer.decode.valid()) {
+                    if (!uploadedOne) {
+                        PROFILE_ZONE_N("Sky.UploadLayer");
+                        DecodedLayer& d = *layer.pending;
+                        if (d.faceSize > 0 && UploadDecodedLayer(d)) {
+                            for (int f = 0; f < 6; ++f) layer.faces[f] = d.layer.faces[f];
+                            layer.resident = true;
+                        }
+                        layer.pending.reset();
+                        uploadedOne = true;
+                    }
+                } else if (!layer.pending && !layer.file.empty()) {
+                    // Off to a worker; the pack's root is the sky dir's
+                    // ancestor the decoder resolves sources against.
+                    auto pending = std::make_shared<DecodedLayer>();
+                    layer.pending = pending;
+                    const std::string file = layer.file, setDir = m_pack.dir, skyDir = layer.skyDir;
+                    layer.decode = std::async(std::launch::async, [pending, file, setDir, skyDir] {
+                        stbi_set_flip_vertically_on_load_thread(0);
+                        PROFILE_THREAD("SkyDecode");
+                        PROFILE_ZONE_N("Sky.DecodeLayer");
+                        DecodeOptiFineLayer(file, setDir, skyDir, *pending);
+                    });
+                }
+            } else if (!needed) {
+                // Idle: the decoded pixels go at once (RAM), the faces after
+                // kResidencyIdle (a layer that flickers at a window's edge
+                // is not re-decoded every time).
+                if (layer.pending && !layer.decode.valid()) layer.pending.reset();
+                if (layer.resident && layer.lastNeeded.time_since_epoch().count() != 0 &&
+                    now - layer.lastNeeded > kResidencyIdle) {
+                    ReleaseLayerFaces(layer);
+                }
+            }
+            if (layer.resident) ++resident;
+        }
+        return resident;
+    }
+
     void SkyRenderer::RenderOptiFineLayers(std::vector<OptiFineLayer>& layers, const glm::mat4& viewProj,
                                            const EnvironmentFrame& env) {
         if (layers.empty()) return;
@@ -1761,15 +1839,22 @@ void main() {
         const float rain    = envState.RainLevel();
         const float thunder = envState.ThunderLevel();
         const auto  now     = std::chrono::steady_clock::now();
+        // The layers this frame needs on the GPU (and the other world's
+        // released as they go idle).
+        PumpLayerResidency(layers, /*active=*/true, dayTime, timeOfDay, rain, thunder, now);
+        std::vector<OptiFineLayer>& other = (&layers == &m_pack.layers[0]) ? m_pack.layers[1] : m_pack.layers[0];
+        PumpLayerResidency(other, /*active=*/false, dayTime, timeOfDay, rain, thunder, now);
 
         PipelineState state;
-        state.depthTestEnabled  = false;
+        state.depthTestEnabled  = m_depthTested;   // the late sky (sky_vk.vert)
+        state.depthCompareOp    = CompareOp::LessEqual;
         state.depthWriteEnabled = false;
         state.blendEnabled      = true;
         state.cullMode          = CullMode::None;
         state.primitiveType     = PrimitiveType::Triangles;
 
         for (OptiFineLayer& layer : layers) {
+            if (!layer.resident) continue;   // needed but not yet decoded: it fades in once it lands
             // Days (CustomSkyLayer.isActive): the day index counts from the
             // layer's own fade-in, so a night layer spanning midnight is one
             // day, taken modulo daysLoop.

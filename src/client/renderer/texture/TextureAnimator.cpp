@@ -25,8 +25,10 @@ namespace Render {
 
     SpriteUploadMode TextureAnimator::Mode() {
         static const SpriteUploadMode mode = [] {
-            const bool vulkan = g_renderBackend && g_renderBackend->GetType() == BackendType::Vulkan;
-            SpriteUploadMode m = vulkan ? SpriteUploadMode::Cpu : SpriteUploadMode::Staged;
+            // Vulkan / Metal stage the upload into the next frame (per-frame
+            // copies of a texture in use); OpenGL needs the PBO path.
+            const bool vkFamily = g_renderBackend && g_renderBackend->UsesVkShaders();
+            SpriteUploadMode m = vkFamily ? SpriteUploadMode::Cpu : SpriteUploadMode::Staged;
             const char* legacy = std::getenv("OBEY_CPU_SPRITE_ANIM");
             if (legacy && std::strcmp(legacy, "0") != 0) m = SpriteUploadMode::Cpu;
             if (const char* v = std::getenv("OBEY_SPRITE_ANIM")) {
@@ -41,8 +43,13 @@ namespace Render {
         return mode;
     }
 
-    void TextureAnimator::Initialize(TextureHandle atlasTexture) {
+    void TextureAnimator::Initialize(TextureHandle atlasTexture,
+                                     const std::array<TextureHandle, AtlasBuilder::kSpriteArrays>& spriteArrays,
+                                     int spriteArrayCap, int spriteArrayLevels) {
         m_atlasTexture = atlasTexture;
+        m_spriteArrays = spriteArrays;
+        m_spriteArrayCap = spriteArrays[0] != INVALID_TEXTURE ? std::max(0, spriteArrayCap) : 0;
+        m_spriteArrayLevels = spriteArrays[0] != INVALID_TEXTURE ? std::max(0, spriteArrayLevels) : 0;
         // A rebuilt atlas (resource pack reload) registers its animations
         // afresh; the previous atlas's entries would draw into freed memory
         // at old offsets.
@@ -59,7 +66,8 @@ namespace Render {
                                                   int atlasX, int atlasY, int padding,
                                                   const std::string& mipmapStrategy,
                                                   float alphaCutoffBias,
-                                                  int mipLevels) {
+                                                  int mipLevels,
+                                                  int arrayLayer, int arrayShift) {
         if (frames.empty() || animation.width <= 0 || animation.height <= 0) return;
         PROFILE_ZONE_N("TexAnim.Register");
 
@@ -69,6 +77,18 @@ namespace Render {
         anim->atlasX = atlasX;
         anim->atlasY = atlasY;
         anim->padding = padding;
+        anim->atlasLevels = std::max(0, mipLevels);
+        int layerInArray = 0;
+        if (arrayLayer >= 0 && SpriteArrayFor(arrayLayer, layerInArray) != INVALID_TEXTURE && m_spriteArrayLevels > 0) {
+            anim->arrayLayer = arrayLayer;
+            anim->arrayShift = std::max(0, arrayShift);
+        }
+        // The chain goes as deep as the atlas OR the array's layer needs:
+        // the array may carry more levels than the atlas (a smaller sprite's
+        // upscale adds levels for every layer).
+        const int chainDepth = anim->arrayLayer >= 0
+                             ? std::max(anim->atlasLevels, m_spriteArrayLevels - 1 - anim->arrayShift)
+                             : anim->atlasLevels;
         if (anim->animation.frames.empty()) {
             for (int i = 0; i < anim->animation.frameCount; ++i) anim->animation.frames.push_back(i);
         }
@@ -79,7 +99,7 @@ namespace Render {
         const bool isItem = textureKey.rfind("item/", 0) == 0 ||
                             textureKey.find(":item/") != std::string::npos;
         const size_t frameBytes = static_cast<size_t>(animation.width) * animation.height * 4u;
-        anim->levels = std::max(0, mipLevels) + 1;
+        anim->levels = chainDepth + 1;
         anim->frameChains.reserve(frames.size());
         for (const auto& pixels : frames) {
             Mipmap::Image level0;
@@ -88,8 +108,8 @@ namespace Render {
             level0.pixels = pixels;
             if (level0.pixels.size() != frameBytes) level0.pixels.resize(frameBytes, 0);
             std::vector<Mipmap::Image> chain;
-            if (mipLevels > 0) {
-                chain = Mipmap::GenerateMipLevels(std::move(level0), mipLevels, strategy, alphaCutoffBias, isItem);
+            if (chainDepth > 0) {
+                chain = Mipmap::GenerateMipLevels(std::move(level0), chainDepth, strategy, alphaCutoffBias, isItem);
             } else {
                 chain.push_back(std::move(level0));
             }
@@ -179,7 +199,9 @@ namespace Render {
         // MC's animate_sprite pixels, made here: the current frame (blended
         // toward the next for an interpolated sprite, as the shader's mix and
         // its UNORM write round), with the padding ring filled by clamping to
-        // the edge texels — the same texels MC's clamped sampler picks.
+        // the edge texels — the same texels MC's clamped sampler picks. The
+        // same pixels, unpadded, go into the sprite's layer of the sprite
+        // array when it has one (hardware repeat needs no ring).
         const bool staged = Mode() == SpriteUploadMode::Staged;
         const TextureHandle target = m_atlasTexture;
         PROFILE_ZONE_N("AnimFrameUpload");
@@ -193,8 +215,11 @@ namespace Render {
             progress = static_cast<int>(p * 1000.0f);
         }
         const bool blend = next != current && progress > 0;
+        int arrayLayer = 0;
+        const TextureHandle array = SpriteArrayFor(anim.arrayLayer, arrayLayer);
+        const bool toArray = anim.arrayLayer >= 0 && array != INVALID_TEXTURE;
 
-        static thread_local std::vector<uint8_t> blended, padded;
+        static thread_local std::vector<uint8_t> blended, padded, upscaled;
         for (int level = 0; level < anim.levels; ++level) {
             const Mipmap::Image& cur = anim.frameChains[static_cast<size_t>(current)][static_cast<size_t>(level)];
             const int lw = cur.width, lh = cur.height;
@@ -217,6 +242,31 @@ namespace Render {
                 }
                 interior = blended.data();
             }
+
+            // The sprite array's layer: this level at level + shift, and the
+            // levels below the shift the frame upscaled (level 0 only).
+            if (toArray) {
+                const int j = level + anim.arrayShift;
+                if (j < m_spriteArrayLevels) {
+                    g_renderBackend->UpdateTextureArrayLevel(array, arrayLayer, j, 0, 0, lw, lh, interior);
+                }
+                if (level == 0) {
+                    Mipmap::Image frame;
+                    frame.width = lw;
+                    frame.height = lh;
+                    for (int jj = 0; jj < anim.arrayShift && jj < m_spriteArrayLevels; ++jj) {
+                        const int factor = 1 << (anim.arrayShift - jj);
+                        if (frame.pixels.empty()) frame.pixels.assign(interior, interior + rowBytes * static_cast<size_t>(lh));
+                        upscaled.resize(rowBytes * static_cast<size_t>(lh) * static_cast<size_t>(factor) * static_cast<size_t>(factor));
+                        Mipmap::UpscaleNearest(frame, factor, upscaled.data());
+                        g_renderBackend->UpdateTextureArrayLevel(array, arrayLayer, jj, 0, 0,
+                                                                 lw * factor, lh * factor, upscaled.data());
+                    }
+                }
+            }
+            // The atlas has levels 0..atlasLevels; the chain may go deeper
+            // for the array.
+            if (level > anim.atlasLevels) continue;
 
             // The padding ring: each row's edge texels repeated outward, the
             // first and last rows repeated up and down.

@@ -271,7 +271,8 @@ void main() {
         m_dummyTexture = g_renderBackend->CreateTexture2D(1, 1, TextureFormat::RGBA8, white);
 
         // Two vertex buffers per set (lines, triangles), two sets.
-        for (FrameBuffers& fb : m_frames) {
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.lineVB = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, MAX_VERTICES * sizeof(StickVertex), nullptr, BufferAccess::Streaming);
             fb.lineMesh = g_renderBackend->CreateMesh(fb.lineVB, INVALID_BUFFER, GetBlockVertexLayout());
@@ -341,7 +342,7 @@ void main() {
             m_lineCursor = 0;
             m_triCursor  = 0;
         }
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
 
         // --- Pass 1: Triangles (head outline ring + back-of-head disc), all
         // back-face-culled. Ring is wound CCW from lookDir → visible from in
@@ -352,7 +353,7 @@ void main() {
         const size_t triCount = m_triCursor < MAX_TRI_VERTICES
             ? std::min(m_triVerts.size(), (MAX_TRI_VERTICES - m_triCursor) / 3 * 3) : 0;
         if (triCount > 0 && fb.triMesh != INVALID_MESH) {
-            // Unsynchronised: the ring is per frame parity and the cursor only
+            // Unsynchronised: the ring is per frame slot and the cursor only
             // advances, so no draw of this frame or the one in flight reads
             // the range. The synchronised update made Apple's GL driver wait
             // for the previous draw of the buffer — 0.7 ms per body, 0.6 ms of

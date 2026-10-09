@@ -92,7 +92,7 @@ namespace Render {
             size_t       capacityVerts = 0;
             size_t       usedVerts = 0;   // this frame's cursor
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
 
         std::vector<Vert> m_verts;   // reused: a steady frame allocates nothing

@@ -19,6 +19,7 @@
 #include "client/renderer/backend/RenderBackend.hpp"
 #include "client/renderer/environment/EntityEnvironment.hpp"
 #include "client/renderer/core/RenderOrigin.hpp"
+#include "client/renderer/mesh/ChunkRenderer.hpp"   // PortalClipPlane
 
 #include <cmath>
 
@@ -82,6 +83,12 @@ namespace Render::BlockEntityShader {
     // caller sets its own afterwards).
     inline void ApplyWorld(ShaderHandle shader, const glm::mat4& localToRender,
                            const glm::vec3& cameraWorld, const glm::ivec3& blockPos) {
+        // The portal clip plane (zero outside a see-through pass) FIRST:
+        // on Vulkan/Metal the name is aliased onto the push constants' uColor
+        // slot as well as the Common block's uTint — the model matrix below
+        // overwrites that push slot (its three rows), and the vertex shader
+        // reads the plane from the block (blockentity_vk.vert).
+        g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", ChunkRenderer::PortalClipPlane());
         g_renderBackend->SetUniformMat4(shader, "uLocalToRender", localToRender);
         EntityEnvironment::ApplyWorld(shader, glm::dvec3(cameraWorld));
         SetLight(shader, LightAt(blockPos));
@@ -104,6 +111,10 @@ namespace Render::BlockEntityShader {
     // fog sees the same placement the MVP does.
     inline void ApplyItem(ShaderHandle shader, const BEWLRLight& light,
                           const glm::mat4& meshToItem = glm::mat4(1.0f)) {
+        // No portal plane for an item form (a held or dropped chest is
+        // never half through a portal), and never a stale one from another
+        // renderer's uTint — see ApplyWorld for the order.
+        g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", glm::vec4(0.0f));
         g_renderBackend->SetUniformMat4(shader, "uLocalToRender", light.localToRender * meshToItem);
         if (light.world) {
             EntityEnvironment::ApplyWorld(shader, light.cameraWorld);

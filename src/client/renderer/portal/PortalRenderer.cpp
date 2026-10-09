@@ -7,9 +7,6 @@
 #include "PortalRenderer.hpp"
 #include "PortalCameraTransform.hpp"
 #include "../backend/RenderBackend.hpp"
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 #include "../mesh/ChunkRenderer.hpp"     // RenderChunksAll for the see-through scene re-render
 #include "../core/WorldFramebuffer.hpp"
 #include "client/world/ClientChunkManager.hpp"   // section info for the occlusion gate
@@ -680,32 +677,14 @@ void main() {
             return false;
         }
 
-        // Try SPIR-V first (Vulkan), fall back to GLSL source (OpenGL). No
-        // .spv files exist yet — the SPIR-V path lands with Phase 5 along
-        // with the stencil pipeline. On Vulkan today this Initialize() will
-        // currently fall through to the source compile, which the Vulkan
-        // backend rejects → m_shader stays INVALID and Render() no-ops
-        // gracefully. Acceptable: the user is on GL by default.
-        // On Vulkan, this needs the *portal* pipeline layout (UBO-aware),
-        // which only CreateShaderFromFilesPortal sets up. We do a backend
-        // type check rather than always calling the Portal variant because
-        // the OpenGL backend's CreateShaderFromFilesPortal symbol isn't
-        // defined — the static dispatch in the abstract RenderBackend
-        // only knows CreateShaderFromFiles. So we cast and call directly
-        // on Vulkan.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/portal.vert", "shaders/portal.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/portal.vert", "shaders/portal.frag");
-            if (m_shader == INVALID_SHADER) {
-                m_shader = g_renderBackend->CreateShader(
-                    vertexShaderSource, fragmentShaderSource);
-            }
+        // The shader files first; OpenGL falls back to the inline GLSL
+        // source. With the _vk shaders this needs the *portal* pipeline
+        // layout (UBO-aware), which CreateShaderFromFilesPortal sets up.
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal(
+            "shaders/portal.vert", "shaders/portal.frag");
+        if (m_shader == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
+            m_shader = g_renderBackend->CreateShader(
+                vertexShaderSource, fragmentShaderSource);
         }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[PortalRenderer] Failed to create shader — portal "
@@ -1363,7 +1342,22 @@ void main() {
             const glm::dvec4 clipPlane(dstN, -glm::dot(dstN, dst.origin) + kClipPlaneOffsetBack);
             ChunkRenderer::SetPortalClipPlane(clipPlane);
 
-            renderScene(virt, virtFrust, virtProj);
+            // ONE projection for everything the callback draws. On OpenGL
+            // the oblique one: its near plane is the portal plane, which
+            // clips the far side for free. On Vulkan and Metal the plain
+            // one: the terrain cannot take the oblique matrix there (its
+            // depth remap puts kept geometry past the far plane —
+            // ChunkRenderer::BindSharedRenderState) and clips at the plane
+            // through gl_ClipDistance instead — and every entity drawn
+            // into the same depth buffer must use the SAME matrix, or
+            // their depths are in different spaces: with the entities on
+            // the oblique projection and the terrain on the plain one, a
+            // mob just under the water surface won the depth test against
+            // the water and drew on top of it (seen through gun portals
+            // only, 2026-10-08). The entity and block-entity shaders clip
+            // at the plane the same way, so nothing is lost.
+            const bool plainProjection = g_renderBackend && g_renderBackend->UsesVkShaders();
+            renderScene(virt, virtFrust, plainProjection ? baseProj : virtProj);
 
             ChunkRenderer::SetPortalClipPlane(glm::dvec4(0.0));  // reset
             g_renderBackend->SetStencilOverride(false);

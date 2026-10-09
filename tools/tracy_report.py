@@ -4,6 +4,7 @@
     tools/tracy_report.py capture.tracy                  # one capture
     tools/tracy_report.py gl.tracy vk.tracy              # A/B comparison
     tools/tracy_report.py gl.tracy vk.tracy --full       # comparison + both full reports
+    tools/tracy_report.py gl.tracy vk.tracy mtl.tracy    # three or more: one side-by-side table
     tools/tracy_report.py capture.tracy --window all     # whole capture, loading included
     tools/tracy_report.py capture.tracy --window 10:40   # seconds 10..40 of the capture
 
@@ -34,7 +35,9 @@ W = 110
 MAIN_NAMES = ("Main thread",)
 SERVER_NAMES = ("ServerThread",)
 SERVER_IDLE = {"Server.Park"}          # the server's sleep until the next tick
-FRAME_WAITS = {"Present", "Vk.FenceWait", "Vk.Acquire"}  # swap / vsync / GPU back-pressure on the main thread
+# Swap / vsync / GPU back-pressure on the main thread, per backend: OpenGL's
+# Present, Vulkan's fence and acquire, Metal's frame-slot wait and drawable.
+FRAME_WAITS = {"Present", "Vk.FenceWait", "Vk.Acquire", "Mtl.FrameWait", "Mtl.NextDrawable"}
 WAIT_ZONES = SERVER_IDLE | FRAME_WAITS  # left out of "busy"
 
 
@@ -144,11 +147,12 @@ class Summary:
         if not d:
             return None
         worst1 = d[-max(1, len(d) // 100):]
+        worst01 = d[-max(1, len(d) // 1000):]
         return {
             "n": len(d), "mean": mean(d), "p50": pct(d, .5), "p90": pct(d, .9), "p95": pct(d, .95),
-            "p99": pct(d, .99), "max": d[-1], "low1_fps": 1e9 / mean(worst1),
+            "p99": pct(d, .99), "max": d[-1], "low1_fps": 1e9 / mean(worst1), "low01_fps": 1e9 / mean(worst01),
             "fps": len(d) / (self.span_ns / 1e9) if self.span_ns else 0,
-            "over16": sum(1 for x in d if x > 16.7e6), "over33": sum(1 for x in d if x > 33.3e6),
+            "over8": sum(1 for x in d if x > 8.33e6), "over16": sum(1 for x in d if x > 16.7e6), "over33": sum(1 for x in d if x > 33.3e6),
             "over50": sum(1 for x in d if x > 50e6),
         }
 
@@ -222,6 +226,119 @@ class Summary:
         return {"n": len(v), "min": v[0], "mean": mean(v), "p50": pct(v, .5), "p95": pct(v, .95), "max": v[-1]}
 
 
+# ── Phase A/B inside one capture ──────────────────────────────────────────────
+
+PHASE_PLOTS = ("Gpu/EncFrameUs", "Mtl/GpuFrameUs", "Mtl/FrameWaitUs", "Mtl/Draws", "Draws/Merged", "Draws/Entries", "Geom/Indices", "Geom/Vertices")
+
+
+def phase_report(s, margin_s=1.0):
+    """Frame stats split by the DevSkip/On plot (OBEY_SKIP=<stage> with
+    OBEY_SKIP_PERIOD=<sec>): the skip-on and skip-off phases of ONE run, so the
+    two sides share the machine's clock state — the fanless Air drifts 25 % across
+    a five-run series, which hides anything smaller than that. The first
+    `margin_s` seconds after every transition are dropped (the switch lands
+    mid-frame; the pipeline takes a few frames to settle)."""
+    pts = s.ex.plots(["DevSkip/On"]).get("DevSkip/On")
+    if not pts:
+        print("  no DevSkip/On plot — run with OBEY_SKIP=<stage> OBEY_SKIP_PERIOD=<sec>")
+        return
+    w0, w1 = s.window
+    segs = []
+    cur_t = cur_v = None
+    for t, v in pts:
+        if cur_v is None or v != cur_v:
+            if cur_v is not None:
+                segs.append((cur_t, t, int(cur_v)))
+            cur_t, cur_v = t, v
+    segs.append((cur_t, w1, int(cur_v)))
+    margin = int(margin_s * 1e9)
+    segs = [(max(st + margin, w0), min(en, w1), v) for st, en, v in segs if min(en, w1) > max(st + margin, w0)]
+
+    def phase_of(t):
+        for st, en, v in segs:
+            if st <= t <= en:
+                return v
+        return None
+
+    span = {0: 0, 1: 0}
+    for st, en, v in segs:
+        span[v] += en - st
+    frames = {0: [], 1: []}
+    for _, st, en in s.frames.get(s.main_set) or []:
+        ph = phase_of(st)
+        if ph is not None:
+            frames[ph].append(en - st)
+    header(f"PHASE A/B  {s.name}  — DevSkip/On off vs on, {len(segs)} segments, {margin_s:.0f}s settle after each switch")
+    rows = []
+    for ph, label in ((0, "skip off"), (1, "skip on")):
+        d = sorted(frames[ph])
+        if not d:
+            print(f"  {label}: no frames")
+            continue
+        worst1 = d[-max(1, len(d) // 100):]
+        fps = len(d) / (span[ph] / 1e9) if span[ph] else 0
+        rows.append((label, len(d), fps, mean(d), pct(d, .5), pct(d, .99), 1e9 / mean(worst1),
+                     100 * sum(1 for x in d if x > 8.33e6) / len(d)))
+    print(f"  {'phase':9s} {'frames':>7s} {'fps':>7s} {'mean ms':>8s} {'p50':>6s} {'p99':>6s} {'1%-low':>7s} {'>8.3ms':>7s}")
+    for label, n, fps, mn, p50, p99, low1, over in rows:
+        print(f"  {label:9s} {n:7d} {fps:7.1f} {ms(mn):8.2f} {ms(p50):6.2f} {ms(p99):6.2f} {low1:7.1f} {over:6.1f}%")
+    if len(rows) == 2:
+        a, b = rows
+        print(f"  on vs off: fps {100 * (b[2] / a[2] - 1):+.1f}%   frame mean {100 * (b[3] / a[3] - 1):+.1f}%"
+              f"   p99 {100 * (b[5] / a[5] - 1):+.1f}%")
+    # Is it real? Each segment is one sample of its phase; consecutive
+    # (off, on) segments are a PAIR, so a slow drift (the Air heating
+    # through the run) cancels within the pair. The paired deltas' mean and
+    # a 95 % interval (t, n-1 dof) say whether the effect clears the run's
+    # own noise — a delta inside its interval is not a result.
+    seg_fps = []
+    for st, en, v in segs:
+        d = [en_ - st_ for _, st_, en_ in (s.frames.get(s.main_set) or []) if st <= st_ <= en]
+        if d and en > st:
+            seg_fps.append((v, len(d) / ((en - st) / 1e9)))
+    pairs = []
+    for i in range(len(seg_fps) - 1):
+        (v0, f0), (v1, f1) = seg_fps[i], seg_fps[i + 1]
+        if v0 == 0 and v1 == 1:
+            pairs.append(100 * (f1 / f0 - 1))
+        elif v0 == 1 and v1 == 0:
+            pairs.append(100 * (f0 / f1 - 1))
+    if len(pairs) >= 2:
+        n = len(pairs)
+        m = sum(pairs) / n
+        sd = (sum((x - m) ** 2 for x in pairs) / (n - 1)) ** 0.5
+        t95 = {2: 12.71, 3: 4.30, 4: 3.18, 5: 2.78, 6: 2.57, 7: 2.45, 8: 2.36, 9: 2.31, 10: 2.26}.get(n, 2.2)
+        ci = t95 * sd / n ** 0.5
+        verdict = "REAL" if abs(m) > ci else "within noise"
+        print(f"  paired segments: skip on vs off fps {m:+.1f}% ± {ci:.1f}% (95 %, {n} pairs) -> {verdict}")
+    # Plot means per phase, PER FRAME: a plot emitted more than once a
+    # frame (the draw and geometry counts go out per layer) is summed
+    # within the frame first, so a per-layer count and a per-frame count
+    # compare. A plot one phase never emits (the GPU path's counts in the
+    # CPU phase) shows "—" on that side.
+    import bisect
+    starts = sorted(st for _, st, _ in (s.frames.get(s.main_set) or []))
+    plots = s.ex.plots(list(PHASE_PLOTS))
+    for name in PHASE_PLOTS:
+        pp = plots.get(name)
+        if not pp:
+            continue
+        per_frame = {0: {}, 1: {}}
+        for t, v in pp:
+            ph = phase_of(t)
+            if ph is None or not (w0 <= t <= w1) or not starts:
+                continue
+            f = bisect.bisect_right(starts, t) - 1
+            per_frame[ph][f] = per_frame[ph].get(f, 0) + v
+        by = {ph: list(per_frame[ph].values()) for ph in (0, 1)}
+        if not by[0] and not by[1]:
+            continue
+        m0 = mean(by[0]) if by[0] else None
+        m1 = mean(by[1]) if by[1] else None
+        delta = f"{100 * (m1 / m0 - 1):+.1f}%" if m0 and m1 else ""
+        print(f"  {name:28s} off {(fmt_num(m0) if m0 is not None else '—'):>10s}   on {(fmt_num(m1) if m1 is not None else '—'):>10s}   {delta}")
+
+
 # ── Single-capture report ─────────────────────────────────────────────────────
 
 def report(s):
@@ -240,10 +357,12 @@ def report(s):
     if not fs:
         print("  no FrameMark frames in the window")
     else:
-        print(f"  {fs['n']} frames in {s.span_ns / 1e9:.1f}s = {fs['fps']:.1f} fps   1%-low {fs['low1_fps']:.1f} fps")
+        print(f"  {fs['n']} frames in {s.span_ns / 1e9:.1f}s = {fs['fps']:.1f} fps   1%-low {fs['low1_fps']:.1f} fps"
+              f"   0.1%-low {fs['low01_fps']:.1f} fps")
         print(f"  frame time ms: mean {ms(fs['mean']):.2f}  p50 {ms(fs['p50']):.2f}  p90 {ms(fs['p90']):.2f}  "
               f"p95 {ms(fs['p95']):.2f}  p99 {ms(fs['p99']):.2f}  max {ms(fs['max']):.1f}")
-        print(f"  frames >16.7ms {fs['over16']} ({100 * fs['over16'] / fs['n']:.1f}%)   >33.3ms {fs['over33']}   "
+        print(f"  frames >8.3ms {fs['over8']} ({100 * fs['over8'] / fs['n']:.1f}%)   "
+              f">16.7ms {fs['over16']} ({100 * fs['over16'] / fs['n']:.1f}%)   >33.3ms {fs['over33']}   "
               f">50ms {fs['over50']}")
 
     # ── Main thread budget
@@ -375,8 +494,10 @@ def compare(a, b):
         print(f"  {'':38s} {'A':>13s} {'B':>13s} {'B - A':>10s}")
         row("fps", fa["fps"], fb["fps"], better="higher")
         row("1%-low fps", fa["low1_fps"], fb["low1_fps"], better="higher")
+        row("0.1%-low fps", fa["low01_fps"], fb["low01_fps"], better="higher")
         for k in ("mean", "p50", "p90", "p95", "p99", "max"):
             row(f"frame time {k}", ms(fa[k]), ms(fb[k]), "ms")
+        row("frames >8.3ms (%)", 100 * fa["over8"] / fa["n"], 100 * fb["over8"] / fb["n"], "%")
         row("frames >16.7ms (%)", 100 * fa["over16"] / fa["n"], 100 * fb["over16"] / fb["n"], "%")
         row("frames >33.3ms", fa["over33"], fb["over33"], fmt="{:.0f}")
 
@@ -430,24 +551,74 @@ def compare(a, b):
     print("=" * W)
 
 
+def compare_many(sums):
+    """Three or more captures (say GL, Vulkan, Metal): the frame pacing and
+    the main thread's CPU work vs its waits, one column per capture. The
+    per-zone differences stay pairwise — run two captures for those."""
+    header("SIDE BY SIDE  " + "   ".join(f"[{i + 1}] {s.name}" for i, s in enumerate(sums)))
+    for i, s in enumerate(sums):
+        print(f"  [{i + 1}] window: {s.window_desc}")
+    stats = [s.frame_stats(s.main_set) if s.main_set else None for s in sums]
+    cpu, wait = [], []
+    for s in sums:
+        if s.main_set and s.main is not None:
+            b = s.budget(s.main_set, s.main)
+            covered = sum(v["self_mean"] for v in b.values())
+            w = sum(b[x]["self_mean"] for x in FRAME_WAITS if x in b)
+            cpu.append(ms(covered - w))
+            wait.append(ms(w))
+        else:
+            cpu.append(None)
+            wait.append(None)
+    col = 14
+
+    def line(label, values, fmt):
+        cells = "".join(f"{(fmt.format(v) if v is not None else '-'):>{col}s}" for v in values)
+        print(f"  {label:30s}{cells}")
+
+    print(f"  {'':30s}" + "".join(f"{'[' + str(i + 1) + ']':>{col}s}" for i in range(len(sums))))
+    line("fps", [f["fps"] if f else None for f in stats], "{:.1f}")
+    line("1%-low fps", [f["low1_fps"] if f else None for f in stats], "{:.1f}")
+    line("0.1%-low fps", [f["low01_fps"] if f else None for f in stats], "{:.1f}")
+    for k in ("mean", "p50", "p90", "p95", "p99", "max"):
+        line(f"frame time {k} (ms)", [ms(f[k]) if f else None for f in stats], "{:.2f}")
+    line("frames >16.7ms (%)", [100 * f["over16"] / f["n"] if f else None for f in stats], "{:.2f}")
+    line("frames >8.3ms (%)", [100 * f["over8"] / f["n"] if f else None for f in stats], "{:.2f}")
+    line("frames >33.3ms", [f["over33"] if f else None for f in stats], "{:.0f}")
+    line("main-thread CPU work (ms)", cpu, "{:.2f}")
+    line("main-thread waits (ms)", wait, "{:.2f}")
+    print("=" * W)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("captures", nargs="+", help="one capture, or two to compare (A then B)")
+    ap.add_argument("captures", nargs="+",
+                    help="one capture, two to compare (A then B), or more for a side-by-side table")
     ap.add_argument("--window", default="replay",
                     help="replay (default: the replayed path when there is one), all, or START:END seconds")
     ap.add_argument("--full", action="store_true", help="with two captures, also print each full report")
+    ap.add_argument("--settle", type=float, default=1.0,
+                    help="--phase: seconds dropped after every switch (default 1.0; 0.3 with OBEY_SKIP_PERIOD=2)")
+    ap.add_argument("--phase", action="store_true",
+                    help="split ONE capture's frames by the DevSkip/On plot (OBEY_SKIP + OBEY_SKIP_PERIOD): "
+                         "the heat-proof A/B")
     args = ap.parse_args()
-    if len(args.captures) > 2:
-        ap.error("at most two captures")
 
     sums = [Summary(tracy_tools.export(c), args.window) for c in args.captures]
+    if args.phase:
+        for s in sums:
+            phase_report(s, args.settle)
+        return
     if len(sums) == 1:
         report(sums[0])
         return
     if args.full:
         for s in sums:
             report(s)
-    compare(*sums)
+    if len(sums) == 2:
+        compare(*sums)
+    else:
+        compare_many(sums)
 
 
 if __name__ == "__main__":

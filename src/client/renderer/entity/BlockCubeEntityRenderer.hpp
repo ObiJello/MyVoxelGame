@@ -129,7 +129,7 @@ namespace Render {
         // grow (the old buffer is kept).
         bool EnsureInstanceCapacity(FrameBuffers& fb, size_t needed);
         VertexLayout m_instanceLayout;
-        FrameBuffers m_cubeFrames[2];
+        FrameBuffers m_cubeFrames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
         size_t m_vertCursor = 0;
         size_t m_idxCursor  = 0;

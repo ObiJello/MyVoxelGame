@@ -27,6 +27,15 @@ out gl_PerVertex { vec4 gl_Position; };
 
 void main() {
     gl_Position = pc.uMVP * vec4(aPos, 1.0);
+    // The sky sits on the far plane: z = w puts every sky pixel at depth
+    // 1.0 exactly (the depth clear), so the late sky pass — drawn AFTER the
+    // opaque and cutout terrain with depth test LessEqual and no depth
+    // write (SkyRenderer::SetDepthTested) — passes only where nothing was
+    // drawn and the GPU shades no sky fragment the terrain covers (the
+    // sky was 17 % of a clear-weather frame when it shaded the whole
+    // screen first, 2026-10-08). Views that keep the sky first (depth
+    // test off) are unaffected: z is not read there.
+    gl_Position.z = gl_Position.w;
     vUV = aUV;
     vColor = aColor;
     // Fog distances from the raw buffer position (camera-centered sky).

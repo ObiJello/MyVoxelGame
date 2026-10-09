@@ -294,6 +294,9 @@ namespace Platform {
         // (WeatherEffectRenderer). Full is MC's look; Half shades ~4x fewer
         // weather pixels, but splits the frame's render pass for it, so it
         // only pays at a large Weather Effect Radius. Every preset sets Full.
+        // Metal ignores it (no control either): with the rain's streak
+        // instancing, Full is ~3 % faster there than Half's extra pass
+        // (WeatherEffectRenderer::HalfResolutionAvailable, 2026-10-07).
         bool GetRainHalfResolution() const { return GetBool("rainHalfResolution", false); }
         void SetRainHalfResolution(bool half) { SetBool("rainHalfResolution", half); NoteGraphicsOptionChanged(); }
         void SetCloudRange(int range) { SetInt("cloudRange", range); NoteGraphicsOptionChanged(); }

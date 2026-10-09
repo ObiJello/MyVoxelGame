@@ -57,6 +57,10 @@ namespace Render {
         float fogEnvEnd = 1024.0f;
         float fogRdStart = 1e9f;
         float fogRdEnd = 1e9f;
+        // The Video Settings fog toggle, as composed: off pushes every
+        // terrain fog distance out of reach AND lets the terrain shaders
+        // skip the fog math (ChunkRenderer sends it as uFogColor's alpha).
+        bool  fogEnabled = true;
         float fogSkyEnd = 512.0f;
         float fogCloudEnd = 2048.0f;
 

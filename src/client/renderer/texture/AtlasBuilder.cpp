@@ -1,6 +1,7 @@
 // File: src/client/renderer/texture/AtlasBuilder.cpp
 #include "AtlasBuilder.hpp"
 #include <unordered_map>
+#include <unordered_set>
 #include "TextureAnimator.hpp"
 #include "common/core/AssetLocator.hpp"
 #include "MipmapGenerator.hpp"
@@ -8,6 +9,7 @@
 #include "Stitcher.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "common/core/Log.hpp"
+#include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"   // anisotropic filtering setting
 #include <filesystem>
 #include <fstream>
@@ -96,6 +98,7 @@ namespace Render {
         m_animator.reset();   // its GPU frames go before the backend-owned atlas
         if (Render::g_renderBackend) {
             DestroyAtlasTextures();
+            DestroySpriteArray();
             if (m_spriteTable != Render::INVALID_TEXTURE)
                 Render::g_renderBackend->DestroyTexture(m_spriteTable);
             if (m_grassColormap != Render::INVALID_TEXTURE)
@@ -609,7 +612,7 @@ namespace Render {
 
             textureKeyToUV[source.key] = uvRect;
         }
-        if (GetConfig().spriteTable) BuildSpriteTable();
+        if (GetConfig().spriteTable) BuildSpriteTable(sources, packedRects);
         BuildSpriteAlpha(sources, packedRects);
         
 
@@ -656,6 +659,7 @@ namespace Render {
         // filter. Must run after the texture exists and after the filter is
         // set, and it rewrites level 0 as well as adding the levels above.
         BuildAndUploadMipChain(sources, packedRects);
+        BuildSpriteArray(sources);
         m_packedRects = packedRects;   // kept for later rebuilds
         Log::Info("Created atlas texture (%dx%d, mipmaps: %s)",
                  atlasWidth, atlasHeight, mipmapEnabled ? "enabled" : "disabled");
@@ -679,6 +683,7 @@ namespace Render {
         if (m_atlasTexture != Render::INVALID_TEXTURE) {
             UpdateTextureParameters();
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            BuildSpriteArray(textureSources);   // its level count follows the chain's
             ReleaseLevel0();
             RegisterAnimations();   // the frames carry the new chain depth
             Log::Info("AtlasBuilder mipmaps %s", enabled ? "enabled" : "disabled");
@@ -692,6 +697,7 @@ namespace Render {
             // The chain is CPU-authored, so a new level count means rebuilding
             // it — the driver is not going to fill the extra levels for us.
             BuildAndUploadMipChain(textureSources, m_packedRects);
+            BuildSpriteArray(textureSources);
             ReleaseLevel0();
             RegisterAnimations();
             Log::Info("Set mipmap level to %d", m_mipmapLevel);
@@ -710,8 +716,12 @@ namespace Render {
             UpdateTextureParameters();
             // The chain is CPU-authored (see SetMipmapLevel), so a deeper
             // chain has to be rebuilt; switching OFF only needs the sampler
-            // change above, the unused levels can stay resident.
-            if (enabled) BuildAndUploadMipChain(textureSources, m_packedRects);
+            // change above, the unused levels can stay resident (the sprite
+            // array's too — its sampler stops at level 0 the same way).
+            if (enabled) {
+                BuildAndUploadMipChain(textureSources, m_packedRects);
+                BuildSpriteArray(textureSources);
+            }
             ReleaseLevel0();
             RegisterAnimations();
             Log::Info("AtlasBuilder mipmap levels -> %d (%s)", levels, enabled ? "on" : "off");
@@ -743,6 +753,36 @@ namespace Render {
         // a chain there is nothing for it to smooth.
         Render::g_renderBackend->SetTextureAnisotropy(m_atlasTexture,
             mipmapEnabled ? static_cast<float>(Platform::g_gameSettings.GetAnisotropicFiltering()) : 1.0f);
+        ApplySpriteArrayParameters();
+    }
+
+    void AtlasBuilder::ApplySpriteArrayParameters() {
+        if (!Render::g_renderBackend) return;
+        // The atlas's filter and anisotropy, so a sprite looks the same from
+        // either path; wrap REPEAT is the point of the array — a tiled quad's
+        // uv runs 0..N and the hardware folds it, where the atlas path needs
+        // fract() and the padding ring.
+        for (Render::TextureHandle array : m_spriteArrays) {
+            if (array == Render::INVALID_TEXTURE) continue;
+            if (mipmapEnabled) {
+                Render::g_renderBackend->SetTextureFilter(array,
+                    Render::TextureFilter::NearestMipmapLinear, Render::TextureFilter::Nearest);
+            } else {
+                Render::g_renderBackend->SetTextureFilter(array,
+                    Render::TextureFilter::Nearest, Render::TextureFilter::Nearest);
+            }
+            Render::g_renderBackend->SetTextureWrap(array, Render::TextureWrap::Repeat, Render::TextureWrap::Repeat);
+            Render::g_renderBackend->SetTextureAnisotropy(array,
+                mipmapEnabled ? static_cast<float>(Platform::g_gameSettings.GetAnisotropicFiltering()) : 1.0f);
+        }
+    }
+
+    void AtlasBuilder::DestroySpriteArray() {
+        for (Render::TextureHandle& array : m_spriteArrays) {
+            if (Render::g_renderBackend && array != Render::INVALID_TEXTURE) Render::g_renderBackend->DestroyTexture(array);
+            array = Render::INVALID_TEXTURE;
+        }
+        m_spriteArrayLevels = 0;
     }
 
     void AtlasBuilder::DestroyAtlasTextures() {
@@ -755,6 +795,7 @@ namespace Render {
     void AtlasBuilder::ReleaseGpuResources() {
         if (!Render::g_renderBackend) return;
         DestroyAtlasTextures();
+        DestroySpriteArray();
         for (Render::TextureHandle* t : {&m_spriteTable, &m_grassColormap, &m_foliageColormap}) {
             if (*t != Render::INVALID_TEXTURE) { Render::g_renderBackend->DestroyTexture(*t); *t = Render::INVALID_TEXTURE; }
         }
@@ -789,6 +830,7 @@ namespace Render {
         // Fresh texture object, so its levels above 0 start undefined — the
         // CPU chain has to be re-uploaded onto it.
         BuildAndUploadMipChain(textureSources, m_packedRects);
+        BuildSpriteArray(textureSources);
         ReleaseLevel0();
 
         // Update TextureAnimator with the new atlas handle
@@ -1198,13 +1240,99 @@ namespace Render {
         return handle;
     }
 
-    void AtlasBuilder::BuildSpriteTable() {
+    namespace {
+        bool IsPowerOfTwo(int v) { return v > 0 && (v & (v - 1)) == 0; }
+        int Log2Exact(int v) { int n = 0; while ((1 << n) < v) ++n; return n; }
+
+        // OBEY_SPRITE_ARRAY=0: no sprite array — every greedy quad samples
+        // the atlas through the sprite table (the kill switch; OBEY_SKIP=
+        // spritearray is the in-run A/B that keeps the array resident).
+        bool SpriteArrayEnabled() {
+            static const bool s_enabled = [] {
+                const char* v = std::getenv("OBEY_SPRITE_ARRAY");
+                const bool on = !(v && std::strcmp(v, "0") == 0);
+                if (!on) Log::Info("[AtlasBuilder] sprite array disabled (OBEY_SPRITE_ARRAY=0)");
+                return on;
+            }();
+            return s_enabled;
+        }
+
+        using Mipmap::UpscaleNearest;
+    } // namespace
+
+    void AtlasBuilder::BuildSpriteTable(const std::vector<TextureSource>& sources,
+                                        const std::vector<PackRect>& packedRects) {
         // Deterministic ids: sorted key order, so a rebuild with the same
-        // sprite set numbers them identically (meshes carry the ids).
+        // sprite set numbers them identically (meshes carry the ids) — the
+        // sprites the sprite array holds first (their id is their layer),
+        // then every other sprite.
+        std::unordered_map<std::string, int> indexOfKey;
+        indexOfKey.reserve(packedRects.size());
+        for (const PackRect& rect : packedRects) {
+            if (rect.textureIndex >= 0 && rect.textureIndex < static_cast<int>(sources.size())) {
+                indexOfKey[sources[static_cast<size_t>(rect.textureIndex)].key] = rect.textureIndex;
+            }
+        }
+        // A layer of the array: a square, power-of-two sprite no larger than
+        // kMaxSpriteArraySize (an animated sprite by its FRAME: the animator
+        // writes its layer as it writes its atlas rect)...
+        auto squareStill = [&](const std::string& key) {
+            if (!SpriteArrayEnabled()) return false;
+            auto it = indexOfKey.find(key);
+            if (it == indexOfKey.end()) return false;
+            const TextureSource& src = sources[static_cast<size_t>(it->second)];
+            return src.width == src.height && IsPowerOfTwo(src.width) && src.width <= kMaxSpriteArraySize &&
+                   !src.data.empty();
+        };
+        auto sideOf = [&](const std::string& key) { return sources[static_cast<size_t>(indexOfKey[key])].width; };
+
         std::vector<std::string> keys;
         keys.reserve(textureKeyToUV.size());
         for (const auto& kv : textureKeyToUV) keys.push_back(kv.first);
         std::sort(keys.begin(), keys.end());
+
+        // ...and no larger than the pack's usual sprite side (the mode): a
+        // layer is S x S, and a smaller sprite is upscaled into level 0, so
+        // a few 32 px sprites in a 16 px pack (vanilla: 47 of 1400, mostly
+        // the chiseled bookshelf and the campfire/soul-fire variants) would
+        // otherwise make every near block's magnified sample read 4x the
+        // texels. Those few keep the atlas path instead.
+        std::unordered_map<int, int> sideCount;
+        for (const std::string& key : keys) if (squareStill(key)) ++sideCount[sideOf(key)];
+        int mode = 0, modeCount = -1;
+        for (const auto& [side, count] : sideCount) {
+            if (count > modeCount || (count == modeCount && side < mode)) { mode = side; modeCount = count; }
+        }
+        auto arrayable = [&](const std::string& key) { return squareStill(key) && sideOf(key) <= mode; };
+        // Arrayable sprites first; among them the ones from a texture file
+        // before the generated ones (the connected-texture edge variants,
+        // 846 of them for 18 blocks): an array holds at most the backend's
+        // layer count (2048 on Metal, fewer sprites than this atlas has),
+        // and the overflow — the sprites past the cap — keeps the atlas
+        // path, so it should be the rarely seen ones.
+        auto generated = [&](const std::string& key) {
+            auto it = indexOfKey.find(key);
+            return it != indexOfKey.end() && sources[static_cast<size_t>(it->second)].generated;
+        };
+        auto eligibleEnd = std::stable_partition(keys.begin(), keys.end(), arrayable);
+        std::stable_partition(keys.begin(), eligibleEnd, [&](const std::string& k) { return !generated(k); });
+        m_spriteArrayCap = Render::g_renderBackend ? std::max(0, Render::g_renderBackend->MaxTextureArrayLayers()) : 0;
+        const int maxLayers = m_spriteArrayCap * kSpriteArrays;
+
+        m_spriteArraySources.clear();
+        m_spriteArraySize = 0;
+        m_spriteArrayMinSize = 0;
+        for (const std::string& key : keys) {
+            if (!arrayable(key)) break;
+            if (static_cast<int>(m_spriteArraySources.size()) >= maxLayers) break;
+            const int index = indexOfKey[key];
+            const int size = sources[static_cast<size_t>(index)].width;
+            m_spriteArraySources.push_back(index);
+            m_spriteArraySize = std::max(m_spriteArraySize, size);
+            m_spriteArrayMinSize = m_spriteArrayMinSize == 0 ? size : std::min(m_spriteArrayMinSize, size);
+        }
+        m_spriteArrayLayers = static_cast<int>(m_spriteArraySources.size());
+
         if (keys.size() > 65535) {
             Log::Error("AtlasBuilder: %zu sprites exceed the 16-bit sprite id; tiled quads past 65535 will mis-sample",
                        keys.size());
@@ -1236,8 +1364,125 @@ namespace Render {
         if (m_spriteTable == Render::INVALID_TEXTURE) {
             Log::Error("AtlasBuilder: failed to create the sprite table texture");
         } else {
-            Log::Info("Atlas sprite table: %zu sprites in %d row(s)", keys.size(), rows);
+            const size_t eligible = static_cast<size_t>(std::distance(keys.begin(), eligibleEnd));
+            Log::Info("Atlas sprite table: %zu sprites in %d row(s); %d of %zu %d..%d px squares in the sprite arrays (%d x %d layers)",
+                      keys.size(), rows, m_spriteArrayLayers, eligible, m_spriteArrayMinSize, m_spriteArraySize,
+                      kSpriteArrays, m_spriteArrayCap);
         }
+    }
+
+    void AtlasBuilder::BuildSpriteArray(const std::vector<TextureSource>& sources) {
+        DestroySpriteArray();
+        if (!Render::g_renderBackend || m_spriteArrayLayers <= 0 || m_spriteArraySize <= 0 || m_spriteArrayCap <= 0) return;
+        PROFILE_ZONE_N("Atlas.BuildSpriteArray");
+
+        // Every layer is S x S. A sprite of side S >> shift is upscaled by
+        // 1 << shift (nearest) into level 0 and its own chain fills the
+        // levels from `shift` on, so at any LOD the GPU reads exactly the
+        // texels the atlas holds for that sprite at LOD - shift — the same
+        // texels the atlas path's textureGrad (derivatives scaled by the
+        // sprite's atlas size) selects. The level count is the atlas's chain
+        // plus the deepest upscale, so the smallest sprite still reaches the
+        // level the atlas clamps at; a larger sprite gets that many levels of
+        // its own chain, continuing past where the atlas stops (a 1x1 where
+        // the atlas clamps at 2x2 — at a distance where the whole sprite is
+        // under a pixel). Capped at the full chain to 1x1.
+        const int S = m_spriteArraySize;
+        const int atlasLevels = EffectiveMipLevels();
+        const int maxShift = Log2Exact(S / std::max(1, m_spriteArrayMinSize));
+        const int levels = std::min(Log2Exact(S) + 1, atlasLevels + 1 + maxShift);
+        const int cap = m_spriteArrayCap;
+
+        // The arrays, each its run of `cap` sprite ids (the second is the
+        // overflow). Every array must exist for the ids to mean anything,
+        // so a failure drops them all.
+        const int arrayCount = std::min(kSpriteArrays, (m_spriteArrayLayers + cap - 1) / cap);
+        for (int a = 0; a < arrayCount; ++a) {
+            const int layers = std::min(cap, m_spriteArrayLayers - a * cap);
+            m_spriteArrays[static_cast<size_t>(a)] =
+                Render::g_renderBackend->CreateTexture2DArray(S, S, layers, levels, Render::TextureFormat::RGBA8);
+            if (m_spriteArrays[static_cast<size_t>(a)] == Render::INVALID_TEXTURE) {
+                Log::Warning("AtlasBuilder: no sprite array %d (%d layers of %dx%d, %d levels) — greedy quads sample the atlas",
+                             a, layers, S, S, levels);
+                DestroySpriteArray();
+                return;
+            }
+        }
+        m_spriteArrayLevels = levels;
+
+        // One buffer per level holding an array's layers back to back (the
+        // upload API takes a level of all layers at once), array by array.
+        std::vector<std::vector<uint8_t>> levelData(static_cast<size_t>(levels));
+        std::vector<size_t> layerBytes(static_cast<size_t>(levels));
+        for (int j = 0; j < levels; ++j) {
+            const int side = std::max(1, S >> j);
+            layerBytes[static_cast<size_t>(j)] = static_cast<size_t>(side) * static_cast<size_t>(side) * 4u;
+        }
+        size_t bytes = 0;
+        for (int a = 0; a < arrayCount; ++a) {
+            const int first = a * cap;
+            const int layers = std::min(cap, m_spriteArrayLayers - first);
+            for (int j = 0; j < levels; ++j) {
+                levelData[static_cast<size_t>(j)].assign(layerBytes[static_cast<size_t>(j)] * static_cast<size_t>(layers), 0);
+            }
+            for (int layer = 0; layer < layers; ++layer) {
+                const TextureSource& source =
+                    sources[static_cast<size_t>(m_spriteArraySources[static_cast<size_t>(first + layer)])];
+                const int shift = Log2Exact(S / source.width);
+                // The sprite's own chain, as deep as the array needs from it
+                // (never past its 1x1: levels <= log2(S) + 1). With the atlas
+                // chain off (atlasLevels 0) a sprite smaller than S still gets
+                // a short chain here, whose level-0 cutout rewrite the atlas
+                // did not get — only RGB under alpha 0, which nothing opaque
+                // draws. An animated sprite's layer starts as its first
+                // frame; the animator (RegisterAnimations) redraws it from
+                // its own chains.
+                Mipmap::Image level0;
+                level0.width = source.width;
+                level0.height = source.height;
+                level0.pixels = source.data;
+                const int chainLevels = std::max(0, levels - 1 - shift);
+                const bool isItem = source.key.rfind("item/", 0) == 0 || source.key.find(":item/") != std::string::npos;
+                std::vector<Mipmap::Image> chain;
+                if (chainLevels > 0) {
+                    chain = Mipmap::GenerateMipLevels(std::move(level0), chainLevels,
+                                                      Mipmap::ParseStrategy(source.mipmapStrategy),
+                                                      source.alphaCutoffBias, isItem);
+                } else {
+                    chain.push_back(std::move(level0));
+                }
+                if (chain.empty()) continue;
+                for (int j = 0; j < levels; ++j) {
+                    uint8_t* dst = levelData[static_cast<size_t>(j)].data() +
+                                   layerBytes[static_cast<size_t>(j)] * static_cast<size_t>(layer);
+                    if (j < shift) {
+                        UpscaleNearest(chain[0], 1 << (shift - j), dst);
+                    } else {
+                        const size_t k = std::min(static_cast<size_t>(j - shift), chain.size() - 1);
+                        const Mipmap::Image& img = chain[k];
+                        if (img.pixels.size() == layerBytes[static_cast<size_t>(j)]) {
+                            std::memcpy(dst, img.pixels.data(), img.pixels.size());
+                        } else {
+                            // A chain that stopped early (a size that could
+                            // not halve — impossible for a power of two,
+                            // guarded): the last level, upscaled to this one.
+                            UpscaleNearest(img, std::max(1, (S >> j) / std::max(1, img.width)), dst);
+                        }
+                    }
+                }
+            }
+            for (int j = 0; j < levels; ++j) {
+                const int side = std::max(1, S >> j);
+                Render::g_renderBackend->UploadTextureArrayLevel(m_spriteArrays[static_cast<size_t>(a)], j, side, side,
+                                                                  layers, levelData[static_cast<size_t>(j)].data());
+                bytes += layerBytes[static_cast<size_t>(j)] * static_cast<size_t>(layers);
+            }
+        }
+        ApplySpriteArrayParameters();
+
+        Log::Info("Atlas sprite arrays: %d x up to %d layers of %dx%d (%d sprites), %d levels (%d atlas + %d upscale), %.1f MB",
+                  arrayCount, cap, S, S, m_spriteArrayLayers, levels, atlasLevels, maxShift,
+                  static_cast<double>(bytes) / (1024.0 * 1024.0));
     }
 
     void AtlasBuilder::BuildSpriteAlpha(const std::vector<TextureSource>& sources,
@@ -1343,9 +1588,9 @@ namespace Render {
     void AtlasBuilder::RegisterAnimations() {
         if (!m_animator) return;
         // A fresh start on the (new) texture: drops the previous frames.
-        m_animator->Initialize(m_atlasTexture);
+        m_animator->Initialize(m_atlasTexture, m_spriteArrays, m_spriteArrayCap, m_spriteArrayLevels);
         if (m_atlasTexture == Render::INVALID_TEXTURE) return;
-        size_t registered = 0;
+        size_t registered = 0, inArray = 0;
         for (const auto& pending : pendingAnimations) {
             auto uvIt = textureKeyToUV.find(pending.textureKey);
             if (uvIt == textureKeyToUV.end()) continue;
@@ -1354,13 +1599,27 @@ namespace Render {
             // x / w * w can land a hair under x.
             const int atlasX = static_cast<int>(std::lround(uvRect.uvMin.x * atlasWidth));
             const int atlasY = static_cast<int>(std::lround(uvRect.uvMin.y * atlasHeight));
+            // Its layer of the sprite array, when it has one (BuildSpriteTable
+            // numbered the array's sprites first): the animator redraws the
+            // layer with the atlas rect, its frame upscaled into the levels
+            // below its own chain like BuildSpriteArray would.
+            int arrayLayer = -1, arrayShift = 0;
+            if (m_spriteArrays[0] != Render::INVALID_TEXTURE && uvRect.spriteId < m_spriteArrayLayers &&
+                pending.animation.width > 0) {
+                arrayLayer = uvRect.spriteId;
+                arrayShift = Log2Exact(std::max(1, m_spriteArraySize / pending.animation.width));
+                ++inArray;
+            }
             m_animator->RegisterAnimatedTexture(pending.textureKey, pending.animation, pending.frames,
                                                 atlasX, atlasY, m_padding,
                                                 pending.mipmapStrategy, pending.alphaCutoffBias,
-                                                EffectiveMipLevels());
+                                                EffectiveMipLevels(), arrayLayer, arrayShift);
             ++registered;
         }
-        if (registered > 0) Log::Info("Registered %zu animated textures in the %s atlas", registered, GetConfig().name);
+        if (registered > 0) {
+            Log::Info("Registered %zu animated textures in the %s atlas (%zu with a sprite array layer)",
+                      registered, GetConfig().name, inArray);
+        }
     }
 
     void AtlasBuilder::UpdateAnimations(float deltaTime) {

@@ -9,9 +9,6 @@
 #include "common/world/lighting/BlockLightProperties.hpp"
 #include "client/renderer/backend/RenderBackend.hpp"
 #include "client/renderer/core/RenderOrigin.hpp"
-#ifdef HAS_VULKAN
-#include "client/renderer/backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <algorithm>
 #include <cmath>
@@ -21,17 +18,9 @@ namespace Render::EntityEnvironment {
     ShaderHandle CreateShader(const std::string& vertexPath, const std::string& fragmentPath,
                               bool readsCommonMatrices) {
         if (!g_renderBackend) return INVALID_SHADER;
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            const ShaderHandle shader = vk->CreateShaderFromFilesPortal(vertexPath, fragmentPath);
-            if (shader != INVALID_SHADER && !readsCommonMatrices) vk->SetShaderIgnoresCommonMatrices(shader);
-            return shader;
-#else
-            return INVALID_SHADER;
-#endif
-        }
-        return g_renderBackend->CreateShaderFromFiles(vertexPath, fragmentPath);
+        const ShaderHandle shader = g_renderBackend->CreateShaderFromFilesPortal(vertexPath, fragmentPath);
+        if (shader != INVALID_SHADER && !readsCommonMatrices) g_renderBackend->SetShaderIgnoresCommonMatrices(shader);
+        return shader;
     }
 
     float Lit() {

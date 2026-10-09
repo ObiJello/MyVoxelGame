@@ -2,6 +2,7 @@
 #ifdef HAS_VULKAN
 
 #include "common/core/TickParallel.hpp"
+#include <cassert>
 #include <chrono>
 #include "VKBackend.hpp"
 #include "client/renderer/core/DevRenderSkip.hpp"
@@ -35,7 +36,7 @@
 
 namespace Render {
 
-    // Factory function called from GLBackend.cpp
+    // Factory function called from RenderBackend.cpp
     std::unique_ptr<RenderBackend> CreateVulkanBackend() {
         return std::make_unique<VKBackend>();
     }
@@ -101,7 +102,13 @@ namespace Render {
 #endif
 
         if (!CreateInstance()) return false;
-        if (s_enableValidation && !SetupDebugMessenger()) {
+        if (m_hasDebugUtils) {
+            m_cmdBeginLabel = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+                vkGetInstanceProcAddr(m_instance, "vkCmdBeginDebugUtilsLabelEXT"));
+            m_cmdEndLabel = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+                vkGetInstanceProcAddr(m_instance, "vkCmdEndDebugUtilsLabelEXT"));
+        }
+        if (s_enableValidation && m_hasDebugUtils && !SetupDebugMessenger()) {
             Log::Warning("VKBackend: Debug messenger setup failed, continuing without validation");
         }
         if (!CreateSurface(window)) return false;
@@ -241,6 +248,11 @@ namespace Render {
             vkDestroyDescriptorSetLayout(m_device, m_texelBufferLayout, nullptr);
             m_texelBufferLayout = VK_NULL_HANDLE;
         }
+        if (m_spriteArrayLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(m_device, m_spriteArrayLayout, nullptr);   // its sets go with the pool
+            m_spriteArrayLayout = VK_NULL_HANDLE;
+        }
+        for (SpriteArraySet& s : m_spriteArraySets) s = SpriteArraySet{};
         if (m_pipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device, m_pipelineLayout, nullptr);
         if (m_textureDescriptorLayout != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(m_device, m_textureDescriptorLayout, nullptr);
@@ -290,6 +302,7 @@ namespace Render {
     void VKBackend::BeginFrame() {
         PROFILE_ZONE_N("Vk.BeginFrame");
         m_frameActive = false; // Only set true at end if everything succeeds
+        m_debugLabelDepth = 0;  // a fresh command buffer has no labels open
         m_frameDepthReadable = false;   // each frame's depth starts as its pass's attachment
         m_depthHandoff = false;         // asked for again by the frame that wants it
 
@@ -569,6 +582,7 @@ namespace Render {
         // End render pass
         { PROFILE_ZONE_N("Vk.EndCommandBuffer");
         vkCmdEndRenderPass(m_commandBuffers[m_currentFrame]);
+        for (; m_debugLabelDepth > 0; --m_debugLabelDepth) m_cmdEndLabel(m_commandBuffers[m_currentFrame]);
         HandOffFrameDepth(m_commandBuffers[m_currentFrame], sceneFrame, sceneFrameExtent);
         vkEndCommandBuffer(m_commandBuffers[m_currentFrame]);
         }
@@ -1490,6 +1504,140 @@ namespace Render {
         return handle;
     }
 
+    TextureHandle VKBackend::CreateTexture2DArray(int width, int height, int layers, int mipLevels,
+                                                 TextureFormat format) {
+        // RGBA8 only: the one caller is the block atlas's sprite array. The
+        // image carries its whole chain from creation (an image's mip count
+        // is fixed, as ReserveTextureMipLevels explains); every level of
+        // every layer is parked in SHADER_READ_ONLY, undefined until
+        // UploadTextureArrayLevel fills it.
+        if (width <= 0 || height <= 0 || layers <= 0 || mipLevels <= 0) return INVALID_TEXTURE;
+        if (format != TextureFormat::RGBA8) {
+            Log::Error("VKBackend::CreateTexture2DArray: only RGBA8 arrays are supported");
+            return INVALID_TEXTURE;
+        }
+        PROFILE_ZONE_N("Vk.CreateTexture2DArray");
+        const VkFormat vkFormat = VK_FORMAT_R8G8B8A8_UNORM;
+        const uint32_t levelCount = static_cast<uint32_t>(mipLevels);
+        const uint32_t layerCount = static_cast<uint32_t>(layers);
+
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory imageMemory = VK_NULL_HANDLE;
+        if (!CreateVkImage(static_cast<uint32_t>(width), static_cast<uint32_t>(height), levelCount, vkFormat,
+                           VK_IMAGE_TILING_OPTIMAL,
+                           VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, image, imageMemory, layerCount)) {
+            Log::Error("VKBackend: failed to create a %dx%dx%d texture array (%d levels)", width, height, layers, mipLevels);
+            return INVALID_TEXTURE;
+        }
+        {
+            VkCommandBuffer cmd = BeginSingleTimeCommands();
+            RecordImageLayoutTransition(cmd, image, vkFormat, VK_IMAGE_LAYOUT_UNDEFINED,
+                                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, levelCount, layerCount);
+            EndSingleTimeCommandsDetached(cmd, VK_NULL_HANDLE, VK_NULL_HANDLE);
+        }
+        VkImageView imageView = CreateImageView(image, vkFormat, VK_IMAGE_ASPECT_COLOR_BIT, levelCount, layerCount);
+        if (imageView == VK_NULL_HANDLE) {
+            vkDestroyImage(m_device, image, nullptr);
+            vkFreeMemory(m_device, imageMemory, nullptr);
+            return INVALID_TEXTURE;
+        }
+
+        VkDescriptorSetAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocInfo.descriptorPool = m_descriptorPool;
+        allocInfo.descriptorSetCount = 1;
+        allocInfo.pSetLayouts = &m_textureDescriptorLayout;   // a combined image sampler, whatever its dimensionality
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(m_device, &allocInfo, &descriptorSet) != VK_SUCCESS) {
+            Log::Error("VKBackend: descriptor pool exhausted — texture array created without a descriptor set");
+            descriptorSet = VK_NULL_HANDLE;
+        }
+
+        size_t bytes = 0;
+        for (uint32_t level = 0; level < levelCount; ++level) {
+            bytes += static_cast<size_t>(std::max(1, width >> level)) * static_cast<size_t>(std::max(1, height >> level)) * 4u;
+        }
+        bytes *= layerCount;
+
+        const uint32_t handle = AllocHandle();
+        VKTextureInfo& tex = m_textures[handle];
+        tex = {image, imageMemory, imageView, VK_NULL_HANDLE, descriptorSet, width, height, levelCount, bytes};
+        tex.format = vkFormat;
+        tex.layers = layerCount;
+        tex.lastUsedFrame = m_frameNumber;
+        // The sampler (and the descriptor write) come from the cached state:
+        // NEAREST / CLAMP defaults, the whole chain reachable, as a 2D
+        // texture's SetTextureFilter would set up.
+        RecreateSamplerFromCache(m_device, tex);
+
+        m_memStats.textureMemory += bytes;
+        m_memStats.totalAllocated += bytes;
+        m_memStats.textureCount++;
+        if (m_memStats.totalAllocated > m_memStats.peakUsage) m_memStats.peakUsage = m_memStats.totalAllocated;
+        return handle;
+    }
+
+    void VKBackend::UploadTextureArrayLevel(TextureHandle handle, int level, int width, int height, int layers,
+                                            const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data) return;
+        VKTextureInfo& tex = it->second;
+        if (level < 0 || static_cast<uint32_t>(level) >= tex.mipLevels) return;
+        if (width <= 0 || height <= 0 || layers <= 0 || static_cast<uint32_t>(layers) > tex.layers) return;
+        tex.lastUsedFrame = m_frameNumber;   // the detached copy rides this frame's window
+
+        // One staging buffer holding every layer's image back to back; one
+        // copy region covering them all (bufferImageHeight 0 = tightly
+        // packed by the extent, so layer n starts n images in).
+        const VkDeviceSize imageSize = static_cast<VkDeviceSize>(width) * height * 4 * layers;
+        VkBuffer       staging       = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        CreateVkBuffer(imageSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       staging, stagingMemory);
+        void* mapped = nullptr;
+        vkMapMemory(m_device, stagingMemory, 0, imageSize, 0, &mapped);
+        std::memcpy(mapped, data, static_cast<size_t>(imageSize));
+        vkUnmapMemory(m_device, stagingMemory);
+
+        VkCommandBuffer cmd = BeginSingleTimeCommands();
+        std::vector<VkImage> images;
+        if (tex.frameCopies.empty()) images.push_back(tex.image);
+        for (const VKTextureInfo::FrameCopy& c : tex.frameCopies) images.push_back(c.image);
+        for (VkImage image : images) {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image               = image;
+            barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, static_cast<uint32_t>(level), 1,
+                                            0, static_cast<uint32_t>(layers) };
+            barrier.oldLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel       = static_cast<uint32_t>(level);
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount     = static_cast<uint32_t>(layers);
+            region.imageExtent = { static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1 };
+            vkCmdCopyBufferToImage(cmd, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            barrier.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                                 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+        EndSingleTimeCommandsDetached(cmd, staging, stagingMemory);
+    }
+
     void VKBackend::UpdateTexture2D(TextureHandle handle, int x, int y,
                                    int width, int height, const void* data) {
         auto it = m_textures.find(handle);
@@ -1499,7 +1647,7 @@ namespace Render {
     }
 
     void VKBackend::QueueTextureUpdate(uint32_t texture, uint32_t mipLevel, int x, int y,
-                                       int width, int height, const void* data) {
+                                       int width, int height, const void* data, uint32_t layer) {
         if (width <= 0 || height <= 0) return;
         const size_t dataSize = static_cast<size_t>(width) * static_cast<size_t>(height) * 4;
 
@@ -1518,6 +1666,7 @@ namespace Render {
         update.width         = width;
         update.height        = height;
         update.mipLevel      = mipLevel;
+        update.layer         = layer;
         update.stagingOffset = offset;
         update.byteSize      = dataSize;
         m_pendingTextureUpdates.push_back(update);
@@ -1598,12 +1747,13 @@ namespace Render {
 
         struct Copy { VkImage image; VkBuffer buffer; VkBufferImageCopy region; };
         std::vector<Copy> copies;
-        auto region = [](size_t offset, uint32_t level, int x, int y, int w, int h) {
+        auto region = [](size_t offset, uint32_t level, int x, int y, int w, int h, uint32_t layer) {
             VkBufferImageCopy r{};
             r.bufferOffset = offset;
-            r.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            r.imageSubresource.mipLevel   = level;
-            r.imageSubresource.layerCount = 1;
+            r.imageSubresource.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+            r.imageSubresource.mipLevel       = level;
+            r.imageSubresource.baseArrayLayer = layer;
+            r.imageSubresource.layerCount     = 1;
             r.imageOffset = {x, y, 0};
             r.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
             return r;
@@ -1635,7 +1785,7 @@ namespace Render {
                 }
                 for (const auto& c : list) {
                     copies.push_back({copy.image, m_texStaging[c.stagingSlot].buffer,
-                                      region(c.stagingOffset, c.mipLevel, c.x, c.y, c.width, c.height)});
+                                      region(c.stagingOffset, c.mipLevel, c.x, c.y, c.width, c.height, c.layer)});
                 }
             }
         }
@@ -1652,15 +1802,15 @@ namespace Render {
                 // promotion that failed — then this frame waits, as before.
                 if (tex.everBound) writesInUseImage = true;
                 copies.push_back({tex.image, slot.buffer,
-                                  region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height)});
+                                  region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height, u.layer)});
                 continue;
             }
             copies.push_back({tex.frameCopies[frameSlot].image, slot.buffer,
-                              region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height)});
+                              region(u.stagingOffset, u.mipLevel, u.x, u.y, u.width, u.height, u.layer)});
             if (tex.carried.empty() || tex.carried.back().first != m_frameNumber)
                 tex.carried.push_back({m_frameNumber, {}});
             tex.carried.back().second.push_back({stagingIndex, u.stagingOffset, u.mipLevel,
-                                                 u.x, u.y, u.width, u.height});
+                                                 u.x, u.y, u.width, u.height, u.layer});
         }
 
         // The slot's copy now holds everything through this frame; records
@@ -1758,9 +1908,9 @@ namespace Render {
                                tex.mipLevels, tex.format, VK_IMAGE_TILING_OPTIMAL,
                                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                VK_IMAGE_USAGE_SAMPLED_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, c.image, c.memory);
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, c.image, c.memory, tex.layers);
             if (ok) {
-                c.view = CreateImageView(c.image, tex.format, VK_IMAGE_ASPECT_COLOR_BIT, tex.mipLevels);
+                c.view = CreateImageView(c.image, tex.format, VK_IMAGE_ASPECT_COLOR_BIT, tex.mipLevels, tex.layers);
                 ok = c.view != VK_NULL_HANDLE;
             }
             if (ok) {
@@ -1810,7 +1960,7 @@ namespace Render {
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.image = image;
-            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1};
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS};
             b.srcAccessMask = srcAccess;
             b.dstAccessMask = dstAccess;
             barriers.push_back(b);
@@ -1830,8 +1980,8 @@ namespace Render {
         for (uint32_t level = 0; level < tex.mipLevels; ++level) {
             VkImageCopy& r = levels[level];
             r = {};
-            r.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
-            r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+            r.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, std::max(1u, tex.layers)};
+            r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, std::max(1u, tex.layers)};
             r.extent = {std::max(1u, static_cast<uint32_t>(tex.width) >> level),
                         std::max(1u, static_cast<uint32_t>(tex.height) >> level), 1};
         }
@@ -2014,7 +2164,7 @@ namespace Render {
         if (!CreateVkImage(static_cast<uint32_t>(tex.width), static_cast<uint32_t>(tex.height),
                            wanted, tex.format, VK_IMAGE_TILING_OPTIMAL,
                            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, newImage, newMemory)) {
+                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, newImage, newMemory, tex.layers)) {
             Log::Error("Vulkan: failed to reallocate texture for %u mip levels", wanted);
             return;
         }
@@ -2024,10 +2174,10 @@ namespace Render {
         // and the caller overwrites them immediately; leaving them UNDEFINED
         // would make the layout wrong instead, which is not.
         TransitionImageLayout(newImage, tex.format, VK_IMAGE_LAYOUT_UNDEFINED,
-                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, wanted);
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, wanted, tex.layers);
 
         VkImageView newView = CreateImageView(newImage, tex.format,
-                                              VK_IMAGE_ASPECT_COLOR_BIT, wanted);
+                                              VK_IMAGE_ASPECT_COLOR_BIT, wanted, tex.layers);
         if (newView == VK_NULL_HANDLE) {
             vkDestroyImage(m_device, newImage, nullptr);
             vkFreeMemory(m_device, newMemory, nullptr);
@@ -2066,6 +2216,7 @@ namespace Render {
             const size_t lh = std::max<size_t>(1u, static_cast<size_t>(tex.height) >> lvl);
             newSize += lw * lh * 4u;
         }
+        newSize *= std::max(1u, tex.layers);
         m_memStats.textureMemory  = m_memStats.textureMemory  - tex.memorySize + newSize;
         m_memStats.totalAllocated = m_memStats.totalAllocated - tex.memorySize + newSize;
         if (m_memStats.totalAllocated > m_memStats.peakUsage)
@@ -2162,6 +2313,19 @@ namespace Render {
         QueueTextureUpdate(handle, static_cast<uint32_t>(level), x, y, width, height, data);
     }
 
+    void VKBackend::UpdateTextureArrayLevel(TextureHandle handle, int layer, int level, int x, int y,
+                                            int width, int height, const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || !data) return;
+        if (level < 0 || static_cast<uint32_t>(level) >= it->second.mipLevels) return;
+        if (layer < 0 || static_cast<uint32_t>(layer) >= it->second.layers) return;
+        it->second.lastUsedFrame = m_frameNumber;
+        // The animated sprites' layers, on UpdateTexture2DLevel's deferred
+        // path (per-frame copies of the array once it has been drawn with).
+        QueueTextureUpdate(handle, static_cast<uint32_t>(level), x, y, width, height, data,
+                           static_cast<uint32_t>(layer));
+    }
+
     void VKBackend::DestroyTexture(TextureHandle handle) {
         DestroyTextureImpl(handle, /*forceWait=*/true);
     }
@@ -2200,6 +2364,14 @@ namespace Render {
         if (it->second.imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, it->second.imageView, nullptr);
         if (it->second.image != VK_NULL_HANDLE) vkDestroyImage(m_device, it->second.image, nullptr);
         if (it->second.memory != VK_NULL_HANDLE) vkFreeMemory(m_device, it->second.memory, nullptr);
+        // A destroyed array's view may get its address reused by the next
+        // one: the set-7 caches must not take that for "unchanged".
+        if (it->second.layers > 1) {
+            for (SpriteArraySet& s : m_spriteArraySets) {
+                s.views[0] = s.views[1] = VK_NULL_HANDLE;
+                s.samplers[0] = s.samplers[1] = VK_NULL_HANDLE;
+            }
+        }
 
         m_memStats.textureMemory -= it->second.memorySize;
         m_memStats.totalAllocated -= it->second.memorySize;
@@ -2255,13 +2427,21 @@ namespace Render {
 
         // If paths end with .vert/.frag, look for _vk.vert.spv/_vk.frag.spv
         if (vertSpvPath.find(".vert") != std::string::npos && vertSpvPath.find(".spv") == std::string::npos) {
-            // Replace "block.vert" with "block_vk.vert.spv"
+            // Replace "block.vert" with "block_vk.vert.spv" — or the half
+            // variant where one exists (terrain_f16_vk.vert: the half
+            // varyings its _f16 fragment partners declare).
             auto pos = vertSpvPath.rfind(".vert");
-            vertSpvPath = vertSpvPath.substr(0, pos) + "_vk.vert.spv";
+            const std::string f16 = vertSpvPath.substr(0, pos) + "_f16_vk.vert.spv";
+            if (m_shaderFloat16 && std::filesystem::exists(f16)) vertSpvPath = f16;
+            else vertSpvPath = vertSpvPath.substr(0, pos) + "_vk.vert.spv";
         }
         if (fragSpvPath.find(".frag") != std::string::npos && fragSpvPath.find(".spv") == std::string::npos) {
             auto pos = fragSpvPath.rfind(".frag");
-            fragSpvPath = fragSpvPath.substr(0, pos) + "_vk.frag.spv";
+            // The half-precision variant (CMake's VK_F16_SHADERS) on a device
+            // with shaderFloat16, the plain .spv otherwise.
+            const std::string f16 = fragSpvPath.substr(0, pos) + "_f16_vk.frag.spv";
+            if (m_shaderFloat16 && std::filesystem::exists(f16)) fragSpvPath = f16;
+            else fragSpvPath = fragSpvPath.substr(0, pos) + "_vk.frag.spv";
         }
 
         auto vertCode = ReadBinaryFile(vertSpvPath);
@@ -2350,301 +2530,30 @@ namespace Render {
                           : m_boundIsPortal ? m_portalPipelineLayout : m_pipelineLayout;
     }
 
-    // Uniform names are matched by string on every call, from every draw of
-    // every subsystem. std::string == const char* costs a strlen plus a
-    // memcmp per candidate, and SetUniformFloat walks up to twenty of them.
-    // With the literal's length known at compile time, a candidate is
-    // rejected on size, then on its LAST character (every name starts with
-    // 'u', so the first is useless), before any memcmp runs.
-    template <size_t N>
-    static inline bool NameIs(const std::string& name, const char (&lit)[N]) {
-        constexpr size_t len = N - 1;
-        return name.size() == len && name[len - 1] == lit[len - 1] &&
-               std::memcmp(name.data(), lit, len) == 0;
+    // Uniform setters — the shared routing of GL uniform names onto the
+    // push constants and the Common / Bones blocks (SpirvUniforms.hpp);
+    // the per-draw ring copy happens in PrepareDraw /
+    // BindPortalDescriptorForDraw.
+    void VKBackend::SetUniformMat4(ShaderHandle, const std::string& name, const glm::mat4& value) {
+        m_uniforms.SetMat4(name, value);
     }
-
-    // ----------------------------------------------------------------
-    // Uniform setters — write to BOTH push constants (for block-style
-    // shaders) AND the CommonUBO / BonesUBO (for portal-feature
-    // shaders). The push constants get sent fresh every draw, so the
-    // double-write costs nothing meaningful and lets a single C++
-    // setter feed either shader path transparently.
-    // ----------------------------------------------------------------
-    // GL→Vulkan depth-range conversion matrix. glm::perspective produces
-    // a GL-style matrix where the near plane maps to NDC z = -1; Vulkan's
-    // near plane is z = 0 and the rasterizer clips anything with z_ndc < 0.
-    // Without this premultiplication, half the depth range falls into the
-    // Vulkan clipped half-space. For normal scenes you barely notice
-    // (geometry is mostly distant, sitting in z_ndc > 0), but the portal
-    // renderer's oblique projection explicitly anchors geometry to the
-    // GL near plane (z_ndc = -1) so that vertices on the destination
-    // portal's clip plane land exactly on the near plane in OpenGL. In
-    // Vulkan those vertices end up at z_ndc = -1 (clipped) instead of 0
-    // (kept). Visible symptom: the see-through view goes blank at steep
-    // angles / distance where more dst-world geometry sits near the
-    // oblique clip plane. This matrix premultiplies every uMVP coming
-    // through SetUniformMat4 to map z_ndc [-1, +1] → [0, +1]:
-    //   z_clip_new = 0.5·z_clip_old + 0.5·w  →  z_ndc_new = 0.5·z_ndc_old + 0.5
-    // — so z_ndc_old = -1 → 0 (Vk near), z_ndc_old = +1 → 1 (Vk far).
-    // Applied only on Vulkan; OpenGL keeps its native GL-style matrix.
-    static const glm::mat4 kVkZCorrect = glm::mat4(
-        1.0f, 0.0f, 0.0f, 0.0f,   // col 0
-        0.0f, 1.0f, 0.0f, 0.0f,   // col 1
-        0.0f, 0.0f, 0.5f, 0.0f,   // col 2 — z_clip *= 0.5
-        0.0f, 0.0f, 0.5f, 1.0f);  // col 3 — z_clip += 0.5 * w
-
-    void VKBackend::SetUniformMat4(ShaderHandle handle, const std::string& name,
-                                   const glm::mat4& value) {
-        if (NameIs(name, "uMVP") || NameIs(name, "uViewProj")) {
-            // "uViewProj" is the instanced block shader's name for the same
-            // push-constant slot — its model matrix arrives per instance.
-            const glm::mat4 vkMVP = kVkZCorrect * value;
-            m_pushConstants.uMVP    = vkMVP;
-            // The UBO copy is dirty only for shaders that read it — see
-            // m_commonMatricesDirty.
-            if (m_commonUBOData.uMVP != vkMVP) {
-                m_commonUBOData.uMVP = vkMVP;
-                m_commonMatricesDirty = true;
-            }
-        } else if (NameIs(name, "uPostParams")) {
-            // A post pass's config uniforms (Render::PostChain), packed four
-            // vec4s deep into the uMVP slot — never a transform, so no depth
-            // correction.
-            m_pushConstants.uMVP = value;
-        } else if (NameIs(name, "uModel")) {
-            if (m_commonUBOData.uModel != value) {
-                m_commonUBOData.uModel = value;
-                m_commonMatricesDirty = true;
-            }
-        } else if (NameIs(name, "uLocalToRender")) {
-            // The block-entity shader's model -> render-space matrix (its
-            // fog needs the fragment's render-space position). Affine, so
-            // its three ROWS fit the three push-constant vec4s that shader
-            // has no other use for (uColor / uUVRange / uScalars) — one
-            // model matrix per block entity would otherwise burn a Common
-            // UBO slot per draw. blockentity_vk.vert rebuilds it.
-            m_pushConstants.uColor   = glm::vec4(value[0][0], value[1][0], value[2][0], value[3][0]);
-            m_pushConstants.uUVRange = glm::vec4(value[0][1], value[1][1], value[2][1], value[3][1]);
-            m_pushConstants.uScalars = glm::vec4(value[0][2], value[1][2], value[2][2], value[3][2]);
-        } else if (name.rfind("uBones[", 0) == 0) {
-            // "uBones[N]" — parse N, write into BonesUBO.
-            const size_t lbracket = 7;            // length of "uBones["
-            const size_t rbracket = name.find(']', lbracket);
-            if (rbracket != std::string::npos) {
-                int idx = std::atoi(name.c_str() + lbracket);
-                if (idx >= 0 && idx < kMaxBones) {
-                    m_bonesUBOData.bones[idx] = value;
-                    m_bonesUBODirty = true;
-                }
-            }
-        }
-    }
-
     void VKBackend::SetUniformVec4(ShaderHandle, const std::string& name, const glm::vec4& value) {
-        if (NameIs(name, "uTint") || NameIs(name, "uColor") || NameIs(name, "uClipPlane") ||
-            NameIs(name, "uPortalClipPlane")) {
-            // uClipPlane (PlayerRenderer's portal-ghost half-space cull)
-            // AND uPortalClipPlane (block shaders' world-space portal
-            // plane → gl_ClipDistance[0]) are aliased onto the same
-            // push-constant slot as uColor — no shader currently needs
-            // both a tint and a clip plane simultaneously, and packing
-            // them here keeps the chunk + player shaders from needing
-            // a UBO descriptor for one tiny vec4.
-            m_pushConstants.uColor  = value;
-            if (m_commonUBOData.uTint != value) {
-                m_commonUBOData.uTint = value;
-                m_commonUBODirty = true;
-            }
-        } else if (NameIs(name, "uEntityClipPlane")) {
-            // The entity shaders' portal clip plane. Their uColor slot is the
-            // hurt overlay, so the plane rides in the uUVRange slot, which
-            // they do not otherwise use (entity_vk.vert).
-            m_pushConstants.uUVRange = value;
-        } else if (NameIs(name, "uFogColor")) {
-            // Environment fog block (sky/clouds/chunk shaders) — dedicated
-            // CommonUBO fields, NOT aliased onto uTint: block shaders need
-            // uPortalClipPlane (which lives in the uColor/uTint slot) and
-            // fog uniforms simultaneously.
-            //
-            // The fog fields are set by every world renderer, often per
-            // draw (a block entity re-sends the frame's fog for each one);
-            // only a real change costs a fresh UBO slot.
-            if (m_commonUBOData.uFogColor != value) {
-                m_commonUBOData.uFogColor = value;
-                m_commonUBODirty = true;
-            }
-        } else if (NameIs(name, "uFogEnv")) {
-            if (m_commonUBOData.uFogEnv != value) {
-                m_commonUBOData.uFogEnv = value;
-                m_commonUBODirty = true;
-            }
-        } else if (NameIs(name, "uOverlayColor")) {
-            // MC's entity overlay — the primed-TNT white flash. Its own UBO
-            // field rather than an alias onto uTint, because the block shaders
-            // need uPortalClipPlane (which lives in the uColor/uTint slot) at
-            // the same time.
-            if (m_commonUBOData.uOverlayColor != value) {
-                m_commonUBOData.uOverlayColor = value;
-                m_commonUBODirty = true;
-            }
-        }
+        m_uniforms.SetVec4(name, value);
     }
     void VKBackend::SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) {
-        if (NameIs(name, "uPortalColor")) {
-            m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
-            m_commonUBOData.uPortalColor    = glm::vec4(value, m_commonUBOData.uPortalColor.a);
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uColorDark")) {
-            m_commonUBOData.uColorDark      = glm::vec4(value, m_commonUBOData.uColorDark.a);
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uColorHot")) {
-            m_commonUBOData.uColorHot       = glm::vec4(value, m_commonUBOData.uColorHot.a);
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uKeyDir")) {
-            m_commonUBOData.uKeyDir         = glm::vec4(value, m_commonUBOData.uKeyDir.a);
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uTint") || NameIs(name, "uColor")) {
-            m_pushConstants.uColor          = glm::vec4(value, m_pushConstants.uColor.a);
-            m_commonUBOData.uTint           = glm::vec4(value, m_commonUBOData.uTint.a);
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uCameraPos")) {
-            const glm::vec4 v(value, m_commonUBOData.uCamPosBright.w);
-            if (m_commonUBOData.uCamPosBright != v) {
-                m_commonUBOData.uCamPosBright = v;
-                m_commonUBODirty = true;
-            }
-        } else if (NameIs(name, "uFogColor")) {
-            const glm::vec4 v(value, m_commonUBOData.uFogColor.a);
-            if (m_commonUBOData.uFogColor != v) {
-                m_commonUBOData.uFogColor = v;
-                m_commonUBODirty = true;
-            }
-        } else if (NameIs(name, "uEntityLight") || NameIs(name, "uDrawLight")) {
-            // The per-draw lightmap colour of the entity- and block-family
-            // shaders (EntityEnvironment.hpp): push constants uScalars.xyz,
-            // so a light change between draws never burns a UBO slot.
-            m_pushConstants.uScalars = glm::vec4(value, m_pushConstants.uScalars.w);
-        } else if (NameIs(name, "uBlockEntityLight")) {
-            // blockentity_vk: its uScalars hold uLocalToRender's rows, so the
-            // colour rides uScreenSize.xy (r, g) and uLineWidth (b) — no line
-            // shader shares a draw with it.
-            m_pushConstants.uScreenSize = glm::vec2(value.r, value.g);
-            m_pushConstants.uLineWidth  = value.b;
-        }
+        m_uniforms.SetVec3(name, value);
     }
     void VKBackend::SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) {
-        if (NameIs(name, "uScreenSize")) {
-            m_pushConstants.uScreenSize     = value;
-            m_commonUBOData.uScreenSize     = value;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uUVMin")) {
-            m_pushConstants.uUVRange.x = value.x; m_pushConstants.uUVRange.y = value.y;
-            m_commonUBOData.uUVRange.x = value.x; m_commonUBOData.uUVRange.y = value.y;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uUVMax")) {
-            m_pushConstants.uUVRange.z = value.x; m_pushConstants.uUVRange.w = value.y;
-            m_commonUBOData.uUVRange.z = value.x; m_commonUBOData.uUVRange.w = value.y;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uInSize")) {
-            // The entity-outline post passes' input size (MC SamplerInfo
-            // InSize) — push constants only, like uScreenSize.
-            m_pushConstants.uScreenSize = value;
-        } else if (NameIs(name, "uBlurDir")) {
-            // entity_outline_box_blur's BlurDir.
-            m_pushConstants.uUVRange.x = value.x;
-            m_pushConstants.uUVRange.y = value.y;
-        } else if (NameIs(name, "uOutSize")) {
-            // A post pass's SamplerInfo.OutSize (Render::PostChain).
-            m_pushConstants.uUVRange.z = value.x;
-            m_pushConstants.uUVRange.w = value.y;
-        } else if (NameIs(name, "uAuxSize")) {
-            // A post pass's second sampler's size.
-            m_pushConstants.uColor.x = value.x;
-            m_pushConstants.uColor.y = value.y;
-        }
+        m_uniforms.SetVec2(name, value);
     }
     void VKBackend::SetUniformFloat(ShaderHandle, const std::string& name, float value) {
-        // Push-constant block-style aliases:
-        if (NameIs(name, "uLineWidth"))           { m_pushConstants.uLineWidth = value; }
-        else if (NameIs(name, "uAlphaTest"))      { m_pushConstants.uAlphaTest = value; }
-        // Post passes (Render::PostChain): whether each input samples
-        // bilinear (else nearest, in the shader), and globals.MenuBlurRadius.
-        else if (NameIs(name, "uInBilinear"))     { m_pushConstants.uLineWidth = value; }
-        else if (NameIs(name, "uAuxBilinear"))    { m_pushConstants.uAlphaTest = value; }
-        else if (NameIs(name, "uMenuBlurRadius")) { m_pushConstants.uScalars.x = value; }
-        // Portal renderer + crosshair scalar packing:
-        else if (NameIs(name, "uPulse"))          { m_pushConstants.uScalars.x = value; m_commonUBOData.uPortalColor.a = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uOpenAmount"))     { m_pushConstants.uScalars.z = value; m_commonUBOData.uColorDark.a    = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uOpenAmountVS"))   { m_commonUBOData.uColorHot.a    = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uKeyIntensity"))   { m_commonUBOData.uKeyDir.a      = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uTime"))           { m_pushConstants.uScalars.y = value; m_commonUBOData.uScalarsA.x = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uTimeVS"))         { m_commonUBOData.uScalarsA.y = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uStaticAmount"))   { m_commonUBOData.uScalarsA.z = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uColorScale"))     { m_commonUBOData.uScalarsA.w = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uPortalActive"))   { m_commonUBOData.uScalarsB.x = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uForceFarDepth"))  { m_commonUBOData.uScalarsB.y = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uOutlineMode"))    { m_commonUBOData.uScalarsB.z = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uFlashIntensity")) { m_pushConstants.uScalars.w = value; m_commonUBOData.uScalarsB.w = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uAmbient"))        { m_commonUBOData.uScalarsC.x = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uAlphaCutoff"))    { m_commonUBOData.uScalarsC.y = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uHasSprite"))      { m_commonUBOData.uScalarsD.x = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uUseSkin"))        { m_commonUBOData.uScalarsD.y = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uUseTextures"))    { m_commonUBOData.uScalarsD.z = value; m_commonUBODirty = true; }
-        else if (NameIs(name, "uSkyBrightness"))  {
-            if (m_commonUBOData.uCamPosBright.w != value) { m_commonUBOData.uCamPosBright.w = value; m_commonUBODirty = true; }
-        }
-        // The per-draw lightmap stand-in of the entity / particle / stick-
-        // figure shaders (EntityEnvironment.hpp) — a push constant, so a batch
-        // switching between lit and emissive never burns a UBO slot.
-        else if (NameIs(name, "uEntityLight") || NameIs(name, "uDrawLight")) {
-            m_pushConstants.uScalars = glm::vec4(value, value, value, m_pushConstants.uScalars.w);
-        }
-        // The block-entity shader's light: its uScalars are taken by
-        // uLocalToRender's rows, so it rides the uLineWidth slot (no line
-        // shader shares a draw with it).
-        else if (NameIs(name, "uBlockEntityLight")) {
-            m_pushConstants.uScreenSize = glm::vec2(value, value);
-            m_pushConstants.uLineWidth  = value;
-        }
+        m_uniforms.SetFloat(name, value);
     }
     void VKBackend::SetUniformIVec3(ShaderHandle, const std::string& name, const glm::ivec3& value) {
-        if (NameIs(name, "uRenderOrigin")) {
-            // .w carries uFadeNowMs (the chunk fade clock); a view's origin
-            // change must not zero it.
-            m_commonUBOData.uRenderOrigin = glm::ivec4(value, m_commonUBOData.uRenderOrigin.w);
-            m_commonUBODirty = true;
-        }
+        m_uniforms.SetIVec3(name, value);
     }
-
     void VKBackend::SetUniformInt(ShaderHandle, const std::string& name, int value) {
-        // Texture-sampler bindings come through as integers (legacy
-        // GL pattern). Vulkan binds textures via descriptor sets, so
-        // we ignore those names. Other ints fall through into the
-        // float path's uUseTextures slot etc.
-        if (NameIs(name, "uUseTextures")) {
-            m_commonUBOData.uScalarsD.z = (float)value;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uFadeNowMs")) {
-            // Chunk fade-in clock (SectionFade.hpp): terrain_vk.vert reads
-            // U.uRenderOrigin_.w; the fade length rides uScalarsC.z.
-            m_commonUBOData.uRenderOrigin.w = value;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uFadeMs")) {
-            m_commonUBOData.uScalarsC.z = (float)value;
-            m_commonUBODirty = true;
-        } else if (NameIs(name, "uHasSprite")) {
-            // PortalParticleSystem uses uHasSprite to select between the
-            // Portal-extracted sprite texture path and the procedural
-            // soft-disc fallback. Routed into BOTH the push-constant
-            // uScalars.x (where portal_particle_vk reads it) and the
-            // CommonUBO slot (so any portal-layout shader that wants
-            // it also sees it).
-            m_pushConstants.uScalars.x        = (float)value;
-            m_commonUBOData.uScalarsD.x       = (float)value;
-            m_commonUBODirty = true;
-        }
-        // "uSprite" and other sampler-name ints are no-ops on Vulkan —
-        // textures bind via descriptor sets, not via uniform int slot.
+        m_uniforms.SetInt(name, value);
     }
 
     // ========================================================================
@@ -2857,10 +2766,10 @@ namespace Render {
         // bytes match.
         const VkPipelineLayout pl = m_boundLayout;
         if (!m_recorded.pushValid || m_recorded.pushLayout != pl ||
-            std::memcmp(&m_lastPushed, &m_pushConstants, sizeof(PushConstantBlock)) != 0) {
+            std::memcmp(&m_lastPushed, &m_uniforms.push, sizeof(PushConstantBlock)) != 0) {
             vkCmdPushConstants(cmd, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(PushConstantBlock), &m_pushConstants);
-            m_lastPushed          = m_pushConstants;
+                               0, sizeof(PushConstantBlock), &m_uniforms.push);
+            m_lastPushed          = m_uniforms.push;
             m_recorded.pushLayout = pl;
             m_recorded.pushValid  = true;
         }
@@ -3041,6 +2950,25 @@ namespace Render {
             if (m_indirectMemory[i] != VK_NULL_HANDLE) vkFreeMemory(m_device, m_indirectMemory[i], nullptr);
         }
         m_indirectBuffers.clear(); m_indirectMemory.clear(); m_indirectMapped.clear(); m_indirectOffset.clear();
+    }
+
+    // ========================================================================
+    // GPU DEBUG GROUPS
+    // ========================================================================
+
+    void VKBackend::PushDebugGroup(const char* name) {
+        if (!m_cmdBeginLabel || !m_frameActive) return;
+        VkDebugUtilsLabelEXT label{};
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pLabelName = name;
+        m_cmdBeginLabel(m_commandBuffers[m_currentFrame], &label);
+        ++m_debugLabelDepth;
+    }
+
+    void VKBackend::PopDebugGroup() {
+        if (!m_cmdEndLabel || !m_frameActive || m_debugLabelDepth <= 0) return;
+        m_cmdEndLabel(m_commandBuffers[m_currentFrame]);
+        --m_debugLabelDepth;
     }
 
     // ========================================================================
@@ -3239,10 +3167,6 @@ namespace Render {
         const char** glfwExts = glfwGetRequiredInstanceExtensions(&glfwExtCount);
         std::vector<const char*> extensions(glfwExts, glfwExts + glfwExtCount);
 
-        if (s_enableValidation) {
-            extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        }
-
 #ifdef __APPLE__
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
@@ -3259,6 +3183,14 @@ namespace Render {
             std::vector<VkExtensionProperties> props(count);
             vkEnumerateInstanceExtensionProperties(nullptr, &count, props.data());
             for (const auto& e : props) {
+                // Debug utils whenever the loader has them, not only with
+                // validation: command-buffer labels are how a GPU capture
+                // (Xcode through MoltenVK, RenderDoc) names the render stages
+                // (PushDebugGroup), and the validation messenger uses it too.
+                if (std::strcmp(e.extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0) {
+                    extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+                    m_hasDebugUtils = true;
+                }
                 if (std::strcmp(e.extensionName, VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME) == 0) {
                     extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
                     m_hasSwapchainColorSpaceExt = true;
@@ -3549,6 +3481,19 @@ namespace Render {
         presentIdFeatures.sType   = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
         presentWaitFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
         bool presentWait = false;
+        // VK_KHR_shader_float16_int8: the half-precision terrain fragment
+        // shaders (<name>_f16_vk.frag.spv, OpCapability Float16) load only
+        // when the device has shaderFloat16 (Apple GPUs through MoltenVK,
+        // AMD GCN3+, NVIDIA Turing+, Intel Gen9+); CreateShaderFromFiles
+        // takes the plain .spv otherwise. Optional, like present_wait.
+        VkPhysicalDeviceShaderFloat16Int8FeaturesKHR float16Features{};
+        float16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES_KHR;
+        // ...and VK_KHR_16bit_storage's storageInputOutput16 for their half
+        // varyings (terrain_f16_vk.vert): the f16 variants are one family,
+        // used together or not at all.
+        VkPhysicalDevice16BitStorageFeaturesKHR storage16Features{};
+        storage16Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES_KHR;
+        bool shaderFloat16 = false;
         {
             uint32_t count = 0;
             vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &count, nullptr);
@@ -3574,11 +3519,39 @@ namespace Render {
                 extensions.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
                 extensions.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
             }
+            if (getFeatures2 && has(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) && has(VK_KHR_16BIT_STORAGE_EXTENSION_NAME) &&
+                has(VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME)) {
+                VkPhysicalDeviceFeatures2 features2{};
+                features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                float16Features.pNext = &storage16Features;
+                features2.pNext = &float16Features;
+                getFeatures2(m_physicalDevice, &features2);
+                float16Features.pNext = nullptr;
+                shaderFloat16 = float16Features.shaderFloat16 == VK_TRUE && storage16Features.storageInputOutput16 == VK_TRUE;
+                if (const char* v = std::getenv("OBEY_VK_F16")) shaderFloat16 = shaderFloat16 && std::strcmp(v, "0") != 0;
+            }
+            if (shaderFloat16) {
+                extensions.push_back(VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME);
+                extensions.push_back(VK_KHR_STORAGE_BUFFER_STORAGE_CLASS_EXTENSION_NAME);   // 16bit_storage's dependency
+                extensions.push_back(VK_KHR_16BIT_STORAGE_EXTENSION_NAME);
+            }
         }
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         if (presentWait) createInfo.pNext = &presentIdFeatures;   // -> presentWaitFeatures
+        if (shaderFloat16) {
+            // Only shaderFloat16 and storageInputOutput16 are asked for.
+            float16Features.shaderInt8 = VK_FALSE;
+            storage16Features.storageBuffer16BitAccess = VK_FALSE;
+            storage16Features.uniformAndStorageBuffer16BitAccess = VK_FALSE;
+            storage16Features.storagePushConstant16 = VK_FALSE;
+            storage16Features.storageInputOutput16 = VK_TRUE;
+            storage16Features.pNext = const_cast<void*>(createInfo.pNext);
+            float16Features.pNext = &storage16Features;
+            createInfo.pNext = &float16Features;
+        }
+        m_shaderFloat16 = shaderFloat16;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.pEnabledFeatures = &deviceFeatures;
@@ -3595,6 +3568,8 @@ namespace Render {
         }
         Log::Info("[VKBackend] present wait: %s (present_id feature %d, present_wait feature %d)",
                   m_waitForPresent ? "yes" : "no", presentIdFeatures.presentId, presentWaitFeatures.presentWait);
+        Log::Info("[VKBackend] shaderFloat16 + storageInputOutput16: %s (half-precision terrain shaders%s)",
+                  m_shaderFloat16 ? "yes" : "no", m_shaderFloat16 ? "" : " — the float variants");
 
         vkGetDeviceQueue(m_device, m_queueFamilies.graphicsFamily.value(), 0, &m_graphicsQueue);
         vkGetDeviceQueue(m_device, m_queueFamilies.presentFamily.value(), 0, &m_presentQueue);
@@ -4136,6 +4111,10 @@ namespace Render {
             Log::Warning("VKBackend: render target format %d not supported — using the swapchain's 8-bit format",
                          static_cast<int>(desc.colorFormat));
         }
+        // RenderTargetDesc::depth is not honoured here: every target shares
+        // m_targetRenderPass (colour + depth, the frame's formats), so the
+        // frame's pipelines draw into it unchanged. A depth-less target would
+        // need its own render pass and pipelines keyed by it.
         if (m_targetRenderPass == VK_NULL_HANDLE && !CreateTargetRenderPass()) {
             Log::Error("VKBackend: could not create the render-target pass");
             return INVALID_RENDER_TARGET;
@@ -4569,18 +4548,21 @@ namespace Render {
         push.size = sizeof(PushConstantBlock);
         if (m_portalOitPipelineLayout == VK_NULL_HANDLE && m_portalPipelineLayout != VK_NULL_HANDLE) {
             // Sets 0..5 exactly the portal layout's (so its descriptor
-            // binding code stays compatible), set 6 the OIT set.
-            VkDescriptorSetLayout sets[7] = {
+            // binding code stays compatible), set 6 the OIT set, set 7 the
+            // sprite array as in the portal layout (bound with THIS layout:
+            // set 6 differs, so a set past it is only valid under the
+            // layout the draw uses — BindPortalDescriptorForDraw).
+            const bool fullPortal = m_uniformBlockLayout != VK_NULL_HANDLE && m_texelBufferLayout != VK_NULL_HANDLE;
+            VkDescriptorSetLayout sets[8] = {
                 m_textureDescriptorLayout, m_portalDescriptorLayout, m_textureDescriptorLayout,
                 m_uniformBlockLayout != VK_NULL_HANDLE ? m_uniformBlockLayout : m_emptySetLayout,
-                (m_uniformBlockLayout != VK_NULL_HANDLE && m_texelBufferLayout != VK_NULL_HANDLE)
-                    ? m_texelBufferLayout : m_emptySetLayout,
-                (m_uniformBlockLayout != VK_NULL_HANDLE && m_texelBufferLayout != VK_NULL_HANDLE)
-                    ? m_textureDescriptorLayout : m_emptySetLayout,
-                m_oitSetLayout};
+                fullPortal ? m_texelBufferLayout : m_emptySetLayout,
+                fullPortal ? m_textureDescriptorLayout : m_emptySetLayout,
+                m_oitSetLayout,
+                (fullPortal && m_spriteArrayLayout != VK_NULL_HANDLE) ? m_spriteArrayLayout : m_emptySetLayout};
             VkPipelineLayoutCreateInfo info{};
             info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            info.setLayoutCount = 7;
+            info.setLayoutCount = fullPortal ? 8 : 7;
             info.pSetLayouts = sets;
             info.pushConstantRangeCount = 1;
             info.pPushConstantRanges = &push;
@@ -4743,7 +4725,10 @@ namespace Render {
         const char* suffix = m_oitStage == OitStage::DepthBounds ? "_oit_db"
                            : m_oitStage == OitStage::Transmittance ? "_oit_tr" : "_oit_ac";
         const std::string fragPath = base.fragPath.substr(0, dot) + suffix + ".frag";
-        const std::string spvPath = base.fragPath.substr(0, dot) + suffix + "_vk.frag.spv";
+        // The half twin (terrain_solid_oit_<stage>_f16_vk.frag.spv) when the
+        // device runs the f16 family — its vertex partner has half varyings.
+        std::string spvPath = base.fragPath.substr(0, dot) + suffix + "_f16_vk.frag.spv";
+        if (!m_shaderFloat16 || !std::filesystem::exists(spvPath)) spvPath = base.fragPath.substr(0, dot) + suffix + "_vk.frag.spv";
         if (!std::filesystem::exists(spvPath)) return INVALID_SHADER;   // not a participating shader
         if (!EnsureOitLayouts()) return INVALID_SHADER;
         const ShaderHandle variant = CreateShaderFromFiles(base.vertPath, fragPath);
@@ -6126,6 +6111,7 @@ namespace Render {
         switch (format) {
             case TextureFormat::RGBA8:   vkFormat = VK_FORMAT_R8G8B8A8_UNORM;      bytesPerTexel = 4;  break;
             case TextureFormat::RGBA16:  vkFormat = VK_FORMAT_R16G16B16A16_UNORM;  bytesPerTexel = 8;  break;
+            case TextureFormat::RGBA16UI: vkFormat = VK_FORMAT_R16G16B16A16_UINT;  bytesPerTexel = 8;  break;
             case TextureFormat::RGBA16F: vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT; bytesPerTexel = 8;  break;
             case TextureFormat::RGBA32F: vkFormat = VK_FORMAT_R32G32B32A32_SFLOAT; bytesPerTexel = 16; break;
             default:
@@ -6213,17 +6199,38 @@ namespace Render {
         //         bound through texture slot 2): the terrain face map.
         // set=5 = the texture bound at slot 3: the lightmap, which the
         //         terrain vertex shader samples (Render::Lightmap).
-        VkDescriptorSetLayout sets[6] = { m_textureDescriptorLayout,
+        // set=6 = empty here; Improved Transparency's set in the portal-OIT
+        //         layout (CreateOitResources), which mirrors sets 0..5 and 7.
+        // set=7 = the texture bound at slot 4: the block atlas's sprite
+        //         array (AtlasBuilder), which the terrain fragment shaders
+        //         sample for greedy-merged quads.
+        if (m_emptySetLayout == VK_NULL_HANDLE) {
+            VkDescriptorSetLayoutCreateInfo empty{};
+            empty.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            if (vkCreateDescriptorSetLayout(m_device, &empty, nullptr, &m_emptySetLayout) != VK_SUCCESS) {
+                m_emptySetLayout = VK_NULL_HANDLE;
+                return false;
+            }
+        }
+        if (!CreateSpriteArrayLayout()) return false;
+        VkDescriptorSetLayout sets[8] = { m_textureDescriptorLayout,
                                           m_portalDescriptorLayout,
                                           m_textureDescriptorLayout,
                                           m_uniformBlockLayout,
                                           m_texelBufferLayout,
-                                          m_textureDescriptorLayout };
+                                          m_textureDescriptorLayout,
+                                          m_emptySetLayout,
+                                          m_spriteArrayLayout };
 
         VkPipelineLayoutCreateInfo info{};
         info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         info.setLayoutCount         = (m_uniformBlockLayout == VK_NULL_HANDLE) ? 3
-                                    : (m_texelBufferLayout == VK_NULL_HANDLE) ? 4 : 6;
+                                    : (m_texelBufferLayout == VK_NULL_HANDLE) ? 4 : 8;
+        if (info.setLayoutCount > m_deviceProperties.limits.maxBoundDescriptorSets) {
+            Log::Error("VKBackend: the portal pipeline layout needs %u descriptor sets, the device allows %u",
+                       info.setLayoutCount, m_deviceProperties.limits.maxBoundDescriptorSets);
+            return false;
+        }
         info.pSetLayouts            = sets;
         info.pushConstantRangeCount = 1;
         info.pPushConstantRanges    = &pushConstant;
@@ -6355,9 +6362,9 @@ namespace Render {
         // UBO: the entity / block-entity / particle shaders take uMVP from
         // the push constants, and a per-draw MVP must not cost them a slot.
         const bool readsMatrices = !m_boundShaderInfo || !m_boundShaderInfo->ignoresCommonMatrices;
-        const bool needCommon = m_commonUBODirty || (m_commonMatricesDirty && readsMatrices) ||
+        const bool needCommon = m_uniforms.commonDirty || (m_uniforms.commonMatricesDirty && readsMatrices) ||
                                 !fb.haveCommonSlot;
-        const bool needBones  = m_bonesUBODirty  || !fb.haveBonesSlot;
+        const bool needBones  = m_uniforms.bonesDirty  || !fb.haveBonesSlot;
 
         if ((needCommon && fb.commonWriteSlot >= kCommonSlotCount) ||
             (needBones  && fb.bonesWriteSlot  >= kBonesSlotCount)) {
@@ -6376,17 +6383,17 @@ namespace Render {
         if (needCommon) {
             const uint32_t slot = fb.commonWriteSlot++;
             fb.lastCommonOffset = slot * m_commonSlotStride;
-            std::memcpy(fb.commonMapped + fb.lastCommonOffset, &m_commonUBOData, sizeof(CommonUBO));
+            std::memcpy(fb.commonMapped + fb.lastCommonOffset, &m_uniforms.common, sizeof(CommonUBO));
             fb.haveCommonSlot = true;
-            m_commonUBODirty  = false;
-            m_commonMatricesDirty = false;   // the slot holds the current matrices too
+            m_uniforms.commonDirty  = false;
+            m_uniforms.commonMatricesDirty = false;   // the slot holds the current matrices too
         }
         if (needBones) {
             const uint32_t slot = fb.bonesWriteSlot++;
             fb.lastBonesOffset = slot * m_bonesSlotStride;
-            std::memcpy(fb.bonesMapped + fb.lastBonesOffset, &m_bonesUBOData, sizeof(BonesUBO));
+            std::memcpy(fb.bonesMapped + fb.lastBonesOffset, &m_uniforms.bones, sizeof(BonesUBO));
             fb.haveBonesSlot = true;
-            m_bonesUBODirty  = false;
+            m_uniforms.bonesDirty  = false;
         }
 
         auto tex0It = m_textures.find(tex);
@@ -6440,7 +6447,91 @@ namespace Render {
                                         0, nullptr);
             }
         }
+        // The sprite arrays (set 7): the 2D arrays in slots 4 and 5.
+        if (m_texelBufferLayout != VK_NULL_HANDLE) BindSpriteArraySet(cmd);
         return true;
+    }
+
+    bool VKBackend::CreateSpriteArrayLayout() {
+        if (m_spriteArrayLayout != VK_NULL_HANDLE) return true;
+        VkDescriptorSetLayoutBinding bindings[2]{};
+        for (uint32_t i = 0; i < 2; ++i) {
+            bindings[i].binding         = i;
+            bindings[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            bindings[i].descriptorCount = 1;
+            bindings[i].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        }
+        VkDescriptorSetLayoutCreateInfo info{};
+        info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        info.bindingCount = 2;
+        info.pBindings    = bindings;
+        if (vkCreateDescriptorSetLayout(m_device, &info, nullptr, &m_spriteArrayLayout) != VK_SUCCESS) {
+            m_spriteArrayLayout = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
+    }
+
+    void VKBackend::BindSpriteArraySet(VkCommandBuffer cmd) {
+        // Binding 0 = slot 4, binding 1 = slot 5 — or slot 4 again when
+        // there is no overflow array (the shader never reaches it then, but
+        // the descriptor must be valid). Bound with the pipeline's OWN
+        // layout: the portal and portal-OIT layouts differ at set 6, so a
+        // set past it is only compatible under the layout the draw uses
+        // (sets 0..5 stay valid under either).
+        if (m_spriteArrayLayout == VK_NULL_HANDLE || m_boundTextures[4] == INVALID_TEXTURE) return;
+        const VKTextureInfo* arrays[2] = {nullptr, nullptr};
+        for (int i = 0; i < 2; ++i) {
+            auto it = m_textures.find(m_boundTextures[4 + i]);
+            if (it != m_textures.end() && it->second.layers > 1 && it->second.imageView != VK_NULL_HANDLE &&
+                it->second.sampler != VK_NULL_HANDLE) {
+                arrays[i] = &it->second;
+            }
+        }
+        if (!arrays[0]) return;
+        if (!arrays[1]) arrays[1] = arrays[0];
+
+        SpriteArraySet& s = m_spriteArraySets[static_cast<size_t>(m_currentFrame)];
+        if (s.set == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = m_descriptorPool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &m_spriteArrayLayout;
+            if (vkAllocateDescriptorSets(m_device, &allocInfo, &s.set) != VK_SUCCESS) {
+                s.set = VK_NULL_HANDLE;
+                return;
+            }
+        }
+        // The slot's set holds this frame's views of both arrays (the
+        // per-frame copy, once the animator writes an array). It is written
+        // only when they change — once per frame at most, before any draw
+        // of this frame recorded with it — and this slot's previous frame
+        // has passed its fence, so nothing in flight reads the set.
+        VkImageView views[2] = {FrameView(*arrays[0]), FrameView(*arrays[1])};
+        VkSampler samplers[2] = {arrays[0]->sampler, arrays[1]->sampler};
+        if (views[0] != s.views[0] || views[1] != s.views[1] || samplers[0] != s.samplers[0] || samplers[1] != s.samplers[1]) {
+            VkDescriptorImageInfo infos[2]{};
+            VkWriteDescriptorSet writes[2]{};
+            for (uint32_t i = 0; i < 2; ++i) {
+                infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                infos[i].imageView   = views[i];
+                infos[i].sampler     = samplers[i];
+                writes[i].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                writes[i].dstSet          = s.set;
+                writes[i].dstBinding      = i;
+                writes[i].dstArrayElement = 0;
+                writes[i].descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                writes[i].descriptorCount = 1;
+                writes[i].pImageInfo      = &infos[i];
+            }
+            vkUpdateDescriptorSets(m_device, 2, writes, 0, nullptr);
+            s.views[0] = views[0];
+            s.views[1] = views[1];
+            s.samplers[0] = samplers[0];
+            s.samplers[1] = samplers[1];
+        }
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_boundLayout, 7, 1, &s.set, 0, nullptr);
     }
 
     void VKBackend::RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout) {
@@ -7037,13 +7128,14 @@ namespace Render {
 
     bool VKBackend::CreateVkImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                                  VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
-                                 VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& memory) {
+                                 VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& memory,
+                                 uint32_t layers) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
         imageInfo.extent = {width, height, 1};
         imageInfo.mipLevels = mipLevels;
-        imageInfo.arrayLayers = 1;
+        imageInfo.arrayLayers = std::max(1u, layers);
         imageInfo.format = format;
         imageInfo.tiling = tiling;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -7065,17 +7157,18 @@ namespace Render {
     }
 
     VkImageView VKBackend::CreateImageView(VkImage image, VkFormat format,
-                                           VkImageAspectFlags aspectFlags, uint32_t mipLevels) {
+                                           VkImageAspectFlags aspectFlags, uint32_t mipLevels,
+                                           uint32_t layers) {
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = format;
         viewInfo.subresourceRange.aspectMask = aspectFlags;
         viewInfo.subresourceRange.baseMipLevel = 0;
         viewInfo.subresourceRange.levelCount = mipLevels;
         viewInfo.subresourceRange.baseArrayLayer = 0;
-        viewInfo.subresourceRange.layerCount = 1;
+        viewInfo.subresourceRange.layerCount = std::max(1u, layers);
 
         VkImageView imageView;
         vkCreateImageView(m_device, &viewInfo, nullptr, &imageView);
@@ -7167,15 +7260,16 @@ namespace Render {
     }
 
     void VKBackend::TransitionImageLayout(VkImage image, VkFormat format,
-                                         VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels) {
+                                         VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels,
+                                         uint32_t layers) {
         VkCommandBuffer cmd = BeginSingleTimeCommands();
-        RecordImageLayoutTransition(cmd, image, format, oldLayout, newLayout, mipLevels);
+        RecordImageLayoutTransition(cmd, image, format, oldLayout, newLayout, mipLevels, layers);
         EndSingleTimeCommands(cmd);
     }
 
     void VKBackend::RecordImageLayoutTransition(VkCommandBuffer cmd, VkImage image, VkFormat format,
                                                 VkImageLayout oldLayout, VkImageLayout newLayout,
-                                                uint32_t mipLevels) {
+                                                uint32_t mipLevels, uint32_t layers) {
         (void)format;
 
         VkImageMemoryBarrier barrier{};
@@ -7189,7 +7283,7 @@ namespace Render {
         barrier.subresourceRange.baseMipLevel = 0;
         barrier.subresourceRange.levelCount = mipLevels;
         barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.layerCount = std::max(1u, layers);
 
         VkPipelineStageFlags srcStage, dstStage;
 
@@ -7258,19 +7352,25 @@ namespace Render {
         // renderer's additive sun/moon draws (same shader, same flags, only
         // dstBlendFactor differs) reused the translucent sunrise pipeline.
         //
-        // Bit budget: 36 bits of state + 1 bit layout + 27 bits of shader
-        // handle = 64 of 64 — full: a new baked field needs bits freed. Reference + masks stay out (dynamic state, set
+        // Bit budget: 37 bits of state + 27 bits of shader handle = 64 of
+        // 64 — full: a new baked field needs bits freed (pack() asserts the
+        // budget). Reference + masks stay out (dynamic state, set
         // per-draw via vkCmdSetStencil*); depth-bias CONSTANTS are baked
         // but keyed only by the enable bit — fine while every biased draw
         // uses the same constants (block break overlay only today).
-        int layoutType = 0;
-        {
-            auto sit = m_shaders.find(shader);
-            layoutType = (sit != m_shaders.end()) ? sit->second.layoutType : 0;
-        }
+        //
+        // The pipeline layout is not keyed: it is a property of the shader
+        // (layoutType is stamped right after creation, before any draw or
+        // WarmPipelines), so the shader bits already carry it. Keying it
+        // in one bit while it takes values up to 4 also aliased layouts,
+        // and blendAlphaLikeColor, added past the 64th bit, wrapped onto
+        // the depth-test bit: the half-res rain columns (depth test off,
+        // alpha-like) and other draws of the same state with depth test on
+        // shared a key and rebuilt each other's pipeline on every draw.
         uint64_t key = 0;
         int bit = 0;
         auto pack = [&key, &bit](uint64_t value, int bits) {
+            assert(bit + bits <= 64 && "pipeline key bit budget exceeded");
             key |= (value & ((1ull << bits) - 1)) << bit;
             bit += bits;
         };
@@ -7292,7 +7392,6 @@ namespace Render {
         pack(static_cast<uint64_t>(state.stencilDepthFailOp), 3);
         pack(static_cast<uint64_t>(state.stencilPassOp), 3);
         pack((state.depthClampEnabled && m_depthClampSupported) ? 1 : 0, 1);
-        pack(static_cast<uint64_t>(layoutType), 1);
         pack(shader, 27);
         pack(state.blendAlphaLikeColor ? 1 : 0, 1);
         return static_cast<size_t>(key);

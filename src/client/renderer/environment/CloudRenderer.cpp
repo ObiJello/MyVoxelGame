@@ -12,9 +12,6 @@
 #include "CloudRenderer.hpp"
 #include "EnvironmentState.hpp"
 #include "../backend/RenderBackend.hpp"
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 #include "platform/GameDirectory.hpp"
 #include "common/core/Log.hpp"
 #include "stb_image.h"
@@ -141,18 +138,11 @@ void main() {
         if (m_initialized) return true;
         if (!g_renderBackend) return false;
 
-        // Vulkan needs the UBO-aware (portal) pipeline layout for
-        // uModel/uFogColor/uFogEnv — same pattern as SkyRenderer.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal("shaders/clouds.vert", "shaders/clouds.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles("shaders/clouds.vert", "shaders/clouds.frag");
-            if (m_shader == INVALID_SHADER) {
-                m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
-            }
+        // The _vk shaders need the UBO-aware (portal) pipeline layout for
+        // uModel/uFogColor/uFogEnv; OpenGL falls back to the inline source.
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/clouds.vert", "shaders/clouds.frag");
+        if (m_shader == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
+            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
         }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("CloudRenderer: failed to create shader — clouds disabled");
@@ -253,8 +243,7 @@ void main() {
     }
 
     void CloudRenderer::DestroyMeshBuffers(bool deferred) {
-        DestroySlot(0, deferred);
-        DestroySlot(1, deferred);
+        for (size_t slot = 0; slot < static_cast<size_t>(EntityFrame::kMaxSlots); ++slot) DestroySlot(slot, deferred);
         m_indexCount = 0;
     }
 
@@ -353,7 +342,7 @@ void main() {
 
         // Alternate slots so the write never lands on the mesh a queued frame
         // is still reading (see MeshSlot in the header).
-        const size_t slot = (m_activeSlot + 1) % 2;
+        const size_t slot = (m_activeSlot + 1) % static_cast<size_t>(EntityFrame::Slots());
         MeshSlot& ms = m_slots[slot];
         const size_t vbBytes = verts.size() * sizeof(Vertex);
         const size_t ibBytes = indices.size() * sizeof(uint32_t);

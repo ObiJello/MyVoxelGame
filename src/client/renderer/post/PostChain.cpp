@@ -157,7 +157,10 @@ namespace Render {
         desc.width = width;
         desc.height = height;
         desc.colorFormat = TextureFormat::RGBA8;   // MC's post targets: RGBA8_UNORM
-        return g_renderBackend->CreateRenderTarget(desc);
+        desc.depth = false;                        // every pass draws with depth off
+        const RenderTargetHandle target = g_renderBackend->CreateRenderTarget(desc);
+        g_renderBackend->SetDebugLabel(DebugLabelKind::RenderTarget, target, "Post chain target");
+        return target;
     }
 
     void PostChain::ConfigureTexture(RenderTargetHandle target) { RefreshTextureState(target); }
@@ -185,11 +188,13 @@ namespace Render {
             set.mainCopy = MakeTarget(width, height);
             if (set.mainCopy == INVALID_RENDER_TARGET) return false;
             ConfigureTexture(set.mainCopy);
+            g_renderBackend->SetDebugLabel(DebugLabelKind::RenderTarget, set.mainCopy, ("Post " + m_id + " main copy").c_str());
             for (const PostChainConfig::Target& t : m_config.targets) {
                 const glm::ivec2 size = sizeOf(t);
                 const RenderTargetHandle rt = MakeTarget(size.x, size.y);
                 if (rt == INVALID_RENDER_TARGET) return false;
                 ConfigureTexture(rt);
+                g_renderBackend->SetDebugLabel(DebugLabelKind::RenderTarget, rt, ("Post " + m_id + " " + t.name).c_str());
                 set.targets[t.name] = rt;
             }
             set.width = width;

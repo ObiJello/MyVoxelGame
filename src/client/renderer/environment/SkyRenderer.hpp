@@ -182,6 +182,14 @@ namespace Render {
         //       render distance).
         // viewRotation: the camera view matrix with translation stripped.
         void Render(const glm::mat4& proj, const glm::mat4& viewRotation);
+        // The late sky pass: every sky draw depth-tested LessEqual at the far
+        // plane (sky_vk.vert puts the sky at depth 1.0), no depth write, so
+        // a view that draws its sky AFTER its opaque and cutout terrain
+        // shades only the sky pixels the terrain left. Off (the default) the
+        // sky draws with the depth test off, as MC's sky pass does, for the
+        // views that draw it first — a portal view's depth is not cleared
+        // where its silhouette is, so those must keep it off.
+        void SetDepthTested(bool on) { m_depthTested = on; }
 
         // The sky of `rawDimensionId` from this viewpoint, whatever the
         // active dimension is — the far side of a portal. The Nether draws
@@ -239,9 +247,25 @@ namespace Render {
         // its 3×2 image, a blend mode, a day-time fade, a rotation, and
         // the conditions OptiFine's CustomSkyLayer checks every frame
         // (biomes, heights, days, weather).
+        struct DecodedLayer;
         struct OptiFineLayer {
             TextureHandle faces[6] = {INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
                                       INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE};
+            // Residency (PumpLayerResidency): the faces are on the GPU only
+            // while the layer is NEEDED — its fade window within
+            // kResidencyLookaheadTicks of the day time, its days and
+            // weather conditions met — and for kResidencyIdle after. A
+            // pack's whole set of 1024² faces (~24 MB a layer) stayed
+            // resident before, two thirds of it invisible at any one time
+            // (Xcode Memory view, 2026-10-07). An unneeded layer keeps its
+            // parsed properties and re-decodes its image on a worker when
+            // it is next needed (`file` / `skyDir`), uploading one layer a
+            // frame; the fade-in from 0 covers the ~0.2 s of decode.
+            std::string file, skyDir;                      // its sky<n>.properties and sky folder
+            bool resident = false;                         // faces[] uploaded
+            std::chrono::steady_clock::time_point lastNeeded{};
+            std::shared_ptr<DecodedLayer> pending;         // decoded (or decoding) faces awaiting upload
+            std::future<void> decode;                      // the worker filling `pending`
             // OptiFine blend names: add (default), alpha, subtract, multiply,
             // dodge, burn, screen, overlay, replace.
             std::string blend = "add";
@@ -329,6 +353,17 @@ namespace Render {
         static void DecodeOptiFinePack(DecodedPack& pack, int parallelism);
         // Main thread: the six face textures of one decoded layer.
         bool UploadDecodedLayer(DecodedLayer& layer);
+        // Layer residency (OptiFineLayer): decides per frame which of
+        // `layers` are needed, starts their decodes, uploads one decoded
+        // layer a frame, and drops the faces of layers idle for
+        // kResidencyIdle. `active` false (the other world's layers) only
+        // releases. Returns the number of layers resident.
+        static constexpr int kResidencyLookaheadTicks = 1200;            // one game hour of fade-in warning
+        static constexpr std::chrono::seconds kResidencyIdle{300};
+        bool LayerNeeded(const OptiFineLayer& layer, int64_t dayTime, int timeOfDay, float rain, float thunder) const;
+        size_t PumpLayerResidency(std::vector<OptiFineLayer>& layers, bool active, int64_t dayTime, int timeOfDay,
+                                  float rain, float thunder, std::chrono::steady_clock::time_point now);
+        void ReleaseLayerFaces(OptiFineLayer& layer);
         // Main thread: uploads what is still pending, then makes the pack
         // the resident one (m_pack). False when no layer could be read.
         bool InstallDecodedPack(DecodedPack& pack);
@@ -395,6 +430,7 @@ namespace Render {
         int         m_userSkyboxMode = 2;
         int         m_dimension = 0;
         bool        m_noSky = false;
+        bool        m_depthTested = false;   // SetDepthTested
         // The Hush's frozen night is the active sky (see RenderFixedNight).
         bool        m_fixedNight = false;
         // The mod dimensions' skies are the active sky: the Twilight

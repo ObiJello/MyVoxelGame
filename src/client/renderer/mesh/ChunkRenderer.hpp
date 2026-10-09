@@ -335,6 +335,15 @@ namespace Render {
         bool IsPortalViewColumn(::Game::Math::ChunkPos chunkPos) const {
             return m_portalViewGrid.HasColumn(chunkPos) || m_shadowViewGrid.HasColumn(chunkPos);
         }
+        // Every column any view reaches (main, portal, shadow), for the
+        // mesh scheduler's walk (ClientChunkManager::ScheduleMeshBuilds
+        // WithSnapshots): a few thousand mask reads, instead of a hash
+        // probe per dirty chunk of the whole loaded world.
+        template <class F> void ForEachViewColumn(F&& f) const {
+            m_mainViewGrid.ForEachColumn(f);
+            m_portalViewGrid.ForEachColumn(f);
+            m_shadowViewGrid.ForEachColumn(f);
+        }
 
         // The camera jumped — a same-level portal crossing (a wrap border)
         // put it a world's width from where it was. The reachable-set slots
@@ -353,6 +362,15 @@ namespace Render {
         // per pass (block entities) read this, so what a portal shows is
         // gathered from the portal's own view rather than the main camera's.
         const std::vector<SectionRenderData>& GetVisibleSections() const { return m_visibleSections; }
+        // The chunk columns of m_visibleSections, each once, in list order —
+        // made with the grid in the same pass, so the block-entity walkers
+        // (BlockEntityRenderDispatcher::CollectVisibleChunks) need neither a
+        // set nor a scan of the sections. VisiblePassSerial changes with
+        // every rebuild (the main view, each portal recursion): a walker
+        // caches what it derived against it. MAIN THREAD ONLY.
+        const std::vector<::Game::Math::ChunkPos>& GetVisibleChunkPositions() const { return m_visibleChunkPositions; }
+        uint64_t VisiblePassSerial() const { return m_visiblePassSerial; }
+        bool IsColumnVisible(::Game::Math::ChunkPos chunkPos) const { return m_visibleGrid.HasColumn(chunkPos); }
         // For the F3 chunk-culling renderers (section paths / visibility).
         const SectionOcclusionGraph& OcclusionGraph() const { return m_occlusionGraph; }
 
@@ -908,10 +926,12 @@ namespace Render {
                 }
                 originX = cx; originZ = cz;
                 overflow.clear();
+                overflowColumns.clear();
             }
             void Clear() {
                 std::fill(masks.begin(), masks.end(), 0u);
                 overflow.clear();
+                overflowColumns.clear();
             }
             bool Cell(::Game::Math::ChunkPos p, size_t& idx) const {
                 const int gx = p.x - originX + radius;
@@ -926,9 +946,22 @@ namespace Render {
                     masks[idx] |= 1u << (sectionY & 31);
                 } else {
                     overflow.insert(VisibleSectionKey(p, sectionY));
-                    overflow.insert(ColumnKey(p));
+                    if (overflow.insert(ColumnKey(p)).second) overflowColumns.push_back(p);
                 }
             }
+            // Every column that is "in": the grid's cells with a mask, then
+            // the overflow's columns. The mesh scheduler walks the views'
+            // columns this way instead of every dirty chunk (2026-10-08).
+            template <class F> void ForEachColumn(F&& f) const {
+                for (int gz = 0; gz < width; ++gz) {
+                    const uint32_t* row = masks.data() + static_cast<size_t>(gz) * width;
+                    for (int gx = 0; gx < width; ++gx) {
+                        if (row[gx]) f(::Game::Math::ChunkPos{gx - radius + originX, gz - radius + originZ});
+                    }
+                }
+                for (const auto& p : overflowColumns) f(p);
+            }
+            std::vector<::Game::Math::ChunkPos> overflowColumns;   // the overflow's column keys, decodable
             bool HasSection(::Game::Math::ChunkPos p, int sectionY) const {
                 size_t idx;
                 if (Cell(p, idx)) return (masks[idx] >> (sectionY & 31)) & 1u;
@@ -953,7 +986,11 @@ namespace Render {
                         }
                     }
                 }
-                overflow.insert(o.overflow.begin(), o.overflow.end());
+                for (const auto& k : o.overflow) overflow.insert(k);
+                for (const auto& p : o.overflowColumns) {
+                    if (std::find(overflowColumns.begin(), overflowColumns.end(), p) == overflowColumns.end())
+                        overflowColumns.push_back(p);
+                }
             }
         };
         // The main view's list and the same-level portal views' lists (see
@@ -984,6 +1021,8 @@ namespace Render {
         // it in the per-frame frustum filter, so IsSectionVisible is one
         // array read instead of a scan of a few thousand entries per entity.
         SectionGrid m_visibleGrid;
+        std::vector<::Game::Math::ChunkPos> m_visibleChunkPositions;   // see GetVisibleChunkPositions
+        uint64_t m_visiblePassSerial = 0;
         // Overflow keys pack chunk x/z (27 bits each — ±67M chunks, far past
         // any world border) and the section index; a chunk beyond that range
         // can only alias onto a false "visible", never a false cull.

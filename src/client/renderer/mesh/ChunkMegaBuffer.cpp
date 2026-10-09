@@ -43,6 +43,7 @@ namespace Render {
             if (m_originsUbo == INVALID_BUFFER) {
                 Log::Error("ChunkMegaBuffer: failed to create the section-origin table");
             }
+            g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, m_originsUbo, "Terrain section origins");
         }
 
         // Allocate the first slab
@@ -65,15 +66,18 @@ namespace Render {
                     g_renderBackend->DestroyBuffer(region.sectionIbo);
                 }
             }
-            for (auto& slab : m_slabs) {
+            auto destroySlab = [&](Slab& slab) {
                 // The buffer texture views the VBO: it goes first.
                 if (slab.faceMapTex != INVALID_TEXTURE) g_renderBackend->DestroyTexture(slab.faceMapTex);
                 if (slab.vbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.vbo);
                 if (slab.ibo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(slab.ibo);
-            }
+            };
+            for (auto& slab : m_slabs) destroySlab(slab);
+            if (m_spareSlab) destroySlab(*m_spareSlab);
             if (m_originsUbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(m_originsUbo);
         }
         m_originsUbo = INVALID_BUFFER;
+        m_spareSlab.reset();
         m_slabs.clear();
         m_regions.clear();
         m_pendingFrees.clear();
@@ -146,17 +150,33 @@ namespace Render {
         }
 
         Slab slab;
-        CreateSlabResources(slab);
+        const bool fromSpare = m_spareSlab.has_value();
+        if (fromSpare) {
+            slab = std::move(*m_spareSlab);
+            m_spareSlab.reset();
+        } else {
+            CreateSlabResources(slab);
+        }
         if (m_drainSlab != UINT32_MAX) EndDrain(/*cooldown=*/true);   // as for a re-created hole
 
         uint32_t index = static_cast<uint32_t>(m_slabs.size());
         m_slabs.push_back(std::move(slab));
 
-        Log::Debug("ChunkMegaBuffer[%s]: allocated slab %u (%.1f MB VBO + %.1f MB IBO)",
+        Log::Debug("ChunkMegaBuffer[%s]: allocated slab %u (%.1f MB VBO + %.1f MB IBO)%s",
                    m_name, index,
                    static_cast<double>(m_slabVertexCapacity * VERTEX_STRIDE) / (1024.0 * 1024.0),
-                   static_cast<double>(m_slabIndexCapacity * INDEX_SIZE) / (1024.0 * 1024.0));
+                   static_cast<double>(m_slabIndexCapacity * INDEX_SIZE) / (1024.0 * 1024.0),
+                   fromSpare ? " from the spare" : "");
+        PrefetchSpareSlab();
         return index;
+    }
+
+    void ChunkMegaBuffer::PrefetchSpareSlab() {
+        if (m_spareSlab || !g_renderBackend || !g_renderBackend->PrefersBufferPrefetch()) return;
+        if (m_slabs.size() < 2 || m_slabs.size() >= kMaxSlabs) return;   // a growing pool, below its cap
+        Slab spare;
+        CreateSlabResources(spare);
+        m_spareSlab = std::move(spare);
     }
 
     void ChunkMegaBuffer::CreateSlabResources(Slab& slab) {
@@ -175,11 +195,17 @@ namespace Render {
             slab.iboCapacity * INDEX_SIZE,
             nullptr,
             BufferAccess::Dynamic);
+        g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, slab.vbo, "Terrain slab VBO");
+        g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, slab.ibo, "Terrain slab IBO");
 
         // The face map: the same bytes as the VBO, seen by the fragment
         // shader as RGBA16 texels (one record each). One view per slab,
         // bound with the slab.
-        slab.faceMapTex = g_renderBackend->CreateBufferTexture(slab.vbo, TextureFormat::RGBA16);
+        // Integer texels: the records are uint16 fields, and the fragment
+        // shader reads them as such (usamplerBuffer) — the unorm view cost
+        // it a multiply-round-convert per fetch (Xcode per-line, 2026-10-07).
+        slab.faceMapTex = g_renderBackend->CreateBufferTexture(slab.vbo, TextureFormat::RGBA16UI);
+        g_renderBackend->SetDebugLabel(DebugLabelKind::Texture, slab.faceMapTex, "Terrain face map");
         if (slab.faceMapTex == INVALID_TEXTURE) {
             Log::Error("ChunkMegaBuffer: no buffer texture for the face map — "
                        "greedy-merged rectangles will read garbage records");

@@ -1,6 +1,7 @@
 // File: src/client/renderer/texture/AtlasBuilder.hpp
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -135,6 +136,36 @@ namespace Render {
         // with the atlas; INVALID_TEXTURE before the first build.
         Render::TextureHandle GetSpriteTableHandle() const { return m_spriteTable; }
 
+        // The sprite array: a 2D texture array with one layer per STATIC
+        // block sprite, layer = sprite id, for the ids below
+        // GetSpriteArrayLayers(). The terrain fragment shaders sample a
+        // greedy-merged quad's sprite from it with hardware repeat instead of
+        // the sprite-table fetch + fract + textureGrad over the atlas (the
+        // fragment stage's longest fetch chain). Every layer is kMaxSpriteArray
+        // SizeOrSmaller sprites' size S: a smaller sprite is upscaled by a
+        // whole power of two, nearest, which keeps the sampled texels AND the
+        // mip level the GPU picks identical to the atlas's. An animated
+        // sprite's layer is redrawn by the TextureAnimator with its atlas
+        // rect. Non-square, non-power-of-two and oversize sprites, and the
+        // overflow past the backend's layer cap, get the ids above the layer
+        // count and keep the atlas path. Built with the atlas and rebuilt
+        // with its mip chain; INVALID_TEXTURE (layers 0) without one, or
+        // with OBEY_SPRITE_ARRAY=0.
+        // Up to kSpriteArrays arrays of GetSpriteArrayCap() layers each (the
+        // backend's layer limit, 2048 on Metal — fewer than this atlas's
+        // sprites): sprite id s is layer s % cap of array s / cap. The second
+        // array is the overflow; INVALID_TEXTURE when everything fits.
+        static constexpr int kSpriteArrays = 2;
+        Render::TextureHandle GetSpriteArrayHandle(int index = 0) const {
+            return index >= 0 && index < kSpriteArrays ? m_spriteArrays[static_cast<size_t>(index)] : Render::INVALID_TEXTURE;
+        }
+        int GetSpriteArrayCap() const { return m_spriteArrayCap; }
+        int GetSpriteArrayLayers() const { return m_spriteArrays[0] != Render::INVALID_TEXTURE ? m_spriteArrayLayers : 0; }
+        // The largest sprite side the array takes: bigger sprites fall back
+        // to the atlas path (a 128 px pack would otherwise cost 16x the
+        // memory of a 32 px one for every upscaled 16 px sprite).
+        static constexpr int kMaxSpriteArraySize = 64;
+
         // Get the native texture ID (for ImGui display / legacy code)
         uintptr_t GetAtlasTextureID() const;
 
@@ -205,8 +236,26 @@ namespace Render {
         Render::TextureHandle m_atlasTexture = Render::INVALID_TEXTURE;
         void DestroyAtlasTextures();
         Render::TextureHandle m_spriteTable  = Render::INVALID_TEXTURE;
-        // Number sprites and (re)create m_spriteTable from textureKeyToUV.
-        void BuildSpriteTable();
+        // Number sprites and (re)create m_spriteTable from textureKeyToUV:
+        // the sprites the array can hold first (ids 0..layers-1, in key
+        // order), then the rest (key order), so ids stay deterministic for
+        // one sprite set.
+        void BuildSpriteTable(const std::vector<TextureSource>& sources,
+                              const std::vector<PackRect>& packedRects);
+        // The sprite array (GetSpriteArrayHandle): built from the sources
+        // BuildSpriteTable picked, with EffectiveMipLevels() in mind, so it
+        // runs wherever the atlas's mip chain is (re)built.
+        void BuildSpriteArray(const std::vector<TextureSource>& sources);
+        void DestroySpriteArray();
+        // The array's sampling parameters (UpdateTextureParameters' for it).
+        void ApplySpriteArrayParameters();
+        std::array<Render::TextureHandle, kSpriteArrays> m_spriteArrays{Render::INVALID_TEXTURE, Render::INVALID_TEXTURE};
+        int m_spriteArrayLayers = 0;              // sprites in the arrays = ids below this
+        int m_spriteArrayCap = 0;                 // layers per array (the backend's limit)
+        int m_spriteArraySize = 0;                // S: every layer is S x S
+        int m_spriteArrayLevels = 0;              // the array's mip levels (0 without one)
+        int m_spriteArrayMinSize = 0;             // the smallest sprite in it (sets the extra levels)
+        std::vector<int> m_spriteArraySources;    // layer -> index into textureSources
         Render::TextureHandle m_grassColormap = Render::INVALID_TEXTURE;
         Render::TextureHandle m_foliageColormap = Render::INVALID_TEXTURE;
 

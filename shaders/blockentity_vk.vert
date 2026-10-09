@@ -23,6 +23,31 @@ layout(push_constant) uniform PushConstants {
     vec4 uLocalRow2;    // 112-127
 } pc;
 
+// The Common UBO's head (SpirvUniforms.hpp CommonUBO; a shader may declare
+// a prefix of the block): uTint_ carries the portal clip plane — a block
+// entity seen through a portal is clipped at the far portal's plane like
+// the terrain (block_vk.vert), since the Vulkan/Metal see-through pass
+// draws with the plain projection (PortalRenderer::SceneRenderFn). The
+// push constants cannot hold it: their last three rows are uLocalToRender.
+// BlockEntityShader::ApplyWorld sets uPortalClipPlane before the model
+// matrix, so the alias (SpirvUniforms::SetVec4) lands here and stays.
+layout(std140, set = 1, binding = 0) uniform Common {
+    mat4 uMVP_;
+    mat4 uModel_;
+    vec4 uPortalColor_;
+    vec4 uColorDark_;
+    vec4 uColorHot_;
+    vec4 uKeyDir_;
+    vec4 uTint_;        // the portal clip plane (render space); zero = none
+} U;
+
+// gl_ClipDistance must be advertised explicitly — see block_vk.vert.
+out gl_PerVertex {
+    vec4  gl_Position;
+    float gl_PointSize;
+    float gl_ClipDistance[1];
+};
+
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
 layout(location = 2) out vec3 vRenderPos;
@@ -33,4 +58,8 @@ void main() {
     vColor = aColor;
     vec4 p = vec4(aPos, 1.0);
     vRenderPos = vec3(dot(pc.uLocalRow0, p), dot(pc.uLocalRow1, p), dot(pc.uLocalRow2, p));
+    // Portal clip plane in render space, the space vRenderPos is in.
+    gl_ClipDistance[0] = (any(notEqual(U.uTint_.xyz, vec3(0.0))))
+        ? dot(U.uTint_.xyz, vRenderPos) + U.uTint_.w
+        : 1.0;
 }

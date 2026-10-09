@@ -14,6 +14,10 @@ uniform mat4 uMVP;
 // pipeline recognises this program as gbuffers_block by the ABSENCE of a
 // uModel.) The item forms draw unfogged and may leave it the identity.
 uniform mat4 uLocalToRender;
+// The portal clip plane in render space (ChunkRenderer::PortalClipPlane,
+// set by BlockEntityShader::ApplyWorld); zero = no clipping. The backend
+// keeps GL_CLIP_DISTANCE0 enabled.
+uniform vec4 uPortalClipPlane;
 
 out vec2 vUV;
 out vec4 vColor;
@@ -24,4 +28,7 @@ void main() {
     vUV = aUV;
     vColor = aColor;
     vRenderPos = (uLocalToRender * vec4(aPos, 1.0)).xyz;
+    gl_ClipDistance[0] = (any(notEqual(uPortalClipPlane.xyz, vec3(0.0))))
+        ? dot(uPortalClipPlane.xyz, vRenderPos) + uPortalClipPlane.w
+        : 1.0;
 }

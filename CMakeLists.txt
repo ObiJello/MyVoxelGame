@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.19)
 project(MyVoxelGame LANGUAGES C CXX VERSION 0.1.0)
+if(APPLE)
+    # The Metal backend (src/client/renderer/backend/metal/*.mm) and ImGui's
+    # Metal renderer are Objective-C++.
+    enable_language(OBJCXX)
+endif()
 
 # Emit compile_commands.json so clangd knows the real per-file compile flags
 # (C++20 standard, include paths to ext/glm, ext/glfw, generated/, MoltenVK,
@@ -94,6 +99,9 @@ add_link_options(
 #     but all shared libraries and the launcher are always universal. ───────────
 if(APPLE)
     option(ENABLE_VULKAN "Enable Vulkan rendering backend" ON)
+    # The native Metal backend (--metal). Independent of the Vulkan SDK, so it
+    # builds into both slices of a universal binary.
+    option(ENABLE_METAL "Enable the native Metal rendering backend" ON)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.7.6" CACHE STRING "Minimum macOS version" FORCE)
 
     # Always build libraries as universal so the launcher (and anything else
@@ -574,6 +582,7 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/scene_upscale_vk.vert
             ${VK_SHADER_DIR}/scene_upscale_vk.frag
             ${VK_SHADER_DIR}/weather_half_vk.frag
+            ${VK_SHADER_DIR}/weather_streak_vk.vert
             ${VK_SHADER_DIR}/beam_volume_vk.vert
             ${VK_SHADER_DIR}/beam_volume_vk.frag
             ${VK_SHADER_DIR}/beam_sprite_vk.vert
@@ -612,6 +621,44 @@ if(HAS_VULKAN)
                 )
                 list(APPEND VK_SPV_FILES ${OIT_SPV})
             endforeach()
+        endforeach()
+        # Half-precision terrain fragment shaders: <name>_f16_vk.frag.spv from
+        # the same source with TERRAIN_F16 (the shader's h* types become
+        # float16). Metal always loads this variant (MetalBackend::LoadFunction),
+        # Vulkan when the device has shaderFloat16 (VKBackend); the plain .spv
+        # is the fallback. Their .metal twins come from the generator like
+        # any other _vk .spv.
+        set(VK_F16_SHADERS terrain_opaque terrain_cutout terrain_solid)
+        # The vertex shader's twin (half varyings, terrain_vk.vert) and the
+        # translucent shader's Improved Transparency twins: a pipeline pairs
+        # f16 with f16 or float with float, never mixed.
+        add_custom_command(
+            OUTPUT ${VK_SPV_DIR}/terrain_f16_vk.vert.spv
+            COMMAND ${GLSLC} -fshader-stage=vert -DTERRAIN_F16 ${VK_SHADER_DIR}/terrain_vk.vert -o ${VK_SPV_DIR}/terrain_f16_vk.vert.spv
+            DEPENDS ${VK_SHADER_DIR}/terrain_vk.vert
+            COMMENT "Compiling SPIR-V: terrain_f16_vk.vert"
+        )
+        list(APPEND VK_SPV_FILES ${VK_SPV_DIR}/terrain_f16_vk.vert.spv)
+        foreach(OIT_STAGE ${VK_OIT_STAGES})
+            set(OIT_SPV ${VK_SPV_DIR}/terrain_solid_oit_${OIT_STAGE}_f16_vk.frag.spv)
+            add_custom_command(
+                OUTPUT ${OIT_SPV}
+                COMMAND ${GLSLC} -fshader-stage=frag -DTERRAIN_F16 ${VK_OIT_DEFINES_${OIT_STAGE}} ${VK_SHADER_DIR}/terrain_solid_vk.frag -o ${OIT_SPV}
+                DEPENDS ${VK_SHADER_DIR}/terrain_solid_vk.frag ${VK_SHADER_DIR}/oit_lib.glsl
+                COMMENT "Compiling SPIR-V: terrain_solid_oit_${OIT_STAGE}_f16_vk.frag"
+            )
+            list(APPEND VK_SPV_FILES ${OIT_SPV})
+        endforeach()
+        foreach(F16_NAME ${VK_F16_SHADERS})
+            set(F16_SRC ${VK_SHADER_DIR}/${F16_NAME}_vk.frag)
+            set(F16_SPV ${VK_SPV_DIR}/${F16_NAME}_f16_vk.frag.spv)
+            add_custom_command(
+                OUTPUT ${F16_SPV}
+                COMMAND ${GLSLC} -fshader-stage=frag -DTERRAIN_F16 ${F16_SRC} -o ${F16_SPV}
+                DEPENDS ${F16_SRC}
+                COMMENT "Compiling SPIR-V: ${F16_NAME}_f16_vk.frag"
+            )
+            list(APPEND VK_SPV_FILES ${F16_SPV})
         endforeach()
         add_custom_target(compile_shaders ALL DEPENDS ${VK_SPV_FILES})
     else()
@@ -2227,6 +2274,9 @@ set(GAME_SOURCES
             src/common/network/packets/KeepAliveC2S.hpp
 
             # Render backend abstraction
+            src/client/renderer/backend/RenderBackend.cpp
+            src/client/renderer/backend/SpirvUniforms.cpp
+            src/client/renderer/backend/SpirvUniforms.hpp
             src/client/renderer/backend/opengl/GLBackend.cpp
             src/client/renderer/backend/opengl/GLBackend.hpp
 
@@ -2451,6 +2501,142 @@ endif()
 # Ensure SPIR-V shaders are compiled before MyVoxelGame links (so post-build copy gets fresh .spv)
 if(TARGET compile_shaders)
     add_dependencies(MyVoxelGame compile_shaders)
+endif()
+
+# ── Native Metal backend (macOS, --metal) ────────────────────────────────────
+# Objective-C++ with ARC. It draws with the MSL that tools/gen_metal_shaders.py
+# generates from the Vulkan SPIR-V into shaders/metal/ (committed, like the
+# .spv): regenerated here after compile_shaders whenever spirv-cross is
+# available, else the committed files are used. With Apple's Metal toolchain
+# they are linked into shaders.metallib below; without it the game compiles
+# the .metal sources at startup.
+if(APPLE AND ENABLE_METAL)
+    set(METAL_BACKEND_SOURCES
+            src/client/renderer/backend/metal/MetalBackend.mm
+            src/client/renderer/backend/metal/MetalResources.mm
+            src/client/renderer/backend/metal/MetalPipelines.mm
+            src/client/renderer/backend/metal/MetalInstrumentation.mm
+            src/client/renderer/backend/metal/Metal4Backend.mm
+            src/client/renderer/backend/metal/MetalFour.mm
+    )
+    target_sources(MyVoxelGame PRIVATE ${METAL_BACKEND_SOURCES})
+    set_source_files_properties(${METAL_BACKEND_SOURCES} PROPERTIES
+            COMPILE_OPTIONS "-fobjc-arc"
+            SKIP_PRECOMPILE_HEADERS ON)
+    target_compile_definitions(MyVoxelGame PRIVATE HAS_METAL=1)
+    target_compile_definitions(imgui PRIVATE HAS_METAL=1)
+    target_sources(imgui PRIVATE ext/imgui/backends/imgui_impl_metal.mm)
+    set_source_files_properties(ext/imgui/backends/imgui_impl_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    find_library(METAL_FRAMEWORK Metal REQUIRED)
+    find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    target_link_libraries(MyVoxelGame PRIVATE ${METAL_FRAMEWORK} ${QUARTZCORE_FRAMEWORK} ${APPKIT_FRAMEWORK})
+    target_link_libraries(imgui PRIVATE ${METAL_FRAMEWORK} ${QUARTZCORE_FRAMEWORK})
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        set(_metal_spv_dirs --spv-dir "${PROJECT_SOURCE_DIR}/shaders")
+        if(TARGET compile_shaders)
+            list(APPEND _metal_spv_dirs --spv-dir "${CMAKE_BINARY_DIR}/shaders")
+        endif()
+        # A custom COMMAND with a stamp output, not a bare target: Ninja decides
+        # what is stale when the build starts, so an .air rule that depended
+        # only on its .metal file saw the file the generator had not yet
+        # rewritten and compiled the previous build's source — the metallib
+        # lagged the shaders by one build (a vertex/fragment varying mismatch
+        # drew no terrain, 2026-10-08). The .air rules depend on this stamp
+        # too, which the generator refreshes whenever a SPIR-V input changed,
+        # so they recompile after it in the same build.
+        set(_metal_gen_stamp "${CMAKE_BINARY_DIR}/gen_metal_shaders.stamp")
+        set(_metal_gen_deps "${PROJECT_SOURCE_DIR}/tools/gen_metal_shaders.py")
+        if(TARGET compile_shaders)
+            list(APPEND _metal_gen_deps ${VK_SPV_FILES})
+        endif()
+        add_custom_command(
+                OUTPUT "${_metal_gen_stamp}"
+                COMMAND ${Python3_EXECUTABLE} "${PROJECT_SOURCE_DIR}/tools/gen_metal_shaders.py"
+                        ${_metal_spv_dirs} --out "${PROJECT_SOURCE_DIR}/shaders/metal"
+                COMMAND ${CMAKE_COMMAND} -E touch "${_metal_gen_stamp}"
+                DEPENDS ${_metal_gen_deps}
+                COMMENT "Generating Metal shaders from SPIR-V"
+                VERBATIM)
+        add_custom_target(gen_metal_shaders ALL DEPENDS "${_metal_gen_stamp}")
+        add_dependencies(MyVoxelGame gen_metal_shaders)
+    endif()
+
+    # With Apple's Metal toolchain (`xcodebuild -downloadComponent
+    # MetalToolchain`), the shaders are precompiled the way shipping games
+    # do: every .metal to AIR with line tables and its source embedded (the
+    # Metal debugger's shader profiler maps GPU cost to source lines), linked
+    # into one shaders.metallib in the bundle. MetalBackend loads it and
+    # compiles the .metal sources at startup only without it.
+    #
+    # The shader profiler's per-line costs are only reported for shaders
+    # built for the OS the capture replays on ("deployment target is lower
+    # than device OS version" otherwise). METAL_SHADER_PROFILING targets this
+    # machine's macOS instead of the deployment target. It defaults to ON in
+    # Tracy builds (the profiling configuration, never shipped) and OFF
+    # everywhere else: a host-targeted metallib refuses to load on an older
+    # macOS, and the game would fall back to compiling the sources. (A
+    # default rather than an ad-hoc `cmake -D`: CLion re-runs its own
+    # configure and resets flags it did not pass.)
+    # (TRACY_ENABLE implies it rather than defaulting the option: an option's
+    # cached value survives reconfigures, so a default would never take in a
+    # build directory configured before it existed.)
+    option(METAL_SHADER_PROFILING "Build shaders.metallib for this Mac's macOS (Xcode per-line shader costs)" OFF)
+    set(_metal_min_os "${CMAKE_OSX_DEPLOYMENT_TARGET}")
+    if(METAL_SHADER_PROFILING OR TRACY_ENABLE)
+        execute_process(COMMAND sw_vers -productVersion OUTPUT_VARIABLE _metal_min_os
+                        OUTPUT_STRIP_TRAILING_WHITESPACE)
+        message(STATUS "Metal shader profiling: shaders.metallib targets macOS ${_metal_min_os}")
+    endif()
+    execute_process(COMMAND xcrun metal --version RESULT_VARIABLE _metal_rc OUTPUT_QUIET ERROR_QUIET)
+    if(_metal_rc EQUAL 0)
+        file(GLOB METAL_SHADER_FILES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/shaders/metal/*.metal")
+        set(_metal_air_dir "${CMAKE_BINARY_DIR}/metal-air")
+        file(MAKE_DIRECTORY "${_metal_air_dir}")
+        set(_metal_air_files "")
+        foreach(_metal_src ${METAL_SHADER_FILES})
+            get_filename_component(_metal_name "${_metal_src}" NAME_WE)
+            get_filename_component(_metal_full "${_metal_src}" NAME)
+            string(REGEX REPLACE "\\.metal$" ".air" _metal_air "${_metal_full}")
+            set(_metal_air "${_metal_air_dir}/${_metal_air}")
+            set(_metal_air_deps "${_metal_src}")
+            if(DEFINED _metal_gen_stamp)
+                list(APPEND _metal_air_deps "${_metal_gen_stamp}")   # after the generator, every build (see above)
+            endif()
+            add_custom_command(
+                    OUTPUT "${_metal_air}"
+                    COMMAND xcrun metal -std=macos-metal2.4 -mmacosx-version-min=${_metal_min_os}
+                            -gline-tables-only -frecord-sources -c "${_metal_src}" -o "${_metal_air}"
+                    DEPENDS ${_metal_air_deps}
+                    COMMENT "Compiling Metal: ${_metal_full}"
+                    VERBATIM)
+            list(APPEND _metal_air_files "${_metal_air}")
+        endforeach()
+        set(METAL_SHADER_LIBRARY "${CMAKE_BINARY_DIR}/shaders.metallib")
+        add_custom_command(
+                OUTPUT "${METAL_SHADER_LIBRARY}"
+                COMMAND xcrun metallib ${_metal_air_files} -o "${METAL_SHADER_LIBRARY}"
+                DEPENDS ${_metal_air_files}
+                COMMENT "Linking shaders.metallib"
+                VERBATIM)
+        add_custom_target(metal_shader_library ALL DEPENDS "${METAL_SHADER_LIBRARY}")
+        if(TARGET gen_metal_shaders)
+            add_dependencies(metal_shader_library gen_metal_shaders)
+        endif()
+        add_dependencies(MyVoxelGame metal_shader_library)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                        "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/metal"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${METAL_SHADER_LIBRARY}"
+                        "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/metal/shaders.metallib"
+                COMMENT "Staging shaders.metallib")
+        message(STATUS "Metal toolchain found: shaders precompile into shaders.metallib")
+    else()
+        message(STATUS "Metal toolchain not installed: Metal shaders compile at runtime "
+                       "(xcodebuild -downloadComponent MetalToolchain to precompile)")
+    endif()
 endif()
 
 # 8) Includes
@@ -2826,6 +3012,45 @@ if(APPLE)
                 COMMENT "Copying freshly-compiled SPIR-V back into source shaders/ for dev runs"
         )
     endif()
+    # Step 3: a shader-only rebuild never relinks the executable, so the
+    # POST_BUILD steps above (and the metallib staging) did not run for it
+    # and the bundle kept the PREVIOUS build's .spv and shaders.metallib —
+    # every Metal shader A/B of 2026-10-08 measured the build before, and a
+    # vertex/fragment varying mismatch between a fresh .spv and a stale
+    # metallib drew no terrain. This stamp depends on the shader outputs
+    # themselves and MyVoxelGame depends on it, so whenever a shader changes
+    # the fresh files land in the bundle in the same build, relink or not.
+    set(_shader_stage_deps "")
+    if(GLSLC)
+        list(APPEND _shader_stage_deps ${VK_SPV_FILES})
+    endif()
+    if(DEFINED METAL_SHADER_LIBRARY)
+        list(APPEND _shader_stage_deps "${METAL_SHADER_LIBRARY}")
+    endif()
+    if(_shader_stage_deps)
+        set(_shader_stage_stamp "${CMAKE_BINARY_DIR}/stage_shaders.stamp")
+        set(_shader_stage_cmds "")
+        if(GLSLC)
+            list(APPEND _shader_stage_cmds
+                 COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
+                 COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD} "${CMAKE_BINARY_DIR}/shaders" "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders"
+                 COMMAND ${CMAKE_COMMAND} -E ${COPY_DIR_CMD} "${CMAKE_BINARY_DIR}/shaders" "${PROJECT_SOURCE_DIR}/shaders")
+        endif()
+        if(DEFINED METAL_SHADER_LIBRARY)
+            list(APPEND _shader_stage_cmds
+                 COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/metal"
+                 COMMAND ${CMAKE_COMMAND} -E copy_if_different "${METAL_SHADER_LIBRARY}" "$<TARGET_BUNDLE_DIR:MyVoxelGame>/Contents/Resources/shaders/metal/shaders.metallib")
+        endif()
+        add_custom_command(
+                OUTPUT "${_shader_stage_stamp}"
+                ${_shader_stage_cmds}
+                COMMAND ${CMAKE_COMMAND} -E touch "${_shader_stage_stamp}"
+                DEPENDS ${_shader_stage_deps}
+                COMMENT "Staging shaders into the bundle"
+                VERBATIM)
+        add_custom_target(stage_shaders DEPENDS "${_shader_stage_stamp}")
+        add_dependencies(MyVoxelGame stage_shaders)
+    endif()
 else()
     foreach(payload IN LISTS GAME_PAYLOAD_DIRS)
         add_game_payload_copy(${payload} "$<TARGET_FILE_DIR:MyVoxelGame>/${payload}")
@@ -3004,6 +3229,12 @@ if(APPLE)
     # "Play … (Game Mode)" run configurations and tools/play.sh always launch
     # what was just built. Not for JALIN (that build is the launcher's
     # release and is uploaded instead); see the Game Mode notes in CLAUDE.md.
+    # The copy gets its own CFBundleIdentifier (com.yourcompany.MyVoxelGame
+    # .<suffix>, re-signed: the signature binds Info.plist) so LaunchServices,
+    # `open` and Instruments can tell it from the installed game — every
+    # build shares Info.plist otherwise, and `xctrace --launch` / Instruments
+    # "Launch" started the installed game instead of this copy (2026-10-06).
+    # tools/play.sh does the same to the copy it makes.
     if(TRACY_ENABLE)
         set(PLAY_COPY_SUFFIX "tracy")
     elseif(CMAKE_BUILD_TYPE STREQUAL "Release" AND NOT JALIN)
@@ -3017,8 +3248,10 @@ if(APPLE)
             COMMAND ${CMAKE_COMMAND} -E make_directory "$ENV{HOME}/Applications"
             COMMAND ${CMAKE_COMMAND} -E rm -rf "${PLAY_COPY_DEST}"
             COMMAND ${CMAKE_COMMAND} -E copy_directory "$<TARGET_BUNDLE_DIR:MyVoxelGame>" "${PLAY_COPY_DEST}"
+            COMMAND /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.yourcompany.MyVoxelGame.${PLAY_COPY_SUFFIX}" "${PLAY_COPY_DEST}/Contents/Info.plist"
+            COMMAND codesign --force --sign - "${PLAY_COPY_DEST}"
             COMMAND /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${PLAY_COPY_DEST}"
-            COMMENT "Refreshing Game-Mode-eligible copy at ${PLAY_COPY_DEST}"
+            COMMENT "Refreshing Game-Mode-eligible copy at ${PLAY_COPY_DEST} (bundle id .${PLAY_COPY_SUFFIX})"
         )
     endif()
 endif()

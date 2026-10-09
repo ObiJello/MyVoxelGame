@@ -20,9 +20,6 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
@@ -180,16 +177,7 @@ namespace Render {
         // through the UBO-aware (portal) layout because the block shaders
         // declare the Common UBO — the plain path bakes a texture-only layout
         // and pipeline creation fails.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                "shaders/block.vert", "shaders/block.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                "shaders/block.vert", "shaders/block.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/block.vert", "shaders/block.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[ItemEntityRenderer] failed to load block shader — "
                          "dropped items will not render");

@@ -90,3 +90,6 @@ mods_reference/
 
 # Python bytecode (tools/tracy_tools.py is imported by the report scripts)
 __pycache__/
+
+# compiled helper of the metal-profiling skill
+.claude/skills/metal-profiling/scripts/mclick

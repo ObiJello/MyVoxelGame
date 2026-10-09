@@ -19,40 +19,6 @@
 
 namespace Render {
 
-    // Global instance
-    std::unique_ptr<RenderBackend> g_renderBackend = nullptr;
-
-    // Default multi-draw: loops individual draws (GL overrides with native call)
-    void RenderBackend::MultiDrawIndexedBaseVertex(const int32_t* indexCounts,
-                                                    const size_t* indexByteOffsets,
-                                                    const int32_t* baseVertices,
-                                                    uint32_t drawCount,
-                                                    IndexType indexType) {
-        for (uint32_t i = 0; i < drawCount; i++) {
-            if (indexCounts[i] > 0)
-                DrawIndexedBaseVertex(indexCounts[i], indexByteOffsets[i], baseVertices[i], indexType);
-        }
-    }
-
-    std::unique_ptr<RenderBackend> CreateRenderBackend(BackendType type) {
-        switch (type) {
-            case BackendType::OpenGL:
-                return std::make_unique<GLBackend>();
-            case BackendType::Vulkan:
-#ifdef HAS_VULKAN
-                {
-                    // Include here to avoid circular dependency
-                    extern std::unique_ptr<RenderBackend> CreateVulkanBackend();
-                    return CreateVulkanBackend();
-                }
-#else
-                Log::Error("Vulkan backend not available (compiled without HAS_VULKAN)");
-                return nullptr;
-#endif
-        }
-        return nullptr;
-    }
-
     // ========================================================================
     // LIFECYCLE
     // ========================================================================
@@ -609,6 +575,65 @@ namespace Render {
         return handle;
     }
 
+    TextureHandle GLBackend::CreateTexture2DArray(int width, int height, int layers, int mipLevels,
+                                                 TextureFormat format) {
+        // RGBA8 only: the one caller is the block atlas's sprite array. The
+        // context is 3.3 core, so the levels are declared one glTexImage3D
+        // each (glTexStorage3D is 4.2) and capped with MAX_LEVEL.
+        if (width <= 0 || height <= 0 || layers <= 0 || mipLevels <= 0) return INVALID_TEXTURE;
+        if (format != TextureFormat::RGBA8) {
+            Log::Error("GLBackend::CreateTexture2DArray: only RGBA8 arrays are supported");
+            return INVALID_TEXTURE;
+        }
+        GLuint glId = 0;
+        glGenTextures(1, &glId);
+        if (glId == 0) return INVALID_TEXTURE;
+        glBindTexture(GL_TEXTURE_2D_ARRAY, glId);
+        size_t memSize = 0;
+        for (int level = 0; level < mipLevels; ++level) {
+            const int lw = std::max(1, width >> level), lh = std::max(1, height >> level);
+            glTexImage3D(GL_TEXTURE_2D_ARRAY, level, GL_RGBA8, lw, lh, layers, 0,
+                         GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            memSize += static_cast<size_t>(lw) * static_cast<size_t>(lh) * 4u * static_cast<size_t>(layers);
+        }
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, mipLevels - 1);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
+        const uint32_t handle = AllocHandle();
+        m_textures[handle] = {glId, width, height, memSize, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE};
+        m_textures[handle].target = GL_TEXTURE_2D_ARRAY;
+        m_memStats.textureMemory += memSize;
+        m_memStats.totalAllocated += memSize;
+        m_memStats.textureCount++;
+        if (m_memStats.totalAllocated > m_memStats.peakUsage)
+            m_memStats.peakUsage = m_memStats.totalAllocated;
+        return handle;
+    }
+
+    int GLBackend::MaxTextureArrayLayers() const {
+        GLint layers = 0;
+        glGetIntegerv(GL_MAX_ARRAY_TEXTURE_LAYERS, &layers);   // at least 256 in 3.3 core
+        return std::max(0, static_cast<int>(layers));
+    }
+
+    void GLBackend::UploadTextureArrayLevel(TextureHandle handle, int level, int width, int height, int layers,
+                                            const void* data) {
+        auto it = m_textures.find(handle);
+        if (it == m_textures.end() || it->second.target != GL_TEXTURE_2D_ARRAY || !data) return;
+        if (level < 0 || width <= 0 || height <= 0 || layers <= 0) return;
+        glBindTexture(GL_TEXTURE_2D_ARRAY, it->second.glId);
+        // `data` is `layers` images back to back — exactly a depth-`layers`
+        // 3D sub-image.
+        glTexSubImage3D(GL_TEXTURE_2D_ARRAY, level, 0, 0, 0, width, height, layers,
+                        it->second.dataFormat, it->second.dataType, data);
+        glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    }
+
     void GLBackend::UpdateTexture2D(TextureHandle handle, int x, int y,
                                    int width, int height, const void* data) {
         auto it = m_textures.find(handle);
@@ -625,20 +650,24 @@ namespace Render {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
 
-        glBindTexture(GL_TEXTURE_2D, it->second.glId);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, ToGLFilter(min));
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, ToGLFilter(mag));
-        glBindTexture(GL_TEXTURE_2D, 0);
+        // Whatever the texture is (2D, or the sprite array): the parameters
+        // belong to the object, set through its own target.
+        const GLenum target = it->second.target;
+        glBindTexture(target, it->second.glId);
+        glTexParameteri(target, GL_TEXTURE_MIN_FILTER, ToGLFilter(min));
+        glTexParameteri(target, GL_TEXTURE_MAG_FILTER, ToGLFilter(mag));
+        glBindTexture(target, 0);
     }
 
     void GLBackend::SetTextureWrap(TextureHandle handle, TextureWrap s, TextureWrap t) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end()) return;
 
-        glBindTexture(GL_TEXTURE_2D, it->second.glId);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, ToGLWrap(s));
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, ToGLWrap(t));
-        glBindTexture(GL_TEXTURE_2D, 0);
+        const GLenum target = it->second.target;
+        glBindTexture(target, it->second.glId);
+        glTexParameteri(target, GL_TEXTURE_WRAP_S, ToGLWrap(s));
+        glTexParameteri(target, GL_TEXTURE_WRAP_T, ToGLWrap(t));
+        glBindTexture(target, 0);
     }
 
     void GLBackend::GenerateMipmaps(TextureHandle handle) {
@@ -702,11 +731,36 @@ namespace Render {
 
     void GLBackend::UpdateTexture2DLevelStaged(TextureHandle handle, int level, int x, int y,
                                                int width, int height, const void* data) {
+        StagedSubImage(handle, -1, level, x, y, width, height, data);
+    }
+
+    void GLBackend::UpdateTextureArrayLevel(TextureHandle handle, int layer, int level, int x, int y,
+                                            int width, int height, const void* data) {
+        if (layer < 0) return;
+        StagedSubImage(handle, layer, level, x, y, width, height, data);
+    }
+
+    void GLBackend::StagedSubImage(TextureHandle handle, int layer, int level, int x, int y,
+                                   int width, int height, const void* data) {
         auto it = m_textures.find(handle);
         if (it == m_textures.end() || !data || width <= 0 || height <= 0) return;
+        const bool array = layer >= 0;
+        if (array != (it->second.target == GL_TEXTURE_2D_ARRAY)) return;
+        // The direct copy — a CPU wait on Apple's driver when the texture is
+        // in use (TextureAnimator.hpp) — for whatever the ring cannot take.
+        auto plain = [&] {
+            if (!array) {
+                UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+                return;
+            }
+            glBindTexture(GL_TEXTURE_2D_ARRAY, it->second.glId);
+            glTexSubImage3D(GL_TEXTURE_2D_ARRAY, level, x, y, layer, width, height, 1,
+                            it->second.dataFormat, it->second.dataType, data);
+            glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+        };
         // RGBA8 only (4 bytes a texel); anything else takes the plain path.
         if (it->second.dataFormat != GL_RGBA || it->second.dataType != GL_UNSIGNED_BYTE) {
-            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            plain();
             return;
         }
         const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 4u;
@@ -743,7 +797,7 @@ namespace Render {
         }
         if (slot.used + aligned > m_uploadSlotSize) {
             // The region is full this frame: fall back to the direct path.
-            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            plain();
             return;
         }
 
@@ -756,17 +810,23 @@ namespace Render {
                                      GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
         if (!dst) {
             glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-            UpdateTexture2DLevel(handle, level, x, y, width, height, data);
+            plain();
             return;
         }
         std::memcpy(dst, data, bytes);
         glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-        glBindTexture(GL_TEXTURE_2D, it->second.glId);
+        const GLenum target = it->second.target;
+        glBindTexture(target, it->second.glId);
         // With a pixel-unpack buffer bound the "pointer" is a byte offset
         // into it: the copy into the texture is queued, not done here.
-        glTexSubImage2D(GL_TEXTURE_2D, level, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
-                        reinterpret_cast<const void*>(offset));
-        glBindTexture(GL_TEXTURE_2D, 0);
+        if (array) {
+            glTexSubImage3D(target, level, x, y, layer, width, height, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                            reinterpret_cast<const void*>(offset));
+        } else {
+            glTexSubImage2D(target, level, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE,
+                            reinterpret_cast<const void*>(offset));
+        }
+        glBindTexture(target, 0);
         glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
         slot.used += aligned;
     }
@@ -815,6 +875,7 @@ namespace Render {
         switch (format) {
             case TextureFormat::RGBA8:   internalFormat = GL_RGBA8;   break;
             case TextureFormat::RGBA16:  internalFormat = GL_RGBA16;  break;
+            case TextureFormat::RGBA16UI: internalFormat = GL_RGBA16UI; break;
             case TextureFormat::RGBA16F: internalFormat = GL_RGBA16F; break;
             case TextureFormat::RGBA32F: internalFormat = GL_RGBA32F; break;
             default:
@@ -827,7 +888,8 @@ namespace Render {
         GLint maxTexels = 0;
         glGetIntegerv(GL_MAX_TEXTURE_BUFFER_SIZE, &maxTexels);
         const size_t bytesPerTexel = (format == TextureFormat::RGBA8) ? 4
-                                   : (format == TextureFormat::RGBA16F || format == TextureFormat::RGBA16) ? 8 : 16;
+                                   : (format == TextureFormat::RGBA16F || format == TextureFormat::RGBA16 ||
+                                      format == TextureFormat::RGBA16UI) ? 8 : 16;
         if (maxTexels > 0 && bit->second.size / bytesPerTexel > static_cast<size_t>(maxTexels)) {
             Log::Error("GLBackend::CreateBufferTexture: buffer of %zu bytes exceeds GL_MAX_TEXTURE_BUFFER_SIZE (%d texels)",
                        bit->second.size, maxTexels);
@@ -1361,14 +1423,18 @@ namespace Render {
         // sampled with linear filtering by post-process shaders.
         SetTextureFilter(info.colorTexture, TextureFilter::Linear, TextureFilter::Linear);
 
-        // 2. Depth+stencil renderbuffer. Cheap, not sampleable. (Use a
+        // 2. Depth+stencil renderbuffer, unless the target asked for none
+        //    (its draws never depth-test). Cheap, not sampleable. (Use a
         //    depth texture instead if a future feature needs to sample
         //    the depth buffer.)
-        glGenRenderbuffers(1, &info.depthRBO);
-        glBindRenderbuffer(GL_RENDERBUFFER, info.depthRBO);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
-                              desc.width, desc.height);
-        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        info.hasDepth = desc.depth;
+        if (info.hasDepth) {
+            glGenRenderbuffers(1, &info.depthRBO);
+            glBindRenderbuffer(GL_RENDERBUFFER, info.depthRBO);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+                                  desc.width, desc.height);
+            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        }
 
         // 3. FBO with the color texture + depth RBO attached.
         glGenFramebuffers(1, &info.fbo);
@@ -1377,15 +1443,17 @@ namespace Render {
         auto colorIt = m_textures.find(info.colorTexture);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D, colorIt->second.glId, 0);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                  GL_RENDERBUFFER, info.depthRBO);
+        if (info.hasDepth) {
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                      GL_RENDERBUFFER, info.depthRBO);
+        }
 
         const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
         glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
         if (status != GL_FRAMEBUFFER_COMPLETE) {
             // Roll back.
             glDeleteFramebuffers(1, &info.fbo);
-            glDeleteRenderbuffers(1, &info.depthRBO);
+            if (info.depthRBO) glDeleteRenderbuffers(1, &info.depthRBO);
             DestroyTexture(info.colorTexture);
             return INVALID_RENDER_TARGET;
         }
@@ -1489,23 +1557,28 @@ namespace Render {
         // Destroy + recreate the color texture and depth RBO at the
         // new size; reuse the FBO id.
         DestroyTexture(it->second.colorTexture);
-        glDeleteRenderbuffers(1, &it->second.depthRBO);
+        if (it->second.depthRBO) glDeleteRenderbuffers(1, &it->second.depthRBO);
+        it->second.depthRBO = 0;
 
         it->second.colorTexture = CreateTexture2D(w, h, it->second.colorFormat, nullptr);
         SetTextureFilter(it->second.colorTexture,
                          TextureFilter::Linear, TextureFilter::Linear);
 
-        glGenRenderbuffers(1, &it->second.depthRBO);
-        glBindRenderbuffer(GL_RENDERBUFFER, it->second.depthRBO);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
-        glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        if (it->second.hasDepth) {
+            glGenRenderbuffers(1, &it->second.depthRBO);
+            glBindRenderbuffer(GL_RENDERBUFFER, it->second.depthRBO);
+            glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+            glBindRenderbuffer(GL_RENDERBUFFER, 0);
+        }
 
         glBindFramebuffer(GL_FRAMEBUFFER, it->second.fbo);
         auto colorIt = m_textures.find(it->second.colorTexture);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D, colorIt->second.glId, 0);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
-                                  GL_RENDERBUFFER, it->second.depthRBO);
+        if (it->second.hasDepth) {
+            glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                      GL_RENDERBUFFER, it->second.depthRBO);
+        }
         glBindFramebuffer(GL_FRAMEBUFFER, m_defaultFbo);
 
         it->second.width  = w;

@@ -31,9 +31,20 @@
 // particle shader is reused unchanged on both backends.
 //
 // Positions are world-space doubles narrowed through Render::ToRender
-// (camera-relative rendering, RenderOrigin.hpp). One streaming vertex buffer
-// per draw from a ring of slots; a slot is only ever regrown with the
-// deferred destroys (Vulkan frame overlap).
+// (camera-relative rendering, RenderOrigin.hpp). One streaming buffer per
+// draw from a ring of slots; a slot is only ever regrown with the deferred
+// destroys (Vulkan frame overlap).
+//
+// The streak path (the default; OBEY_RAIN_STREAKS=0 restores MC's quads):
+// a column quad launches a fragment for every pixel it covers and ~97 % of
+// them fail the texture's alpha cutout — on a tile GPU that pass is bound
+// by fragment LAUNCHES, not shading (12 columns deep over the screen at
+// radius 10). So the texture's alpha > 0 texels are rectangled once at load
+// (StreakSet, ~110 rects for rain.png) and each column is drawn as those
+// rects, instanced per column and texture repeat, placed by
+// weather_streak(_vk).vert exactly where the quad would have sampled them:
+// the same pixels get the same texels. The fragment shaders are unchanged.
+// A texture whose alpha is dense (a pack's) falls back to the quads.
 //
 // Main thread only, against the bound (active) client level.
 #pragma once
@@ -58,6 +69,15 @@ namespace Render {
         void Shutdown();
         // Resource pack reload: rain.png / snow.png again.
         void ReloadTextures();
+
+        // Whether Rain Resolution: Half exists on this backend. Not on
+        // Metal: with the streak instancing the full-resolution pass is
+        // the cheaper one there (ABBA on the tour, 2026-10-07: Full 217 fps
+        // / 4.61 ms, Half 210 fps / 4.77 ms — Half's own target pass, the
+        // composite and the previous-depth reprojection cost more than the
+        // fragments it still saves), so the setting is ignored and Video
+        // Settings shows no control. OpenGL and Vulkan keep the option.
+        static bool HalfResolutionAvailable();
 
         // Extract, prepare and draw the columns for this view. `cameraPos` is
         // the eye in world doubles; `partialTick` the client tick fraction.
@@ -108,14 +128,62 @@ namespace Render {
         void LoadTextures();
         void DestroyTextures(bool deferred);
 
+        // ── Streaks (see the file header) ───────────────────────────────
+        struct StreakRect { uint16_t x, y, w, h; };   // texels
+        struct StreakSet {
+            std::vector<StreakRect> rects;
+            // The template: every rect's quad (`copies` of it, see the
+            // shader) as 24-byte block-layout vertices + uint32 indices.
+            BufferHandle vb = INVALID_BUFFER;
+            BufferHandle ib = INVALID_BUFFER;
+            uint32_t     indexCount = 0;
+            int          copies = 1;
+            bool         usable = false;   // rects found and sparse enough to be worth it
+        };
+        // One column x one texture repeat (weather_streak_vk.vert's instance
+        // attributes, locations 3..6).
+        struct StreakInstance {
+            float column[4];   // cx, cz, hx, hz (render space)
+            float span[4];     // bottomY, topY (render space), uOffset, vOffset (+ origin term)
+            float tint[4];     // rgba
+            float repeat[4];   // R, 0, 0, 0
+        };
+        static_assert(sizeof(StreakInstance) == 64, "the instance layout's stride");
+        // Greedy rectangles of the texture's alpha > 0 texels and the
+        // template buffers; `copies` 2 for a texture whose u is offset per
+        // column (snow), 1 otherwise. Unusable when there are none, or when
+        // the alpha covers more than a quarter of the texture (a pack's
+        // dense texture: the quads are cheaper than thousands of rects).
+        void BuildStreakSet(StreakSet& set, const unsigned char* rgba, int width, int height, int copies);
+        void DestroyStreakSet(StreakSet& set, bool deferred);
+        // prepareInstances as instances: one per (column, repeat).
+        void PrepareStreakInstances(std::vector<StreakInstance>& out, const std::vector<ColumnInstance>& columns,
+                                    const glm::dvec3& cameraPos, float maxAlpha, int radius, float intensity) const;
+        bool StreaksActive() const { return m_streaksWanted && m_rainStreaks.usable && m_snowStreaks.usable; }
+        bool          m_streaksWanted = true;
+        StreakSet     m_rainStreaks, m_snowStreaks;
+        uint32_t      m_streakGeneration = 0;   // bumped when the sets are rebuilt (slots re-mesh)
+        ShaderHandle  m_streakShader     = INVALID_SHADER;   // weather_streak.vert + the particle fragment
+        ShaderHandle  m_streakHalfShader = INVALID_SHADER;   // weather_streak.vert + weather_half.frag
+        VertexLayout  m_streakInstanceLayout;
+        std::vector<StreakInstance> m_instances;
+        bool CreateStreakShaders();
+
         void PrepareInstances(std::vector<Vertex>& out, const std::vector<ColumnInstance>& columns,
                               const glm::dvec3& cameraPos, float maxAlpha, int radius, float intensity) const;
         struct StreamSlot;
+        // What one Render draws: the slot holding this view's data, and the
+        // counts — vertices (MC's quads) or streak instances — of rain, then
+        // snow.
+        struct Batch {
+            const StreamSlot* slot = nullptr;
+            size_t rainCount = 0, snowCount = 0;
+            bool   streaks = false;
+        };
         // extractRenderState + prepareInstances for `dimension` around the
         // eye, uploaded into a stream slot: false when there is nothing to
         // draw (no weather there, or no column in range).
-        bool BuildColumns(Game::DimensionId dimension, const glm::dvec3& cameraPos, float partialTick,
-                          const StreamSlot*& slot, size_t& rainVerts, size_t& snowVerts);
+        bool BuildColumns(Game::DimensionId dimension, const glm::dvec3& cameraPos, float partialTick, Batch& out);
         void RestoreDefaultState();
 
         // MC's columnSizeX / columnSizeZ: the half-quad direction for each
@@ -131,27 +199,33 @@ namespace Render {
         std::vector<ColumnInstance> m_snowColumns;
         std::vector<Vertex>         m_vertices;
 
-        // A ring of streaming vertex buffers, one per draw. A slot reused a
+        // A ring of streaming buffers, one per draw — the quads' vertices, or
+        // the streak instances, with a mesh over each (the instanced ones
+        // pair the buffer with the rain / snow templates). A slot reused a
         // few frames later is free on both backends; growing one defers the
         // old buffer's destruction past the frames still reading it. Sized
         // for several draws a frame (the main view plus every portal view)
         // across the frames in flight.
         struct StreamSlot {
-            BufferHandle vb   = INVALID_BUFFER;
-            MeshHandle   mesh = INVALID_MESH;
-            size_t       capacityVerts = 0;
+            BufferHandle vb       = INVALID_BUFFER;
+            MeshHandle   mesh     = INVALID_MESH;   // the quads (block layout)
+            MeshHandle   rainMesh = INVALID_MESH;   // rain template + this buffer's instances
+            MeshHandle   snowMesh = INVALID_MESH;
+            uint32_t     meshGeneration = 0;        // m_streakGeneration the instanced meshes were made for
+            size_t       capacityBytes = 0;
         };
         static constexpr size_t kStreamSlots = 24;
         std::array<StreamSlot, kStreamSlots> m_slots;
         size_t m_slotCursor = 0;
-        StreamSlot& AcquireSlot(size_t vertsNeeded);
+        StreamSlot& AcquireSlot(size_t bytesNeeded, bool streaks);
         void DestroySlots();
 
-        // The columns' draw: `shader` bound with the world's uniforms, `state`
-        // set, rain then snow from `slot`; `sceneDepth` (half resolution) at
-        // texture slot 1, and with `reprojection` it is the previous
-        // frame's, seen through that frame's view-projection.
-        void DrawColumns(ShaderHandle shader, const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
+        // The columns' draw: the shader (the batch's kind, `half` for the
+        // half-resolution fragment shader) bound with the world's uniforms,
+        // `state` set, rain then snow from the batch; `sceneDepth` (half
+        // resolution) at texture slot 1, and with `reprojection` it is the
+        // previous frame's, seen through that frame's view-projection.
+        void DrawColumns(bool half, const Batch& batch,
                          const glm::mat4& mvp, const glm::dvec3& cameraPos, const glm::vec4& clipPlane,
                          const PipelineState& state, TextureHandle sceneDepth = INVALID_TEXTURE,
                          const glm::mat4* reprojection = nullptr);
@@ -175,14 +249,12 @@ namespace Render {
         //    weather's place in the frame (m_sceneDepthCopy), the target
         //    drawn, the frame resumed. False: nothing was drawn, the caller
         //    draws at full resolution.
-        bool DrawHalfResolution(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
-                                const glm::mat4& mvp, const glm::dvec3& cameraPos);
-        bool DrawAhead(const StreamSlot& slot, size_t rainVerts, size_t snowVerts, const glm::mat4& mvp,
-                       const glm::mat4& reprojection, const glm::dvec3& cameraPos, TextureHandle previousDepth);
+        bool DrawHalfResolution(const Batch& batch, const glm::mat4& mvp, const glm::dvec3& cameraPos);
+        bool DrawAhead(const Batch& batch, const glm::mat4& mvp, const glm::mat4& reprojection,
+                       const glm::dvec3& cameraPos, TextureHandle previousDepth);
         // Into the bound half target: cleared, then the columns.
-        void DrawIntoHalfTarget(const StreamSlot& slot, size_t rainVerts, size_t snowVerts,
-                                const glm::mat4& mvp, const glm::dvec3& cameraPos, TextureHandle sceneDepth,
-                                const glm::mat4* reprojection, int halfWidth, int halfHeight);
+        void DrawIntoHalfTarget(const Batch& batch, const glm::mat4& mvp, const glm::dvec3& cameraPos,
+                                TextureHandle sceneDepth, const glm::mat4* reprojection, int halfWidth, int halfHeight);
         // The half target over the frame (bound), `width` x `height`.
         void CompositeHalf(RenderTargetHandle target, int width, int height);
         bool EnsureHalfResources(int width, int height);

@@ -83,8 +83,6 @@ namespace Render {
         std::unordered_map<std::string, TextureHandle> m_textures;
         int m_packGeneration = -1;   // Resources::CacheStale
 
-        std::vector<Client::ClientChunk*> m_visibleChunks;
-        BlockEntityRenderDispatcher::ChunkSet m_seen;
     };
 
     extern BedRenderer g_bedRenderer;

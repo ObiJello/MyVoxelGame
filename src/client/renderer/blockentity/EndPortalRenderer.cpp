@@ -13,9 +13,6 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <stb_image.h>
 #include <cmath>
@@ -189,30 +186,16 @@ void main() {
     bool EndPortalRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            // Vulkan needs the UBO-aware ("portal") pipeline layout: two
-            // samplers (set=0 + set=2) and the Common UBO for uTime/fog.
-            // CreateShaderFromFilesPortal is VKBackend-only — the abstract
-            // RenderBackend has no such entry point — hence the cast, the
-            // same shape XpOrbRenderer and PortalRenderer use.
-            //
-            // There is no inline-source fallback on this path:
-            // VKBackend::CreateShader logs an error and returns
-            // INVALID_SHADER for GLSL source, so calling it would only add
-            // noise. Missing .spv → warn once here and stay disabled.
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal(
-                PlatformMain::GetAssetPath("shaders/end_portal.vert"),
-                PlatformMain::GetAssetPath("shaders/end_portal.frag"));
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles(
-                PlatformMain::GetAssetPath("shaders/end_portal.vert"),
-                PlatformMain::GetAssetPath("shaders/end_portal.frag"));
-            if (m_shader == INVALID_SHADER) {
-                m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
-            }
+        // The _vk shaders need the UBO-aware ("portal") pipeline layout:
+        // two samplers (set=0 + set=2) and the Common UBO for uTime/fog.
+        // There is no inline-source fallback for them: the Vulkan and
+        // Metal backends refuse GLSL source, so calling it would only add
+        // noise. Missing shader file → warn once here and stay disabled.
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal(
+            PlatformMain::GetAssetPath("shaders/end_portal.vert"),
+            PlatformMain::GetAssetPath("shaders/end_portal.frag"));
+        if (m_shader == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
+            m_shader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
         }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[EndPortalRenderer] failed to create shader — "
@@ -230,8 +213,9 @@ void main() {
 
         // 12 verts per portal block (two faces × two triangles). A vanilla
         // portal is 9 blocks, so this covers several in view before the
-        // buffer has to grow. One set per frame parity.
-        for (FrameBuffers& fb : m_frames) {
+        // buffer has to grow. One set per frame in flight (EntityFrame::Slots()).
+        for (int slot = 0; slot < EntityFrame::Slots(); ++slot) {
+            FrameBuffers& fb = m_frames[slot];
             fb.capacityVerts = 12 * 64;
             fb.vb = g_renderBackend->CreateBuffer(
                 BufferUsage::Vertex, fb.capacityVerts * sizeof(Vert),
@@ -261,9 +245,6 @@ void main() {
         if (m_shader != INVALID_SHADER) { g_renderBackend->DestroyShader(m_shader); m_shader = INVALID_SHADER; }
         m_verts.clear();
         m_verts.shrink_to_fit();
-        m_visibleChunks.clear();
-        m_visibleChunks.shrink_to_fit();
-        m_seen.clear();
         m_initialized = false;
     }
 
@@ -286,7 +267,7 @@ void main() {
         // full walk of every loaded chunk was a second copy of the
         // dispatcher's per-frame cost, for a block that exists in one or
         // two chunks of a world.
-        BlockEntityRenderDispatcher::CollectVisibleChunks(chunkMgr, m_visibleChunks, m_seen);
+        const std::vector<Client::ClientChunk*>& visibleChunks = BlockEntityRenderDispatcher::CollectVisibleChunks(chunkMgr);
         const ChunkRenderer* sections = g_chunkRenderer;
 
         m_verts.clear();
@@ -310,7 +291,7 @@ void main() {
             }
         };
 
-        for (const Client::ClientChunk* chunk : m_visibleChunks) {
+        for (const Client::ClientChunk* chunk : visibleChunks) {
             if (!chunk) continue;
             // Empty for all but a handful of chunks in a world — this is the
             // cull that actually matters, and it is a size() check.
@@ -423,7 +404,7 @@ void main() {
         // boundary; the previous frame's set may still be in flight on
         // Vulkan, which is why there are two. See EntityFrame.hpp.
         m_frameCursor.Advance();
-        FrameBuffers& fb = m_frames[m_frameCursor.parity];
+        FrameBuffers& fb = m_frames[m_frameCursor.slot];
 
         if (m_verts.size() > fb.capacityVerts) {
             size_t newCap = fb.capacityVerts;

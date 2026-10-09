@@ -24,9 +24,6 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 
 #include <glm/gtc/matrix_transform.hpp>
 
@@ -105,14 +102,7 @@ namespace Render {
         }
         // The gun's portal shader: a solid fill in uOutlineMode 0 with the
         // plain block vertex layout, already compiled for both backends.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            m_shader = vk->CreateShaderFromFilesPortal("shaders/portal.vert", "shaders/portal.frag");
-#endif
-        } else {
-            m_shader = g_renderBackend->CreateShaderFromFiles("shaders/portal.vert", "shaders/portal.frag");
-        }
+        m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/portal.vert", "shaders/portal.frag");
         if (m_shader == INVALID_SHADER) {
             Log::Warning("[ImmersivePortalRenderer] Portal shader unavailable — portals will not render");
             return false;

@@ -27,6 +27,15 @@ namespace Render {
 
         virtual BackendType GetType() const = 0;
         virtual const char* GetName() const = 0;
+        // Vulkan and Metal draw with the _vk shader family (Metal runs the
+        // MSL generated from the same SPIR-V, tools/gen_metal_shaders.py)
+        // and therefore share its conventions: shaders load from the _vk
+        // files only (no inline GLSL), the uniform model is the push
+        // constants + Common block (SpirvUniforms.hpp), clip-space depth is
+        // 0..1, framebuffer and texture rows run top to bottom, and a
+        // texture updated while frames are in flight gets per-frame copies
+        // (no CPU-side ring needed). OpenGL is the odd one out on each.
+        bool UsesVkShaders() const { return GetType() != BackendType::OpenGL; }
         // Vendor / device / driver strings for the F3 system_specs lines.
         virtual GpuDeviceInfo GetDeviceInfo() const { GpuDeviceInfo i; i.backendName = GetName(); return i; }
 
@@ -229,6 +238,41 @@ namespace Render {
             UpdateTexture2DLevel(handle, level, x, y, width, height, data);
         }
 
+        // ── 2D texture arrays ───────────────────────────────────────────────
+        //
+        // A sampler2DArray: `layers` images of width x height, each with
+        // levels 0..mipLevels-1, filter / wrap / anisotropy through the
+        // ordinary setters, bound through BindTexture like any texture. The
+        // block atlas's sprite array (AtlasBuilder::GetSpriteArrayHandle):
+        // one layer per static sprite, so a greedy-merged terrain quad
+        // samples its sprite with hardware repeat instead of the atlas
+        // sprite-table fetch + fract + textureGrad. Contents are undefined
+        // until uploaded; a backend without arrays returns INVALID_TEXTURE
+        // and the terrain shaders keep the atlas path (uSpriteLayers 0).
+        virtual TextureHandle CreateTexture2DArray(int /*width*/, int /*height*/, int /*layers*/,
+                                                   int /*mipLevels*/, TextureFormat /*format*/) {
+            return INVALID_TEXTURE;
+        }
+        // The most layers one array may have (Metal: 2048, and the block
+        // atlas holds more sprites than that); 0 = no arrays.
+        virtual int MaxTextureArrayLayers() const { return 0; }
+        // Replaces one whole level of EVERY layer: `data` is `layers` images
+        // of width x height (the level's size) back to back, layer 0 first.
+        // Immediate, like UploadTextureMipLevel: the pixels are copied out
+        // before this returns and the transfer is submitted ahead of the
+        // frame's draws — one transfer per level, not per layer.
+        virtual void UploadTextureArrayLevel(TextureHandle /*handle*/, int /*level*/,
+                                             int /*width*/, int /*height*/, int /*layers*/,
+                                             const void* /*data*/) {}
+        // A sub-rectangle of one layer's level, for an animated sprite whose
+        // layer changes after the array is built — on the same staged path
+        // as UpdateTexture2DLevelStaged (queued frames may still sample the
+        // array: Vulkan and Metal stage it into the next frame with per-frame
+        // copies, OpenGL copies through the pixel-unpack ring).
+        virtual void UpdateTextureArrayLevel(TextureHandle /*handle*/, int /*layer*/, int /*level*/,
+                                             int /*x*/, int /*y*/, int /*width*/, int /*height*/,
+                                             const void* /*data*/) {}
+
         virtual void DestroyTexture(TextureHandle handle) = 0;
         virtual void BindTexture(TextureHandle handle, uint32_t slot = 0) = 0;
 
@@ -246,6 +290,34 @@ namespace Render {
         // Create shader from file paths (auto-detects GLSL vs SPIR-V)
         virtual ShaderHandle CreateShaderFromFiles(const std::string& vertexPath,
                                                   const std::string& fragmentPath) = 0;
+        // A shader that reads the Common block (and the bone palette, slot-1..3
+        // textures, the user uniform block): the portal / environment
+        // renderers, the block and terrain shaders. Vulkan builds these
+        // against its "portal" pipeline layout (the plain one carries only
+        // the slot-0 texture and the push constants). Same _vk file
+        // convention as CreateShaderFromFiles. OpenGL resolves uniforms by
+        // name, so for it this IS CreateShaderFromFiles.
+        virtual ShaderHandle CreateShaderFromFilesPortal(const std::string& vertexPath,
+                                                         const std::string& fragmentPath) {
+            return CreateShaderFromFiles(vertexPath, fragmentPath);
+        }
+        // The vertex input a shader's pipelines bake in. Backends whose
+        // pipelines fix the vertex format (Vulkan, Metal) fall back to the
+        // 24-byte block layout without it, so a renderer with another
+        // format (terrain's 20-byte TerrainVertex, the 52-byte skinned
+        // viewmodel, particle billboards) registers it right after creating
+        // the shader, before its first draw. OpenGL takes the format from
+        // the mesh's VAO instead: a no-op there.
+        virtual void RegisterShaderVertexLayout(ShaderHandle /*shader*/, const VertexLayout& /*layout*/) {}
+        // Per-INSTANCE attributes (vertex binding 1) of an instanced shader.
+        virtual void RegisterShaderInstanceLayout(ShaderHandle /*shader*/, const VertexLayout& /*layout*/) {}
+        // A Common-block shader that reads the block's environment fields
+        // (fog, camera, sky brightness) but never its uMVP / uModel. Such
+        // shaders are drawn once per entity or block entity with a new MVP
+        // each time; without this every one of those draws would copy a
+        // fresh Common slot for matrices the shader never reads. No-op on
+        // OpenGL, whose uniforms are per program.
+        virtual void SetShaderIgnoresCommonMatrices(ShaderHandle /*shader*/) {}
         virtual void DestroyShader(ShaderHandle handle) = 0;
         virtual void BindShader(ShaderHandle handle) = 0;
 
@@ -550,6 +622,19 @@ namespace Render {
         virtual TextureHandle PreviousFrameDepthTexture() { return INVALID_TEXTURE; }
         // Counts BeginFrames that went on to record (the handoff's stamp).
         virtual uint64_t FrameNumber() const { return 0; }
+        // Frames the GPU may still be reading while the CPU records the next:
+        // how many buffer sets a renderer that rewrites a buffer every frame
+        // through UpdateBuffer must keep (EntityFrame::Slots()). Vulkan and
+        // Metal UpdateBuffer are immediate host memcpys; OpenGL's unsynchronised
+        // map is the same contract.
+        virtual uint32_t FramesInFlight() const { return 1; }
+        // Whether a large buffer should be created a step ahead of its first
+        // use: on Metal 4 a new allocation's residency commit (the page
+        // mapping of a 32 MB terrain slab, 5–10 ms) runs off the main
+        // thread, and a buffer created ahead has it done by the time it is
+        // needed (ChunkMegaBuffer's spare slab). Elsewhere creation is cheap
+        // and the spare would only cost memory.
+        virtual bool PrefersBufferPrefetch() const { return false; }
 
         // Viewport depth range (Vulkan): later draws map their depth into
         // [minDepth, maxDepth] until reset; BeginFrame resets it to [0, 1].
@@ -674,6 +759,47 @@ namespace Render {
         virtual void EndGPUTimer(GPUTimerHandle handle) = 0;
         virtual float GetGPUTimerResultMs(GPUTimerHandle handle) = 0;
 
+        // Per-encoder GPU timing on backends that sample at encoder
+        // boundaries (Metal: counter sample buffers). OFF by default: while
+        // the app attaches a sample buffer, Apple's Metal Performance HUD
+        // shows no encoder times (MTL_HUD_ENCODER_TIMING_ENABLED), so the
+        // live default keeps the HUD useful. PlatformMain forwards the
+        // "GPU Pass Timers" toggle; OBEY_MTL_GPU_TIMERS=1|split forces it.
+        virtual void SetGpuTimersEnabled(bool /*enabled*/) {}
+        virtual bool GpuTimersActive() const { return false; }
+        // The last completed frame's whole-command-buffer GPU time in ms,
+        // needing no counters (Metal: GPUEndTime - GPUStartTime); -1 when
+        // the backend cannot say, in which case callers fall back to a
+        // BeginGPUTimer("frame") bracket.
+        virtual float GetLastFrameGpuMs() const { return -1.0f; }
+        // The last resolved frame's encoders (needs the timers on). False
+        // when there are none.
+        virtual bool GetGpuEncoderTimings(std::vector<GpuEncoderTiming>& /*out*/) const { return false; }
+
+        // ====================================================================
+        // GPU DEBUGGING AIDS
+        // ====================================================================
+        // Capture the next frame with the platform's GPU debugger (Metal: a
+        // .gputrace under <obeycraft>/captures; needs MTL_CAPTURE_ENABLED=1
+        // in the launch environment). False when unavailable.
+        virtual bool RequestGpuCapture() { return false; }
+        // A name for the platform's tools (Xcode's Metal debugger, Instruments
+        // list resources by it). Metal: the object's label; GL/VK: no-op.
+        virtual void SetDebugLabel(DebugLabelKind, uint32_t /*handle*/, const char* /*label*/) {}
+
+        // ====================================================================
+        // GPU DEBUG GROUPS
+        // ====================================================================
+        // Names a stretch of draws for GPU tools — Xcode's Metal debugger and
+        // GPU capture, Instruments, RenderDoc: everything recorded between a
+        // Push and its Pop shows as one named group ("Opaque terrain",
+        // "Rain"), with the tools' own GPU time for it. Nestable; pair them
+        // within a frame (GpuDebugGroup below does). Metal: encoder debug
+        // groups; Vulkan: VK_EXT_debug_utils labels when the instance has
+        // them; OpenGL 4.1 (macOS) has no markers: a no-op.
+        virtual void PushDebugGroup(const char* /*name*/) {}
+        virtual void PopDebugGroup() {}
+
         // ====================================================================
         // DEBUG / MEMORY
         // ====================================================================
@@ -701,9 +827,24 @@ namespace Render {
     };
 
     // Factory function
+    // --metal4 (PlatformMain): Metal 4 where the Mac offers it, else Metal 3 (docs/metal4.md).
+    void SetMetal4Requested(bool requested);
     std::unique_ptr<RenderBackend> CreateRenderBackend(BackendType type);
 
     // Global backend instance
     extern std::unique_ptr<RenderBackend> g_renderBackend;
+
+    // A GPU debug group for the enclosing scope (RenderBackend::PushDebugGroup).
+    // `name` must outlive the scope (a string literal).
+    struct GpuDebugGroup {
+        explicit GpuDebugGroup(const char* name) {
+            if (g_renderBackend) g_renderBackend->PushDebugGroup(name);
+        }
+        ~GpuDebugGroup() {
+            if (g_renderBackend) g_renderBackend->PopDebugGroup();
+        }
+        GpuDebugGroup(const GpuDebugGroup&) = delete;
+        GpuDebugGroup& operator=(const GpuDebugGroup&) = delete;
+    };
 
 } // namespace Render

@@ -89,13 +89,11 @@ namespace Render {
             MeshHandle   mesh = INVALID_MESH;
             size_t       capacityVerts = 0;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         EntityFrame::Cursor m_frameCursor;
 
         // Reused across frames so a steady-state frame does no allocation.
         std::vector<Vert> m_verts;
-        std::vector<Client::ClientChunk*> m_visibleChunks;
-        BlockEntityRenderDispatcher::ChunkSet m_seen;
 
         static const char* s_vertSource;
         static const char* s_fragSource;

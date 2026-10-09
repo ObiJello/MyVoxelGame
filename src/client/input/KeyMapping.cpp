@@ -329,6 +329,7 @@ namespace Input {
         KeyMapping* DebugDumpDynamicTextures = nullptr;
         KeyMapping* DebugReloadResourcePacks = nullptr;
         KeyMapping* DebugProfiling = nullptr;
+        KeyMapping* DebugGpuCapture = nullptr;
         KeyMapping* DebugCopyLocation = nullptr;
         KeyMapping* DebugDumpVersion = nullptr;
         KeyMapping* DebugProfilingChart = nullptr;
@@ -469,6 +470,8 @@ namespace Input {
         Binds::DebugDumpDynamicTextures  = &Register("key.debug.dumpDynamicTextures",  "Debug", "Dump Dynamic Textures",       BoundKey::Keyboard(GLFW_KEY_S));
         Binds::DebugReloadResourcePacks  = &Register("key.debug.reloadResourcePacks",  "Debug", "Reload Resource Packs",       BoundKey::Keyboard(GLFW_KEY_T));
         Binds::DebugProfiling            = &Register("key.debug.profiling",            "Debug", "Start/Stop Profiling",        BoundKey::Keyboard(GLFW_KEY_L));
+        // Engine-specific: F3+U captures the next frame for the GPU debugger.
+        Binds::DebugGpuCapture           = &Register("key.debug.gpuCapture",           "Debug", "GPU Frame Capture",           BoundKey::Keyboard(GLFW_KEY_U));
         Binds::DebugCopyLocation         = &Register("key.debug.copyLocation",         "Debug", "Copy Location",               BoundKey::Keyboard(GLFW_KEY_C));
         Binds::DebugDumpVersion          = &Register("key.debug.dumpVersion",          "Debug", "Dump Version Info",           BoundKey::Keyboard(GLFW_KEY_V));
         Binds::DebugProfilingChart       = &Register("key.debug.profilingChart",       "Debug", "Profiling Chart",             BoundKey::Keyboard(GLFW_KEY_1));

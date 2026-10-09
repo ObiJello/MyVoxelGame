@@ -47,6 +47,7 @@ layout (std140) uniform SectionOrigins {
 // origin. uMVP is the render-space view (its translation is the camera's
 // sub-block offset), uPortalClipPlane is in render space too.
 uniform ivec3 uRenderOrigin;
+uniform vec3 uCameraPos;   // render-space camera (the fog distances, the two-sided back test)
 // MC chunk fade-in (Options.chunkSectionFadeInTime, ChunkVisibility): the
 // origin row's .w is the section's first-upload time on the SectionFade
 // clock, these are the clock now and the fade length, all in milliseconds.
@@ -55,6 +56,8 @@ uniform int uFadeMs;
 // MC's lightmap (Render::Lightmap), texture unit 3: 16x16, x = block light,
 // y = sky light, LINEAR.
 uniform sampler2D uLightmap;
+uniform int uWorldLighting;   // 0: World Lighting off — the lightmap is white, so it is not sampled
+uniform vec4 uFogColor;       // .a = 0: fog off (ChunkRenderer::SetEnvironmentUniforms)
 
 // MC sample_lightmap.glsl: uv are the light coords (0..240 each).
 vec3 sampleLightmap(vec2 uv) {
@@ -63,13 +66,12 @@ vec3 sampleLightmap(vec2 uv) {
 
 // Output to fragment shader
 out vec2 fragTexCoord;
-out vec3 fragWorldPos;
+out vec2 fragFog;         // MC terrain.vsh: (spherical, cylindrical) fog distance, interpolated
 out vec4 fragColor;
 flat out int fragSprite;   // see the decode below; -1 = untiled
 flat out int fragRecord;   // face-mapped: texel index of the first record
 flat out int fragAux;      // two-sided: back mapping (alpha byte)
-flat out float fragVisibility;   // MC ChunkVisibility: the section's fade-in, 0..1
-out vec3 fragLight;              // 1: face-mapped rectangles light per block in the fragment shader
+// (ChunkVisibility rides in fragAux's bits 16..23, as in terrain_vk.vert.)   // MC ChunkVisibility: the section's fade-in, 0..1
 
 void main() {
     int slotRaw = int(aPosSlot.w * 65535.0 + 0.5);
@@ -84,7 +86,7 @@ void main() {
     // MC RenderSection.getVisibility: elapsed / fade, clamped; 1 with the
     // fade off or a row never stamped (0).
     int fadeStart = uOrigins[slot].w;
-    fragVisibility = (uFadeMs <= 0 || fadeStart == 0)
+    float visibility = (uFadeMs <= 0 || fadeStart == 0)
         ? 1.0
         : clamp(float(uFadeNowMs - fadeStart) / float(uFadeMs), 0.0, 1.0);
 
@@ -127,6 +129,13 @@ void main() {
             fragSprite = (spriteV & 0x7FFF) | 0x20000 | (((packedTile >> 10) & 0x3F) << 19)
                        | ((spriteV & 0x8000) << 10);
             fragAux = int(aColor.a * 255.0 + 0.5);
+            // Bit 8: the camera is behind the quad (one sign over a plane;
+            // see terrain_vk.vert).
+            int code = (packedTile >> 10) & 0x3F;
+            vec3 n = vec3(float((code & 3) == 1) - float((code & 3) == 3),
+                          float(((code >> 2) & 3) == 1) - float(((code >> 2) & 3) == 3),
+                          float(((code >> 4) & 3) == 1) - float(((code >> 4) & 3) == 3));
+            if (dot(n, uCameraPos - worldPos) < 0.0) fragAux |= 0x100;
         } else {
             fragTexCoord = vec2(float(packedTile & 0xFF), float(packedTile >> 8));
             fragSprite = int(aTexCoord.y * 65535.0 + 0.5);
@@ -135,12 +144,22 @@ void main() {
         fragTexCoord = aTexCoord;
         fragSprite = -1;
     }
-    fragWorldPos = worldPos;
+    // MC terrain.vsh: the fog distances per vertex, interpolated (fog.glsl).
+    // Fog off (uFogColor.a = 0): nothing to measure; the fragment shader
+    // skips the fog on the same flag.
+    if (uFogColor.a > 0.0) {
+        vec3 camDelta = worldPos - uCameraPos;
+        fragFog = vec2(length(camDelta), max(length(camDelta.xz), abs(camDelta.y)));
+    } else {
+        fragFog = vec2(0.0);
+    }
     fragColor = aColor;
     // MC terrain.vsh: vertexColor = Color * sample_lightmap(Sampler2, UV2).
     // A face-mapped rectangle's colour — AO and light included — is rebuilt
     // per block in the fragment shader from the face map, so its vertices
-    // carry no light of their own.
-    fragLight = vec3(1.0);
-    if (!mapped) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
+    // carry no light of their own. World Lighting off: the lightmap is
+    // white, so the sample is skipped.
+    if (!mapped && uWorldLighting != 0) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
+    // The fade rides in fragAux's bits 16..23 (a flat varying fewer).
+    fragAux |= int(visibility * 255.0 + 0.5) << 16;
 }

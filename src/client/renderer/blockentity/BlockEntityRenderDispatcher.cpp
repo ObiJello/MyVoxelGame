@@ -1,5 +1,6 @@
 // File: src/client/renderer/blockentity/BlockEntityRenderDispatcher.cpp
 #include "BlockEntityRenderDispatcher.hpp"
+#include "client/renderer/entity/EntityFrame.hpp"
 #include "../../world/ClientChunkManager.hpp"
 #include "../mesh/ChunkRenderer.hpp"
 #include "../effects/VolumetricBeam.hpp"
@@ -45,39 +46,49 @@ namespace Render {
         return m_renderers[typeId].get();
     }
 
-    void BlockEntityRenderDispatcher::CollectVisibleChunks(
-            Client::ClientChunkManager* chunkMgr,
-            std::vector<Client::ClientChunk*>& out,
-            ChunkSet& seen) {
-        out.clear();
-        seen.clear();
-        if (!chunkMgr) return;
+    BlockEntityRenderDispatcher::VisibleChunkCache BlockEntityRenderDispatcher::s_visibleChunks;
+
+    const std::vector<Client::ClientChunk*>& BlockEntityRenderDispatcher::CollectVisibleChunks(
+            Client::ClientChunkManager* chunkMgr) {
+        VisibleChunkCache& cache = s_visibleChunks;
+        cache.valid = false;
+        cache.chunks.clear();
+        if (!chunkMgr) return cache.chunks;
 
         const ChunkRenderer* renderer = g_chunkRenderer;
         if (!renderer) {
-            // No draw list to read — every loaded chunk, as before.
+            // No draw list to read — every loaded chunk, as before (and not
+            // cached: nothing says when that set changes).
             std::vector<std::pair<Game::Math::ChunkPos, Client::ClientChunk*>> snap;
             chunkMgr->SnapshotLoadedChunks(snap);
-            out.reserve(snap.size());
+            cache.chunks.reserve(snap.size());
             for (auto& [pos, chunk] : snap) {
-                if (chunk) out.push_back(chunk);
+                if (chunk) cache.chunks.push_back(chunk);
             }
-            return;
+            return cache.chunks;
         }
 
-        // The draw list is per SECTION and a chunk has up to 24 of them in
-        // it; the set collapses those to one chunk entry each. GetChunk is
-        // a main-thread map lookup — cheap next to the BE-map walk it
-        // replaces, and it answers the load state too (a chunk can drop
-        // out between the BFS snapshot and this frame).
-        // The CURRENT view's sections: inside a portal view this is the
+        // The CURRENT view's columns: inside a portal view this is the
         // portal's list, and the chests it looks at are gathered — the main
-        // view's snapshot held nothing of what the portal showed.
-        for (const SectionRenderData& rd : renderer->GetVisibleSections()) {
-            if (!seen.insert(rd.chunkPos).second) continue;
-            Client::ClientChunk* chunk = chunkMgr->GetChunk(rd.chunkPos);
-            if (chunk && chunk->IsLoaded()) out.push_back(chunk);
+        // view's snapshot held nothing of what the portal showed. The same
+        // pass of the same frame answers from the cache (a chunk unloads
+        // between frames, never between the walkers of one pass). GetChunk
+        // is a main-thread map lookup per column and answers the load state
+        // too (a chunk can drop out between the BFS snapshot and this frame).
+        const uint64_t pass = renderer->VisiblePassSerial();
+        const uint32_t frame = EntityFrame::Serial();
+        if (cache.valid && cache.passSerial == pass && cache.frameSerial == frame && cache.chunkMgr == chunkMgr) {
+            return cache.chunks;
         }
+        for (const Game::Math::ChunkPos& pos : renderer->GetVisibleChunkPositions()) {
+            Client::ClientChunk* chunk = chunkMgr->GetChunk(pos);
+            if (chunk && chunk->IsLoaded()) cache.chunks.push_back(chunk);
+        }
+        cache.passSerial = pass;
+        cache.frameSerial = frame;
+        cache.chunkMgr = chunkMgr;
+        cache.valid = true;
+        return cache.chunks;
     }
 
     void BlockEntityRenderDispatcher::RenderAll(Client::ClientChunkManager* chunkMgr,
@@ -87,15 +98,26 @@ namespace Render {
                                                  float partialTick) {
         PROFILE_ZONE_N("BlockEntityRenderAll");
         if (!chunkMgr) return;
-        chunkMgr->RetireLandedBlockEntities();
+        {
+            PROFILE_ZONE_N("BE.Retire");
+            chunkMgr->RetireLandedBlockEntities();
+        }
         // A new view for the volumetric beams (their depth snapshot is per
         // view): main, portal and panorama views all come through here.
-        VolumetricBeam::Get().BeginView();
+        {
+            PROFILE_ZONE_N("BE.BeamView");
+            VolumetricBeam::Get().BeginView();
+        }
 
-        CollectVisibleChunks(chunkMgr, m_visibleChunks, m_seen);
+        const std::vector<Client::ClientChunk*>& visibleChunks = [&]() -> const std::vector<Client::ClientChunk*>& {
+            PROFILE_ZONE_N("BE.Collect");
+            return CollectVisibleChunks(chunkMgr);
+        }();
         const ChunkRenderer* renderer = g_chunkRenderer;
 
-        for (Client::ClientChunk* clientChunk : m_visibleChunks) {
+        {
+        PROFILE_ZONE_N("BE.Walk");
+        for (Client::ClientChunk* clientChunk : visibleChunks) {
             if (!clientChunk || !clientChunk->chunkData) continue;
             const auto& chunkBEs = clientChunk->chunkData->GetAllBlockEntities();
             if (chunkBEs.empty()) continue;   // most chunks, every frame
@@ -127,8 +149,10 @@ namespace Render {
                 const float r  = static_cast<float>(beRenderer->GetViewDistance());
                 if (dx * dx + dz * dz > r * r) continue;
 
+                PROFILE_ZONE_N("BE.Render");
                 beRenderer->Render(*be, partialTick, proj, view, cameraPos);
             }
+        }
         }
 
         // With no chunk renderer CollectVisibleChunks already returned every
@@ -144,6 +168,8 @@ namespace Render {
                                                       const glm::vec3& cameraPos,
                                                       float partialTick) {
         PROFILE_ZONE_N("BlockEntityRenderOffScreen");
+        const ChunkRenderer* renderer = g_chunkRenderer;
+        if (!renderer) return;
         // Bounded by the reach, not the render distance: a lamp whose own
         // section is on screen was drawn above at any distance; only one
         // near enough for its geometry to swing into view while its section
@@ -158,7 +184,7 @@ namespace Render {
         for (int cz = minCz; cz <= maxCz; ++cz) {
             for (int cx = minCx; cx <= maxCx; ++cx) {
                 const Game::Math::ChunkPos pos{cx, cz};
-                if (m_seen.count(pos)) continue;          // walked by the visible pass
+                if (renderer->IsColumnVisible(pos)) continue;   // walked by the visible pass
                 Client::ClientChunk* clientChunk = chunkMgr->GetChunk(pos);
                 if (!clientChunk || !clientChunk->IsLoaded() || !clientChunk->chunkData) continue;
                 const auto& chunkBEs = clientChunk->chunkData->GetAllBlockEntities();

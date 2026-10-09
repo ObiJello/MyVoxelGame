@@ -12,6 +12,8 @@
 // (GetRenderClouds(): "true" = Fancy 3D, "fast" = flat, "false" = off).
 #pragma once
 
+#include "client/renderer/entity/EntityFrame.hpp"
+
 #include "../backend/RenderTypes.hpp"
 #include <glm/glm.hpp>
 #include <cstdint>
@@ -99,7 +101,7 @@ namespace Render {
             size_t vbCapacity = 0;   // bytes
             size_t ibCapacity = 0;   // bytes
         };
-        MeshSlot m_slots[2];
+        MeshSlot m_slots[EntityFrame::kMaxSlots];   // a rebuild takes the next; EntityFrame::Slots() cycle
         size_t m_activeSlot = 0;     // slot the last rebuild filled
         uint32_t m_indexCount = 0;
         // Scratch reused across rebuilds so a cell crossing does not reallocate.

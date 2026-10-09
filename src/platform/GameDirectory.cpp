@@ -479,7 +479,9 @@ namespace Platform {
         // draws softer streaks. Half is the opt-in: on Vulkan drawn ahead of
         // the frame from the previous frame's depth, 1.17 ms a frame faster
         // than Full at radius 10 on an M4; on OpenGL it splits the frame's
-        // pass (+11 % at radius 10, -5 % at radius 5) (2026-10-05).
+        // pass (+11 % at radius 10, -5 % at radius 5) (2026-10-05). On
+        // Metal the option is gone: with the streak instancing, Full beat
+        // Half by ~3 % (2026-10-07; WeatherEffectRenderer::HalfResolutionAvailable).
         SetRainHalfResolution(false);
         SetImprovedTransparency(fabulous);
         // Engine row: every preset draws the world at the window's own

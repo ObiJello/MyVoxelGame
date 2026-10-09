@@ -3,6 +3,8 @@
 // Matches MC's GuiRenderer: sorts commands, batches by texture, executes draws.
 #pragma once
 
+#include "client/renderer/entity/EntityFrame.hpp"
+
 #include "../backend/RenderTypes.hpp"
 #include "GuiRenderState.hpp"
 #include <vector>
@@ -57,7 +59,7 @@ namespace Render {
             size_t vboCapacity = 0;
             size_t iboCapacity = 0;
         };
-        FrameBuffers m_frames[2];
+        FrameBuffers m_frames[EntityFrame::kMaxSlots];   // EntityFrame::Slots() of them exist
         int m_frameIndex = 0;
 
         struct DrawBatch {

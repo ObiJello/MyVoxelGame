@@ -4,6 +4,7 @@
 #ifdef HAS_VULKAN
 
 #include "../RenderBackend.hpp"
+#include "../SpirvUniforms.hpp"
 #include <vulkan/vulkan.h>
 #include <unordered_map>
 #include <deque>
@@ -70,11 +71,22 @@ namespace Render {
         // See PipelineState::depthClampEnabled — a device feature we may lack.
         bool m_depthClampSupported = false;
         bool DebugGetMultiDrawIndirect() const override { return m_multiDrawIndirect; }
+        bool ShaderFloat16() const { return m_shaderFloat16; }   // VK_KHR_shader_float16_int8 enabled (CreateLogicalDevice)
 
         // Textures
         TextureHandle CreateEmptyTexture2D(int width, int height, TextureFormat format,
                                            int maxLevel) override;
         TextureHandle CreateTexture2D(int width, int height, TextureFormat format,
+                                     const void* data) override;
+        TextureHandle CreateTexture2DArray(int width, int height, int layers, int mipLevels,
+                                           TextureFormat format) override;
+        void UpdateTextureArrayLevel(TextureHandle handle, int layer, int level, int x, int y,
+                                     int width, int height, const void* data) override;
+        int MaxTextureArrayLayers() const override {
+            const uint32_t limit = m_deviceProperties.limits.maxImageArrayLayers;
+            return static_cast<int>(limit > (1u << 20) ? (1u << 20) : limit);
+        }
+        void UploadTextureArrayLevel(TextureHandle handle, int level, int width, int height, int layers,
                                      const void* data) override;
         void UpdateTexture2D(TextureHandle handle, int x, int y,
                             int width, int height, const void* data) override;
@@ -121,6 +133,7 @@ namespace Render {
         void SetDepthHandoff(bool handoff) override { m_depthHandoff = handoff; }
         TextureHandle PreviousFrameDepthTexture() override;
         uint64_t FrameNumber() const override { return m_frameNumber; }
+        uint32_t FramesInFlight() const override { return MAX_FRAMES_IN_FLIGHT; }
         void SetDepthRange(float minDepth, float maxDepth) override;
         void ClearDepthRect(int x, int y, int width, int height, float depth) override;
         bool FrameDepthIsFloat() const override {
@@ -149,7 +162,7 @@ namespace Render {
         // so we can keep both layouts coexisting without breaking existing
         // chunk rendering. Same _vk.spv file convention.
         ShaderHandle CreateShaderFromFilesPortal(const std::string& vertexPath,
-                                                 const std::string& fragmentPath);
+                                                 const std::string& fragmentPath) override;
         void DestroyShader(ShaderHandle handle) override;
         void BindShader(ShaderHandle handle) override;
         void SetUniformMat4(ShaderHandle handle, const std::string& name, const glm::mat4& value) override;
@@ -201,6 +214,10 @@ namespace Render {
         void MultiDrawIndexedBaseVertex(const int32_t* indexCounts, const size_t* indexByteOffsets,
                                         const int32_t* baseVertices, uint32_t drawCount,
                                         IndexType indexType = IndexType::Uint32) override;
+
+        // GPU debug groups: VK_EXT_debug_utils command-buffer labels.
+        void PushDebugGroup(const char* name) override;
+        void PopDebugGroup() override;
 
         // GPU timers
         GPUTimerHandle BeginGPUTimer(const std::string& name) override;
@@ -464,6 +481,7 @@ namespace Render {
         // frame (measured 2026-08-30). Falls back to the loop when the device
         // lacks multiDrawIndirect or the ring is full.
         bool m_multiDrawIndirect = false;
+        bool m_shaderFloat16 = false;     // VK_KHR_shader_float16_int8 enabled: the _f16_vk.frag.spv terrain variants load
         static constexpr VkDeviceSize kIndirectRingBytes = 4u << 20;   // 4 MB = 209k commands
         std::vector<VkBuffer> m_indirectBuffers;
         std::vector<VkDeviceMemory> m_indirectMemory;
@@ -498,6 +516,7 @@ namespace Render {
             uint32_t texture = 0;       // TextureHandle; its image is resolved at flush
             int x, y, width, height;
             uint32_t mipLevel = 0;
+            uint32_t layer = 0;         // array layer (UpdateTextureArrayLevel); 0 for a 2D texture
             size_t stagingOffset = 0;   // byte offset into the staging ring slot
             size_t byteSize = 0;
         };
@@ -555,7 +574,7 @@ namespace Render {
         uint8_t* ReserveTexStaging(size_t bytes, size_t& outOffset);
         void DestroyTexStaging();
         void QueueTextureUpdate(uint32_t texture, uint32_t mipLevel, int x, int y,
-                                int width, int height, const void* data);
+                                int width, int height, const void* data, uint32_t layer = 0);
 
         // ====================================================================
         // DESCRIPTOR POOL & LAYOUTS
@@ -676,6 +695,10 @@ namespace Render {
             int width = 0, height = 0;
             uint32_t mipLevels = 1;
             size_t memorySize = 0;
+            // CreateTexture2DArray: the image's array layers (a 2D-array
+            // view); 1 for every other texture. Set after the positional
+            // initialisation, like `format`.
+            uint32_t layers = 1;
             // Cached sampler state so SetTextureFilter / SetTextureWrap can
             // recreate the sampler while preserving each other's settings.
             // CreateTexture2D initializes these to the defaults it builds the
@@ -728,6 +751,7 @@ namespace Render {
                 size_t   stagingOffset;
                 uint32_t mipLevel;
                 int x, y, width, height;
+                uint32_t layer;
             };
             std::vector<std::pair<uint64_t, std::vector<CarriedUpdate>>> carried;   // (frame, updates), oldest first
         };
@@ -795,67 +819,23 @@ namespace Render {
         // pos+uv+color; etc.) call this after creating their shader so
         // the backend can build matching VkVertexInputAttributeDescription
         // arrays in CreateGraphicsPipeline.
-        void RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout);
-        void RegisterShaderInstanceLayout(ShaderHandle shader, const VertexLayout& layout);
+        void RegisterShaderVertexLayout(ShaderHandle shader, const VertexLayout& layout) override;
+        void RegisterShaderInstanceLayout(ShaderHandle shader, const VertexLayout& layout) override;
         // A portal-layout shader that reads the Common UBO's environment
         // fields (fog, camera, sky brightness) but never its uMVP / uModel.
         // Such shaders are drawn once per entity or block entity with a new
         // MVP each time; without this every one of those draws would copy a
         // fresh 384-byte UBO slot for matrices the shader never reads, and a
         // storage room of chests could run the 8192-slot ring dry.
-        void SetShaderIgnoresCommonMatrices(ShaderHandle shader);
+        void SetShaderIgnoresCommonMatrices(ShaderHandle shader) override;
     private:
 
         // ====================================================================
         // PORTAL-FEATURE UNIFORM BUFFERS
         // ====================================================================
-        // Common uniforms used across portal/viewmodel/HDR/bloom shaders.
-        // Packs every uniform we route from C++ SetUniform* into named
-        // fields. Layout matches `layout(std140, set=0, binding=1) uniform
-        // Common { ... }` in the _vk shaders. std140 means vec3 takes
-        // 16 bytes (rounded up to vec4 alignment) so we use vec4 for
-        // vec3-flavored uniforms with the 4th component carrying a
-        // related scalar.
-        struct CommonUBO {
-            glm::mat4 uMVP         = glm::mat4(1.0f);   //   0
-            glm::mat4 uModel       = glm::mat4(1.0f);   //  64
-            glm::vec4 uPortalColor = {0, 0, 0, 0};      // 128 — rgb=color, w=uPulse
-            glm::vec4 uColorDark   = {0, 0, 0, 0};      // 144 — rgb=dark, w=uOpenAmount
-            glm::vec4 uColorHot    = {0, 0, 0, 0};      // 160 — rgb=hot,  w=uOpenAmountVS
-            glm::vec4 uKeyDir      = {0, 0, 0, 0};      // 176 — xyz=keyDir, w=uKeyIntensity
-            glm::vec4 uTint        = {1, 1, 1, 1};      // 192 — rgba (crosshair / glow tint)
-            glm::vec4 uUVRange     = {0, 0, 1, 1};      // 208 — (uvMin.xy, uvMax.xy)
-            glm::vec4 uScalarsA    = {0, 0, 0, 0};      // 224 — (uTime, uTimeVS, uStaticAmount, uColorScale)
-            glm::vec4 uScalarsB    = {0, 0, 0, 0};      // 240 — (uPortalActive, uForceFarDepth, uOutlineMode, uFlashIntensity)
-            glm::vec4 uScalarsC    = {1, 0, 1, 0};      // 256 — (uAmbient, uAlphaCutoff, uExposure, uHasBloom)
-            glm::vec4 uScalarsD    = {0, 0, 0, 0};      // 272 — (uHasSprite, uUseSkin, uUseTextures, _pad)
-            glm::vec2 uScreenSize  = {0, 0};            // 288
-            glm::vec2 _pad         = {0, 0};            // 296 — pad to vec4 alignment
-            // Environment / fog block (sky, clouds, chunk fog + night dim).
-            // APPENDED so older _vk shaders that declare the 304-byte layout
-            // stay valid (a shader may declare a smaller UBO block than the
-            // bound buffer). New shaders declare the full 352-byte layout.
-            glm::vec4 uFogColor    = {1, 1, 1, 1};      // 304 — rgb=fog color, w=1
-            glm::vec4 uFogEnv      = {1e9f, 1e9f, 1e9f, 1e9f}; // 320 — (envStart, envEnd, rdStart, rdEnd)
-            glm::vec4 uCamPosBright= {0, 0, 0, 1};      // 336 — xyz=uCameraPos, w=uSkyBrightness
-            // MC's entity OVERLAY (OverlayTexture) — rgb = overlay colour,
-            // w = STRENGTH. Zero is a clean passthrough, which is why the
-            // alpha is inverted from vanilla's texel; see shaders/block.frag.
-            // Appended for the same reason the fog block was: a _vk shader may
-            // declare a smaller layout than the buffer it is bound to.
-            glm::vec4 uOverlayColor= {0, 0, 0, 0};      // 352 — rgb=colour, w=strength
-            // The view's render origin (RenderOrigin.hpp): the integer block
-            // position every float the GPU sees is measured from. The
-            // terrain vertex shader subtracts it from the section-origin
-            // table in INTEGER arithmetic. Appended, as the fog block was.
-            glm::ivec4 uRenderOrigin= {0, 0, 0, 0};     // 368 — xyz = origin, w unused
-        };                                              // 384 bytes
-        // 96-mat4 bone palette UBO for the viewmodel skinning shader.
-        // 6144 bytes — well within the typical UBO size limit (16 KB).
-        static constexpr int kMaxBones = 96;
-        struct BonesUBO {
-            glm::mat4 bones[kMaxBones];   // identity-initialised in CPU staging
-        };
+        // The Common / Bones blocks and the push constants (CommonUBO,
+        // BonesUBO, PushConstantBlock) and the uniform-name routing that
+        // fills them are shared with the Metal backend: SpirvUniforms.hpp.
 
         // Per-frame UBO RING BUFFERS (one ring per frame-in-flight so a
         // draw recording the current frame doesn't stomp on a buffer
@@ -920,19 +900,9 @@ namespace Render {
         uint32_t m_bonesSlotStride  = 0;   // aligned, >= sizeof(BonesUBO)
         uint32_t m_uboAlignment     = 256; // discovered via VkPhysicalDeviceLimits
         // Working copies modified by SetUniform* between draws — copied
-        // into the active frame's UBO buffer right before vkCmdDraw*.
-        CommonUBO m_commonUBOData;
-        BonesUBO  m_bonesUBOData;
-        // Tracks whether the working copies have been modified since
-        // the last upload, so we only memcpy when needed.
-        bool m_commonUBODirty = true;
-        bool m_bonesUBODirty  = true;
-        // uMVP / uModel changed since the last slot. Kept apart from
-        // m_commonUBODirty so a shader that ignores the UBO's matrices
-        // (VKShaderInfo::ignoresCommonMatrices) can keep rebinding the
-        // previous slot; any slot written copies the current matrices, so
-        // a later matrix-reading draw still sees the right ones.
-        bool m_commonMatricesDirty = true;
+        // into the active frame's UBO buffer right before vkCmdDraw*, and
+        // their dirty flags (only a change costs a ring slot).
+        SpirvUniformState m_uniforms;
 
         struct VKMeshInfo {
             BufferHandle vertexBuffer = INVALID_BUFFER;
@@ -993,6 +963,25 @@ namespace Render {
         std::array<std::array<VkRenderPass, 2>, 3> m_oitPasses{};
         VkDescriptorSetLayout m_oitSetLayout   = VK_NULL_HANDLE;   // set 6: 3 samplers + params UBO
         VkDescriptorSetLayout m_emptySetLayout = VK_NULL_HANDLE;   // pads the unused set numbers
+        // Set 7 of the portal layouts: the two sprite arrays (texture slots
+        // 4 and 5) as one set of two combined image samplers — the ninth
+        // set a second per-texture set would need is past MoltenVK's eight.
+        // One set per frame slot, rewritten in that slot's frame when the
+        // views it holds change (an array's per-frame copy, a rebuilt
+        // atlas): the slot's previous frame has passed its fence by then.
+        VkDescriptorSetLayout m_spriteArrayLayout = VK_NULL_HANDLE;
+        struct SpriteArraySet {
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            VkImageView views[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+            VkSampler samplers[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+        };
+        SpriteArraySet m_spriteArraySets[MAX_FRAMES_IN_FLIGHT];
+        bool CreateSpriteArrayLayout();
+        void BindSpriteArraySet(VkCommandBuffer cmd);
+        VkImageView FrameView(const VKTextureInfo& tex) const {
+            return tex.frameCopies.empty() ? tex.imageView
+                                           : tex.frameCopies[static_cast<size_t>(m_currentFrame)].view;
+        }
         VkPipelineLayout m_portalOitPipelineLayout = VK_NULL_HANDLE;   // layoutType 3
         VkPipelineLayout m_blockOitPipelineLayout  = VK_NULL_HANDLE;   // layoutType 4
         VkDescriptorPool m_oitPool = VK_NULL_HANDLE;                   // per target set; freed with it
@@ -1060,7 +1049,9 @@ namespace Render {
         // a third descriptor set just for the secondary texture so
         // BindTexture(handle, slot=1) can attach a real texture there
         // without rewriting any descriptors mid-frame.
-        static constexpr uint32_t kMaxTextureSlots = 4;
+        // Slots 0..3 as the portal layout's sets 0, 2, 4, 5; slots 4 and 5
+        // are the block atlas's sprite arrays (set 7, bindings 0 and 1).
+        static constexpr uint32_t kMaxTextureSlots = 6;
         TextureHandle m_boundTexture = INVALID_TEXTURE;       // legacy alias for slot 0
         TextureHandle m_boundTextures[kMaxTextureSlots] = {
             INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
@@ -1086,33 +1077,7 @@ namespace Render {
         };
         StencilOverride m_stencilOverride;
 
-        // Push constant data — must match every shader's
-        // layout(push_constant) block exactly. Vulkan guarantees 128 bytes
-        // of push constants minimum; we use ALL of it so portal-feature
-        // shaders (crosshair, particle, simple HUD) can fit their tiny
-        // uniform sets here without needing a UBO. Larger shaders
-        // (portal renderer, viewmodel skinning) use UBOs via the
-        // m_portalDescriptorLayout path below.
-        // CRITICAL: do NOT reorder the first four fields — block_vk /
-        // crosshair_vk / highlight_vk / gui_*_vk / player_billboard_vk
-        // shaders ALL declare a push_constant block ending at uAlphaTest
-        // (offset 76, total 80 bytes). They read pc.uAlphaTest by offset,
-        // so moving uAlphaTest off offset 76 breaks alpha discard for
-        // every existing shader and transparent texels render as their
-        // discarded-pixel default (black). New portal-feature uniforms
-        // append AFTER the existing tail.
-        struct PushConstantBlock {
-            glm::mat4 uMVP        = glm::mat4(1.0f);   // 0-63   (64) — existing
-            glm::vec2 uScreenSize = {0, 0};            // 64-71  (8)  — existing
-            float     uLineWidth  = 0.0f;              // 72-75  (4)  — existing
-            float     uAlphaTest  = 0.0f;              // 76-79  (4)  — existing
-            // ---- new fields below; safe to add because GLSL shaders that
-            // only declare the first 80 bytes simply ignore the trailing
-            // bytes of the push range. ----
-            glm::vec4 uColor      = {0, 0, 0, 0};      // 80-95  (16) — tint / portal color
-            glm::vec4 uUVRange    = {0, 0, 1, 1};      // 96-111 (16) — (uvMin.xy, uvMax.xy)
-            glm::vec4 uScalars    = {0, 0, 0, 0};      // 112-127(16) — per-shader scalar pack
-        } m_pushConstants;                              // 128 bytes — Vulkan minimum guarantee
+        // Push constants: m_uniforms.push (PushConstantBlock, SpirvUniforms.hpp).
         PushConstantBlock m_lastPushed;                 // what the command buffer last received
 
         // Clear color
@@ -1345,6 +1310,13 @@ namespace Render {
         // surface offers VK_COLOR_SPACE_PASS_THROUGH_EXT (see
         // ChooseSwapSurfaceFormat for why that is the one we want).
         bool m_hasSwapchainColorSpaceExt = false;
+        // VK_EXT_debug_utils on the instance: the label entry points, and how
+        // many labels the frame's command buffer has open (EndFrame closes
+        // what a caller left open, so a frame's labels always balance).
+        bool m_hasDebugUtils = false;
+        PFN_vkCmdBeginDebugUtilsLabelEXT m_cmdBeginLabel = nullptr;
+        PFN_vkCmdEndDebugUtilsLabelEXT   m_cmdEndLabel   = nullptr;
+        int m_debugLabelDepth = 0;
         VkPresentModeKHR ChooseSwapPresentMode(const std::vector<VkPresentModeKHR>& modes) const;
         VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& caps, GLFWwindow* window) const;
         // Queried once in PickPhysicalDevice; FindMemoryType used to re-query
@@ -1359,21 +1331,27 @@ namespace Render {
         // Buffer/Image creation helpers
         bool CreateVkBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                            VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& memory);
+        // `layers` > 1 makes an array image (CreateTexture2DArray) and, in
+        // CreateImageView, a 2D-array view over all of them.
         bool CreateVkImage(uint32_t width, uint32_t height, uint32_t mipLevels,
                           VkFormat format, VkImageTiling tiling, VkImageUsageFlags usage,
-                          VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& memory);
-        VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels);
+                          VkMemoryPropertyFlags properties, VkImage& image, VkDeviceMemory& memory,
+                          uint32_t layers = 1);
+        VkImageView CreateImageView(VkImage image, VkFormat format, VkImageAspectFlags aspectFlags, uint32_t mipLevels,
+                                    uint32_t layers = 1);
         VkShaderModule CreateShaderModule(const std::vector<char>& code) const;
 
         // Single-use command buffer helpers
         VkCommandBuffer BeginSingleTimeCommands();
         void EndSingleTimeCommands(VkCommandBuffer commandBuffer);
         void TransitionImageLayout(VkImage image, VkFormat format,
-                                  VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels);
+                                  VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels,
+                                  uint32_t layers = 1);
         // The same two, recorded into a caller's command buffer: one submit
         // (one GPU drain) for a whole texture upload instead of three.
         void RecordImageLayoutTransition(VkCommandBuffer cmd, VkImage image, VkFormat format,
-                                         VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels);
+                                         VkImageLayout oldLayout, VkImageLayout newLayout, uint32_t mipLevels,
+                                         uint32_t layers = 1);
         // Both CreateTexture2D forms: the image carries `mipLevels` levels,
         // `data` (optional) fills level 0.
         TextureHandle CreateTexture2DImpl(int width, int height, TextureFormat format,

@@ -11,9 +11,6 @@
 #include "../texture/AtlasBuilder.hpp"
 #include "../backend/RenderBackend.hpp"
 #include "../core/Vertex.hpp"
-#ifdef HAS_VULKAN
-#include "../backend/vulkan/VKBackend.hpp"
-#endif
 #include "../environment/EnvironmentState.hpp"
 #include "client/renderer/environment/Lightmap.hpp"
 #include "common/core/Features.hpp"
@@ -182,19 +179,11 @@ namespace Render {
         // Create separate shader programs for opaque (no discard → early-z
         // enabled), cutout and translucent (both alpha-tested with discard).
         // Matches Minecraft's SOLID_TERRAIN vs CUTOUT_TERRAIN pipeline split.
-        // On Vulkan the block fragment shaders read the environment/fog fields
+        // The _vk block fragment shaders read the environment/fog fields
         // from the Common UBO, which needs the UBO-aware (portal) pipeline
-        // layout — same backend-cast pattern as PortalRenderer/SkyRenderer.
+        // layout.
         auto createBlockShader = [](const char* vertPath, const char* fragPath) {
-            if (g_renderBackend->GetType() == BackendType::Vulkan) {
-#ifdef HAS_VULKAN
-                auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-                return vk->CreateShaderFromFilesPortal(vertPath, fragPath);
-#else
-                return INVALID_SHADER;
-#endif
-            }
-            return g_renderBackend->CreateShaderFromFiles(vertPath, fragPath);
+            return g_renderBackend->CreateShaderFromFilesPortal(vertPath, fragPath);
         };
         // Terrain uses its OWN shader files (terrain.* — the block.* shaders
         // plus the greedy-meshing tile-rect attribute at location 3). They are
@@ -218,20 +207,15 @@ namespace Render {
             Log::Error("Failed to create solid block shader");
             return false;
         }
-#ifdef HAS_VULKAN
-        // Vulkan bakes the vertex input into each shader's pipelines; without
-        // a registered layout it falls back to the 24-byte block layout and
-        // the 32-byte terrain buffers would be read misaligned. Must happen
-        // before the first draw (pipelines are created lazily). OpenGL needs
-        // nothing here — the shared terrain VAO (SetupBlockVertexFormat)
-        // carries the format.
-        if (g_renderBackend->GetType() == BackendType::Vulkan) {
-            auto* vk = static_cast<VKBackend*>(g_renderBackend.get());
-            vk->RegisterShaderVertexLayout(m_opaqueShader, GetTerrainVertexLayout());
-            vk->RegisterShaderVertexLayout(m_cutoutShader, GetTerrainVertexLayout());
-            vk->RegisterShaderVertexLayout(m_solidShader,  GetTerrainVertexLayout());
-        }
-#endif
+        // Vulkan and Metal bake the vertex input into each shader's
+        // pipelines; without a registered layout they fall back to the
+        // 24-byte block layout and the 20-byte terrain buffers would be read
+        // misaligned. Must happen before the first draw (pipelines are
+        // created lazily). OpenGL needs nothing here — the shared terrain
+        // VAO (SetupBlockVertexFormat) carries the format.
+        g_renderBackend->RegisterShaderVertexLayout(m_opaqueShader, GetTerrainVertexLayout());
+        g_renderBackend->RegisterShaderVertexLayout(m_cutoutShader, GetTerrainVertexLayout());
+        g_renderBackend->RegisterShaderVertexLayout(m_solidShader,  GetTerrainVertexLayout());
         m_backendShader = m_opaqueShader;
         m_shadersLoaded = true;
         Log::Info("Block shaders created (opaque + cutout + solid)");
@@ -449,6 +433,11 @@ namespace Render {
         // flight, keep waiting). A pass only starts a new query when its
         // previous one has been collected, so there is never more than one
         // in-flight query per pass and GL_TIME_ELAPSED brackets never nest.
+        // Metal times ENCODERS, not draws: the three passes share the
+        // frame's encoder, so these brackets read 0 there unless
+        // OBEY_MTL_GPU_TIMERS=split gives each top-level stage its own
+        // encoder (MetalBackend.hpp, m_gpu); the per-encoder numbers are the
+        // Gpu/Enc*Us plots.
         const bool mainScene = !m_useProjectionOverride && g_renderBackend != nullptr;
         // One main view per frame: it advances the secondary views' sort
         // ring to its next partition (WriteViewSortedTranslucent).
@@ -530,7 +519,7 @@ namespace Render {
         // Opaque pass: uses opaque shader (no discard → early-z enabled)
         {
             GPUTimerHandle t = beginPassTimer(0, "opaque");
-            if (!DevSkip("opaque")) RenderOpaque(camera, frustum);
+            if (!DevSkip("opaque")) { GpuDebugGroup gpuGroup("Opaque terrain"); RenderOpaque(camera, frustum); }
             endPassTimer(0, t);
         }
 
@@ -551,7 +540,7 @@ namespace Render {
 
         {
             GPUTimerHandle t = beginPassTimer(1, "cutout");
-            if (!DevSkip("cutout")) RenderCutout(camera, frustum);
+            if (!DevSkip("cutout")) { GpuDebugGroup gpuGroup("Cutout terrain"); RenderCutout(camera, frustum); }
             endPassTimer(1, t);
         }
 
@@ -662,7 +651,7 @@ namespace Render {
         // The cull view, deliberately: RenderTranslucent's only use of its
         // camera is the resort origin, and back-to-front order must match
         // the origin the sections were sorted for — the override camera.
-        if (!DevSkip("translucent")) RenderTranslucent(cullCamera, cullFrustum);
+        if (!DevSkip("translucent")) { GpuDebugGroup gpuGroup("Translucent terrain"); RenderTranslucent(cullCamera, cullFrustum); }
         if (t != INVALID_GPU_TIMER) {
             g_renderBackend->EndGPUTimer(t);
             m_gpuTimerPending[2] = t;
@@ -1588,7 +1577,14 @@ namespace Render {
             // that follow each chunk pass see that pass's view.
             { PROFILE_ZONE_N("FrustumFilter.Keys");
             m_visibleGrid.Reset(currentChunkX, currentChunkZ, renderDistanceChunks + 4);
-            for (const auto& rd : m_visibleSections) m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
+            m_visibleChunkPositions.clear();
+            for (const auto& rd : m_visibleSections) {
+                // The column's first section lists the chunk; the grid says
+                // whether one was seen (an array read, no set).
+                if (!m_visibleGrid.HasColumn(rd.chunkPos)) m_visibleChunkPositions.push_back(rd.chunkPos);
+                m_visibleGrid.Insert(rd.chunkPos, rd.sectionY);
+            }
+            ++m_visiblePassSerial;
             }
 
             // MAIN-VIEW SNAPSHOT for the mesh scheduler.
@@ -2001,9 +1997,21 @@ namespace Render {
         g_renderBackend->SetUniformVec3(shader, "uCameraPos", Render::ToRender(camera.position));
         g_renderBackend->SetUniformIVec3(shader, "uRenderOrigin", glm::ivec3(Render::RenderOrigin()));
         g_renderBackend->SetUniformFloat(shader, "uSkyBrightness", env.skyBrightness);
-        g_renderBackend->SetUniformVec4(shader, "uFogColor", glm::vec4(env.fogColor, 1.0f));
+        // uFogColor's alpha is the fog switch: 0 with fog off, and the terrain
+        // shaders skip the per-vertex distances and the per-fragment ramps
+        // and mix on it (the distances are out of reach anyway, so the
+        // output is the same). OBEY_SKIP=fogskip keeps the alpha at 1 with
+        // fog off — the in-run A/B of the skip itself.
+        const bool fogOn = env.fogEnabled || Render::DevSkip("fogskip");
+        g_renderBackend->SetUniformVec4(shader, "uFogColor", glm::vec4(env.fogColor, fogOn ? 1.0f : 0.0f));
         g_renderBackend->SetUniformVec4(shader, "uFogEnv",
             glm::vec4(env.fogEnvStart, env.fogEnvEnd, env.fogRdStart, env.fogRdEnd));
+        // World Lighting off (Lightmap::WorldLightingOn): the lightmap is
+        // white, so the shaders skip its samples — one per vertex, four per
+        // face-mapped fragment plus the light texel. OBEY_SKIP=lightskip
+        // keeps sampling the white map — the in-run A/B of the skip.
+        const bool worldLightingOn = Lightmap::WorldLightingOn() || Render::DevSkip("lightskip");
+        g_renderBackend->SetUniformInt(shader, "uWorldLighting", worldLightingOn ? 1 : 0);
         // MC ChunkVisibility (options.chunkFade): the vertex shader turns a
         // section's upload time (its origin row's .w) and these two into a
         // 0..1 that the fragment shader mixes from the fog colour.
@@ -2053,8 +2061,8 @@ namespace Render {
         // Use the caller-supplied projection (oblique-near-plane from the
         // portal renderer) when present; otherwise build the standard one.
         //
-        // Vulkan special-case: skip the oblique override. The Vulkan
-        // backend's GL→VK depth remap (kVkZCorrect in VKBackend.cpp)
+        // Vulkan/Metal special-case: skip the oblique override. Their
+        // GL→0..1 depth remap (kZeroToOneDepthCorrect, SpirvUniforms.hpp)
         // interacts with the Lengyel oblique modification such that
         // kept-side geometry past the clip plane's asymptote ends up at
         // z_ndc > 1 in Vulkan NDC, getting clipped by the rasterizer's
@@ -2071,7 +2079,7 @@ namespace Render {
         // and left gaps between the faces.
         const bool useOverride = m_useProjectionOverride && g_renderBackend &&
                                  (m_projectionOverrideExact ||
-                                  g_renderBackend->GetType() != BackendType::Vulkan);
+                                  !g_renderBackend->UsesVkShaders());
         const glm::mat4 proj = useOverride
             ? m_projectionOverride
             : glm::perspective(glm::radians(camera.fov), aspect, s_nearPlane, farPlane);
@@ -2141,8 +2149,36 @@ namespace Render {
             // binds each slab's buffer texture there. Set here, before any
             // draw with the shader: a samplerBuffer left on unit 0 would
             // share the atlas's unit with a different sampler type, which GL
-            // rejects at draw time.
+            // rejects at draw time. The sprite array's unit (4) likewise,
+            // bound or not — a sampler2DArray left on unit 0 is the same
+            // mismatch.
             g_renderBackend->SetUniformInt(shader, "uFaceMap", 2);
+            g_renderBackend->SetUniformInt(shader, "uSpriteArray", 4);
+            g_renderBackend->SetUniformInt(shader, "uSpriteArray2", 5);
+        }
+        // The sprite arrays (AtlasBuilder::GetSpriteArrayHandle) on texture
+        // slots 4 and 5 (GL units 4, 5; Vulkan descriptor set 7): the
+        // fragment shaders sample a greedy quad's sprite from them, ids
+        // below uSpriteLayers (id s = layer s % cap of array s / cap); 0
+        // sends every sprite through the sprite table. Slot 5 takes the
+        // first array again when there is no overflow (never sampled then,
+        // but every bound slot the shader declares must hold a texture).
+        // Only the engine's own terrain shaders: a shader pack's replace them
+        // and its G-buffer sits on the same units (ShaderPipeline). OBEY_SKIP=
+        // spritearray leaves the arrays resident and unused — the in-run A/B.
+        const bool engineShader = shader == m_opaqueShader || shader == m_cutoutShader || shader == m_solidShader;
+        const TextureHandle spriteArray = g_atlasBuilder->GetSpriteArrayHandle(0);
+        int spriteLayers = 0, spriteCap = 0;
+        if (engineShader && spriteArray != INVALID_TEXTURE && !Render::DevSkip("spritearray")) {
+            const TextureHandle overflow = g_atlasBuilder->GetSpriteArrayHandle(1);
+            g_renderBackend->BindTexture(spriteArray, 4);
+            g_renderBackend->BindTexture(overflow != INVALID_TEXTURE ? overflow : spriteArray, 5);
+            spriteLayers = g_atlasBuilder->GetSpriteArrayLayers();
+            spriteCap = g_atlasBuilder->GetSpriteArrayCap();
+        }
+        if (shader != INVALID_SHADER) {
+            g_renderBackend->SetUniformInt(shader, "uSpriteLayers", spriteLayers);
+            g_renderBackend->SetUniformInt(shader, "uSpriteArrayCap", spriteCap);
         }
     }
 
@@ -2184,11 +2220,20 @@ namespace Render {
         static const bool s_faceCullDisabled = std::getenv("OBEY_NO_FACE_CULL") != nullptr;
         // Smallest skipped group worth its own sub-draw, in indices (6 per
         // quad). OBEY_SPLIT_MIN=<indices> overrides for tuning; 0 = split
-        // at every group as before.
+        // at every group as before. Per backend: 900 on OpenGL / Vulkan
+        // (the 2026-09-04 sub-draw cost), 0 on Metal — its sub-draws are
+        // cheap enough that every back-facing group is worth skipping:
+        // tour at RD 32 (2026-10-07, two pairings) 0 vs 900 = -14 %
+        // vertices, +57 % sub-draws, -3..5 % GPU frame, +2..3 % fps; no
+        // face culling at all (+27 % vertices) cost 4.5 %.
         static const uint32_t s_splitMinIndices = [] {
             const char* v = std::getenv("OBEY_SPLIT_MIN");
-            return v ? static_cast<uint32_t>(std::atoi(v)) : 900u;
+            if (v) return static_cast<uint32_t>(std::atoi(v));
+            const bool metal = g_renderBackend && g_renderBackend->GetType() == BackendType::Metal;
+            return metal ? 0u : 900u;
         }();
+        // OBEY_SKIP=splitmin: the skip phases use the OpenGL/Vulkan 900 (the phase A/B).
+        const uint32_t splitMinIndices = DevSkip("splitmin") ? 900u : s_splitMinIndices;
         const RenderPassConfig& passConfig = (layer == RenderLayer::Cutout) ? m_cutoutConfig : m_opaqueConfig;
         const bool useFacing = layer != RenderLayer::Translucent && passConfig.enableBackFaceCulling &&
                                !s_faceCullDisabled;
@@ -2275,7 +2320,7 @@ namespace Render {
                             const uint32_t begin = cachedCmd.facingRanges[slot];
                             const uint32_t stop  = cachedCmd.facingRanges[end];
                             if (stop > begin) {
-                                if (haveRun && begin - runEnd <= s_splitMinIndices) {
+                                if (haveRun && begin - runEnd <= splitMinIndices) {
                                     runEnd = stop;                       // bridge the small gap
                                 } else {
                                     if (haveRun) {

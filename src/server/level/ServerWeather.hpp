@@ -106,9 +106,14 @@ namespace Server {
         // away, or a forced resync).
         void Forget(uint32_t connectionId) { m_synced.erase(connectionId); }
 
+        // Bring every player whose level changed (a join, a dimension
+        // change) up to date — MC PlayerList.sendLevelInfo. Tick() does it
+        // while the simulation runs; the server calls it on its own while
+        // paused, since a join's level info goes out pause or not.
+        void SyncPlayers(IntegratedServer& server);
+
     private:
         void AdvanceCycle();
-        void SyncPlayers(IntegratedServer& server);
         // MC ServerLevel.findLightningTargetAround / findLightningRod.
         glm::ivec3 FindLightningTargetAround(ServerLevel& level, const glm::ivec3& pos);
 
