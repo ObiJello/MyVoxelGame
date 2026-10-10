@@ -70,8 +70,23 @@ namespace Render {
             auto str = [](GLenum e) { const GLubyte* v = glGetString(e); return v ? std::string(reinterpret_cast<const char*>(v)) : std::string(); };
             m_deviceInfo.vendorName  = str(GL_VENDOR);
             m_deviceInfo.name        = str(GL_RENDERER);
-            m_deviceInfo.driverInfo  = str(GL_VERSION);
-            m_deviceInfo.backendName = GetName();
+            // F3: the context the driver actually created (3.3 is only what we
+            // ask for; NVIDIA/AMD hand back their newest, e.g. 4.6) and the
+            // rest of GL_VERSION after its leading version number — the
+            // driver ("NVIDIA 591.44", "Metal - 89.4").
+            GLint major = 0, minor = 0, profile = 0;
+            glGetIntegerv(GL_MAJOR_VERSION, &major);
+            glGetIntegerv(GL_MINOR_VERSION, &minor);
+            glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profile);
+            char name[48];
+            std::snprintf(name, sizeof(name), "OpenGL %d.%d%s", major, minor,
+                          (profile & GL_CONTEXT_CORE_PROFILE_BIT) ? " Core" :
+                          (profile & GL_CONTEXT_COMPATIBILITY_PROFILE_BIT) ? " Compatibility" : "");
+            m_deviceInfo.backendName = major > 0 ? std::string(name) : std::string(GetName());
+            const std::string version = str(GL_VERSION);
+            const size_t space = version.find(' ');
+            m_deviceInfo.driverInfo = (space != std::string::npos && space + 1 < version.size())
+                                          ? version.substr(space + 1) : version;
             // GL has no device-class query; Apple's integrated parts and every
             // software renderer announce themselves in the renderer string.
             std::string lower = m_deviceInfo.name;

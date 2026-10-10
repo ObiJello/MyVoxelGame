@@ -31,7 +31,11 @@ namespace Render {
         bool Initialize(GLFWwindow* window) override;
         void Shutdown() override;
         BackendType GetType() const override { return BackendType::Vulkan; }
-        const char* GetName() const override { return "Vulkan 1.0 (MoltenVK)"; }
+#ifdef __APPLE__
+        const char* GetName() const override { return "Vulkan (MoltenVK)"; }
+#else
+        const char* GetName() const override { return "Vulkan"; }
+#endif
         GpuDeviceInfo GetDeviceInfo() const override;
         GLFWwindow* GetWindow() const override { return m_window; }
         void SetVSync(bool enabled) override;

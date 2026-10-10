@@ -1903,6 +1903,10 @@ namespace Render {
         b.SetUniformFloat(s, "fogStart", in.fogStart);
         b.SetUniformFloat(s, "fogEnd", in.fogEnd);
         b.SetUniformFloat(s, "fogDensity", 0.0f);
+        // gl_Fog's members (ShaderPackGlsl's CommonPrelude).
+        b.SetUniformVec4(s, "sp_FogColor", glm::vec4(in.fogColor, 1.0f));
+        b.SetUniformFloat(s, "sp_FogStart", in.fogStart);
+        b.SetUniformFloat(s, "sp_FogEnd", in.fogEnd);
 
         // Weather: MC's rain / thunder levels at the frame's partial tick,
         // and the eased wetness (SetFrameInput).

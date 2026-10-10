@@ -3979,6 +3979,16 @@ static uint16_t     s_lastPresencePort = 0;
         (void)retinaFramebuffer;
 #endif
 
+#if defined(_WIN32) && defined(HAS_VULKAN)
+        // vulkan-1.dll is delay-loaded (CMakeLists.txt): it comes with the GPU
+        // driver, and a machine without one must still start on OpenGL. Check
+        // for the loader before the window is created without a GL context.
+        if (useVulkan && !glfwVulkanSupported()) {
+            Log::Error("Vulkan requested but no Vulkan loader/driver found (vulkan-1.dll). Falling back to OpenGL.");
+            useVulkan = false;
+        }
+#endif
+
         // Setup graphics API context based on backend choice
         if (useVulkan) {
 #ifdef HAS_VULKAN

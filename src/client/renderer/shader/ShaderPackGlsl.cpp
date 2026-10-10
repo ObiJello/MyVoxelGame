@@ -1,5 +1,6 @@
 // File: src/client/renderer/shader/ShaderPackGlsl.cpp
 #include "ShaderPackGlsl.hpp"
+#include "client/shader/PackCompiler.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -134,7 +135,9 @@ namespace Render::PackGlsl {
                  "#define MC_RENDER_QUALITY 1.0\n"
                  "#define MC_SHADOW_QUALITY 1.0\n"
                  "#define MC_HAND_DEPTH 0.125\n"
-                 "#define MC_ANISOTROPIC_FILTERING 16\n"
+                 // No MC_ANISOTROPIC_FILTERING: OptiFine defines it only while
+                 // its own AF is on and Iris never does; Complementary takes
+                 // it as that OptiFine setting and draws an error screen.
                  "#define MC_RENDER_STAGE_NONE 0\n"
                  "#define MC_RENDER_STAGE_SKY 1\n"
                  "#define MC_RENDER_STAGE_SUNSET 2\n"
@@ -194,6 +197,17 @@ namespace Render::PackGlsl {
                  "#define shadow2D(s, c) vec4(float(texture(s, (c).xy).r >= (c).z - 0.0005))\n"
                  "#define shadow2DLod(s, c, l) vec4(float(textureLod(s, (c).xy, l).r >= (c).z - 0.0005))\n"
                  "#define shadow2DProj(s, c) vec4(float(textureProj(s, (c).xyw).r >= (c).z / (c).w - 0.0005))\n";
+            // gl_Fog, the compatibility built-in struct (Complementary reads
+            // gl_Fog.start / .scale in its fog and End checks): MC's linear
+            // fog from the pipeline's sp_Fog* uniforms (ShaderPipeline::SetUniforms).
+            p += "uniform vec4 sp_FogColor;\n"
+                 "uniform float sp_FogStart;\n"
+                 "uniform float sp_FogEnd;\n"
+                 "struct sp_FogParameters { vec4 color; float density; float start; float end; float scale; };\n"
+                 "sp_FogParameters sp_Fog() {\n"
+                 "    return sp_FogParameters(sp_FogColor, 0.0, sp_FogStart, sp_FogEnd, 1.0 / max(sp_FogEnd - sp_FogStart, 1e-4));\n"
+                 "}\n"
+                 "#define gl_Fog sp_Fog()\n";
             return p;
         }
 
@@ -485,6 +499,84 @@ namespace Render::PackGlsl {
             return out;
         }
 
+        // The pack source with only its #if branches decided (glslang's
+        // preprocessor), for questions the raw text cannot answer: which
+        // draw-buffer directive and which sampler declarations are live.
+        // Callers mark what they ask about with tokens the preprocessor
+        // keeps. False without glslang or when the source does not
+        // preprocess — the raw-text answer then stands.
+        bool PreprocessBranches(std::string src, bool fragment, std::string& pre) {
+            // glslang will not #define a reserved gl_ name (the prelude maps
+            // gl_ModelViewMatrix and friends that way); the copy only has to
+            // decide the #if branches, which never test those names.
+            for (size_t p = src.find("gl_"); p != std::string::npos; p = src.find("gl_", p + 6)) {
+                if (p > 0 && (std::isalnum(static_cast<unsigned char>(src[p - 1])) || src[p - 1] == '_')) continue;
+                src.insert(p, "sp_");
+            }
+            // Line continuations (Complementary) need GLSL 4.20; the version
+            // only changes what the preprocessor accepts here.
+            src = std::regex_replace(src, std::regex(R"(^#version[^\n]*)"), "#version 450 core",
+                                     std::regex_constants::format_first_only);
+            return Shaders::PackCompiler::Preprocess(src, fragment, pre);
+        }
+
+        // The directive that survives the program's own #if branches — the
+        // last one left after preprocessing, as Iris and OptiFine read it.
+        // A program can name its buffers twice (Complementary's composite:
+        // DRAWBUFFERS:7, then :71 when PBR reflections are on; Sildur's water:
+        // :41, then :412 only for OptiFine before 1.16.4), and the raw text
+        // cannot tell which applies. False: the raw parse stands.
+        bool ActiveDrawBuffers(const std::string& source, std::vector<int>& out) {
+            static const std::regex kDirective(R"(/\*[ \t]*(RENDERTARGETS|DRAWBUFFERS)[ \t]*:[ \t]*([0-9A-Za-z, \t]+?)[ \t]*\*/)");
+            std::string marked;
+            std::vector<std::string> directives;
+            size_t last = 0;
+            for (auto it = std::sregex_iterator(source.begin(), source.end(), kDirective); it != std::sregex_iterator(); ++it) {
+                const std::smatch& m = *it;
+                marked.append(source, last, static_cast<size_t>(m.position(0)) - last);
+                marked += " sp_directive_" + std::to_string(directives.size()) + "_ ";
+                directives.push_back(m.str(0));
+                last = static_cast<size_t>(m.position(0) + m.length(0));
+            }
+            if (directives.size() < 2) return false;   // one or none: the raw parse is exact
+            marked.append(source, last, std::string::npos);
+            std::string pre;
+            if (!PreprocessBranches(std::move(marked), true, pre)) return false;
+            static const std::regex kMarker(R"(\bsp_directive_([0-9]+)_\b)");
+            int lastRt = -1, lastDb = -1;
+            for (auto mt = std::sregex_iterator(pre.begin(), pre.end(), kMarker); mt != std::sregex_iterator(); ++mt) {
+                const int i = std::atoi((*mt)[1].str().c_str());
+                if (i < 0 || i >= static_cast<int>(directives.size())) continue;
+                (directives[i].find("RENDERTARGETS") != std::string::npos ? lastRt : lastDb) = i;
+            }
+            const int pick = lastRt >= 0 ? lastRt : lastDb;   // RENDERTARGETS wins, as in ParseDrawBuffers
+            if (pick < 0) return false;
+            out = ParseDrawBuffers(directives[pick]);
+            return true;
+        }
+
+        // Which of `lines` (0-based line numbers in `source`) the
+        // preprocessor keeps. False when it cannot run.
+        bool SurvivingLines(const std::string& source, bool fragment, const std::set<size_t>& lines,
+                            std::set<size_t>& surviving) {
+            std::string marked;
+            std::istringstream in(source);
+            std::string line;
+            for (size_t n = 0; std::getline(in, line); ++n) {
+                if (lines.count(n)) marked += " sp_line_" + std::to_string(n) + "_ ";
+                marked += line;
+                marked += '\n';
+            }
+            std::string pre;
+            if (!PreprocessBranches(std::move(marked), fragment, pre)) return false;
+            static const std::regex kMarker(R"(\bsp_line_([0-9]+)_\b)");
+            surviving.clear();
+            for (auto mt = std::sregex_iterator(pre.begin(), pre.end(), kMarker); mt != std::sregex_iterator(); ++mt) {
+                surviving.insert(static_cast<size_t>(std::stoull((*mt)[1].str())));
+            }
+            return true;
+        }
+
     } // namespace
 
     std::vector<FormatDecl> FindFormatDecls(const std::string& source) {
@@ -570,6 +662,12 @@ namespace Render::PackGlsl {
             case Stage::TerrainFragment: t.source = FragmentPrelude(version, true) + body + TerrainFragmentEpilogue(); break;
             case Stage::EntityVertex:    t.source = EntityVertexPrelude(version) + body + EntityVertexEpilogue(); break;
             case Stage::EntityFragment:  t.source = FragmentPrelude(version, true) + body + EntityFragmentEpilogue(); break;
+        }
+        // With the prelude's defines in place (MC_VERSION, MC_OS_*), which
+        // of several draw-buffer directives the program really ends on.
+        if (fragment) {
+            std::vector<int> active;
+            if (ActiveDrawBuffers(t.source, active)) t.drawBuffers = std::move(active);
         }
         return t;
     }
@@ -662,6 +760,23 @@ namespace Render::PackGlsl {
             array = m[4].matched ? m[4].str() : "";
             return static_cast<size_t>(m[0].length());
         }
+        // `flat out vec3 upVec, sunVec;` → one declaration per name, which
+        // ParseVarying then takes one at a time (Complementary's composite1).
+        // Only plain names (an optional [N]) count: a parameter list of a
+        // function signature wrapped onto its own line is left alone.
+        std::string ExpandVaryingList(const std::string& line) {
+            if (line.find(',') == std::string::npos || line.find("layout") != std::string::npos) return line;
+            static const std::regex kList(R"(^([ \t]*(?:(?:flat|smooth|noperspective|centroid)[ \t]+)*(?:out|in|varying)[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]+)([^;(){}]*,[^;(){}]*);)");
+            static const std::regex kName(R"(^[ \t]*[A-Za-z_][A-Za-z0-9_]*[ \t]*(\[[0-9]+\])?[ \t]*$)");
+            std::smatch m;
+            if (!std::regex_search(line, m, kList)) return line;
+            std::string expanded;
+            for (const std::string& d : SplitDeclarators(m[2].str())) {
+                if (!std::regex_match(d, kName)) return line;
+                expanded += m[1].str() + TrimWs(d) + "; ";
+            }
+            return expanded + m.suffix().str();
+        }
     } // namespace
 
     bool Vulkanize(const std::string& vertexCore, const std::string& fragmentCore,
@@ -678,19 +793,43 @@ namespace Render::PackGlsl {
         // the same stage — such samplers (Distant Horizons' dhDepthTex*, an
         // optional feature's input) are read only on paths that are off.
         std::map<std::string, std::string> declared[2];   // [0] vertex, [1] fragment
+        // Declared without a binding: samplers whose every declaration sits
+        // in an #if branch the preprocessor drops (Complementary's colored
+        // lighting and world-space reflection inputs), so they take no slot
+        // and are never an alias target; and, when the layout is full with
+        // no same-type sampler to alias, the rest — likely behind an option
+        // too (used for real, glslang rejects it: the same failure as
+        // running out of slots).
+        std::set<std::string> samplerUnslotted;
+        std::set<std::string> inactiveSamplers;
         auto collect = [&](const std::string& src, int stage) {
+            struct Decl { size_t line; std::string type, name; };
+            std::vector<Decl> found;
+            std::set<size_t> lineNumbers;
             std::istringstream in(src);
             std::string line;
-            while (std::getline(in, line)) {
+            for (size_t n = 0; std::getline(in, line); ++n) {
                 size_t pos;
                 std::string type;
                 std::vector<UniformDecl> decls;
                 if (!StartsWithUniform(line, pos) || !ParseUniformLine(line, type, decls) || !IsSamplerType(type)) continue;
-                for (const UniformDecl& d : decls) declared[stage].emplace(d.name, type);
+                for (const UniformDecl& d : decls) found.push_back({n, type, d.name});
+                lineNumbers.insert(n);
+            }
+            // The raw text holds every #if branch; the preprocessor says
+            // which declarations are live (all of them when it cannot run).
+            std::set<size_t> live;
+            const bool known = SurvivingLines(src, stage == 1, lineNumbers, live);
+            for (const Decl& d : found) {
+                if (!known || live.count(d.line)) declared[stage].emplace(d.name, d.type);
+                else inactiveSamplers.insert(d.name);
             }
         };
         collect(vertexCore, 0);
         collect(fragmentCore, 1);
+        for (const std::string& name : inactiveSamplers) {
+            if (!declared[0].count(name) && !declared[1].count(name)) samplerUnslotted.insert(name);
+        }
         std::map<std::string, int> samplerSlot;            // name → slot, both stages
         std::map<std::string, std::string> samplerAlias;   // name → the sampler it stands for
         {
@@ -718,11 +857,12 @@ namespace Render::PackGlsl {
                     for (const auto& [other, otherType] : decls) {
                         if (other != name && otherType == type && samplerSlot.count(other)) { candidate = other; break; }
                     }
-                    if (candidate.empty()) { out.error = "no free texture slot for sampler " + name + " (" + type + ")"; return false; }
+                    if (candidate.empty()) { alias.clear(); break; }
                     if (alias.empty()) alias = candidate;
                     else if (alias != candidate && !decls.count(alias)) alias = candidate;   // must exist in this stage too
                 }
-                samplerAlias[name] = alias;
+                if (alias.empty()) samplerUnslotted.insert(name);
+                else samplerAlias[name] = alias;
             }
         }
         auto slotFor = [&](const std::string& name, std::string& error) -> int {
@@ -782,6 +922,10 @@ namespace Render::PackGlsl {
                                     rebuilt += "#define " + name + " " + target + "\n";
                                     continue;
                                 }
+                                if (samplerUnslotted.count(d.name)) {
+                                    rebuilt += "uniform " + type + " " + name + d.array + "; ";
+                                    continue;
+                                }
                                 std::string err;
                                 const int slot = slotFor(d.name, err);
                                 if (slot < 0) { out.error = err; return false; }
@@ -789,6 +933,15 @@ namespace Render::PackGlsl {
                             }
                             if (!rebuilt.empty() && rebuilt.back() == '\n') rebuilt.pop_back();
                             lines.push_back(rebuilt);
+                        } else if (type.find("image") != std::string::npos || type == "atomic_uint" ||
+                                   type == "writeonly" || type == "readonly" || type == "coherent" ||
+                                   type == "volatile" || type == "restrict") {   // a memory qualifier: an image follows
+                            // Opaque but no sampler (Iris custom images,
+                            // `uniform writeonly image2D x;`): never a block
+                            // member. Left as written — behind an option
+                            // that is off, as in Complementary, the
+                            // preprocessor drops it; used, glslang says so.
+                            lines.push_back(line.substr(0, line.size() - rest.size()));
                         } else {
                             for (const UniformDecl& d : decls) {
                                 if (memberNames.insert(d.name).second) members.push_back(d);
@@ -819,7 +972,7 @@ namespace Render::PackGlsl {
                 // Varyings: locations. Several may share a line, and the line
                 // may go on after them (`out vec2 vUV; void main() {`).
                 {
-                    std::string rest = line, rebuilt;
+                    std::string rest = ExpandVaryingList(line), rebuilt;
                     bool any = false;
                     for (;;) {
                         std::string q, type, name, array;

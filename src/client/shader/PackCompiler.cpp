@@ -202,6 +202,18 @@ namespace Shaders::PackCompiler {
 
     bool Available() { return true; }
 
+    bool Preprocess(const std::string& glsl, bool fragment, std::string& out) {
+        EnsureGlslang();
+        glslang::TShader shader(fragment ? EShLangFragment : EShLangVertex);
+        const char* src = glsl.c_str();
+        shader.setStrings(&src, 1);
+        glslang::TShader::ForbidIncluder includer;   // includes are resolved before this
+        out.clear();
+        if (shader.preprocess(GetDefaultResources(), 330, ECoreProfile, false, false, EShMsgDefault, &out, includer)) return true;
+        out = shader.getInfoLog();
+        return false;
+    }
+
     bool Compile(const std::string& vertexGlsl, const std::string& fragmentGlsl,
                  const std::string& label, Program& out) {
         EnsureGlslang();
@@ -264,6 +276,7 @@ namespace Shaders::PackCompiler {
 
 #else
 
+    bool Preprocess(const std::string&, bool, std::string&) { return false; }
     bool Available() { return false; }
     bool Compile(const std::string&, const std::string&, const std::string& label, Program& out) {
         out = Program{};

@@ -62,6 +62,12 @@ namespace Shaders::PackCompiler {
     bool Compile(const std::string& vertexGlsl, const std::string& fragmentGlsl,
                  const std::string& label, Program& out);
 
+    // Run only the GLSL preprocessor over a (core-profile) stage: what is
+    // left once the #if branches are decided. False without glslang
+    // (SHADER_PACK_SPIRV off) or when the source does not preprocess
+    // (`out` is then glslang's log).
+    bool Preprocess(const std::string& glsl, bool fragment, std::string& out);
+
     // The Metal translation of one compiled stage: samplers at texture and
     // sampler index = binding, the uniform block (set 1 binding 0) at
     // `uniformBufferIndex`, the engine's user uniform block (set 3 binding

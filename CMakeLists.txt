@@ -2831,6 +2831,15 @@ if(HAS_VULKAN)
     target_link_libraries(imgui PRIVATE ${VULKAN_LIBRARY})
     target_include_directories(imgui PRIVATE ${VULKAN_INCLUDE_DIR})
 
+    if(WIN32)
+        # vulkan-1.dll ships with the GPU driver, not the game. Delay-load it
+        # so a PC without one still starts (on OpenGL — PlatformMain checks
+        # glfwVulkanSupported() before choosing Vulkan) instead of Windows
+        # refusing to launch the exe over a missing DLL.
+        target_link_options(MyVoxelGame PRIVATE "/DELAYLOAD:vulkan-1.dll")
+        target_link_libraries(MyVoxelGame PRIVATE delayimp)
+    endif()
+
     if(APPLE)
         # ── Bundle Vulkan libraries into .app so users don't need to install anything ──
 

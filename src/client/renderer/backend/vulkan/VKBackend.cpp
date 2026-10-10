@@ -3552,10 +3552,28 @@ namespace Render {
             case VK_PHYSICAL_DEVICE_TYPE_CPU:            info.type = GpuDeviceInfo::Type::Cpu;        break;
             default:                                     info.type = GpuDeviceInfo::Type::Other;      break;
         }
-        char driver[96];
-        std::snprintf(driver, sizeof(driver), "driver %u.%u.%u, api %u.%u.%u",
-                      VK_VERSION_MAJOR(p.driverVersion), VK_VERSION_MINOR(p.driverVersion), VK_VERSION_PATCH(p.driverVersion),
+        // F3: "Vulkan 1.4.325 (MoltenVK on macOS) <vendor> driver <version>" —
+        // the API version the device offers, not the instance's 1.0 target.
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s %u.%u.%u", GetName(),
                       VK_VERSION_MAJOR(p.apiVersion), VK_VERSION_MINOR(p.apiVersion), VK_VERSION_PATCH(p.apiVersion));
+        info.backendName = name;
+        // driverVersion is vendor-encoded; only AMD/Apple/Mesa use VK_MAKE_VERSION.
+        char driver[96];
+        const uint32_t v = p.driverVersion;
+        if (p.vendorID == 0x10DE) {           // NVIDIA: 10.8.8.6 bits, shown as e.g. 591.44
+            std::snprintf(driver, sizeof(driver), "%s driver %u.%02u", info.vendorName.c_str(),
+                          (v >> 22) & 0x3FFu, (v >> 14) & 0xFFu);
+        }
+#ifdef _WIN32
+        else if (p.vendorID == 0x8086) {      // Intel on Windows: 18.14 bits, e.g. 101.6130
+            std::snprintf(driver, sizeof(driver), "%s driver %u.%u", info.vendorName.c_str(), v >> 14, v & 0x3FFFu);
+        }
+#endif
+        else {
+            std::snprintf(driver, sizeof(driver), "%s driver %u.%u.%u", info.vendorName.c_str(),
+                          VK_VERSION_MAJOR(v), VK_VERSION_MINOR(v), VK_VERSION_PATCH(v));
+        }
         info.driverInfo = driver;
         return info;
     }

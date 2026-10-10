@@ -295,7 +295,7 @@ vec4 PortalFlame(bool transparentCenter) {
 //
 // `transparentCenter` is kept as the API hook but is now derived from
 // uPortalActive (1.0 = active/centered transparent, 0.0 = inactive/filled).
-vec4 PortalRefract(bool /*transparentCenter*/) {
+vec4 PortalRefract(bool transparentCenter) {   // named: GLSL 3.30 (NVIDIA) rejects unnamed parameters
     const float kOuterBorder    = 0.075;
     const float kInnerBorder    = kOuterBorder * 4.0;   // 0.30
     const float kBorderSoftness = 0.875;

@@ -274,7 +274,7 @@ namespace Render {
         enum class Type { Other, Integrated, Discrete, Virtual, Cpu };
         std::string vendorName;
         std::string name;
-        std::string backendName;   // "OpenGL 3.3", "Vulkan 1.0 (MoltenVK)"
+        std::string backendName;   // "OpenGL 4.6 Core", "Vulkan 1.4.325", "Metal 4"
         std::string driverInfo;    // GL_VERSION / Vulkan driver version
         Type type = Type::Other;
     };
