@@ -38,12 +38,33 @@ namespace Render::EntityEnvironment {
         return std::max(full, Lit());
     }
 
+    namespace {
+        // The coloured light at a cell (ChunkLight's header note), each
+        // channel raised to `state`'s channel emission, as a tint on
+        // `coords` (LightCoords::WithTint). Only where there is block light.
+        int TintedAt(const Client::ClientBlockAccess& blocks, int coords, int x, int y, int z,
+                     const Game::BlockState* state) {
+            namespace L = Game::Lighting;
+            if (L::LightCoords::Block(coords) <= 0) return coords;
+            int level[3];
+            for (int c = 0; c < 3; ++c) {
+                level[c] = blocks.GetBrightness(L::ChannelLayer(c), x, y, z);
+                if (state) {
+                    level[c] = std::max(level[c], L::BlockLightProperties::ChannelEmission(
+                                                      *state, static_cast<L::LightChannel>(c)));
+                }
+            }
+            return L::LightCoords::WithTint(coords, level[0], level[1], level[2]);
+        }
+    } // namespace
+
     int PackedLightAt(int x, int y, int z) {
         namespace L = Game::Lighting;
         const Client::ClientBlockAccess* blocks = Client::g_clientBlockAccess;
         if (!blocks) return L::LightCoords::Pack(0, 15);
-        return L::LightCoords::Pack(blocks->GetBrightness(L::LightLayer::Block, x, y, z),
-                                    blocks->GetBrightness(L::LightLayer::Sky, x, y, z));
+        const int coords = L::LightCoords::Pack(blocks->GetBrightness(L::LightLayer::Block, x, y, z),
+                                                blocks->GetBrightness(L::LightLayer::Sky, x, y, z));
+        return TintedAt(*blocks, coords, x, y, z, nullptr);
     }
 
     int LevelLightCoordsAt(const glm::ivec3& pos) {
@@ -59,7 +80,7 @@ namespace Render::EntityEnvironment {
         const int sky = blocks->GetBrightness(L::LightLayer::Sky, lightPos.x, lightPos.y, lightPos.z);
         const int block = std::max(blocks->GetBrightness(L::LightLayer::Block, lightPos.x, lightPos.y, lightPos.z),
                                    L::BlockLightProperties::Emission(state));
-        return L::LightCoords::Pack(block, sky);
+        return TintedAt(*blocks, L::LightCoords::Pack(block, sky), lightPos.x, lightPos.y, lightPos.z, &state);
     }
 
     int PackedLightAt(const glm::dvec3& world) {
@@ -76,7 +97,24 @@ namespace Render::EntityEnvironment {
         if (!Lightmap::Enabled() || !Lightmap::WorldLightingOn()) {
             return glm::vec3(block >= 15 ? FullBlockLight() : Lit());
         }
-        return Lightmap::Get().SampleFor(EnvironmentState::Get().Frame(), block, sky);
+        const EnvironmentFrame& frame = EnvironmentState::Get().Frame();
+        Lightmap& lightmap = Lightmap::Get();
+        const int tint = L::LightCoords::Tint15(packedLight);
+        if (tint == 0) return lightmap.SampleFor(frame, block, sky);
+        // Coloured light (the terrain shader's terrainLight): one sample per
+        // channel at that channel's share of the block light, between the
+        // two nearest lightmap columns, keeping that channel.
+        const auto sampleAt = [&](float level) {
+            const int b0 = std::clamp(static_cast<int>(level), 0, 15);
+            const int b1 = std::min(b0 + 1, 15);
+            const float t = std::clamp(level - static_cast<float>(b0), 0.0f, 1.0f);
+            return glm::mix(lightmap.SampleFor(frame, b0, sky), lightmap.SampleFor(frame, b1, sky), t);
+        };
+        const glm::vec3 share = glm::vec3(1.0f) - glm::vec3(static_cast<float>(tint & 31),
+                                                            static_cast<float>((tint >> 5) & 31),
+                                                            static_cast<float>((tint >> 10) & 31)) / 31.0f;
+        const glm::vec3 level = static_cast<float>(block) * share;
+        return glm::vec3(sampleAt(level.r).r, sampleAt(level.g).g, sampleAt(level.b).b);
     }
 
     glm::vec3 LightColorCoords(int lightCoords) {

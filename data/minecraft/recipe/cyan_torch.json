@@ -1,0 +1,30 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "group": "dyed_torch",
+  "ingredients": [
+    "minecraft:cyan_dye",
+    [
+      "minecraft:torch",
+      "minecraft:white_torch",
+      "minecraft:orange_torch",
+      "minecraft:magenta_torch",
+      "minecraft:light_blue_torch",
+      "minecraft:yellow_torch",
+      "minecraft:lime_torch",
+      "minecraft:pink_torch",
+      "minecraft:gray_torch",
+      "minecraft:light_gray_torch",
+      "minecraft:purple_torch",
+      "minecraft:blue_torch",
+      "minecraft:brown_torch",
+      "minecraft:green_torch",
+      "minecraft:red_torch",
+      "minecraft:black_torch"
+    ]
+  ],
+  "result": {
+    "count": 1,
+    "id": "minecraft:cyan_torch"
+  }
+}

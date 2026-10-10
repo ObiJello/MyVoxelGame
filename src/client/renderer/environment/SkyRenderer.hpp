@@ -182,14 +182,23 @@ namespace Render {
         //       render distance).
         // viewRotation: the camera view matrix with translation stripped.
         void Render(const glm::mat4& proj, const glm::mat4& viewRotation);
-        // The late sky pass: every sky draw depth-tested LessEqual at the far
-        // plane (sky_vk.vert puts the sky at depth 1.0), no depth write, so
-        // a view that draws its sky AFTER its opaque and cutout terrain
-        // shades only the sky pixels the terrain left. Off (the default) the
-        // sky draws with the depth test off, as MC's sky pass does, for the
-        // views that draw it first — a portal view's depth is not cleared
-        // where its silhouette is, so those must keep it off.
-        void SetDepthTested(bool on) { m_depthTested = on; }
+        // How the next Render's sky draws are depth-tested. sky_vk.vert puts
+        // the sky at depth 1.0 (the far plane, the clear); none writes depth.
+        //   Off      — the default: no depth test, as MC's sky pass, for the
+        //              views that draw their sky first. A portal view's depth
+        //              is not cleared where its silhouette is, so those must
+        //              keep it off.
+        //   Late     — LessEqual: a view that draws its sky AFTER its opaque
+        //              and cutout terrain shades only the pixels the terrain
+        //              left.
+        //   Windows  — Greater: only the pixels something nearer already
+        //              holds depth for. The late-sky view draws this right
+        //              after the sky blocks' depth-only faces and before any
+        //              terrain (SkyBlockRenderer.hpp), so the sky lands in
+        //              exactly those faces and nowhere else; Late fills the
+        //              rest of the frame after the terrain.
+        enum class DepthMode { Off, Late, Windows };
+        void SetDepthMode(DepthMode mode) { m_depthMode = mode; }
 
         // The sky of `rawDimensionId` from this viewpoint, whatever the
         // active dimension is — the far side of a portal. The Nether draws
@@ -207,6 +216,11 @@ namespace Render {
             uint8_t r, g, b, a;
         };
         static_assert(sizeof(Vertex) == 24, "must match GetBlockVertexLayout stride");
+
+        // The compare op of every sky draw under m_depthMode (unused when Off).
+        CompareOp DepthCompareOp() const {
+            return m_depthMode == DepthMode::Windows ? CompareOp::Greater : CompareOp::LessEqual;
+        }
 
         struct Mesh {
             BufferHandle vb = INVALID_BUFFER;
@@ -428,7 +442,7 @@ namespace Render {
         int         m_userSkyboxMode = 2;
         int         m_dimension = 0;
         bool        m_noSky = false;
-        bool        m_depthTested = false;   // SetDepthTested
+        DepthMode   m_depthMode = DepthMode::Off;   // SetDepthMode
         // The Hush's frozen night is the active sky (see RenderFixedNight).
         bool        m_fixedNight = false;
         // The mod dimensions' skies are the active sky: the Twilight

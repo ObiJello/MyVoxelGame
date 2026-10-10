@@ -5,7 +5,7 @@
 //        /gamerule <rule> <value>
 // Every vanilla 26.3 rule is accepted (new id, `minecraft:` id or the old
 // camelCase name) plus this engine's own (immersive_portals, portal_gun,
-// redstone_plus, redstone_chunks, vein_mine_max_blocks, player_step_height …).
+// redstone_plus, redstone_chunks, player_step_height …).
 #pragma once
 
 #include "CommandDispatcher.hpp"

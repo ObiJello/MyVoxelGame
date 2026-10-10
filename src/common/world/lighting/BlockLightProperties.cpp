@@ -69,6 +69,33 @@ namespace Game::Lighting {
 #undef ENGINE_BLOCK_LIGHT
         };
 
+        struct ColorRow { std::string_view slug; uint32_t rgb; };
+        const ColorRow kColorRows[] = {
+#define BLOCK_LIGHT_COLOR(slug, rgb) { slug, rgb },
+#include "common/world/block/BlockLightColor.inc"
+#undef BLOCK_LIGHT_COLOR
+        };
+
+        // A colour (0xRRGGBB) applied to an emission: each channel the
+        // colour's share of it, scaled so the brightest channel IS the
+        // emission. 0 (white) when the colour is white or there is no light.
+        uint16_t PackEmissionRgb(int emission, uint32_t rgb) {
+            const int c[3] = { static_cast<int>((rgb >> 16) & 0xFF), static_cast<int>((rgb >> 8) & 0xFF),
+                               static_cast<int>(rgb & 0xFF) };
+            const int top = std::max({c[0], c[1], c[2]});
+            if (emission <= 0 || top <= 0 || (c[0] == c[1] && c[1] == c[2])) return 0;
+            uint16_t packed = 0;
+            for (int i = 0; i < 3; ++i) {
+                const int level = c[i] == top ? emission
+                                              : static_cast<int>(std::lround(static_cast<double>(emission) * c[i] / top));
+                packed = static_cast<uint16_t>(packed | (std::clamp(level, 0, 15) << (4 * i)));
+            }
+            // Rounding can land every channel on the emission (a very pale
+            // colour at a low level): that is white.
+            const int r = packed & 15, g = (packed >> 4) & 15, b = (packed >> 8) & 15;
+            return (r == g && g == b) ? 0 : packed;
+        }
+
         // One 16x16 coverage grid per face, 1/16-block cells (every vanilla
         // shape that uses its shape for light is on that grid: slabs, stairs,
         // snow layers in eighths, farmland and paths at 15/16...). Row v, bit u.
@@ -180,6 +207,8 @@ namespace Game::Lighting {
         for (const LightRow& r : kLightRows) bySlug.emplace(r.slug, &r);
         std::unordered_map<std::string_view, int> engineEmission;
         for (const EngineRow& r : kEngineRows) engineEmission[r.slug] = r.emission;
+        std::unordered_map<std::string_view, uint32_t> lightColor;
+        for (const ColorRow& r : kColorRows) lightColor[r.slug] = r.rgb;
 
         const uint32_t total = BlockStates::Total();
         s_table.assign(total, StateLightInfo{});
@@ -194,6 +223,7 @@ namespace Game::Lighting {
             const LightRow* row = it != bySlug.end() ? it->second : nullptr;
             if (!row && id != BlockID::Air) ++unmatched;
             const auto eng = engineEmission.find(std::string_view(block.registrySlug));
+            const auto color = lightColor.find(std::string_view(block.registrySlug));
 
             const uint32_t base = BlockStates::Base(id);
             const uint32_t count = BlockStates::Count(id);
@@ -296,6 +326,7 @@ namespace Game::Lighting {
                 }
 
                 info.emission = static_cast<uint8_t>(emission);
+                if (color != lightColor.end()) info.emissionRgb = PackEmissionRgb(emission, color->second);
                 info.dampening = static_cast<uint8_t>(std::clamp(dampening, 0, 15));
                 info.flags = static_cast<uint8_t>(
                     (canOcclude ? kCanOcclude : 0) | (solidRender ? kSolidRender : 0) |
@@ -367,7 +398,9 @@ namespace Game::Lighting {
         if (newState == oldState) return false;
         const StateLightInfo& o = Info(oldState);
         const StateLightInfo& n = Info(newState);
-        return n.dampening != o.dampening || n.emission != o.emission ||
+        // The light's colour too (engine): one emitter swapped for another
+        // of the same strength still repaints the light around it.
+        return n.dampening != o.dampening || n.emission != o.emission || n.emissionRgb != o.emissionRgb ||
                (n.flags & kUseShape) != 0 || (o.flags & kUseShape) != 0;
     }
 

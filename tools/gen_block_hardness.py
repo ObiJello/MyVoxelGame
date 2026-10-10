@@ -780,6 +780,24 @@ SLUG_ALIASES = {
     # Sky Block (2026-10-02): a full opaque cube drawn as a window onto the
     # sky; breaks, sounds, drops and blocks light like tinted glass.
     "sky_block": "tinted_glass",
+    # Coloured torches (2026-10-10): TorchBlock / WallTorchBlock — vanilla's
+    # torch in everything but their light's colour (BlockLightColor.inc).
+    "white_torch": "torch", "white_wall_torch": "wall_torch",
+    "orange_torch": "torch", "orange_wall_torch": "wall_torch",
+    "magenta_torch": "torch", "magenta_wall_torch": "wall_torch",
+    "light_blue_torch": "torch", "light_blue_wall_torch": "wall_torch",
+    "yellow_torch": "torch", "yellow_wall_torch": "wall_torch",
+    "lime_torch": "torch", "lime_wall_torch": "wall_torch",
+    "pink_torch": "torch", "pink_wall_torch": "wall_torch",
+    "gray_torch": "torch", "gray_wall_torch": "wall_torch",
+    "light_gray_torch": "torch", "light_gray_wall_torch": "wall_torch",
+    "cyan_torch": "torch", "cyan_wall_torch": "wall_torch",
+    "purple_torch": "torch", "purple_wall_torch": "wall_torch",
+    "blue_torch": "torch", "blue_wall_torch": "wall_torch",
+    "brown_torch": "torch", "brown_wall_torch": "wall_torch",
+    "green_torch": "torch", "green_wall_torch": "wall_torch",
+    "red_torch": "torch", "red_wall_torch": "wall_torch",
+    "black_torch": "torch", "black_wall_torch": "wall_torch",
     # The Hush (engine dimension, 2026-09-21): each block breaks like the
     # vanilla block it is modelled on, and inherits its mineable/needs-tool tags.
     "hushstone": "deepslate",

@@ -117,6 +117,8 @@ BLOCK_LIGHT("black_shulker_box", None, 0, false, False, -1, False)  // ShulkerBo
 BLOCK_LIGHT("black_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("black_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("black_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("black_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("black_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("black_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("black_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("black_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -145,6 +147,8 @@ BLOCK_LIGHT("blue_shulker_box", None, 0, false, False, -1, False)  // ShulkerBox
 BLOCK_LIGHT("blue_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("blue_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("blue_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("blue_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("blue_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("blue_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("blue_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("blue_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -185,6 +189,8 @@ BLOCK_LIGHT("brown_stained_glass", None, 0, false, True, -1, False)  // StainedG
 BLOCK_LIGHT("brown_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("brown_terracotta", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("brown_thorns", None, 0, false, True, -1, False)  // TransparentBlock
+BLOCK_LIGHT("brown_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("brown_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("brown_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("brown_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("brown_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -380,6 +386,8 @@ BLOCK_LIGHT("cyan_shulker_box", None, 0, false, False, -1, False)  // ShulkerBox
 BLOCK_LIGHT("cyan_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("cyan_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("cyan_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("cyan_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("cyan_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("cyan_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("cyan_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("cyan_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -565,6 +573,8 @@ BLOCK_LIGHT("gray_shulker_box", None, 0, false, False, -1, False)  // ShulkerBox
 BLOCK_LIGHT("gray_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("gray_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("gray_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("gray_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("gray_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("gray_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("gray_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("gray_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -583,6 +593,8 @@ BLOCK_LIGHT("green_stained_glass", None, 0, false, True, -1, False)  // StainedG
 BLOCK_LIGHT("green_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("green_terracotta", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("green_thorns", None, 0, false, True, -1, False)  // TransparentBlock
+BLOCK_LIGHT("green_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("green_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("green_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("green_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("green_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -702,6 +714,8 @@ BLOCK_LIGHT("light_blue_shulker_box", None, 0, false, False, -1, False)  // Shul
 BLOCK_LIGHT("light_blue_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("light_blue_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("light_blue_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("light_blue_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("light_blue_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("light_blue_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("light_blue_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("light_blue_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -719,6 +733,8 @@ BLOCK_LIGHT("light_gray_shulker_box", None, 0, false, False, -1, False)  // Shul
 BLOCK_LIGHT("light_gray_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("light_gray_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("light_gray_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("light_gray_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("light_gray_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("light_gray_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("light_gray_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("light_gray_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -742,6 +758,8 @@ BLOCK_LIGHT("lime_shulker_box", None, 0, false, False, -1, False)  // ShulkerBox
 BLOCK_LIGHT("lime_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("lime_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("lime_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("lime_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("lime_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("lime_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("lime_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("lime_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -769,6 +787,8 @@ BLOCK_LIGHT("magenta_shulker_box", None, 0, false, False, -1, False)  // Shulker
 BLOCK_LIGHT("magenta_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("magenta_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("magenta_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("magenta_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("magenta_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("magenta_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("magenta_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("magenta_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -882,7 +902,9 @@ BLOCK_LIGHT("orange_shulker_box", None, 0, false, False, -1, False)  // ShulkerB
 BLOCK_LIGHT("orange_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("orange_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("orange_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("orange_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
 BLOCK_LIGHT("orange_tulip", None, 0, false, FluidEmpty, -1, False)  // FlowerBlock
+BLOCK_LIGHT("orange_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("orange_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("orange_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("orange_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -948,7 +970,9 @@ BLOCK_LIGHT("pink_shulker_box", None, 0, false, False, -1, False)  // ShulkerBox
 BLOCK_LIGHT("pink_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("pink_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("pink_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("pink_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
 BLOCK_LIGHT("pink_tulip", None, 0, false, FluidEmpty, -1, False)  // FlowerBlock
+BLOCK_LIGHT("pink_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("pink_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("pink_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("pink_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -1098,6 +1122,8 @@ BLOCK_LIGHT("purple_shulker_box", None, 0, false, False, -1, False)  // ShulkerB
 BLOCK_LIGHT("purple_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("purple_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("purple_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("purple_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("purple_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("purple_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("purple_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("purple_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -1143,7 +1169,9 @@ BLOCK_LIGHT("red_shulker_box", None, 0, false, False, -1, False)  // ShulkerBoxB
 BLOCK_LIGHT("red_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("red_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("red_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("red_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
 BLOCK_LIGHT("red_tulip", None, 0, false, FluidEmpty, -1, False)  // FlowerBlock
+BLOCK_LIGHT("red_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("red_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("red_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("red_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -1517,7 +1545,9 @@ BLOCK_LIGHT("white_shulker_box", None, 0, false, False, -1, False)  // ShulkerBo
 BLOCK_LIGHT("white_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("white_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("white_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("white_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
 BLOCK_LIGHT("white_tulip", None, 0, false, FluidEmpty, -1, False)  // FlowerBlock
+BLOCK_LIGHT("white_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("white_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("white_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("white_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock
@@ -1543,6 +1573,8 @@ BLOCK_LIGHT("yellow_shulker_box", None, 0, false, False, -1, False)  // ShulkerB
 BLOCK_LIGHT("yellow_stained_glass", None, 0, false, True, -1, False)  // StainedGlassBlock
 BLOCK_LIGHT("yellow_stained_glass_pane", None, 0, false, NotWaterlogged, -1, False)  // StainedGlassPaneBlock
 BLOCK_LIGHT("yellow_terracotta", None, 0, true, Default, -1, False)  // Block
+BLOCK_LIGHT("yellow_torch", Constant, 14, false, Default, -1, False)  // TorchBlock
+BLOCK_LIGHT("yellow_wall_torch", Constant, 14, false, Default, -1, False)  // WallTorchBlock
 BLOCK_LIGHT("yellow_wool", None, 0, true, Default, -1, False)  // Block
 BLOCK_LIGHT("yellow_wool_slab", None, 0, true, Default, -1, NotDouble)  // SlabBlock
 BLOCK_LIGHT("yellow_wool_stairs", None, 0, true, Default, -1, True)  // StairBlock

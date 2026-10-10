@@ -8,6 +8,8 @@
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/BlockInteraction.hpp"  // Game::UseResult
 #include "common/world/block/entity/SignBlockEntity.hpp"  // Game::SignTextSlot
+#include "common/world/level/VeinMine.hpp"                // Game::VeinMine::Target
+#include "common/entity/Item.hpp"                         // Game::ItemID
 #include "common/network/PacketTypes.hpp"
 #include "common/network/packets/KeepAliveC2S.hpp"
 #include "../world/watch/ChunkTrackingView.hpp"
@@ -376,23 +378,22 @@ namespace Server {
         // clear, exhaustion, loot and XP. `oldBlock`/`oldBlockState` are
         // what stood at `pos` — from the packet for the dug block (the
         // client's prediction has already cleared a shared world) and from
-        // the world for the extra blocks of a vein.
+        // the world for the extra blocks of a vein. `breakerPredicted`: the
+        // breaker's client already played the break puff and sound (its own
+        // dig) — false for a vein's extra blocks, whose effect it is sent.
         void DestroyBlockAsPlayer(Game::World* world, const glm::ivec3& pos,
                                   Game::BlockID oldBlock, Game::BlockState oldBlockState,
-                                  bool creativeBreak);
-        // Vein mine, capped by the vein_mine_max_blocks rule. The cluster of
-        // `kind` touching `origin` (26-neighbourhood) is counted first:
-        //   • it fits under the cap  -> the whole cluster goes (a vein);
-        //   • it is bigger           -> it is a mass, not a vein, and the
-        //     mine becomes a tunnel: a kVeinTunnelSize-square cross-section
-        //     centred on the origin, driven into the dug face (`face`,
-        //     RaycastHit::hitFace order) one layer at a time until the cap
-        //     is reached or a layer holds none of `kind`.
-        // Every block goes through DestroyBlockAsPlayer, so it drops and
-        // pays XP exactly as if dug by hand.
-        static constexpr int kVeinTunnelSize = 5;
-        void VeinMineFrom(Game::World* world, const glm::ivec3& origin,
-                          Game::BlockID kind, uint8_t face, bool creativeBreak);
+                                  bool creativeBreak, bool breakerPredicted);
+        // Vein mine, limited only by the shape's size: the blocks the
+        // packet's shape takes from `origin` (Game::VeinMine::CollectTargets
+        // — the same set the client highlighted) start breaking outward,
+        // nearest first, 25 ms apart and never longer than a second in all
+        // (Game::VeinMine::BreakTimeMs, TickVeinMines). Letting go of the
+        // keys stops it where it is (StopVeinMines). Every block goes
+        // through DestroyBlockAsPlayer, so it drops, pays XP and wears the
+        // tool exactly as if dug by hand.
+        void StartVeinMine(Game::World* world, const glm::ivec3& origin, Game::BlockID kind,
+                           const Network::BlockActionC2SPacket& packet, bool creativeBreak);
         void HandleUseItemOn(const Network::UseItemOnC2SPacket& packet);  // Minecraft-correct naming
         // MC LeadItem.bindPlayerMobs for this player at a fence (FenceBlock.
         // useWithoutItem and LeadItem.useOn): the mobs they lead go onto the
@@ -708,6 +709,30 @@ namespace Server {
         DigEffects m_dig;
         void StartDigEffects(Game::World& world, const glm::ivec3& pos, uint8_t face);
         void TickDigEffects();
+
+        // Vein mines still spreading (StartVeinMine). Targets are nearest
+        // ring first; `next` is the first not yet due. A target is re-checked
+        // when it comes due: it must still be `kind`. A mine ends when its last ring
+        // is done, when the keys are let go (StopVeinMines), or when the held
+        // item changes — switched away, or the tool broke. The falling blocks
+        // among the targets are held up (World::HoldFall) until each comes
+        // due or the mine ends (ReleaseVeinMine), so a gravel vein breaks
+        // ring by ring instead of collapsing out of its shape.
+        struct VeinMineJob {
+            Game::DimensionId                     dimension = Game::DimensionId::Overworld;
+            std::vector<Game::VeinMine::Target>   targets;
+            size_t                                next = 0;
+            int                                   ticks = 0;
+            Game::BlockID                         kind = Game::BlockID::Air;
+            bool                                  creativeBreak = false;
+            Game::ItemID                          tool{};
+            std::vector<bool>                     held;   // per target: HoldFall taken
+        };
+        std::vector<VeinMineJob> m_veinMines;
+        void TickVeinMines();
+        void StopVeinMines();
+        // Lets go of the holds of the targets `job` has not reached.
+        void ReleaseVeinMine(VeinMineJob& job);
 
         // MC ServerPlayer.startSleepInBed: the check chain (alive, in range,
         // not obstructed, night, no monsters near), the respawn point, then

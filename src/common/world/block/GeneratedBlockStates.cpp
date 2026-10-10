@@ -339,9 +339,10 @@ namespace Game {
         1, 20, 21, 9, 1, 20, 21, 9, 1, 20, 21, 9, 1, 20, 21, 9,
         1, 20, 21, 9, 1, 20, 21, 9, 1, 20, 21, 9, 19, 9, 19, 9,
         19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 19, 9,
-        19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 19, 9,
+        19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 19, 9, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
     };
-    const size_t kBlockPropertyRefCount = 2604;
+    const size_t kBlockPropertyRefCount = 2620;
 
     const GeneratedBlockStateRow kBlockStates[] = {
         { "acacia_button", 0, 3, 9, 24 },
@@ -1335,7 +1336,23 @@ namespace Game {
         { "green_concrete_slab", 2598, 2, 3, 6 },
         { "red_concrete_slab", 2600, 2, 3, 6 },
         { "black_concrete_slab", 2602, 2, 3, 6 },
+        { "white_wall_torch", 2604, 1, 0, 4 },
+        { "orange_wall_torch", 2605, 1, 0, 4 },
+        { "magenta_wall_torch", 2606, 1, 0, 4 },
+        { "light_blue_wall_torch", 2607, 1, 0, 4 },
+        { "yellow_wall_torch", 2608, 1, 0, 4 },
+        { "lime_wall_torch", 2609, 1, 0, 4 },
+        { "pink_wall_torch", 2610, 1, 0, 4 },
+        { "gray_wall_torch", 2611, 1, 0, 4 },
+        { "light_gray_wall_torch", 2612, 1, 0, 4 },
+        { "cyan_wall_torch", 2613, 1, 0, 4 },
+        { "purple_wall_torch", 2614, 1, 0, 4 },
+        { "blue_wall_torch", 2615, 1, 0, 4 },
+        { "brown_wall_torch", 2616, 1, 0, 4 },
+        { "green_wall_torch", 2617, 1, 0, 4 },
+        { "red_wall_torch", 2618, 1, 0, 4 },
+        { "black_wall_torch", 2619, 1, 0, 4 },
     };
-    const size_t kBlockStateRowCount = 991;
+    const size_t kBlockStateRowCount = 1007;
 
 } // namespace Game

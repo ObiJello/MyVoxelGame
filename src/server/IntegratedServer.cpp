@@ -715,7 +715,6 @@ namespace Server {
                             if (m_config.immersivePortals) m_config.immersivePortals = saved.immersivePortals;
                             m_config.redstonePlus = saved.redstonePlus;
                             m_config.redstoneChunks = saved.redstoneChunks;
-                            m_config.veinMineMaxBlocks = saved.veinMineMaxBlocks;
                             m_config.playerStepHeight = saved.playerStepHeight;
                             m_config.sharedVitals = saved.sharedVitals;
                             m_config.advancementsWithCheats = saved.advancementsWithCheats;
@@ -759,7 +758,6 @@ namespace Server {
                     meta.dimensionStack   = m_config.dimensionStack;
                     meta.redstonePlus     = m_config.redstonePlus;
                     meta.redstoneChunks   = m_config.redstoneChunks;
-                    meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
                     meta.playerStepHeight = m_config.playerStepHeight;
                     meta.sharedVitals     = m_config.sharedVitals;
                     meta.advancementsWithCheats = m_config.advancementsWithCheats;
@@ -774,7 +772,6 @@ namespace Server {
         meta.dimensionStack   = m_config.dimensionStack;
         meta.redstonePlus     = m_config.redstonePlus;
         meta.redstoneChunks   = m_config.redstoneChunks;
-        meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
         meta.playerStepHeight = m_config.playerStepHeight;
         meta.sharedVitals     = m_config.sharedVitals;
         meta.advancementsWithCheats = m_config.advancementsWithCheats;
@@ -1565,7 +1562,6 @@ namespace Server {
         meta.dimensionStack   = m_config.dimensionStack;
         meta.redstonePlus     = m_config.redstonePlus;
         meta.redstoneChunks   = m_config.redstoneChunks;
-        meta.veinMineMaxBlocks = m_config.veinMineMaxBlocks;
         meta.playerStepHeight = m_config.playerStepHeight;
         meta.sharedVitals     = m_config.sharedVitals;
         meta.advancementsWithCheats = m_config.advancementsWithCheats;
@@ -6265,11 +6261,6 @@ namespace Server {
                      : "go back to a private grid (what they store is handed over at the next open)");
     }
 
-    void IntegratedServer::SetVeinMineMaxBlocks(int count) {
-        m_config.veinMineMaxBlocks = std::clamp(count, 0, kMaxVeinMineMaxBlocks);
-        Log::Info("[VeinMine] limit is now %d extra block(s)", m_config.veinMineMaxBlocks);
-    }
-
     void IntegratedServer::SetImmersivePortals(bool on) {
         const bool was = m_config.immersivePortals;
         m_config.immersivePortals = on;
@@ -8354,6 +8345,7 @@ namespace Server {
 
             case Network::BlockActionType::START_DESTROY:
             case Network::BlockActionType::ABORT_DESTROY:
+            case Network::BlockActionType::VEIN_MINE_RELEASE:
                 // Informational only (no server-side per-player progress).
                 break;
         }

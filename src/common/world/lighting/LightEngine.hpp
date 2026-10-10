@@ -36,6 +36,7 @@
 #include "common/world/block/BlockState.hpp"
 #include "common/world/block/Direction.hpp"
 
+#include <array>
 #include <climits>
 #include <cstdint>
 #include <unordered_set>
@@ -210,9 +211,13 @@ namespace Game::Lighting {
         int64_t m_lastAffected = INT64_MIN;
     };
 
+    // Block light — or, given LightLayer::Red / Green / Blue, one coloured
+    // channel (ChunkLight's header note): the same propagation over the
+    // channel's own layer, seeded by the state's channel emission.
     class BlockLightEngine final : public LayerLightEngine {
     public:
-        explicit BlockLightEngine(LightChunkGetter* getter) : LayerLightEngine(LightLayer::Block, getter) {}
+        explicit BlockLightEngine(LightChunkGetter* getter, LightLayer layer = LightLayer::Block)
+            : LayerLightEngine(layer, getter) {}
         void PropagateLightSources(Chunk& chunk) override;
 
     protected:
@@ -222,6 +227,9 @@ namespace Game::Lighting {
 
     private:
         int GetEmission(int64_t blockNode, BlockState state);
+        // This layer's emission of a state (lit or not): block emission, or
+        // the channel's share of it.
+        int StateEmission(BlockState state) const;
     };
 
     class SkyLightEngine final : public LayerLightEngine {
@@ -252,20 +260,32 @@ namespace Game::Lighting {
         bool HasSkyLight() const { return m_hasSkyLight; }
         // Set before any chunk is lit (World::Initialize, from the dimension).
         void SetHasSkyLight(bool hasSkyLight) { m_hasSkyLight = hasSkyLight; }
-        void SetGetter(LightChunkGetter* getter) { m_block.SetGetter(getter); m_sky.SetGetter(getter); }
-        void SetAffectedSink(SectionSet* sink) { m_block.SetAffectedSink(sink); m_sky.SetAffectedSink(sink); }
+        void SetGetter(LightChunkGetter* getter) {
+            m_block.SetGetter(getter); m_sky.SetGetter(getter);
+            for (auto& c : m_channels) c.SetGetter(getter);
+        }
+        void SetAffectedSink(SectionSet* sink) {
+            m_block.SetAffectedSink(sink); m_sky.SetAffectedSink(sink);
+            for (auto& c : m_channels) c.SetAffectedSink(sink);
+        }
 
+        // Block and sky light.
         void CheckBlock(int x, int y, int z);
+        // The three coloured channels — only where coloured light can be
+        // (LevelLightManager decides; elsewhere they are block light).
+        void CheckChannels(int x, int y, int z);
         bool HasLightWork() const;
         int  RunLightUpdates();
 
         BlockLightEngine& Block() { return m_block; }
         SkyLightEngine&   Sky()   { return m_sky; }
+        BlockLightEngine& Channel(int c) { return m_channels[static_cast<size_t>(c)]; }
 
     private:
         bool m_hasSkyLight;
         BlockLightEngine m_block;
         SkyLightEngine   m_sky;
+        std::array<BlockLightEngine, 3> m_channels;
     };
 
     // ── Entry points ────────────────────────────────────────────────────────
@@ -273,7 +293,14 @@ namespace Game::Lighting {
     // MC's LIGHT status for one chunk, isolated from its neighbours: sky
     // sources, both layers, lightCorrect = true. Any thread; the chunk must
     // not be shared yet. Thread-local engine, no allocation after warm-up.
+    // The coloured channels: propagated only when the chunk holds a coloured
+    // emitter, otherwise shared with block light (ChunkLight's header note);
+    // ChunkLight::coloredEmitters is set either way.
     void LightChunk(Chunk& chunk, bool hasSkyLight);
+
+    // The emitters with coloured light in a chunk (palette pre-check, so a
+    // chunk with none costs one palette walk per section).
+    int CountColoredEmitters(const Chunk& chunk);
 
     // Level light query shared by server and client: MC getBrightness(layer)
     // over one chunk's layers (null chunk = not loaded: sky 15, block 0, as

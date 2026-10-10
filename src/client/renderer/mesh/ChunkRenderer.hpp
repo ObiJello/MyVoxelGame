@@ -510,6 +510,14 @@ namespace Render {
         void SetPassOverride(TerrainPass pass, PassOverride o) { m_passOverride[pass] = o; }
         void ClearPassOverrides();
         void SetBeforeTranslucentHook(std::function<void()> fn) { m_beforeTranslucent = std::move(fn); }
+        // Run right after the sky blocks' depth-only faces, before the opaque
+        // pass, when this view drew any. A view that draws its sky after the
+        // terrain (the main view's late sky) draws it here into just those
+        // faces (SkyRenderer::DepthMode::Windows) — otherwise they would show
+        // the clear colour. Set immediately before the MAIN RenderChunksAll
+        // and cleared right after it; the views that draw their sky first
+        // need nothing.
+        void SetSkyWindowsHook(std::function<void()> fn) { m_skyWindows = std::move(fn); }
         // Bound again once the three passes are done, so what the frame
         // draws next (entities, clouds) lands in the pack's colour + depth
         // rather than the last pass's gbuffer set.
@@ -556,6 +564,7 @@ namespace Render {
         ShaderHandle m_activeShader = INVALID_SHADER;        // Currently bound shader
         PassOverride m_passOverride[3];
         std::function<void()> m_beforeTranslucent;
+        std::function<void()> m_skyWindows;   // SetSkyWindowsHook
         RenderTargetHandle m_afterPassesTarget = INVALID_RENDER_TARGET;
 
         // The translucent pass parked by the last RenderAll (see

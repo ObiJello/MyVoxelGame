@@ -41,6 +41,7 @@
 #include "common/world/block/RedstoneComponents.hpp"
 #include <limits>
 #include "common/world/block/entity/BlockEntity.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
 #include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "common/world/block/entity/BeehiveBlockEntity.hpp"
 #include "common/network/packets/game/LevelEventS2CPacket.hpp"
@@ -212,6 +213,41 @@ namespace {
             SetDoorHinge(world, pos,      "left");
             SetDoorHinge(world, *onRight, "right");
         }
+    }
+
+    // The sky-face gesture (UseItemOnC2SPacket::skyFaceGesture): toggles the
+    // clicked face of the door at `pos` — given in the WORLD, kept in the
+    // door's frame (SkyFacesBlockEntity.hpp) — on both halves, so each half
+    // carries the same mask. The entities are created on a door's first sky
+    // face and removed with its last. False when `pos` is not a door.
+    bool ToggleDoorSkyFace(Game::World& world, const glm::ivec3& pos, Game::Direction worldFace) {
+        const Game::BlockState state = world.GetBlockState(pos.x, pos.y, pos.z);
+        if (!Game::SkyFaces::AppliesTo(state.Block())) return false;
+        const uint8_t bit = Game::SkyFaces::Bit(Game::SkyFaces::ToDoorFrame(state, worldFace));
+
+        const auto* clickedEntity = dynamic_cast<const Game::SkyFacesBlockEntity*>(world.GetBlockEntity(pos));
+        const uint8_t mask = static_cast<uint8_t>((clickedEntity ? clickedEntity->Mask() : 0) ^ bit);
+
+        const bool upper = state.GetName(Game::PropertyId::DOUBLE_BLOCK_HALF) == "upper";
+        const glm::ivec3 otherPos = pos + glm::ivec3(0, upper ? -1 : 1, 0);
+        for (const glm::ivec3& p : {pos, otherPos}) {
+            const Game::BlockID id = world.GetBlock(p.x, p.y, p.z);
+            if (!Game::SkyFaces::AppliesTo(id)) continue;   // a half door: just the one
+            auto* existing = dynamic_cast<Game::SkyFacesBlockEntity*>(world.GetBlockEntity(p));
+            if (mask == 0) {
+                if (existing) world.RemoveBlockEntity(p);
+            } else if (existing) {
+                existing->SetMask(mask);
+                world.BlockEntityChanged(p);
+            } else if (const Game::BlockEntityType* type = Game::BlockEntityTypes::LazyForBlock(id)) {
+                auto entity = type->Create(p, id);
+                if (auto* sky = dynamic_cast<Game::SkyFacesBlockEntity*>(entity.get())) {
+                    sky->SetMask(mask);
+                    world.SetBlockEntity(p, std::move(entity));
+                }
+            }
+        }
+        return true;
     }
 
     // The cell this chest's stored type points at, or nullopt when SINGLE.
@@ -405,6 +441,7 @@ namespace Server {
         }
 
         TickDigEffects();
+        TickVeinMines();
         
         // Latency now comes from the connection's MC-style EMA, refreshed on
         // the network I/O thread by ServerConnection::HandleKeepAliveResponse
@@ -667,6 +704,9 @@ namespace Server {
 
     void PlayerSession::Cleanup() {
         m_state = State::DISCONNECTING;
+
+        // A vein mine still spreading lets go of the falling blocks it held.
+        StopVeinMines();
 
         // Off a cushion, with the saved position moved off the seat (no
         // broadcast: the session manager's lock is held — PlayerRiding.hpp).
@@ -2439,12 +2479,19 @@ namespace Server {
                 if (creativeBreak && !Game::CanDestroyBlockWith(m_player->getItemInHand(0), /*instabuild=*/true)) {
                     break;
                 }
-                DestroyBlockAsPlayer(world, pos, oldBlock, oldBlockState, creativeBreak);
-                // Vein mine: the player held the modifier with Sneak, so
-                // every touching block of the same kind goes too.
+                DestroyBlockAsPlayer(world, pos, oldBlock, oldBlockState, creativeBreak,
+                                     /*breakerPredicted=*/true);
+                // Vein mine: the player held the modifier with Sneak, so the
+                // shape's blocks start breaking outward from this one.
                 if (packet.veinMine) {
-                    VeinMineFrom(world, pos, oldBlock, packet.face, creativeBreak);
+                    StartVeinMine(world, pos, oldBlock, packet, creativeBreak);
                 }
+                break;
+            }
+            case Network::BlockActionType::VEIN_MINE_RELEASE: {
+                // The keys were let go: what has broken stays broken, the
+                // rest of every spreading mine is dropped.
+                StopVeinMines();
                 break;
             }
             case Network::BlockActionType::PLACE:
@@ -2547,7 +2594,7 @@ namespace Server {
     void PlayerSession::DestroyBlockAsPlayer(Game::World* world, const glm::ivec3& pos,
                                              Game::BlockID oldBlock,
                                              Game::BlockState oldBlockState,
-                                             bool creativeBreak) {
+                                             bool creativeBreak, bool breakerPredicted) {
         ASSERT_SERVER_THREAD();
         // MC ChestBlock.updateShape: the surviving half of a broken
         // pair falls back to SINGLE, or it keeps claiming a partner
@@ -2728,8 +2775,11 @@ namespace Server {
         // MC Block.playerWillDestroy → spawnDestroyParticles → level.levelEvent(
         // player, 2001, pos, getId(state)): the break sound (and particles)
         // for everyone near EXCEPT the breaker, whose client played its own
-        // when it predicted the break (see ClientPlayerController).
-        Game::PlayLevelEventSound(*world, Game::SoundExcept(m_player), Game::LevelEvent::PARTICLES_DESTROY_BLOCK,
+        // when it predicted the break (see ClientPlayerController). A vein
+        // mine's extra blocks were never predicted, so the breaker gets
+        // each one's puff and sound too, as if dug by hand.
+        Game::PlayLevelEventSound(*world, breakerPredicted ? Game::SoundExcept(m_player) : nullptr,
+                                  Game::LevelEvent::PARTICLES_DESTROY_BLOCK,
                                   pos, static_cast<int>(oldBlockState.RawId()), world->Random());
         // BaseFireBlock.playerWillDestroy:170 — putting a fire out hisses too
         // (levelEvent(null, 1009) — for everyone, the puncher included).
@@ -2981,106 +3031,117 @@ namespace Server {
         }
     }
 
-    void PlayerSession::VeinMineFrom(Game::World* world, const glm::ivec3& origin,
-                                     Game::BlockID kind, uint8_t face, bool creativeBreak) {
+    void PlayerSession::StartVeinMine(Game::World* world, const glm::ivec3& origin, Game::BlockID kind,
+                                      const Network::BlockActionC2SPacket& packet, bool creativeBreak) {
         ASSERT_SERVER_THREAD();
-        if (!world || kind == Game::BlockID::Air) return;
-        // /gamerule vein_mine_max_blocks; 0 is "off".
-        const int maxBlocks = g_integratedServer ? g_integratedServer->VeinMineMaxBlocks()
-                                                 : IntegratedServer::kDefaultVeinMineMaxBlocks;
-        if (maxBlocks <= 0) return;
-        // Unbreakable blocks never vein (DestroyBlockAsPlayer would refuse
-        // each one anyway, but there is no point walking the cluster).
-        if (Game::BlockRegistry::Get(kind).destroyTime < 0.0f && !creativeBreak) return;
+        if (!world || !m_player || kind == Game::BlockID::Air) return;
 
-        const auto isKind = [&](const glm::ivec3& p) {
-            // An unloaded cell reads as air and simply ends the walk there.
-            return world->GetBlock(p.x, p.y, p.z) == kind;
-        };
-        // These cells were never predicted client-side, so the world still
-        // holds their real state (unlike the origin, whose state came from
-        // the packet).
-        const auto destroy = [&](const glm::ivec3& p) {
-            DestroyBlockAsPlayer(world, p, kind, world->GetBlockState(p.x, p.y, p.z),
-                                 creativeBreak);
-        };
+        Game::VeinMine::Settings settings;
+        settings.shape  = static_cast<Game::VeinMine::Shape>(packet.veinShape);
+        settings.width  = packet.veinWidth;
+        settings.height = packet.veinHeight;
+        settings.length = packet.veinLength;
+        settings = settings.Clamped();
+        // A vein of an unbreakable block never spreads (DestroyBlockAsPlayer
+        // would refuse each one anyway); the sized shapes skip those cells.
+        if (settings.shape == Game::VeinMine::Shape::Vein &&
+            Game::BlockRegistry::Get(kind).destroyTime < 0.0f && !creativeBreak) {
+            return;
+        }
+        Game::Direction facing = packet.veinFacing < 6 ? static_cast<Game::Direction>(packet.veinFacing)
+                                                       : Game::Direction::North;
+        if (!Game::IsHorizontal(facing)) facing = Game::Direction::North;
 
-        // Pass 1 — size the cluster. Breadth-first over the 26-neighbourhood
-        // (ore veins are generated with diagonal contact, so face adjacency
-        // alone would split most of them), stopping as soon as it is known
-        // to exceed the cap: past that point the exact size does not matter.
-        // The origin is already gone; it seeds the walk and is never counted.
-        std::unordered_set<glm::ivec3, Game::IVec3Hash> seen;
-        std::vector<glm::ivec3> cluster;   // in BFS order — the break order
-        {
-            std::queue<glm::ivec3> frontier;
-            seen.insert(origin);
-            frontier.push(origin);
-            while (!frontier.empty() && static_cast<int>(cluster.size()) <= maxBlocks) {
-                const glm::ivec3 at = frontier.front();
-                frontier.pop();
-                for (int dx = -1; dx <= 1; ++dx)
-                for (int dy = -1; dy <= 1; ++dy)
-                for (int dz = -1; dz <= 1; ++dz) {
-                    if (dx == 0 && dy == 0 && dz == 0) continue;
-                    const glm::ivec3 next = at + glm::ivec3(dx, dy, dz);
-                    if (!seen.insert(next).second) continue;
-                    if (!isKind(next)) continue;
-                    cluster.push_back(next);
-                    frontier.push(next);
+        VeinMineJob job;
+        job.dimension     = world->GetDimension();
+        // Survival / adventure: only where the held item can harvest (none
+        // at all when it cannot harvest the dug block). Creative: anything.
+        const Game::ItemStack* harvestTool = creativeBreak ? nullptr : &m_player->getItemInHand(0);
+        job.targets       = Game::VeinMine::CollectTargets(*world, origin, kind, packet.face, facing,
+                                                           settings, harvestTool);
+        if (job.targets.empty()) return;
+        job.kind          = kind;
+        job.creativeBreak = creativeBreak;
+        job.tool          = m_player->getItemInHand(0).itemId;
+        job.held.assign(job.targets.size(), false);
+        for (size_t i = 0; i < job.targets.size(); ++i) {
+            const glm::ivec3& p = job.targets[i].pos;
+            if (Game::IsFallingBlock(world->GetBlock(p.x, p.y, p.z))) {
+                world->HoldFall(p);
+                job.held[i] = true;
+            }
+        }
+        Log::Debug("StartVeinMine: Player %u %s, %zu block(s) from (%d,%d,%d)", m_playerId,
+                   Game::VeinMine::ShapeName(settings.shape), job.targets.size(),
+                   origin.x, origin.y, origin.z);
+        m_veinMines.push_back(std::move(job));
+    }
+
+    void PlayerSession::TickVeinMines() {
+        if (m_veinMines.empty()) return;
+        if (!m_player || m_player->isDead()) { StopVeinMines(); return; }
+        // A server tick, in the spread's milliseconds (VeinMine::BreakTimeMs):
+        // the 25 ms steps of a small mine break two blocks a tick.
+        constexpr int kVeinMineTickMs = 50;
+        IntegratedServer* server = g_integratedServer.get();
+        for (auto it = m_veinMines.begin(); it != m_veinMines.end();) {
+            VeinMineJob& job = *it;
+            ServerLevel* level = server ? server->GetLevel(job.dimension) : nullptr;
+            Game::World* world = level ? level->World() : nullptr;
+            ++job.ticks;
+            while (world && job.next < job.targets.size() &&
+                   Game::VeinMine::BreakTimeMs(static_cast<int>(job.next), static_cast<int>(job.targets.size())) <=
+                       job.ticks * kVeinMineTickMs) {
+                // The held item changed (switched away, or the last block
+                // broke the tool): the mine stops with it.
+                if (m_player->getItemInHand(0).itemId != job.tool) break;
+                const size_t index = job.next++;
+                const glm::ivec3 p = job.targets[index].pos;
+                if (job.held[index]) {
+                    world->ReleaseFall(p);
+                    job.held[index] = false;
+                }
+                const Game::BlockState state = world->GetBlockState(p.x, p.y, p.z);
+                // Re-checked as it comes due — the cell may have changed
+                // since (dug by someone else, water flowed in).
+                bool still = state.Block() == job.kind;
+                if (still && !job.creativeBreak) {
+                    still = Game::VeinMine::CanHarvest(&m_player->getItemInHand(0), state.Block());
+                }
+                if (still) {
+                    DestroyBlockAsPlayer(world, p, state.Block(), state, job.creativeBreak,
+                                         /*breakerPredicted=*/false);
                 }
             }
-        }
-        if (cluster.empty()) return;
-
-        // A vein: everything touching goes.
-        if (static_cast<int>(cluster.size()) <= maxBlocks) {
-            for (const glm::ivec3& p : cluster) destroy(p);
-            Log::Debug("VeinMineFrom: Player %u vein-mined %zu extra block(s) from (%d,%d,%d)",
-                       m_playerId, cluster.size(), origin.x, origin.y, origin.z);
-            return;
-        }
-
-        // A mass: tunnel into the dug face instead of eating a shapeless
-        // blob out of it. Depth runs OPPOSITE the face normal (the face
-        // the player hit points back at them); the cross-section spans the
-        // other two axes, centred on the origin.
-        static const glm::ivec3 kFaceNormals[6] = {
-            { 1, 0, 0}, {-1, 0, 0}, {0,  1, 0}, {0, -1, 0}, {0, 0,  1}, {0, 0, -1}
-        };
-        if (face > 5) {
-            // No face to drive into (a sender that predates the field):
-            // take the cap's worth of the cluster in BFS order, which is
-            // the old behaviour.
-            for (int i = 0; i < maxBlocks; ++i) destroy(cluster[static_cast<size_t>(i)]);
-            return;
-        }
-        const glm::ivec3 depthDir = -kFaceNormals[face];
-        const glm::ivec3 axisU = (depthDir.x != 0) ? glm::ivec3(0, 1, 0) : glm::ivec3(1, 0, 0);
-        const glm::ivec3 axisV = (depthDir.z != 0) ? glm::ivec3(0, 1, 0) : glm::ivec3(0, 0, 1);
-        constexpr int half = kVeinTunnelSize / 2;
-
-        int broken = 0;
-        for (int depth = 0; broken < maxBlocks; ++depth) {
-            const glm::ivec3 layerCentre = origin + depthDir * depth;
-            int inLayer = 0;
-            for (int a = -half; a <= half && broken < maxBlocks; ++a)
-            for (int b = -half; b <= half && broken < maxBlocks; ++b) {
-                const glm::ivec3 p = layerCentre + axisU * a + axisV * b;
-                if (p == origin) continue;          // already broken
-                if (!isKind(p)) continue;
-                destroy(p);
-                ++inLayer;
-                ++broken;
+            const bool toolChanged = m_player->getItemInHand(0).itemId != job.tool;
+            if (!world || toolChanged || job.next >= job.targets.size()) {
+                ReleaseVeinMine(job);
+                it = m_veinMines.erase(it);
+            } else {
+                ++it;
             }
-            // The tunnel has left the mass (or run into unloaded chunks):
-            // stop rather than bore on through air. The first layer is the
-            // exception — the origin alone may be all of it, and the mass
-            // the cluster count found lies behind.
-            if (inLayer == 0 && depth > 0) break;
         }
-        Log::Debug("VeinMineFrom: Player %u tunnel-mined %d extra block(s) from (%d,%d,%d), face %d",
-                   m_playerId, broken, origin.x, origin.y, origin.z, static_cast<int>(face));
+    }
+
+    void PlayerSession::StopVeinMines() {
+        if (!m_veinMines.empty()) {
+            Log::Debug("StopVeinMines: Player %u let go, %zu vein mine(s) stopped", m_playerId, m_veinMines.size());
+        }
+        for (VeinMineJob& job : m_veinMines) ReleaseVeinMine(job);
+        m_veinMines.clear();
+    }
+
+    void PlayerSession::ReleaseVeinMine(VeinMineJob& job) {
+        // What was held up falls now if nothing holds it any more — its fall
+        // was re-booked every time it came due, so the next one runs it.
+        IntegratedServer* server = g_integratedServer.get();
+        ServerLevel* level = server ? server->GetLevel(job.dimension) : nullptr;
+        Game::World* world = level ? level->World() : nullptr;
+        for (size_t i = job.next; i < job.targets.size(); ++i) {
+            if (!job.held[i]) continue;
+            if (world) world->ReleaseFall(job.targets[i].pos);
+            job.held[i] = false;
+        }
     }
 
     void PlayerSession::HandleHeldItemChange(const Network::HeldItemChangeC2SPacket& packet) {
@@ -5752,6 +5813,31 @@ namespace Server {
         // ITEM_USED_ON_BLOCK / ANY_BLOCK_USE triggers see, before the use
         // changes the stack.
         const Game::ItemStack usedItemStack = heldStack;
+
+        // ── Sky faces (engine): sneak + sprint keys with a sky block on a
+        // door's face open that face onto the sky, or close it again
+        // (SkyFacesBlockEntity). Before the block's own use, so the door
+        // does not swing, and before placement. Not for a player who may
+        // not build. The client played the sound with its prediction.
+        if (packet.skyFaceGesture && isMainHand &&
+            heldStack.itemId == Game::ItemRegistry::FromBlock(Game::BlockID::SkyBlock) &&
+            Game::SkyFaces::AppliesTo(clickedBlkId) &&
+            m_player->getGameMode() != Server::GameMode::ADVENTURE &&
+            packet.direction < 6) {
+            const bool toggled = ToggleDoorSkyFace(*world, clicked, static_cast<Game::Direction>(packet.direction));
+            if (toggled) {
+                const Game::SoundType& soundType =
+                    Game::SoundTypeOf(Game::BlockStates::Default(Game::BlockID::SkyBlock));
+                if (!Game::IsEmptySound(soundType.placeSound)) {
+                    world->PlaySound(Game::SoundExcept(m_player), clicked, soundType.placeSound,
+                                     Game::SoundSource::Blocks, (soundType.volume + 1.0f) / 2.0f,
+                                     soundType.pitch * 0.8f);
+                }
+            }
+            AckInteraction(packet.sequence, toggled);
+            m_lastInteractionSequence = packet.sequence;
+            return;
+        }
 
         if (!suppressBlockUse) {
             if (clickedBlock.useItemOn) {

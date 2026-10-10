@@ -38,6 +38,7 @@
 #include "AurelithBlockEntities.hpp"
 #include "HushLighthouseLampBlockEntity.hpp"
 #include "CraftingTableBlockEntity.hpp"
+#include "SkyFacesBlockEntity.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "../../../core/Log.hpp"
 #include <memory>
@@ -590,6 +591,26 @@ namespace Game {
             g_byStringId[type->StringId()] = type;
             g_lazyByBlockId.assign(static_cast<size_t>(BlockID::Count), nullptr);
             g_lazyByBlockId[static_cast<size_t>(BlockID::CraftingTable)] = type;
+        }
+
+        // ── Engine: sky faces ─────────────────────────────────────────────
+        // A door's faces opened onto the sky (SkyFacesBlockEntity). Valid
+        // for every door and LAZY for the crafting table's reasons: a door
+        // carries one only while a face of it shows the sky.
+        {
+            std::unordered_set<BlockID> doors;
+            for (size_t i = 0; i < static_cast<size_t>(BlockID::Count); ++i) {
+                if (SkyFaces::AppliesTo(static_cast<BlockID>(i))) doors.insert(static_cast<BlockID>(i));
+            }
+            const auto* type = RegisterType(
+                BlockEntityTypeIds::OBEY_SKY_FACES, "obeycraft:sky_faces",
+                [](const BlockEntityType* t, glm::ivec3 pos, BlockID id) {
+                    return std::make_unique<SkyFacesBlockEntity>(t, pos, id);
+                },
+                doors);
+            s_byId[BlockEntityTypeIds::OBEY_SKY_FACES] = type;
+            g_byStringId[type->StringId()] = type;
+            for (BlockID door : doors) g_lazyByBlockId[static_cast<size_t>(door)] = type;
         }
 
         Log::Info("[BlockEntityTypes] initialised with %zu type(s)", g_typeStorage.size());

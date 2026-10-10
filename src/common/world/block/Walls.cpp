@@ -3,6 +3,7 @@
 #include "CrossCollision.hpp"
 #include "FenceGate.hpp"
 #include "BlockPlacement.hpp"
+#include "ColoredTorches.hpp"
 
 #include <algorithm>
 #include <array>
@@ -138,7 +139,8 @@ namespace Game {
             return n == "torch" || n == "soul_torch" || n == "redstone_torch" ||
                    n == "wall_torch" || n == "soul_wall_torch" ||
                    n == "redstone_wall_torch" || n == "tripwire" ||
-                   n == "ambrosium_torch" || n == "ambrosium_wall_torch";
+                   n == "ambrosium_torch" || n == "ambrosium_wall_torch" ||
+                   ColoredTorches::Is(id);   // the dyed torches, standing and wall
         }
 
         // MC makeWallState(connects, aboveShape, testShape).

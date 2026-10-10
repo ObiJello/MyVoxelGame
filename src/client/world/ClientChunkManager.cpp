@@ -9,6 +9,7 @@
 #include "common/world/block/entity/PistonMovingBlockEntity.hpp"
 #include "common/world/block/entity/BlockEntityType.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/block/BedBlock.hpp"
 #include "common/world/biome/Biomes.hpp"
@@ -182,9 +183,10 @@ namespace Client {
             PROFILE_ZONE_N("Unload.Diffs");
             m_pendingDiffs->DropChunkDiffs(chunkPos);
         }
-        // Parked or freed, its sky blocks are no longer drawn
+        // Parked or freed, its sky blocks and sky faces are no longer drawn
         // (RestoreRetainedChunk lists them again).
         m_skyBlockChunks.erase(chunkPos);
+        if (!m_skyFaces.empty() && DropChunkSkyFaces(chunkPos)) PublishSkyFaces();
 
         auto it = m_chunks.find(chunkPos);
         if (it != m_chunks.end() && it->second->chunkData && m_meshes) {
@@ -679,14 +681,21 @@ namespace Client {
             // daylight everywhere, the look the engine had before it lit.
             for (auto& d : dst.sky) d = Game::Lighting::DataLayer(15);
             for (auto& d : dst.block) d = Game::Lighting::DataLayer(0);
+            for (auto& c : dst.channel) c = dst.block;
             dst.lightCorrect = false;
             return;
         }
         for (int i = 0; i < Game::Lighting::kLightSectionCount; ++i) {
             const size_t u = static_cast<size_t>(i);
+            const bool hasBlock = (light->blockMask & (1u << i)) != 0;
             // A dimension without sky light sends no sky layers: all zero.
-            dst.sky[u]   = (light->skyMask & (1u << i))   ? light->sky[u]   : Game::Lighting::DataLayer(0);
-            dst.block[u] = (light->blockMask & (1u << i)) ? light->block[u] : Game::Lighting::DataLayer(0);
+            dst.sky[u]   = (light->skyMask & (1u << i)) ? light->sky[u] : Game::Lighting::DataLayer(0);
+            dst.block[u] = hasBlock ? light->block[u] : Game::Lighting::DataLayer(0);
+            // The coloured channels ride with block light (white ones as
+            // block light's own storage — ChunkLight's header note).
+            for (size_t c = 0; c < dst.channel.size(); ++c) {
+                dst.channel[c][u] = hasBlock ? light->channel[c][u] : dst.block[u];
+            }
         }
         dst.lightCorrect = true;
     }
@@ -705,7 +714,10 @@ namespace Client {
         for (int i = 0; i < Game::Lighting::kLightSectionCount; ++i) {
             const size_t u = static_cast<size_t>(i);
             if (light.skyMask & (1u << i))   dst.sky[u]   = light.sky[u];
-            if (light.blockMask & (1u << i)) dst.block[u] = light.block[u];
+            if (light.blockMask & (1u << i)) {
+                dst.block[u] = light.block[u];
+                for (size_t c = 0; c < dst.channel.size(); ++c) dst.channel[c][u] = light.channel[c][u];
+            }
         }
         ++m_lightVersion;
         // Exactly the sections the server's light run affected (its set
@@ -945,6 +957,9 @@ namespace Client {
             chunk->skyBlocks.push_back(pos);
             NoteSkyBlockIndex(*chunk);
         }
+        // A door's sky faces dropped with its entity above (the section is
+        // remeshed just below).
+        if (!m_skyFaces.empty() && m_skyFaces.count(pos) && SyncSkyFace(*chunk, pos)) PublishSkyFaces();
 
         // Mark section as dirty for remeshing
         MarkSectionDirty(chunkPos, sectionY, fromPlayer, /*blockEdit=*/true);
@@ -965,6 +980,71 @@ namespace Client {
         if (localZ == 15) MarkSectionDirty({chunkPos.x, chunkPos.z + 1}, sectionY, fromPlayer, /*blockEdit=*/true);
         if (localY == 0  && sectionY > 0)  MarkSectionDirty(chunkPos, sectionY - 1, fromPlayer, /*blockEdit=*/true);
         if (localY == 15 && sectionY < 23) MarkSectionDirty(chunkPos, sectionY + 1, fromPlayer, /*blockEdit=*/true);
+    }
+
+    bool ClientChunkManager::SyncSkyFace(const ClientChunk& chunk, const glm::ivec3& pos) {
+        uint8_t mask = 0;
+        if (chunk.chunkData) {
+            if (const auto* sky = dynamic_cast<const Game::SkyFacesBlockEntity*>(
+                    chunk.chunkData->GetBlockEntity(pos.x & 0xF, pos.y, pos.z & 0xF))) {
+                mask = sky->Mask();
+            }
+        }
+        const auto it = m_skyFaces.find(pos);
+        if (mask == 0) {
+            if (it == m_skyFaces.end()) return false;
+            m_skyFaces.erase(it);
+            return true;
+        }
+        if (it != m_skyFaces.end() && it->second == mask) return false;
+        m_skyFaces[pos] = mask;
+        return true;
+    }
+
+    bool ClientChunkManager::DropChunkSkyFaces(Game::Math::ChunkPos chunkPos) {
+        bool changed = false;
+        for (auto it = m_skyFaces.begin(); it != m_skyFaces.end();) {
+            if ((it->first.x >> 4) == chunkPos.x && (it->first.z >> 4) == chunkPos.z) {
+                it = m_skyFaces.erase(it);
+                changed = true;
+            } else {
+                ++it;
+            }
+        }
+        return changed;
+    }
+
+    bool ClientChunkManager::AddChunkSkyFaces(const ClientChunk& chunk) {
+        if (!chunk.chunkData) return false;
+        bool changed = false;
+        for (const auto& [local, be] : chunk.chunkData->GetAllBlockEntities()) {
+            const auto* sky = dynamic_cast<const Game::SkyFacesBlockEntity*>(be.get());
+            if (!sky || sky->Mask() == 0) continue;
+            uint8_t& mask = m_skyFaces[sky->GetWorldPos()];
+            if (mask != sky->Mask()) { mask = sky->Mask(); changed = true; }
+        }
+        return changed;
+    }
+
+    void ClientChunkManager::PublishSkyFaces() {
+        ::Render::Mesher::SetSkyFaces(
+            m_dimension,
+            m_skyFaces.empty() ? nullptr
+                               : std::make_shared<const ::Render::Mesher::SkyFaceMap>(m_skyFaces.begin(),
+                                                                                     m_skyFaces.end()));
+    }
+
+    void ClientChunkManager::RefreshSkyFaces(const glm::ivec3& pos) {
+        ASSERT_MAIN_THREAD();
+        const Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
+        const ClientChunk* chunk = GetChunk(chunkPos);
+        if (!chunk || !SyncSkyFace(*chunk, pos)) return;
+        PublishSkyFaces();
+        // The faces belong to the door's own section mesh.
+        const int sectionY = (pos.y - Config::MinY) >> 4;
+        if (sectionY >= 0 && sectionY < Game::Math::SECTIONS_PER_CHUNK) {
+            MarkSectionDirty(chunkPos, sectionY, /*fromPlayer=*/true, /*blockEdit=*/true);
+        }
     }
 
     Game::BlockID ClientChunkManager::GetBlockAt(const glm::ivec3& pos) const {
@@ -1144,6 +1224,9 @@ namespace Client {
         // (non-groundUp) update rescans too: it can have replaced any section.
         RebuildEndPortalIndex(*chunk);
         NoteSkyBlockIndex(*chunk);
+        // The new chunk data carries no block entities; a door's sky faces
+        // come back with the entity packets that follow it.
+        if (!m_skyFaces.empty() && DropChunkSkyFaces(chunkPos)) PublishSkyFaces();
 
         // Mark all dirty sections for meshing
         for (int section : chunk->dirtySections) {
@@ -2170,6 +2253,7 @@ namespace Client {
         m_chunks.emplace(pos, std::move(chunk));
         TransitionChunkState(raw, ChunkState::LOADED);
         NoteSkyBlockIndex(*raw);   // the parked index came back with it
+        if (AddChunkSkyFaces(*raw)) PublishSkyFaces();   // and its doors' entities
         if (m_meshes) m_meshes->UnparkChunkGPUData(pos);
         if (!raw->dirtySections.empty()) { m_chunksWithDirtySections.insert(pos); m_schedulerSkip = 0; }
 
@@ -2278,6 +2362,7 @@ namespace Client {
         m_loadedChunkCount = 0;
         m_chunksWithDirtySections.clear();
         m_skyBlockChunks.clear();
+        if (!m_skyFaces.empty()) { m_skyFaces.clear(); PublishSkyFaces(); }
         // Predictions reference positions in chunks that no longer exist —
         // drop them rather than letting a late ack roll back into a chunk
         // that has since been reloaded from scratch.

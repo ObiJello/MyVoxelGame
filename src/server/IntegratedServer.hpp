@@ -229,9 +229,6 @@ namespace Server {
         // /gamerule redstone_chunks (ChunkKeeper.hpp): every saved chunk with a
         // redstone component stays loaded and ticking. Per world (level.dat).
         bool redstoneChunks = false;
-        // /gamerule vein_mine_max_blocks (PlayerSession::VeinMineFrom): the
-        // most extra blocks one vein mine takes. Per world (level.dat).
-        int veinMineMaxBlocks = 64;
         // /gamerule player_step_height (ServerPlayer::applyStepHeightRule):
         // every player's STEP_HEIGHT, in tenths of a block. Per world
         // (level.dat obeycraft).
@@ -380,11 +377,6 @@ namespace Server {
         bool RedstonePlusEnabled() const { return m_config.redstonePlus; }
         void SetRedstoneChunks(bool on);
         bool RedstoneChunksEnabled() const { return m_config.redstoneChunks; }
-        // /gamerule vein_mine_max_blocks: the cap PlayerSession::VeinMineFrom
-        // stops at (0 = vein mining off). Clamped to [0, kMaxVeinMineMaxBlocks].
-        static constexpr int kDefaultVeinMineMaxBlocks = 64;
-        static constexpr int kMaxVeinMineMaxBlocks     = 4096;
-        void SetVeinMineMaxBlocks(int count);
         // /gamerule player_step_height: how high every player steps up, in
         // tenths of a block (6 = vanilla's 0.6). An engine rule over MC's
         // step_height attribute — ServerPlayer::applyStepHeightRule turns it
@@ -421,7 +413,6 @@ namespace Server {
                  : dimension == Game::DimensionId::TwilightForest ? m_config.twilightForestEnabled
                  : true;
         }
-        int  VeinMineMaxBlocks() const { return m_config.veinMineMaxBlocks; }
         // /gamerule portal_gun: off closes every placed pair and the gun goes
         // inert (PortalGunBehavior); kept per world in the sidecar.
         void SetPortalGunAllowed(bool on);

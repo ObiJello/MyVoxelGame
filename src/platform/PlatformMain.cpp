@@ -148,6 +148,7 @@
 #include "client/renderer/core/DevRenderSkip.hpp"
 #include "client/renderer/core/WorldFramebuffer.hpp"
 #include "client/renderer/blockentity/SkyBlockRenderer.hpp"
+#include "client/input/VeinMineClient.hpp"
 #include <functional>
 #include <sstream>
 #include <unordered_set>
@@ -642,9 +643,14 @@ static uint16_t     s_lastPresencePort = 0;
     // it is not drawn, and neither is its name tag.
     static int32_t s_hiddenCameraEntityId = -1;
 
+    // `veinHighlight`: the hit is the local player's own, so the vein-mine
+    // highlight may be drawn; `veinHarvestTool` is their held stack in
+    // survival / adventure (only blocks it can harvest are taken), null in
+    // creative.
     void RenderBlockHighlight(const std::optional<Game::RaycastHit>& hit, const glm::mat4& proj,
                               const glm::mat4& view, bool entityPicked,
-                              const glm::vec3& cameraPos, float fovDeg, int fbWidth, int fbHeight) {
+                              const glm::vec3& cameraPos, float fovDeg, int fbWidth, int fbHeight,
+                              bool veinHighlight = false, const Game::ItemStack* veinHarvestTool = nullptr) {
         // MC LevelRenderer.renderHitOutline only runs for
         // `hitResult.getType() == BLOCK`. With a mob under the crosshair the
         // hit result IS the entity, so no outline is drawn — which is also the
@@ -678,6 +684,8 @@ static uint16_t     s_lastPresencePort = 0;
         }
         const float width = std::max(2.5f, static_cast<float>(fbWidth) / 1920.0f * 2.5f);
         Render::Gizmos::ShapeOutline(boxes, count, glm::dvec3(hit->blockPos), 0x66000000u, width);
+        // Sneak + Vein Mine held: every block the dig would take, outlined.
+        if (veinHighlight && !s_outlineViewerSpectator) Client::VeinMineClient::QueueHighlight(*hit, veinHarvestTool);
         Render::Gizmos::Flush(proj, view, cameraPos, fovDeg, fbWidth, fbHeight);
     }
 
@@ -2276,6 +2284,12 @@ static uint16_t     s_lastPresencePort = 0;
                         player.flyingSpeed = std::clamp(player.flyingSpeed + static_cast<float>(wheel) * 0.005f,
                                                         0.0f, 0.2f);
                     }
+                } else if (Client::VeinMineClient::ResizeKeysActive()) {
+                    // Resizing the vein mine (its shape key, or Sneak + Vein
+                    // Mine with a sized shape): the wheel is its length.
+                    if (Client::VeinMineClient::OnScroll(wheel)) {
+                        g_hudRenderer.SetOverlayMessage(Client::VeinMineClient::StatusText());
+                    }
                 } else if (wheel > 0) {
                     controller.OnHotbarChanged((player.GetSelectedSlot() - 1 + 9) % 9);
                 } else {
@@ -2294,6 +2308,14 @@ static uint16_t     s_lastPresencePort = 0;
         if (Input::ConsumeClick(*Input::Binds::Noclip)) {
             if (!freeCamDetached && !player.IsSpectator()) player.ToggleNoclip();
         }
+
+        // Vein mining: the shape key cycles / resizes (shown on the action
+        // bar), and letting go of Sneak + Vein Mine stops a mine still
+        // spreading on the server.
+        if (Client::VeinMineClient::HandleKeys()) {
+            g_hudRenderer.SetOverlayMessage(Client::VeinMineClient::StatusText());
+        }
+        if (Client::VeinMineClient::TakeReleaseEdge()) controller.SendVeinMineRelease();
 
         // MC handleKeybinds: `while (keyToggleSpectatorShaderEffects
         // .consumeClick()) gameRenderer.toggleSpectatorPostEffect()`.
@@ -8166,8 +8188,11 @@ static uint16_t     s_lastPresencePort = 0;
                         s_zoomOwnsDistance = true;
                     }
                     if (!camera.IsFirstPerson()) {
-                        if (Input::Binds::CameraLeft  && Input::IsDown(*Input::Binds::CameraLeft))  s_orbitYaw -= kOrbitDegPerSec * dt;
-                        if (Input::Binds::CameraRight && Input::IsDown(*Input::Binds::CameraRight)) s_orbitYaw += kOrbitDegPerSec * dt;
+                        // The arrows are the vein-mine size keys while it is
+                        // being resized (Client::VeinMineClient).
+                        const bool orbitKeys = !Client::VeinMineClient::ResizeKeysActive();
+                        if (orbitKeys && Input::Binds::CameraLeft  && Input::IsDown(*Input::Binds::CameraLeft))  s_orbitYaw -= kOrbitDegPerSec * dt;
+                        if (orbitKeys && Input::Binds::CameraRight && Input::IsDown(*Input::Binds::CameraRight)) s_orbitYaw += kOrbitDegPerSec * dt;
                         s_orbitYaw = std::fmod(s_orbitYaw, 360.0f);
                     } else {
                         // First person forgets the swing: the next third-
@@ -9427,7 +9452,9 @@ static uint16_t     s_lastPresencePort = 0;
                     ctx.dimension == player.lastBlockHitDimension) {
                     RenderBlockHighlight(player.lastBlockHit, ctx.projection, ctx.view,
                                          playerController.PickEntity() != 0,
-                                         ctx.camera.position, ctx.camera.fov, width, height);
+                                         ctx.camera.position, ctx.camera.fov, width, height,
+                                         /*veinHighlight=*/true,
+                                         player.IsCreative() ? nullptr : &player.inventory.GetSelectedStack());
                     RenderBlockBreakOverlay(playerController.GetDestroyStage(), playerController.GetBreakingPos(),
                                             ctx.projection, ctx.view);
                 }
@@ -10103,7 +10130,7 @@ static uint16_t     s_lastPresencePort = 0;
             //
             // MC draws it BEFORE the terrain. Here it is drawn right AFTER the
             // opaque and cutout terrain, depth-tested at the far plane
-            // (SkyRenderer::SetDepthTested, sky_vk.vert): the output is the
+            // (SkyRenderer::DepthMode::Late, sky_vk.vert): the output is the
             // same — the sky lands exactly on the pixels the terrain leaves,
             // and everything blended (translucent terrain, entities' glass,
             // particles, clouds, weather) comes later in the frame and finds
@@ -10116,7 +10143,7 @@ static uint16_t     s_lastPresencePort = 0;
                 return !(v && std::strcmp(v, "0") == 0);
             }();
             const bool lateSky = s_lateSkyEnabled && !Render::DevSkip("latesky");
-            auto drawSkyPass = [&]() {
+            auto drawSkyPass = [&](Render::SkyRenderer::DepthMode depthMode, const char* gpuLabel) {
                 PROFILE_ZONE_N("SkyPass");
                 DEBUG_PIE_ZONE("Sky");
                 glm::mat4 skyProj = glm::perspective(glm::radians(camera.fov), aspect, 0.05f, 2048.0f);
@@ -10124,13 +10151,26 @@ static uint16_t     s_lastPresencePort = 0;
                 // MC Camera.doesMobEffectBlockSky: BLINDNESS / DARKNESS leave
                 // the sky undrawn — the darkened fog clear colour shows.
                 if (!Render::DevSkip("sky") && !Render::MobEffectBlocksSky()) {
-                    Render::GpuDebugGroup gpuGroup("Sky");
-                    Render::g_skyRenderer.SetDepthTested(lateSky);
+                    Render::GpuDebugGroup gpuGroup(gpuLabel);
+                    Render::g_skyRenderer.SetDepthMode(depthMode);
                     Render::g_skyRenderer.Render(skyProj, viewRotation);
-                    Render::g_skyRenderer.SetDepthTested(false);
+                    Render::g_skyRenderer.SetDepthMode(Render::SkyRenderer::DepthMode::Off);
                 }
             };
-            if (!lateSky) drawSkyPass();
+            if (!lateSky) drawSkyPass(Render::SkyRenderer::DepthMode::Off, "Sky");
+            // Sky blocks open onto the sky (SkyBlockRenderer.hpp), but with
+            // the late sky nothing is in the colour buffer yet when their
+            // depth-only faces go down, and the late pass is then kept out of
+            // them by their depth. So the chunk renderer calls back right
+            // after the faces, before any terrain, and the sky is drawn into
+            // exactly those pixels (DepthMode::Windows: Greater against the
+            // far plane). Only frames that draw a sky-block face pay for it,
+            // and only for the faces' area.
+            if (lateSky && Render::g_chunkRenderer) {
+                Render::g_chunkRenderer->SetSkyWindowsHook([&]() {
+                    drawSkyPass(Render::SkyRenderer::DepthMode::Windows, "Sky (sky blocks)");
+                });
+            }
 
             // Main chunk rendering (includes frustum culling and all render passes)
             // MC's "Main" frame-graph pass: solid terrain, the solid
@@ -10139,6 +10179,7 @@ static uint16_t     s_lastPresencePort = 0;
             Render::DebugScreen::FrameProfiler::Push("Main");
             { PROFILE_ZONE_N("ChunkPass.Main");
             Render::RenderChunksAll(camera, frustum);
+            if (Render::g_chunkRenderer) Render::g_chunkRenderer->SetSkyWindowsHook(nullptr);
             if (Render::DebugScreen::FrameProfiler::IsActive()) {
                 if (auto* rs = Render::GetChunkRendererStats()) {
                     Render::DebugScreen::FrameProfiler::AddChildTime("solidTerrain", rs->opaquePassTimeMs + rs->cutoutPassTimeMs);
@@ -10146,7 +10187,7 @@ static uint16_t     s_lastPresencePort = 0;
                 }
             }
             }
-            if (lateSky) drawSkyPass();
+            if (lateSky) drawSkyPass(Render::SkyRenderer::DepthMode::Late, "Sky");
             // Flicker diagnostics: the MAIN pass's numbers, read here and not
             // at frame end — a portal view into this same level re-enters
             // the renderer later in the frame and overwrites them.
@@ -10838,7 +10879,9 @@ static uint16_t     s_lastPresencePort = 0;
                 } else {
                     RenderBlockHighlight(player.lastBlockHit, proj, view,
                                          playerController.PickEntity() != 0,
-                                         camera.position, camera.fov, width, height);
+                                         camera.position, camera.fov, width, height,
+                                         /*veinHighlight=*/true,
+                                         player.IsCreative() ? nullptr : &player.inventory.GetSelectedStack());
                     RenderBlockBreakOverlay(playerController.GetDestroyStage(),
                                             playerController.GetBreakingPos(), proj, view);
                 }

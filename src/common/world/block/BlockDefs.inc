@@ -1707,3 +1707,42 @@ BLOCK_DEF(PottedPurpleFlower, "potted_purple_flower", "Potted Purple Flower", Cu
 // after the view's sky. Breaks, sounds and blocks light like tinted glass
 // (gen_block_hardness SLUG_ALIASES).
 BLOCK_DEF(SkyBlock, "sky_block", "Sky Block", Opaque)
+// ── Coloured torches (2026-10-10), APPENDED, never re-sorted. A torch dyed
+// with any of the 16 dyes (shapeless torch + dye, data/minecraft/recipe/
+// <colour>_torch.json): MC's torch in every way (states, shape, hardness,
+// sound, light level 14 — gen_* SLUG_ALIASES), except that its light is
+// that colour (BlockLightColor.inc, ChunkLight's coloured channels) and so
+// is its flame. Standing and wall pairs (RedstoneFamilies). Not in any
+// creative tab for now (CreativeModeTabs kEngineBlockOnly).
+BLOCK_DEF(WhiteTorch, "white_torch", "White Torch", Cutout)
+BLOCK_DEF(WhiteWallTorch, "white_wall_torch", "White Wall Torch", Cutout)
+BLOCK_DEF(OrangeTorch, "orange_torch", "Orange Torch", Cutout)
+BLOCK_DEF(OrangeWallTorch, "orange_wall_torch", "Orange Wall Torch", Cutout)
+BLOCK_DEF(MagentaTorch, "magenta_torch", "Magenta Torch", Cutout)
+BLOCK_DEF(MagentaWallTorch, "magenta_wall_torch", "Magenta Wall Torch", Cutout)
+BLOCK_DEF(LightBlueTorch, "light_blue_torch", "Light Blue Torch", Cutout)
+BLOCK_DEF(LightBlueWallTorch, "light_blue_wall_torch", "Light Blue Wall Torch", Cutout)
+BLOCK_DEF(YellowTorch, "yellow_torch", "Yellow Torch", Cutout)
+BLOCK_DEF(YellowWallTorch, "yellow_wall_torch", "Yellow Wall Torch", Cutout)
+BLOCK_DEF(LimeTorch, "lime_torch", "Lime Torch", Cutout)
+BLOCK_DEF(LimeWallTorch, "lime_wall_torch", "Lime Wall Torch", Cutout)
+BLOCK_DEF(PinkTorch, "pink_torch", "Pink Torch", Cutout)
+BLOCK_DEF(PinkWallTorch, "pink_wall_torch", "Pink Wall Torch", Cutout)
+BLOCK_DEF(GrayTorch, "gray_torch", "Gray Torch", Cutout)
+BLOCK_DEF(GrayWallTorch, "gray_wall_torch", "Gray Wall Torch", Cutout)
+BLOCK_DEF(LightGrayTorch, "light_gray_torch", "Light Gray Torch", Cutout)
+BLOCK_DEF(LightGrayWallTorch, "light_gray_wall_torch", "Light Gray Wall Torch", Cutout)
+BLOCK_DEF(CyanTorch, "cyan_torch", "Cyan Torch", Cutout)
+BLOCK_DEF(CyanWallTorch, "cyan_wall_torch", "Cyan Wall Torch", Cutout)
+BLOCK_DEF(PurpleTorch, "purple_torch", "Purple Torch", Cutout)
+BLOCK_DEF(PurpleWallTorch, "purple_wall_torch", "Purple Wall Torch", Cutout)
+BLOCK_DEF(BlueTorch, "blue_torch", "Blue Torch", Cutout)
+BLOCK_DEF(BlueWallTorch, "blue_wall_torch", "Blue Wall Torch", Cutout)
+BLOCK_DEF(BrownTorch, "brown_torch", "Brown Torch", Cutout)
+BLOCK_DEF(BrownWallTorch, "brown_wall_torch", "Brown Wall Torch", Cutout)
+BLOCK_DEF(GreenTorch, "green_torch", "Green Torch", Cutout)
+BLOCK_DEF(GreenWallTorch, "green_wall_torch", "Green Wall Torch", Cutout)
+BLOCK_DEF(RedTorch, "red_torch", "Red Torch", Cutout)
+BLOCK_DEF(RedWallTorch, "red_wall_torch", "Red Wall Torch", Cutout)
+BLOCK_DEF(BlackTorch, "black_torch", "Black Torch", Cutout)
+BLOCK_DEF(BlackWallTorch, "black_wall_torch", "Black Wall Torch", Cutout)

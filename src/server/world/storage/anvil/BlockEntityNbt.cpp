@@ -22,6 +22,7 @@
 #include "common/world/block/entity/AurelithBlockEntities.hpp"
 #include "common/world/block/entity/HushLighthouseLampBlockEntity.hpp"
 #include "common/world/block/entity/CraftingTableBlockEntity.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
 #include "common/world/block/entity/EndGatewayBlockEntity.hpp"
 #include "common/world/block/entity/FurnaceBlockEntity.hpp"
 #include "common/world/block/entity/BrewingStandBlockEntity.hpp"
@@ -221,6 +222,11 @@ namespace Game::Anvil {
         // as a container's Items list, slots 0..8 row-major.
         if (const auto* table = dynamic_cast<const CraftingTableBlockEntity*>(&entity)) {
             WriteContainerItems(w, table->Grid());
+        }
+
+        // obeycraft:sky_faces — the door-frame face mask (SkyFaces::Bit).
+        if (const auto* sky = dynamic_cast<const SkyFacesBlockEntity*>(&entity)) {
+            w.Byte("SkyFaces", static_cast<int8_t>(sky->Mask()));
         }
 
         if (const auto* pot = dynamic_cast<const DecoratedPotBlockEntity*>(&entity)) {
@@ -630,6 +636,12 @@ namespace Game::Anvil {
         // obeycraft:crafting_table — the stored grid, an Items list.
         if (auto* table = dynamic_cast<CraftingTableBlockEntity*>(entity.get())) {
             ReadContainerItems(tag, table->Grid());
+        }
+
+        // obeycraft:sky_faces — an entity left with no face is not kept.
+        if (auto* sky = dynamic_cast<SkyFacesBlockEntity*>(entity.get())) {
+            sky->SetMask(static_cast<uint8_t>(tag.GetValue<int8_t>("SkyFaces", 0)));
+            if (sky->Mask() == 0) return nullptr;
         }
 
         if (auto* pot = dynamic_cast<DecoratedPotBlockEntity*>(entity.get())) {

@@ -14,6 +14,7 @@
 #include "common/world/biome/Biomes.hpp"
 #include "../texture/ConnectedTextures.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
 #include "common/world/level/World.hpp"
 #include "common/world/lighting/BlockLightProperties.hpp"
 #include "common/world/lighting/LightCoords.hpp"
@@ -52,6 +53,14 @@ namespace Render {
             std::make_shared<const std::vector<Mesher::AoExclusion>>();
         std::shared_ptr<const std::vector<Mesher::PortalFace>> g_portalFaces =
             std::make_shared<const std::vector<Mesher::PortalFace>>();
+        // Keyed by DimensionToRaw; an entry is never mutated, only replaced.
+        std::unordered_map<int, std::shared_ptr<const Mesher::SkyFaceMap>> g_skyFaces;
+    }
+
+    void Mesher::SetSkyFaces(Game::DimensionId dimension, std::shared_ptr<const SkyFaceMap> faces) {
+        std::lock_guard<std::mutex> lock(g_aoExclusionMutex);
+        if (faces && !faces->empty()) g_skyFaces[Game::DimensionToRaw(dimension)] = std::move(faces);
+        else g_skyFaces.erase(Game::DimensionToRaw(dimension));
     }
 
     void Mesher::SetPortalFaces(Game::DimensionId dimension, const std::vector<PortalFace>& faces) {
@@ -95,6 +104,8 @@ namespace Render {
             std::lock_guard<std::mutex> lock(g_aoExclusionMutex);
             list  = g_aoExclusions;
             faces = g_portalFaces;
+            const auto sky = g_skyFaces.find(Game::DimensionToRaw(dimension));
+            m_skyFaces = sky != g_skyFaces.end() ? sky->second : nullptr;
         }
         m_aoExclusions.clear();
         for (const AoExclusion& e : *list) if (e.dimension == dimension) m_aoExclusions.push_back(e);
@@ -415,6 +426,9 @@ namespace Render {
         // builder asks the same cache the block faces read.
         m_fluidBuilder->lightProvider = [this](int x, int y, int z) {
             return LightCoordsAt(x, y, z);
+        };
+        m_fluidBuilder->tintProvider = [this](int x, int y, int z) {
+            return TintAt(x, y, z);
         };
         std::memset(m_lightCache, 0xF0, sizeof(m_lightCache));
         std::memset(m_lightPermeable, 1, sizeof(m_lightPermeable));
@@ -1065,6 +1079,15 @@ namespace Render {
     void Mesher::FillLightCaches(const Client::Render::RegionSnapshot* region,
                                  const Game::IBlockAccess* blocks) {
         PROFILE_ZONE_N("Mesher.FillLight");
+        // Coloured light: only a section copy carries the channels (the
+        // generic IBlockAccess path is white).
+        m_hasColor = region && region->AnyColor();
+        if (m_hasColor) {
+            for (int ly = -1; ly <= 16; ++ly)
+                for (int lz = -1; lz <= 16; ++lz)
+                    for (int lx = -1; lx <= 16; ++lx)
+                        m_rgbCache[ly + 1][lz + 1][lx + 1] = region->ChannelsAtLocal(lx, ly, lz);
+        }
         // Raw light over the 18^3 halo.
         for (int ly = -1; ly <= 16; ++ly) {
             for (int lz = -1; lz <= 16; ++lz) {
@@ -1122,6 +1145,28 @@ namespace Render {
         return LC::Pack(block, sky);
     }
 
+    int Mesher::ChannelLevelWith(Game::BlockState state, int channel, int worldX, int worldY, int worldZ) const {
+        using Game::Lighting::BlockLightProperties;
+        const Game::Lighting::StateLightInfo& info = BlockLightProperties::Info(state);
+        const int lx = worldX - m_sectionBaseWorldX + 1;
+        const int ly = worldY - m_sectionBaseWorldY + 1;
+        const int lz = worldZ - m_sectionBaseWorldZ + 1;
+        int level = 0;
+        if (lx >= 0 && lx < 18 && ly >= 0 && ly < 18 && lz >= 0 && lz < 18) {
+            level = (m_rgbCache[ly][lz][lx] >> (4 * channel)) & 15;
+        }
+        return std::max(level, BlockLightProperties::ChannelEmission(
+                                   info, static_cast<Game::Lighting::LightChannel>(channel)));
+    }
+
+    uint32_t Mesher::TintAt(int worldX, int worldY, int worldZ) const {
+        if (!m_hasColor) return 0;
+        const Game::BlockState state = GetCachedBlockState(worldX, worldY, worldZ);
+        return TerrainVertex::LightTint(ChannelLevelWith(state, 0, worldX, worldY, worldZ),
+                                        ChannelLevelWith(state, 1, worldX, worldY, worldZ),
+                                        ChannelLevelWith(state, 2, worldX, worldY, worldZ));
+    }
+
     bool Mesher::LightPermeableAt(int worldX, int worldY, int worldZ) const {
         const int lx = worldX - m_sectionBaseWorldX + 2;
         const int ly = worldY - m_sectionBaseWorldY + 2;
@@ -1168,19 +1213,48 @@ namespace Render {
         }
     };
 
+    // A coloured channel as BlockModelLighter's level: the channel stands in
+    // for block light in the light coords, so the same flat / smooth rules
+    // blend it (the block term of each result is that channel).
+    struct Mesher::ChannelLighterLevel {
+        const Mesher& m;
+        int channel;
+        Game::BlockState StateAt(int x, int y, int z) const { return m.GetCachedBlockState(x, y, z); }
+        int LightCoordsWith(Game::BlockState s, int x, int y, int z) const {
+            namespace LC = Game::Lighting::LightCoords;
+            const int coords = m.LightCoordsWith(s, x, y, z);
+            if (coords == LC::kFullBright) return coords;   // emissiveRendering: white
+            return LC::Pack(m.ChannelLevelWith(s, channel, x, y, z), (coords >> 20) & 15);
+        }
+        bool LightPermeableAt(int x, int y, int z) const { return m.LightPermeableAt(x, y, z); }
+        float ShadeAt(int x, int y, int z) const {
+            return Game::Lighting::BlockLightProperties::ShadeBrightness(m.GetCachedBlockState(x, y, z));
+        }
+    };
+
     void Mesher::ComputeFaceLight(Game::BlockState state, int worldX, int worldY, int worldZ,
                                   BlockFace face, int cullfaceDir, bool smooth,
                                   const glm::vec3 (&localPos)[4], std::array<uint32_t, 4>& outLight) const {
         const Game::Direction dir = DirectionOf(face);
         const LighterLevel level{*this};
+        Game::Direction cullface{};
+        const bool culled = cullfaceDir >= 0;
+        if (culled) cullface = FaceDirToDirection(static_cast<Game::FaceDir>(cullfaceDir));
 
         if (!smooth) {
             // MC tesselateFlat (BlockModelLighter::QuadLightFlat).
-            Game::Direction cullface{};
-            const bool culled = cullfaceDir >= 0;
-            if (culled) cullface = FaceDirToDirection(static_cast<Game::FaceDir>(cullfaceDir));
-            const uint32_t word = TerrainVertex::LightWord(BlockModelLighter::QuadLightFlat(
+            uint32_t word = TerrainVertex::LightWord(BlockModelLighter::QuadLightFlat(
                 level, state, worldX, worldY, worldZ, dir, culled ? &cullface : nullptr, localPos));
+            if (m_hasColor) {
+                // The same cell's three channels give the face its tint.
+                int channel[3];
+                for (int c = 0; c < 3; ++c) {
+                    const ChannelLighterLevel cl{*this, c};
+                    channel[c] = BlockModelLighter::QuadLightFlat(
+                        cl, state, worldX, worldY, worldZ, dir, culled ? &cullface : nullptr, localPos) & 0xFF;
+                }
+                word |= TerrainVertex::LightTint(channel[0], channel[1], channel[2]);
+            }
             outLight = { word, word, word, word };
             return;
         }
@@ -1189,6 +1263,19 @@ namespace Render {
         int coords[4];
         BlockModelLighter::QuadLightSmooth(level, state, worldX, worldY, worldZ, dir, localPos, coords);
         for (int v = 0; v < 4; ++v) outLight[static_cast<size_t>(v)] = TerrainVertex::LightWord(coords[v]);
+        if (m_hasColor) {
+            // The smooth blend once per channel: each vertex's tint is the
+            // ratio of its three blended channels.
+            int channel[3][4];
+            for (int c = 0; c < 3; ++c) {
+                const ChannelLighterLevel cl{*this, c};
+                BlockModelLighter::QuadLightSmooth(cl, state, worldX, worldY, worldZ, dir, localPos, channel[c]);
+            }
+            for (int v = 0; v < 4; ++v) {
+                outLight[static_cast<size_t>(v)] |= TerrainVertex::LightTint(
+                    channel[0][v] & 0xFF, channel[1][v] & 0xFF, channel[2][v] & 0xFF);
+            }
+        }
     }
 
     void Mesher::BuildSectionMeshFromCache(Game::Math::ChunkPos chunkPos, int sectionY, SectionMesh& outMesh) {
@@ -1360,6 +1447,16 @@ namespace Render {
         // Use cached render layer instead of registry lookup
         RenderLayer blockLayer = s_blockPropsCache[static_cast<uint16_t>(blockId)].renderLayer;
 
+        // A door's faces opened onto the sky (SkyFacesBlockEntity) are not
+        // meshed: SkyBlockRenderer draws them as windows onto the sky. The
+        // model's face keys are world directions (pre-rotated); the mask is
+        // in the door's frame.
+        uint8_t skyFaces = 0;
+        if (m_skyFaces && Game::SkyFaces::AppliesTo(blockId)) {
+            const auto it = m_skyFaces->find(glm::ivec3(worldX, worldY, worldZ));
+            if (it != m_skyFaces->end()) skyFaces = it->second;
+        }
+
         for (const auto& element : model.elements) {
             // Two-sided candidate: a zero-thickness element carrying both
             // faces of its thin axis (see FaceCapture). Each such face is
@@ -1378,6 +1475,11 @@ namespace Render {
             FaceCapture captureA, captureB;
             for (const auto& [faceDir, faceDef] : element.faces) {
                 BlockFace blockFace = FaceDirToBlockFace(faceDir);
+
+                if (skyFaces != 0 &&
+                    (skyFaces & Game::SkyFaces::Bit(Game::SkyFaces::ToDoorFrame(state, FaceDirToDirection(faceDir))))) {
+                    continue;
+                }
 
                 // Face culling uses the pre-built opaque cache (no GetBlock/registry calls).
                 //
@@ -2121,6 +2223,9 @@ namespace Render {
                                     const std::array<uint32_t, 4>& light,
                                     int worldX, int worldY, int worldZ) {
         if (!m_config.enableGreedyMeshing || Greedy::Disabled() || !GreedyEnabled()) return false;
+        // A tinted face (coloured light) stays a plain quad: face-map and
+        // quad records have no room for the tint (TerrainVertex::light).
+        if ((light[0] | light[1] | light[2] | light[3]) & TerrainVertex::kTintMask) return false;
 
         // Eligibility — every test errs toward NOT merging, because a merged
         // quad must be pixel-identical to the quads it replaces:

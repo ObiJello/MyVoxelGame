@@ -63,6 +63,11 @@ namespace Render {
         bool hasLight = false;
         Game::Lighting::DataLayer skyLight;
         Game::Lighting::DataLayer blockLight;
+        // The coloured block-light channels, red / green / blue (ChunkLight's
+        // header note); `hasColor` when any is not block light itself — the
+        // mesher tints only sections whose neighbourhood has some.
+        bool hasColor = false;
+        std::array<Game::Lighting::DataLayer, 3> channelLight;
 
         Game::BlockID GetBlock(int lx, int ly, int lz) const {
             if (allAir) return Game::BlockID::Air;
@@ -147,6 +152,28 @@ namespace Render {
             if (!sec || !sec->hasLight) return 0xF0;
             const int x = lx & 15, y = ly & 15, z = lz & 15;
             return static_cast<uint8_t>((sec->skyLight.Get(x, y, z) << 4) | sec->blockLight.Get(x, y, z));
+        }
+
+        // The coloured channels at a cell, red | green << 4 | blue << 8. A
+        // section without colour reads its block light in all three; a
+        // missing one reads 0.
+        uint16_t ChannelsAtLocal(int lx, int ly, int lz) const {
+            const SectionCopy* sec = SectionForLocal(lx, ly, lz);
+            if (!sec || !sec->hasLight) return 0;
+            const int x = lx & 15, y = ly & 15, z = lz & 15;
+            if (!sec->hasColor) {
+                const int b = sec->blockLight.Get(x, y, z);
+                return static_cast<uint16_t>(b | (b << 4) | (b << 8));
+            }
+            return static_cast<uint16_t>(sec->channelLight[0].Get(x, y, z) |
+                                         (sec->channelLight[1].Get(x, y, z) << 4) |
+                                         (sec->channelLight[2].Get(x, y, z) << 8));
+        }
+
+        // Any of the 27 sections carries coloured light.
+        bool AnyColor() const {
+            for (const auto& sec : sections) if (sec && sec->hasColor) return true;
+            return false;
         }
 
         uint16_t BiomeAtLocal(int lx, int ly, int lz) const {

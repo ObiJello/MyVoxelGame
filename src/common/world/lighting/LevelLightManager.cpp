@@ -85,18 +85,61 @@ namespace Game::Lighting {
         const int64_t key = Key(chunk->pos.x, chunk->pos.z);
         m_chunks[key] = Entry{chunk};
         m_missing.erase(key);
+        // A chunk from disk was not lit here: count its coloured emitters.
+        chunk->light.coloredEmitters = CountColoredEmitters(*chunk);
+        NoteColoredEmitters(*chunk);
         ReconcileBorders(*chunk);
         if (auto it = m_deferredChecks.find(key); it != m_deferredChecks.end()) {
-            for (int64_t pos : it->second) {
-                m_engine.CheckBlock(Pos::X(pos), Pos::Y(pos), Pos::Z(pos));
-            }
+            for (int64_t pos : it->second) QueueCheck(Pos::X(pos), Pos::Y(pos), Pos::Z(pos));
             m_deferredChecks.erase(it);
+        }
+    }
+
+    // ── Coloured light ───────────────────────────────────────────────────────
+
+    bool LevelLightManager::ColorNear(int cx, int cz, int radius) const {
+        for (int64_t key : m_coloredChunks) {
+            const int x = static_cast<int>(key >> 32);
+            const int z = static_cast<int>(static_cast<int32_t>(key & 0xFFFFFFFF));
+            if (std::abs(x - cx) <= radius && std::abs(z - cz) <= radius) return true;
+        }
+        return false;
+    }
+
+    void LevelLightManager::NoteColoredEmitters(const Chunk& chunk) {
+        const int64_t key = Key(chunk.pos.x, chunk.pos.z);
+        if (chunk.light.coloredEmitters > 0) m_coloredChunks.insert(key);
+        else m_coloredChunks.erase(key);
+    }
+
+    void LevelLightManager::QueueCheck(int x, int y, int z) {
+        m_engine.CheckBlock(x, y, z);
+        m_channelCandidates.push_back(Pos::Pack(x, y, z));
+    }
+
+    // After a run: every affected section's channels are either the
+    // channel engines' answer (a coloured emitter within a chunk — the run
+    // propagated them) or, with none that near, block light itself.
+    void LevelLightManager::FinishChannels() {
+        for (int64_t key : m_affected) {
+            const int cx = SectionKey::X(key), cz = SectionKey::Z(key);
+            auto it = m_chunks.find(Key(cx, cz));
+            if (it == m_chunks.end() || !it->second.chunk) continue;
+            const int li = SectionKey::Y(key) - kMinLightSectionY;
+            if (li < 0 || li >= kLightSectionCount) continue;
+            ChunkLight& light = it->second.chunk->light;
+            if (ColorNear(cx, cz, 1)) {
+                light.ShareWhiteChannels(li);
+            } else {
+                for (auto& c : light.channel) c[static_cast<size_t>(li)] = light.block[static_cast<size_t>(li)];
+            }
         }
     }
 
     void LevelLightManager::RemoveChunk(Math::ChunkPos pos) {
         const int64_t key = Key(pos.x, pos.z);
         m_chunks.erase(key);
+        m_coloredChunks.erase(key);
         m_deferredChecks.erase(key);
         m_lockedThisRun.erase(key);
     }
@@ -140,14 +183,17 @@ namespace Game::Lighting {
             { 0, -1, Direction::North }, { 0, 1, Direction::South },
             { -1, 0, Direction::West },  { 1, 0, Direction::East },
         };
+        // The coloured channels cross the border too where coloured light can
+        // be; elsewhere they follow block light (FinishChannels).
+        const bool channels = ColorNear(cx, cz, 2);
         for (const N& n : kNeighbours) {
             auto it = m_chunks.find(Key(cx + n.dx, cz + n.dz));
             if (it == m_chunks.end() || !it->second.chunk) continue;
-            ReconcileFace(chunk, *it->second.chunk, n.dir);
+            ReconcileFace(chunk, *it->second.chunk, n.dir, channels);
         }
     }
 
-    void LevelLightManager::ReconcileFace(Chunk& a, Chunk& b, Direction aToB) {
+    void LevelLightManager::ReconcileFace(Chunk& a, Chunk& b, Direction aToB, bool channels) {
         const bool alongX = aToB == Direction::West || aToB == Direction::East;
         // Local coordinate of the border column on each side.
         const int aEdge = (aToB == Direction::East || aToB == Direction::South) ? 15 : 0;
@@ -156,12 +202,16 @@ namespace Game::Lighting {
         const int aBaseX = a.pos.x * 16, aBaseZ = a.pos.z * 16;
         const int bBaseX = b.pos.x * 16, bBaseZ = b.pos.z * 16;
 
-        for (int layerIdx = 0; layerIdx < 2; ++layerIdx) {
-            const LightLayer layer = layerIdx == 0 ? LightLayer::Sky : LightLayer::Block;
+        // Sky, block, then (when `channels`) red, green, blue.
+        const int layerCount = channels ? 2 + kLightChannelCount : 2;
+        for (int layerIdx = 0; layerIdx < layerCount; ++layerIdx) {
+            const LightLayer layer = layerIdx == 0 ? LightLayer::Sky
+                                   : layerIdx == 1 ? LightLayer::Block
+                                                   : ChannelLayer(layerIdx - 2);
             if (layer == LightLayer::Sky && !HasSkyLight()) continue;
-            LayerLightEngine& engine = layer == LightLayer::Sky
-                ? static_cast<LayerLightEngine&>(m_engine.Sky())
-                : static_cast<LayerLightEngine&>(m_engine.Block());
+            LayerLightEngine& engine = layer == LightLayer::Sky   ? static_cast<LayerLightEngine&>(m_engine.Sky())
+                                     : layer == LightLayer::Block ? static_cast<LayerLightEngine&>(m_engine.Block())
+                                                                  : static_cast<LayerLightEngine&>(m_engine.Channel(layerIdx - 2));
             for (int li = 0; li < kLightSectionCount; ++li) {
                 const DataLayer& la = a.light.Layer(layer, li);
                 const DataLayer& lb = b.light.Layer(layer, li);
@@ -213,11 +263,21 @@ namespace Game::Lighting {
         // LevelChunk.setBlockState: the sky source column first, always (it
         // is this chunk's own data and must track its blocks)...
         chunk.light.skySources.Update(chunk, x & 15, y, z & 15);
+        // The chunk's coloured emitters (engine), whatever the engine does.
+        const bool oldColored = BlockLightProperties::ColoredEmission(oldState);
+        const bool newColored = BlockLightProperties::ColoredEmission(newState);
+        if (oldColored != newColored) {
+            chunk.light.coloredEmitters = std::max(0, chunk.light.coloredEmitters + (newColored ? 1 : -1));
+            if (IsRegistered(chunk.pos)) NoteColoredEmitters(chunk);
+        }
         if (!EngineEnabled()) return;
+        // A coloured emitter placed or removed: the channels must run (its
+        // own chunk may have just lost its last one).
+        if (oldColored || newColored) m_channelRun = true;
         // ...then checkBlock.
         const int cx = x >> 4, cz = z >> 4;
         if (Lookup(cx, cz)) {
-            m_engine.CheckBlock(x, y, z);
+            QueueCheck(x, y, z);
         } else {
             m_deferredChecks[Key(cx, cz)].push_back(Pos::Pack(x, y, z));
         }
@@ -235,8 +295,24 @@ namespace Game::Lighting {
         }
         PROFILE_ZONE_N("Light.RunUpdates");
         const auto t0 = std::chrono::steady_clock::now();
+        // The channels follow every check of a run that needs them anywhere
+        // — all or none, so no channel propagation reads a neighbour's stale
+        // channel where a block-only check moved block light.
+        if (!m_channelRun) {
+            for (int64_t pos : m_channelCandidates) {
+                if (ColorNear(Pos::X(pos) >> 4, Pos::Z(pos) >> 4, 2)) { m_channelRun = true; break; }
+            }
+        }
+        if (m_channelRun) {
+            for (int64_t pos : m_channelCandidates) m_engine.CheckChannels(Pos::X(pos), Pos::Y(pos), Pos::Z(pos));
+        }
+        m_channelCandidates.clear();
+        m_channelRun = false;
         m_inRun = true;
         const int count = m_engine.RunLightUpdates();
+        // Still under the run's chunk locks: every affected section was
+        // written through them.
+        FinishChannels();
         m_inRun = false;
         ReleaseRunLocks();
         m_missing.clear();

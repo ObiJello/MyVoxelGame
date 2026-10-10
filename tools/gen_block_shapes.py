@@ -392,6 +392,23 @@ def main():
                                  # wall twin and the plates/buttons are per-state); every other
                                  # pass-two block is a cube or a per-state family.
                                  ("ambrosium_torch", "torch"), ("ambrosium_wall_torch", "wall_torch"),
+                                 # Coloured torches (2026-10-10): TorchBlock / WallTorchBlock.
+                                 ("white_torch", "torch"), ("white_wall_torch", "wall_torch"),
+                                 ("orange_torch", "torch"), ("orange_wall_torch", "wall_torch"),
+                                 ("magenta_torch", "torch"), ("magenta_wall_torch", "wall_torch"),
+                                 ("light_blue_torch", "torch"), ("light_blue_wall_torch", "wall_torch"),
+                                 ("yellow_torch", "torch"), ("yellow_wall_torch", "wall_torch"),
+                                 ("lime_torch", "torch"), ("lime_wall_torch", "wall_torch"),
+                                 ("pink_torch", "torch"), ("pink_wall_torch", "wall_torch"),
+                                 ("gray_torch", "torch"), ("gray_wall_torch", "wall_torch"),
+                                 ("light_gray_torch", "torch"), ("light_gray_wall_torch", "wall_torch"),
+                                 ("cyan_torch", "torch"), ("cyan_wall_torch", "wall_torch"),
+                                 ("purple_torch", "torch"), ("purple_wall_torch", "wall_torch"),
+                                 ("blue_torch", "torch"), ("blue_wall_torch", "wall_torch"),
+                                 ("brown_torch", "torch"), ("brown_wall_torch", "wall_torch"),
+                                 ("green_torch", "torch"), ("green_wall_torch", "wall_torch"),
+                                 ("red_torch", "torch"), ("red_wall_torch", "wall_torch"),
+                                 ("black_torch", "torch"), ("black_wall_torch", "wall_torch"),
                                  ("skyroot_pressure_plate", "oak_pressure_plate"),
                                  ("holystone_pressure_plate", "stone_pressure_plate"),
                                  ("skyroot_button", "oak_button"), ("holystone_button", "stone_button"),

@@ -323,6 +323,43 @@ shading multipliers come from the existing AO path, not a re-port of
 fire does not light the hand; shader-pack entity passes still get constant
 lmcoords; the far-portal lightmap is one frame late.
 
+**Coloured light (2026-10-10).** Block light stays MC's (gameplay reads
+only it). Beside it, `ChunkLight::channel` holds three more layers per light
+section — red, green, blue block light — each propagated by its own
+`BlockLightEngine` (constructed with `LightLayer::Red/Green/Blue`) from the
+state's channel emission (`BlockLightProperties::ChannelEmission`, from
+`BlockLightColor.inc`, scaled so the brightest channel equals the emission —
+which makes block light exactly the maximum of the three). Costs only where
+there is colour:
+- *Storage:* a channel equal to block light shares its `DataLayer` storage
+  (`ShareWhiteChannels`; copy-on-write separates them on the first write);
+  the wire (`NetCodec` v2, tag 17 "same as block") and disk (`ObeyRed/Green/
+  BlueLight` section tags, absent = block light, no light-version bump) carry
+  only non-white channels.
+- *Engine:* `LightChunk` propagates the channels only for a chunk holding a
+  coloured emitter (`CountColoredEmitters`); `LevelLightManager` runs channel
+  checks only for a run with a coloured emitter within two chunks of any
+  check (light reaches 15, so a changed cell is lit only by emitters within
+  30) — all of the run's checks or none — and border reconciliation includes
+  the channels on the same rule. After every run `FinishChannels` either
+  re-shares a section's channels (colour within a chunk) or sets them to
+  block light (none).
+- *Meshing:* a section copy's `hasColor`; only a section whose 3x3x3
+  neighbourhood has colour fills `Mesher::m_rgbCache` and runs the flat /
+  smooth light blend once per channel (`ChannelLighterLevel`) to give each
+  vertex a tint — bytes b, a of `TerrainVertex::light`, each channel's
+  shortfall from the brightest as RGB565, 0 = white (`LightTint`). Tinted
+  faces never go greedy (face map and quad records have no room); fluids take
+  the tint of the brighter of their two cells. `terrain*.vert`'s
+  `terrainLight` samples the lightmap once per channel at its share of the
+  block light (one sample when white).
+- *Entities, block entities, items, the hand:* `EntityEnvironment::
+  PackedLightAt` / `LevelLightCoordsAt` carry a 15-bit tint in the packed
+  coords' unused bits (`LightCoords::WithTint`); every LightCoords helper
+  masks it away, so only a straight hand-off to `LightColor` sees it, which
+  samples per channel like the shader. Particles and moving blocks stay white.
+- *Shader packs* read only bytes r/g of the light word: white light.
+
 ## Sprite atlases (2026-09-25)
 
 MC 26's split, packed by MC's own stitcher (`texture/Stitcher.{hpp,cpp}`, a
@@ -701,7 +738,7 @@ CPU work per frame is the same on both (1.4–1.9 ms either way): the Metal 4 ga
 
 The clear-weather tour frame at RD 32 (Xcode, Medium state, overlapping): terrain vertex 37 %, opaque terrain fragment 24 % (58 registers, FS occupancy 33 %), **sky fragment 17.6 %**, cutout fragment 6 %. The sky's two pipelines ran 230 k + 76 k SIMD groups — 7.4 M + 2.4 M fragments, the whole screen and a third of it again — with depth test off, as MC's sky pass draws it, before the terrain covered most of them. The TBDR's hidden-surface removal only spares fragments of opaque, depth-writing, discard-free draws, and the sky is none of those (the sky shader discards on alpha 0, the pack layers blend).
 
-**Late sky.** The main view now draws the sky right AFTER the opaque and cutout terrain (before entities, block entities, translucent terrain and everything blended), depth-tested `LessEqual` with no depth write, and `sky_vk.vert` / the GL twin put every sky vertex on the far plane (`gl_Position.z = gl_Position.w`, depth 1.0 = the clear) — so the sky lands exactly where the terrain left nothing and the early depth test rejects the rest before shading. Output identical by construction (no MSAA; cutout holes keep depth 1.0 and get sky, as before). `SkyRenderer::SetDepthTested` is on only for that call: a portal or panorama view draws its sky first with the test off, as today, because its depth is not cleared under the silhouette. Still-frame paired test (`latesky` token, skip = MC's order): **−7.8 % ± 0.2 % fps for the old order** (23 pairs; GPU frame +10.6 %), i.e. +8.5 % for the late sky at the tour's first pose. `OBEY_LATE_SKY=0` restores MC's order.
+**Late sky.** The main view now draws the sky right AFTER the opaque and cutout terrain (before entities, block entities, translucent terrain and everything blended), depth-tested `LessEqual` with no depth write, and `sky_vk.vert` / the GL twin put every sky vertex on the far plane (`gl_Position.z = gl_Position.w`, depth 1.0 = the clear) — so the sky lands exactly where the terrain left nothing and the early depth test rejects the rest before shading. Output identical by construction (no MSAA; cutout holes keep depth 1.0 and get sky, as before). `SkyRenderer::SetDepthMode(Late)` is on only for that call: a portal or panorama view draws its sky first with the test off, as today, because its depth is not cleared under the silhouette. Sky blocks (`SkyBlockRenderer`) write their faces' depth before the terrain and rely on the sky being under them; in the late-sky main view `ChunkRenderer`'s sky-windows hook draws the sky right after those faces with `DepthMode::Windows` (`Greater` against the far plane, so only the face pixels shade), and the late pass does the rest. Still-frame paired test (`latesky` token, skip = MC's order): **−7.8 % ± 0.2 % fps for the old order** (23 pairs; GPU frame +10.6 %), i.e. +8.5 % for the late sky at the tour's first pose. `OBEY_LATE_SKY=0` restores MC's order.
 
 **Half-precision terrain fragment shaders.** `terrain_{opaque,cutout,solid}_vk.frag` carry a `TERRAIN_F16` build (`<name>_f16_vk.frag.spv`, CMake `VK_F16_SHADERS`; `h*` types are float16 under the define, float otherwise, so the GL twins and the float .spv read the same source): the atlas texel, the lightmap colours, AO, tint and the fog mixes in half; texture coordinates, fog distances and the record's integer fields stay 32-bit. Metal loads the variant always (`MetalBackend::LoadFunction` tries `<name>_f16_vk_<stage>` first), Vulkan when the device has `shaderFloat16` (`VK_KHR_shader_float16_int8`, enabled in `CreateLogicalDevice`; MoltenVK, AMD GCN3+, NVIDIA Turing+, Intel Gen9+ — Pascal and older take the float .spv; `OBEY_VK_F16=0` forces it). Registers 58 → 44 (opaque/cutout/solid alike); the F32 limiter 22 → 15 % with F16 at 6 %. MC's `clamp` in `sampleLightmap` is gone from the fragment shaders: every light word the mesher writes is a MC light coord (0..240 per axis), so the coordinate is inside the clamp by construction — six ops × four samples per fragment. spirv-cross emits native `half` for `float16_t`; the samples come back `half4(tex.sample(...))`.
 

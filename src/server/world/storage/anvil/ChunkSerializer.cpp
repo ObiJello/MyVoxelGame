@@ -56,6 +56,10 @@ namespace Game::Anvil {
         //       source used to sit at the top of its highest non-empty
         //       section, darkening everything below it).
         constexpr int32_t kObeyLightVersion = 2;
+        // The coloured light channels' section tags (ChunkLight's header
+        // note), red / green / blue. No version bump: a save without them is
+        // white light, which every save before coloured light is.
+        constexpr const char* kChannelLightTags[3] = { "ObeyRedLight", "ObeyGreenLight", "ObeyBlueLight" };
 
         // ── Palette entry naming ────────────────────────────────────────────
 
@@ -288,6 +292,17 @@ namespace Game::Anvil {
                 if (hasSkyLight) {
                     skyLight.CopyTo(reinterpret_cast<uint8_t*>(bytes.data()));
                     w.ByteArray("SkyLight", bytes.data(), bytes.size());
+                }
+                // ObeyCraft extension: a coloured channel, only where it is
+                // not block light (ChunkLight's header note) — a world with no
+                // coloured light writes none. Minecraft ignores the tags.
+                if (writeLight) {
+                    for (size_t c = 0; c < light.channel.size(); ++c) {
+                        const Lighting::DataLayer& layer = light.channel[c][static_cast<size_t>(li)];
+                        if (layer.SharesWith(blockLight)) continue;
+                        layer.CopyTo(reinterpret_cast<uint8_t*>(bytes.data()));
+                        w.ByteArray(kChannelLightTags[c], bytes.data(), bytes.size());
+                    }
                 }
                 // Y is written LAST and as a signed byte, matching vanilla.
                 w.Byte("Y", static_cast<int8_t>(Lighting::kMinLightSectionY + li));
@@ -559,6 +574,7 @@ namespace Game::Anvil {
         const bool lightOn = rootC->GetValue<int8_t>("isLightOn", 0) != 0 &&
             (!writtenByEngine || rootC->GetValue<int32_t>("ObeyLightVersion", 0) >= kObeyLightVersion);
         std::array<bool, Lighting::kLightSectionCount> skyPresent{};
+        std::array<std::array<bool, Lighting::kLightSectionCount>, 3> channelPresent{};
         out.light.Reset();
 
         std::vector<int> sculkSections;   // see the sculk repair below
@@ -584,6 +600,10 @@ namespace Game::Anvil {
                     };
                     readLayer("BlockLight", out.light.block[static_cast<size_t>(li)]);
                     skyPresent[static_cast<size_t>(li)] = readLayer("SkyLight", out.light.sky[static_cast<size_t>(li)]);
+                    for (size_t c = 0; c < out.light.channel.size(); ++c) {
+                        channelPresent[c][static_cast<size_t>(li)] =
+                            readLayer(kChannelLightTags[c], out.light.channel[c][static_cast<size_t>(li)]);
+                    }
                 }
 
                 if (index < 0 || index >= Chunk::SECTION_COUNT) {
@@ -667,6 +687,16 @@ namespace Game::Anvil {
                 layer = Lighting::DataLayer::FromBytes(repeated.data());
                 layer.Compact();
             }
+            // A coloured channel the save left out is block light (every
+            // world saved before coloured light, and every white section).
+            for (size_t c = 0; c < out.light.channel.size(); ++c) {
+                for (int li = 0; li < Lighting::kLightSectionCount; ++li) {
+                    if (!channelPresent[c][static_cast<size_t>(li)]) {
+                        out.light.channel[c][static_cast<size_t>(li)] = out.light.block[static_cast<size_t>(li)];
+                    }
+                }
+            }
+            out.light.ShareWhiteChannels();
             // The sky source heightmap is not saved (MC rebuilds it in the
             // LevelChunk constructor either): recompute from the blocks.
             out.light.skySources.FillFrom(out);

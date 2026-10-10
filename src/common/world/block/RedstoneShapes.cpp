@@ -1,6 +1,7 @@
 // File: src/common/world/block/RedstoneShapes.cpp
 #include "common/world/block/RedstoneShapes.hpp"
 
+#include "common/world/block/ColoredTorches.hpp"
 #include "common/world/block/Direction.hpp"
 #include "common/world/block/RedstoneWire.hpp"
 
@@ -175,6 +176,12 @@ namespace Game {
 
     bool RedstoneShapeFor(BlockState state, BlockShape& out) {
         const BlockID id = state.Block();
+        // The dyed wall torches (ColoredTorches): WallTorchBlock.SHAPES.
+        if (ColoredTorches::IsWall(id)) {
+            out = TurnY(Px(5.5f, 3.0f, 11.0f, 10.5f, 13.0f, 16.0f),
+                        TurnsFor(state.GetValueByName("facing")));
+            return true;
+        }
         switch (id) {
             // WallTorchBlock.SHAPES (RedstoneWallTorchBlock and the soul
             // variant reuse it): rotateHorizontal(boxZ(5, 3, 13, 11, 16)).

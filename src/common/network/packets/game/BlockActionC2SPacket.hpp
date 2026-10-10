@@ -42,11 +42,20 @@ namespace Network {
         // and optional on the wire; kDimensionUnknown = the player's own.
         static constexpr int8_t kDimensionUnknown = 127;
         int8_t          dimensionId = kDimensionUnknown;
-        // Vein mine: on STOP_DESTROY / BREAK, the server also breaks every
-        // touching block of the same kind (PlayerSession::VeinMineFrom).
+        // Vein mine: on STOP_DESTROY / BREAK, the server also breaks the
+        // blocks the vein-mine shape below takes (PlayerSession::StartVeinMine).
         // Set when the player held the vein-mine key together with Sneak.
         // Trailing and optional on the wire; absent = false.
         bool            veinMine = false;
+        // The vein mine's shape and size (Game::VeinMine::Settings) and the
+        // player's horizontal facing (Game::Direction) at the break — the
+        // stairs run along it. Sent with veinMine; the server clamps them.
+        // Trailing and optional; absent = the plain vein.
+        uint8_t         veinShape  = 0;
+        uint8_t         veinWidth  = 3;
+        uint8_t         veinHeight = 3;
+        uint8_t         veinLength = 5;
+        uint8_t         veinFacing = 2;   // north
 
         BlockActionC2SPacket() = default;
         BlockActionC2SPacket(int x, int y, int z, BlockActionType act)
@@ -72,6 +81,11 @@ namespace Network {
             buffer.WriteShort(packet.blockState);
             buffer.WriteByte(static_cast<uint8_t>(packet.dimensionId));
             buffer.WriteByte(packet.veinMine ? 1 : 0);
+            buffer.WriteByte(packet.veinShape);
+            buffer.WriteByte(packet.veinWidth);
+            buffer.WriteByte(packet.veinHeight);
+            buffer.WriteByte(packet.veinLength);
+            buffer.WriteByte(packet.veinFacing);
             return buffer.GetData();
         }
 
@@ -99,6 +113,13 @@ namespace Network {
             }
             if (reader.Remaining() >= 1) {
                 packet.veinMine = reader.ReadByte() != 0;
+            }
+            if (reader.Remaining() >= 5) {
+                packet.veinShape  = reader.ReadByte();
+                packet.veinWidth  = reader.ReadByte();
+                packet.veinHeight = reader.ReadByte();
+                packet.veinLength = reader.ReadByte();
+                packet.veinFacing = reader.ReadByte();
             }
             return packet;
         }

@@ -515,14 +515,17 @@ namespace Render {
         // Bind opaque shader, compute MVP, and bind atlas texture
         BindSharedRenderState(camera);
 
-        // Sky blocks: their faces go into the depth buffer now — after this
-        // view's sky, before any of its terrain — so the sky stays showing
-        // where they are (SkyBlockRenderer.hpp). Every view passes through
-        // here (main, portal far sides, gun portals, panorama faces), with
-        // its own sections, MVP and clip plane. A draw leaves its own
-        // shader bound, so the terrain state is bound again.
+        // Sky blocks: their faces go into the depth buffer now — before any
+        // of this view's terrain — so the sky shows where they are
+        // (SkyBlockRenderer.hpp). Every view passes through here (main,
+        // portal far sides, gun portals, panorama faces), with its own
+        // sections, MVP and clip plane. A view that drew its sky first has
+        // it in the colour buffer already; the main view's late sky is drawn
+        // into the faces by the hook. A draw leaves its own shader bound, so
+        // the terrain state is bound again.
         if (!m_visibleSections.empty() &&
             g_skyBlockRenderer.RenderWindows(*this, m_cachedMVP, PortalClipPlane())) {
+            if (m_skyWindows) m_skyWindows();
             BindSharedRenderState(camera);
         }
 

@@ -5,6 +5,7 @@
 #include "common/entity/EntityLevel.hpp"
 #include "common/particle/ParticleOptions.hpp"
 #include "common/world/block/BlockState.hpp"
+#include "common/world/block/ColoredTorches.hpp"
 #include "common/world/block/Direction.hpp"
 #include "common/world/block/FallingBlock.hpp"
 #include "common/world/block/RedstoneWire.hpp"
@@ -199,6 +200,24 @@ namespace Game {
             const double z = pos.z + 0.5 + 0.27 * StepZ(opposite);
             level.AddParticle(ParticleOptions(K::Smoke), x, y, z, 0.0, 0.0, 0.0);
             level.AddParticle(ParticleOptions(Flame), x, y, z, 0.0, 0.0, 0.0);
+        }
+
+        // The dyed torches (ColoredTorches): the torch's smoke, and in place
+        // of its orange flame a dust mote in the torch's colour — the way
+        // the redstone torch shows its red.
+        template <bool Wall>
+        void DyedTorchParticles(EntityLevel& level, const glm::ivec3& pos, BlockState state, JavaRandom&) {
+            double x = pos.x + 0.5, y = pos.y + 0.7, z = pos.z + 0.5;
+            if constexpr (Wall) {
+                const Direction opposite = Opposite(DirectionFromName(Prop(state, "facing")));
+                x += 0.27 * StepX(opposite);
+                y += 0.22;
+                z += 0.27 * StepZ(opposite);
+            }
+            const int color = ColoredTorches::ColorOf(state.Block());
+            if (color < 0) return;
+            level.AddParticle(ParticleOptions(K::Smoke), x, y, z, 0.0, 0.0, 0.0);
+            level.AddParticle(ParticleOptions::Dust(ColoredTorches::kColor[color], 0.75f), x, y, z, 0.0, 0.0, 0.0);
         }
 
         // RedstoneTorchBlock.animateTick.
@@ -918,6 +937,10 @@ namespace Game {
         Attach(blocks, B::SoulWallTorch,   &WallTorchParticles<K::SoulFireFlame>);
         Attach(blocks, B::CopperTorch,     &TorchParticles<K::CopperFireFlame>);
         Attach(blocks, B::CopperWallTorch, &WallTorchParticles<K::CopperFireFlame>);
+        for (int c = 0; c < ColoredTorches::kCount; ++c) {
+            Attach(blocks, ColoredTorches::Standing(c), &DyedTorchParticles<false>);
+            Attach(blocks, ColoredTorches::Wall(c),     &DyedTorchParticles<true>);
+        }
         Attach(blocks, B::RedstoneTorch,     &RedstoneTorchParticles);
         Attach(blocks, B::RedstoneWallTorch, &RedstoneWallTorchParticles);
         // Redstone.

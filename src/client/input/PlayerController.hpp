@@ -200,6 +200,10 @@ namespace Game {
         // MC continuous-mine cadence (every MINE_SWING_TICKS).
         bool ConsumeMiningSwingTrigger();
 
+        // The vein-mine keys were let go: the server stops every vein mine
+        // still spreading (Client::VeinMineClient::TakeReleaseEdge).
+        void SendVeinMineRelease();
+
         // Get player reference (for compatibility during refactor)
         ClientPlayer* GetPlayer() { return player; }
         const ClientPlayer* GetPlayer() const { return player; }
@@ -310,9 +314,10 @@ namespace Game {
         // absent, it is the level the crosshair's block is in.
         // `fromUse` marks a placement that came from the held item's own
         // `use` clip (PlaceOnWaterBlockItem) rather than from the crosshair.
+        // `skyFaceGesture` marks the sky-face gesture (IsSkyFaceGesture).
         uint32_t SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract = false,
                                std::optional<Game::DimensionId> dimension = std::nullopt,
-                               bool fromUse = false);
+                               bool fromUse = false, bool skyFaceGesture = false);
 
         // Raycast face numbering -> MC Direction ordinals. Shared by the
         // outgoing packet and the local placement prediction, so the two
@@ -379,6 +384,12 @@ namespace Game {
         // The fill tool's share of a right-click; true when it took the
         // click (a corner marked, a box sent) and nothing else should.
         bool HandleFillClick(const std::optional<RaycastHit>& hit);
+        // The sky-face gesture (Game::SkyFaces): a sky block in the main
+        // hand, the sneak and sprint KEYS both down (sneaking stops a
+        // grounded sprint, so not the states), and the crosshair on a door.
+        // The server toggles the clicked face; nothing is placed and the
+        // door does not swing.
+        bool IsSkyFaceGesture(const RaycastHit& hit) const;
         // The cell a fill corner lands in when the crosshair is on nothing:
         // a few blocks out along the look, if the held block could go there.
         bool FillAirCell(glm::ivec3& outCell, Game::BlockState& outState) const;

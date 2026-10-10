@@ -339,6 +339,19 @@ namespace Client {
             return m_skyBlockChunks;
         }
 
+        // Door cells with sky faces (Game::SkyFacesBlockEntity) in the loaded
+        // chunks: world position → door-frame face mask. Render::
+        // SkyBlockRenderer's walk for doors; published, whole, to the mesher
+        // (Render::Mesher::SetSkyFaces) on every change so it leaves those
+        // faces out. MAIN THREAD ONLY.
+        const std::unordered_map<glm::ivec3, uint8_t, Game::IVec3Hash>& SkyFaces() const {
+            return m_skyFaces;
+        }
+        // The block entity at `pos` arrived, changed or went
+        // (ClientConnection's block-entity handlers): re-read its sky faces
+        // and remesh its section if they changed.
+        void RefreshSkyFaces(const glm::ivec3& pos);
+
         // Write a block into the client's chunk store and mark the affected
         // sections dirty. This is the shared body behind ProcessBlockChange,
         // predictions and rollbacks.
@@ -548,6 +561,19 @@ namespace Client {
             if (chunk.skyBlocks.empty()) m_skyBlockChunks.erase(chunk.position);
             else m_skyBlockChunks.insert(chunk.position);
         }
+        // Sky faces (SkyFaces). Kept exact wherever a door's entity or its
+        // chunk comes and goes: the block-entity packets (RefreshSkyFaces),
+        // SetBlockLocal (an entity dropped with its block), arrival (the new
+        // chunk data has no entities yet; their packets follow), UnloadChunk,
+        // RestoreRetainedChunk and ClearAllChunks.
+        std::unordered_map<glm::ivec3, uint8_t, Game::IVec3Hash> m_skyFaces;
+        // Re-reads one cell's entry; true when it changed.
+        bool SyncSkyFace(const ClientChunk& chunk, const glm::ivec3& pos);
+        // Drops / lists one chunk's entries; true when any changed.
+        bool DropChunkSkyFaces(Game::Math::ChunkPos chunkPos);
+        bool AddChunkSkyFaces(const ClientChunk& chunk);
+        // Hands the mesher a fresh copy of m_skyFaces for this level.
+        void PublishSkyFaces();
         struct Retained {
             std::unique_ptr<ClientChunk> chunk;
             size_t bytes = 0;

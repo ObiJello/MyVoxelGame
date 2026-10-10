@@ -28,6 +28,8 @@
 #include "../entity/LocalItemCooldowns.hpp"
 #include "common/world/block/BlockInteraction.hpp"
 #include "common/world/block/BlockPlacement.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
+#include "VeinMineClient.hpp"
 #include "common/world/block/SnowLayerBlock.hpp"
 #include "common/world/block/CandleBlocks.hpp"
 #include "common/physics/Physics.hpp"
@@ -149,8 +151,21 @@ namespace Game {
         // (Input::SetUiActive) reads as "not held".
         if (action == Network::BlockActionType::STOP_DESTROY ||
             action == Network::BlockActionType::BREAK) {
-            packet.veinMine = Input::IsDown(*Input::Binds::Sneak) &&
-                              Input::IsDown(*Input::Binds::VeinMine);
+            packet.veinMine = ::Client::VeinMineClient::KeysHeld();
+            if (packet.veinMine) {
+                // The shape, and the facing the stairs run along — taken
+                // along the ray that found the block when it is still the
+                // one under the crosshair, as the highlight took it.
+                Game::Direction facing = Game::Direction::North;
+                if (player && player->lastBlockHit.has_value() && player->lastBlockHit->blockPos == pos) {
+                    facing = ::Client::VeinMineClient::FacingFor(*player->lastBlockHit);
+                } else {
+                    float yaw = 0.0f, pitch = 0.0f;
+                    LookAngles(yaw, pitch);
+                    facing = Game::FromYRot(yaw);
+                }
+                ::Client::VeinMineClient::FillPacket(packet, facing);
+            }
         }
         auto data = Network::Serialization::Serialize(packet);
         auto connection = networkClient->GetConnection();
@@ -159,6 +174,10 @@ namespace Game {
             connection->SendPacket(static_cast<uint8_t>(Network::PacketId::BlockActionC2S), data);
         }
         return packet.sequenceNumber;
+    }
+
+    void ClientPlayerController::SendVeinMineRelease() {
+        SendDigPacket(Network::BlockActionType::VEIN_MINE_RELEASE, glm::ivec3(0), BlockID::Air);
     }
 
     void ClientPlayerController::SetPlayer(ClientPlayer* playerPtr) {
@@ -431,7 +450,7 @@ namespace Game {
 
     uint32_t ClientPlayerController::SendUseItemOn(const RaycastHit& hit, int hand, bool altInteract,
                                                    std::optional<Game::DimensionId> dimension,
-                                                   bool fromUse) {
+                                                   bool fromUse, bool skyFaceGesture) {
         // Build and send BlockPlaceC2S packet (Minecraft-compatible)
         Log::Debug("SendUseItemOn called for block (%d,%d,%d), hand=%d alt=%d",
                   hit.blockPos.x, hit.blockPos.y, hit.blockPos.z, hand, altInteract ? 1 : 0);
@@ -469,6 +488,7 @@ namespace Game {
             dimension ? *dimension
                       : (player ? player->lastBlockHitDimension : Game::DimensionId::Overworld)));
         packet.fromUse = fromUse;
+        packet.skyFaceGesture = skyFaceGesture;
         // The rotation in the clicked block's space (through a portal: the
         // look mapped through it) — what the server orients a placement by.
         packet.hasLookRotation = true;
@@ -502,6 +522,14 @@ namespace Game {
             case 5: return 2;  // -Z -> north
             default: return 1;
         }
+    }
+
+    bool ClientPlayerController::IsSkyFaceGesture(const RaycastHit& hit) const {
+        if (!player || player->IsSpectator() || player->gameMode == 2) return false;   // adventure: no
+        if (player->inventory.GetSelectedItem() != Game::ItemRegistry::FromBlock(BlockID::SkyBlock)) return false;
+        if (!Input::Binds::Sneak || !Input::Binds::Sprint) return false;
+        if (!Input::IsDown(*Input::Binds::Sneak) || !Input::IsDown(*Input::Binds::Sprint)) return false;
+        return Game::SkyFaces::AppliesTo(ReadBlock(hit.blockPos));
     }
 
     BlockID ClientPlayerController::HeldFillBlock() const {
@@ -1709,6 +1737,10 @@ namespace Game {
         if (held == Game::Items::PortalGun) return;
 #endif
 
+        // The sky-face gesture toggles on the click edge only: a repeat
+        // would flip the face back and forth, and must not place either.
+        if (IsSkyFaceGesture(*currentHit)) return;
+
         OnHotbarChanged(player->inventory.GetSelectedSlot());
         // Resolve the prediction BEFORE sending — once the block is predicted
         // into the chunk cache the target cell is no longer Air and the
@@ -2381,6 +2413,21 @@ namespace Game {
                 // The fill tool first: with Alt held the click marks a
                 // corner; with a corner marked it sends the box.
                 if (HandleFillClick(currentHit)) {
+                    armSwingPending = true;
+                    rightClickDelay = PLACE_REFIRE_TICKS;
+                    placeButtonHeld = true;
+                    return;
+                }
+
+                // The sky-face gesture: the server toggles the door's face
+                // (it arrives as the door's sky-faces block entity). Nothing
+                // to predict but the sound and the swing — no placement, no
+                // door swing, nothing consumed.
+                if (currentHit.has_value() && IsSkyFaceGesture(*currentHit)) {
+                    OnHotbarChanged(player->inventory.GetSelectedSlot());
+                    SendUseItemOn(*currentHit, 0, /*altInteract=*/false, std::nullopt,
+                                  /*fromUse=*/false, /*skyFaceGesture=*/true);
+                    PlayBlockPlaceSound(currentHit->blockPos, Game::BlockStates::Default(BlockID::SkyBlock));
                     armSwingPending = true;
                     rightClickDelay = PLACE_REFIRE_TICKS;
                     placeButtonHeld = true;

@@ -119,6 +119,14 @@ namespace Game::Lighting {
             return true;
         }
 
+        // The same storage as `o`: one shared array, or both homogeneous at
+        // one value. A cheap stand-in for ContentEquals where layers are
+        // shared on purpose (a coloured channel that equals block light —
+        // ChunkLight::ShareWhiteChannels).
+        bool SharesWith(const DataLayer& o) const {
+            return m_data ? m_data == o.m_data : (!o.m_data && m_default == o.m_default);
+        }
+
         // An independent copy (never shares the array).
         DataLayer DeepCopy() const {
             DataLayer d;

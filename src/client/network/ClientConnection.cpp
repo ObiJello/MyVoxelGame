@@ -660,6 +660,10 @@ namespace Client {
         clientChunk->chunkData->SetBlockEntity(lx, packet.worldY, lz, std::move(be));
         if (ticks) g_clientChunkManager->RegisterTickingBlockEntity(
             glm::ivec3(packet.worldX, packet.worldY, packet.worldZ));
+        // A door's sky faces are meshed around (Render::Mesher::SetSkyFaces).
+        if (packet.typeId == Game::BlockEntityTypeIds::OBEY_SKY_FACES) {
+            g_clientChunkManager->RefreshSkyFaces(glm::ivec3(packet.worldX, packet.worldY, packet.worldZ));
+        }
     }
 
     void ClientConnection::HandleBlockEvent(const Network::BlockEntityActionS2CPacket& packet) {
@@ -682,6 +686,8 @@ namespace Client {
         const int lx = packet.worldX - chunkPos.x * 16;
         const int lz = packet.worldZ - chunkPos.z * 16;
         clientChunk->chunkData->RemoveBlockEntity(lx, packet.worldY, lz);
+        // A door's last sky face turned back.
+        g_clientChunkManager->RefreshSkyFaces(glm::ivec3(packet.worldX, packet.worldY, packet.worldZ));
     }
 
     void ClientConnection::HandleChatMessage(const Network::ChatMessageS2CPacket& packet) {

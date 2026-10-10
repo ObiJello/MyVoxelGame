@@ -20,6 +20,7 @@
 #include <deque>
 #include <optional>
 #include <vector>
+#include <unordered_map>
 #include <unordered_set>
 #include <glm/glm.hpp>
 
@@ -600,6 +601,14 @@ namespace Game {
         ScheduledTickAccess* Ticks() override { return &m_blockTicks; }
         LevelTicks&          BlockTicks()     { return m_blockTicks; }
 
+        // Vein mine (PlayerSession): the falling blocks a spreading mine has
+        // still to break stay where they are until their turn, so breaking
+        // the ring under them does not drop them out of the shape. Counted,
+        // as two mines may share a cell. Server thread.
+        void HoldFall(const glm::ivec3& pos);
+        void ReleaseFall(const glm::ivec3& pos);
+        bool IsFallHeld(const glm::ivec3& pos) const override;
+
         // MC ServerLevel's per-tick cap on scheduled ticks (65536). Far above
         // anything a real world produces; it exists so a runaway feedback loop
         // degrades into lag instead of hanging the tick thread.
@@ -798,6 +807,8 @@ namespace Game {
         uint64_t m_blockTickingVersion = ~uint64_t{0};
         // Lookup form of the above — see SetBlockTickingChunks.
         std::unordered_set<uint64_t> m_blockTickingKeys;
+        // HoldFall: BlockPos.asLong → how many mines hold the cell.
+        std::unordered_map<uint64_t, int> m_fallHolds;
 
         // Chunks announced with worldgen post-processing pending (see
         // ChunkProvider::SetChunkPostProcessCallback), keyed like

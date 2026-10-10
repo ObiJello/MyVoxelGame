@@ -236,7 +236,6 @@ namespace Game::Anvil {
         w.Bool("dimension_stack",   data.dimensionStack);
         w.Bool("redstone_plus",     data.redstonePlus);
         w.Bool("redstone_chunks",   data.redstoneChunks);
-        w.Int ("vein_mine_max_blocks", data.veinMineMaxBlocks);
         w.Int ("player_step_height", data.playerStepHeight);
         w.Bool("shared_vitals",     data.sharedVitals);
         w.Bool("advancements_with_cheats", data.advancementsWithCheats);
@@ -448,7 +447,6 @@ namespace Game::Anvil {
         out.dimensionStack   = RuleBool(obey.get(), {"dimension_stack"},   RuleBool(r, {"obeyDimensionStack"}, out.dimensionStack));
         out.redstonePlus     = RuleBool(obey.get(), {"redstone_plus"},     out.redstonePlus);
         out.redstoneChunks   = RuleBool(obey.get(), {"redstone_chunks"},   out.redstoneChunks);
-        out.veinMineMaxBlocks = RuleInt(obey.get(), {"vein_mine_max_blocks"}, out.veinMineMaxBlocks);
         out.playerStepHeight = RuleInt(obey.get(), {"player_step_height"}, out.playerStepHeight);
         out.sharedVitals     = RuleBool(obey.get(), {"shared_vitals"},     out.sharedVitals);
         out.advancementsWithCheats = RuleBool(obey.get(), {"advancements_with_cheats"}, out.advancementsWithCheats);

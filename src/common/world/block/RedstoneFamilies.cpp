@@ -2,6 +2,7 @@
 #include "common/world/block/RedstoneFamilies.hpp"
 
 #include "common/world/block/BlockRegistry.hpp"
+#include "common/world/block/ColoredTorches.hpp"
 
 #include <array>
 #include <string>
@@ -70,12 +71,13 @@ namespace Game {
                 if (slug == "repeater" || slug == "comparator") bits |= kDiode;
                 // ambrosium_torch: the Aether's TorchBlock copy of Blocks.TORCH.
                 if (slug == "torch" || slug == "soul_torch" || slug == "redstone_torch" ||
-                    slug == "blue_redstone_torch" || slug == "ambrosium_torch") {
+                    slug == "blue_redstone_torch" || slug == "ambrosium_torch" ||
+                    ColoredTorches::IsStanding(static_cast<BlockID>(i))) {
                     bits |= kStandingTorch;
                 }
                 if (slug == "wall_torch" || slug == "soul_wall_torch" ||
                     slug == "redstone_wall_torch" || slug == "blue_redstone_wall_torch" ||
-                    slug == "ambrosium_wall_torch") {
+                    slug == "ambrosium_wall_torch" || ColoredTorches::IsWall(static_cast<BlockID>(i))) {
                     bits |= kWallTorch;
                 }
                 if (slug == "iron_door" || slug == "iron_trapdoor") bits |= kIron;
@@ -99,6 +101,10 @@ namespace Game {
             if (blue  != BlockID::Air) s_wallTorch[static_cast<size_t>(blue)]  = find("blue_redstone_wall_torch");
             const BlockID ambrosium = find("ambrosium_torch");
             if (ambrosium != BlockID::Air) s_wallTorch[static_cast<size_t>(ambrosium)] = find("ambrosium_wall_torch");
+            // The dyed torches pair by BlockID (ColoredTorches).
+            for (int c = 0; c < ColoredTorches::kCount; ++c) {
+                s_wallTorch[static_cast<size_t>(ColoredTorches::Standing(c))] = ColoredTorches::Wall(c);
+            }
         }
 
         inline bool Has(BlockID id, uint16_t bit) {

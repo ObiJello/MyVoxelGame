@@ -4,12 +4,18 @@
 // ChunkDataS2C (the full column, appended after the sections) and
 // LightUpdateS2C (just the sections a light run touched):
 //
-//   u8   version (1)
+//   u8   version (2)
 //   u32  skyMask      bit i: a sky layer for light section i follows
 //   u32  blockMask    bit i: a block layer for light section i follows
 //   per set bit of skyMask, ascending, then of blockMask:
 //        u8 tag       0..15  a homogeneous layer of that value (no bytes)
 //                     16     2048 bytes of nibbles follow (DataLayer layout)
+//   then per set bit of blockMask, ascending, the coloured channels (engine,
+//   ChunkLight's header note) red, green, blue:
+//        u8 tag       0..16  as above
+//                     17     the same as this section's block layer — every
+//                            section no coloured light reaches, one byte
+// Version 1 (no channels) reads as white light everywhere.
 //
 // MC sends every non-empty layer as 2048 bytes and zlib squeezes the sky's
 // solid 15s back out; the homogeneous tag keeps that off the wire and out of
@@ -25,8 +31,9 @@
 
 namespace Game::Lighting::NetCodec {
 
-    inline constexpr uint8_t kVersion   = 1;
+    inline constexpr uint8_t kVersion   = 2;
     inline constexpr uint8_t kTagArray  = 16;
+    inline constexpr uint8_t kTagSameAsBlock = 17;
     inline constexpr uint32_t kAllSections = (1u << kLightSectionCount) - 1u;
 
     struct Decoded {
@@ -34,6 +41,9 @@ namespace Game::Lighting::NetCodec {
         uint32_t blockMask = 0;
         std::array<DataLayer, kLightSectionCount> sky{};
         std::array<DataLayer, kLightSectionCount> block{};
+        // Per blockMask bit: red, green, blue; block light's own storage
+        // where the channel is white.
+        std::array<std::array<DataLayer, kLightSectionCount>, 3> channel{};
     };
 
     inline void WriteLayer(Network::PacketBuffer& out, const DataLayer& layer) {
@@ -59,6 +69,15 @@ namespace Game::Lighting::NetCodec {
         for (int i = 0; i < kLightSectionCount; ++i) {
             if (sectionMask & (1u << i)) WriteLayer(out, light.block[static_cast<size_t>(i)]);
         }
+        for (int i = 0; i < kLightSectionCount; ++i) {
+            if (!(sectionMask & (1u << i))) continue;
+            const DataLayer& block = light.block[static_cast<size_t>(i)];
+            for (const auto& c : light.channel) {
+                const DataLayer& layer = c[static_cast<size_t>(i)];
+                if (layer.SharesWith(block)) out.WriteByte(kTagSameAsBlock);
+                else WriteLayer(out, layer);
+            }
+        }
     }
 
     inline DataLayer ReadLayer(Network::PacketReader& in) {
@@ -71,7 +90,8 @@ namespace Game::Lighting::NetCodec {
 
     // Throws (PacketReader) on a truncated block; false on an unknown version.
     inline bool Read(Network::PacketReader& in, Decoded& out) {
-        if (in.ReadByte() != kVersion) return false;
+        const uint8_t version = in.ReadByte();
+        if (version != 1 && version != kVersion) return false;
         out.skyMask = in.ReadInt() & kAllSections;
         out.blockMask = in.ReadInt() & kAllSections;
         for (int i = 0; i < kLightSectionCount; ++i) {
@@ -79,6 +99,17 @@ namespace Game::Lighting::NetCodec {
         }
         for (int i = 0; i < kLightSectionCount; ++i) {
             if (out.blockMask & (1u << i)) out.block[static_cast<size_t>(i)] = ReadLayer(in);
+        }
+        for (int i = 0; i < kLightSectionCount; ++i) {
+            if (!(out.blockMask & (1u << i))) continue;
+            const DataLayer& block = out.block[static_cast<size_t>(i)];
+            for (auto& c : out.channel) {
+                if (version == 1) { c[static_cast<size_t>(i)] = block; continue; }
+                const uint8_t tag = in.ReadByte();
+                if (tag == kTagSameAsBlock) c[static_cast<size_t>(i)] = block;
+                else if (tag == kTagArray)  c[static_cast<size_t>(i)] = DataLayer::FromBytes(in.ReadSpan(DataLayer::kSize));
+                else                        c[static_cast<size_t>(i)] = DataLayer(tag & 15);
+            }
         }
         return true;
     }
@@ -90,6 +121,11 @@ namespace Game::Lighting::NetCodec {
             if (!(sectionMask & (1u << i))) continue;
             if (hasSkyLight) n += 1 + (light.sky[static_cast<size_t>(i)].IsDefinitelyHomogeneous() ? 0 : DataLayer::kSize);
             n += 1 + (light.block[static_cast<size_t>(i)].IsDefinitelyHomogeneous() ? 0 : DataLayer::kSize);
+            for (const auto& c : light.channel) {
+                const DataLayer& layer = c[static_cast<size_t>(i)];
+                n += 1 + ((layer.SharesWith(light.block[static_cast<size_t>(i)]) || layer.IsDefinitelyHomogeneous())
+                              ? 0 : DataLayer::kSize);
+            }
         }
         return n;
     }

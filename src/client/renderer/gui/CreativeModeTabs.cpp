@@ -323,6 +323,16 @@ namespace Render {
             "potted_tf_mangrove_sapling", "potted_darkwood_sapling",
             "potted_skyroot_sapling", "potted_golden_oak_sapling",
             "potted_white_flower", "potted_purple_flower",
+            // The dyed torches (2026-10-10): survival-only for now — crafted
+            // from a torch and a dye, kept out of every tab and the search.
+            "white_torch", "white_wall_torch", "orange_torch", "orange_wall_torch",
+            "magenta_torch", "magenta_wall_torch", "light_blue_torch", "light_blue_wall_torch",
+            "yellow_torch", "yellow_wall_torch", "lime_torch", "lime_wall_torch",
+            "pink_torch", "pink_wall_torch", "gray_torch", "gray_wall_torch",
+            "light_gray_torch", "light_gray_wall_torch", "cyan_torch", "cyan_wall_torch",
+            "purple_torch", "purple_wall_torch", "blue_torch", "blue_wall_torch",
+            "brown_torch", "brown_wall_torch", "green_torch", "green_wall_torch",
+            "red_torch", "red_wall_torch", "black_torch", "black_wall_torch",
         };
 
         // Custom items outside the pure-item table: registry path -> id.

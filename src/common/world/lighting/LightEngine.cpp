@@ -185,8 +185,15 @@ namespace Game::Lighting {
 
     // ── BlockLightEngine ────────────────────────────────────────────────────
 
+    int BlockLightEngine::StateEmission(BlockState state) const {
+        const StateLightInfo& info = BlockLightProperties::Info(state);
+        if (Layer() == LightLayer::Block) return info.emission;
+        const int channel = static_cast<int>(Layer()) - static_cast<int>(LightLayer::Red);
+        return BlockLightProperties::ChannelEmission(info, static_cast<LightChannel>(channel));
+    }
+
     int BlockLightEngine::GetEmission(int64_t blockNode, BlockState state) {
-        const int emission = BlockLightProperties::Emission(state);
+        const int emission = StateEmission(state);
         return emission > 0 && LightOnAt(blockNode) ? emission : 0;
     }
 
@@ -267,14 +274,14 @@ namespace Game::Lighting {
             if (!states.IsGlobalPalette()) {
                 bool any = false;
                 for (uint32_t id : states.Palette()) {
-                    if (BlockLightProperties::Emission(BlockState::FromRawId(id)) > 0) { any = true; break; }
+                    if (StateEmission(BlockState::FromRawId(id)) > 0) { any = true; break; }
                 }
                 if (!any) continue;
             }
             const int baseY = Config::MinY + si * 16;
             for (int i = 0; i < 4096; ++i) {
                 const BlockState state = BlockState::FromRawId(states.Get(static_cast<size_t>(i)));
-                const int emission = BlockLightProperties::Emission(state);
+                const int emission = StateEmission(state);
                 if (emission <= 0) continue;
                 const int x = baseX + (i & 15), y = baseY + (i >> 8), z = baseZ + ((i >> 4) & 15);
                 EnqueueIncrease(Pos::Pack(x, y, z),
@@ -458,7 +465,9 @@ namespace Game::Lighting {
     // ── LevelLightEngine ────────────────────────────────────────────────────
 
     LevelLightEngine::LevelLightEngine(LightChunkGetter* getter, bool hasSkyLight)
-        : m_hasSkyLight(hasSkyLight), m_block(getter), m_sky(getter) {}
+        : m_hasSkyLight(hasSkyLight), m_block(getter), m_sky(getter),
+          m_channels{ BlockLightEngine(getter, LightLayer::Red), BlockLightEngine(getter, LightLayer::Green),
+                      BlockLightEngine(getter, LightLayer::Blue) } {}
 
     void LevelLightEngine::CheckBlock(int x, int y, int z) {
         const int64_t pos = Pos::Pack(x, y, z);
@@ -466,12 +475,20 @@ namespace Game::Lighting {
         if (m_hasSkyLight) m_sky.CheckBlock(pos);
     }
 
+    void LevelLightEngine::CheckChannels(int x, int y, int z) {
+        const int64_t pos = Pos::Pack(x, y, z);
+        for (auto& c : m_channels) c.CheckBlock(pos);
+    }
+
     bool LevelLightEngine::HasLightWork() const {
-        return (m_hasSkyLight && m_sky.HasLightWork()) || m_block.HasLightWork();
+        if ((m_hasSkyLight && m_sky.HasLightWork()) || m_block.HasLightWork()) return true;
+        for (const auto& c : m_channels) if (c.HasLightWork()) return true;
+        return false;
     }
 
     int LevelLightEngine::RunLightUpdates() {
         int count = m_block.RunLightUpdates();
+        for (auto& c : m_channels) count += c.RunLightUpdates();
         if (m_hasSkyLight) count += m_sky.RunLightUpdates();
         return count;
     }
@@ -507,9 +524,49 @@ namespace Game::Lighting {
         blockEngine.PropagateLightSources(chunk);
         blockEngine.RunLightUpdates();
 
+        // The coloured channels: worked out only when the chunk holds a
+        // coloured emitter. Without one, every channel IS block light (the
+        // neighbours' colour arrives through LevelLightManager's border
+        // reconciliation), so each takes block light's storage.
+        chunk.light.coloredEmitters = CountColoredEmitters(chunk);
+        if (chunk.light.coloredEmitters > 0) {
+            thread_local BlockLightEngine redEngine(&getter, LightLayer::Red);
+            thread_local BlockLightEngine greenEngine(&getter, LightLayer::Green);
+            thread_local BlockLightEngine blueEngine(&getter, LightLayer::Blue);
+            for (BlockLightEngine* engine : { &redEngine, &greenEngine, &blueEngine }) {
+                engine->SetGetter(&getter);
+                engine->PropagateLightSources(chunk);
+                engine->RunLightUpdates();
+            }
+        } else {
+            for (auto& c : chunk.light.channel) c = chunk.light.block;
+        }
+
         chunk.light.Compact();
         chunk.light.lightCorrect = true;
         getter.chunk = nullptr;
+    }
+
+    int CountColoredEmitters(const Chunk& chunk) {
+        int count = 0;
+        for (int si = 0; si < Math::SECTIONS_PER_CHUNK; ++si) {
+            const ChunkSection* section = chunk.GetSection(si);
+            if (!section || section->IsAllAir()) continue;
+            const PalettedContainer& states = section->States();
+            if (!states.IsGlobalPalette()) {
+                bool any = false;
+                for (uint32_t id : states.Palette()) {
+                    if (BlockLightProperties::ColoredEmission(BlockState::FromRawId(id))) { any = true; break; }
+                }
+                if (!any) continue;
+            }
+            for (int i = 0; i < 4096; ++i) {
+                if (BlockLightProperties::ColoredEmission(BlockState::FromRawId(states.Get(static_cast<size_t>(i))))) {
+                    ++count;
+                }
+            }
+        }
+        return count;
     }
 
     int GetBrightness(const Chunk* chunk, LightLayer layer, int x, int y, int z, bool hasSkyLight) {

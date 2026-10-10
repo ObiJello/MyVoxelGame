@@ -4336,6 +4336,23 @@ namespace Game {
         { 0, "purple_flower", 0, 0, 0, 0, 0, 0 },
         // Sky Block (2026-10-02), appended by hand: blocks/sky_block.json, tinted glass's table.
         { 0, "sky_block", 0, 0, 0, 0, 0, 0 },
+        // Dyed torches (2026-10-10), appended by hand: blocks/<colour>_torch.json, the torch's table.
+        { 0, "white_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "orange_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "magenta_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "light_blue_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "yellow_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "lime_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "pink_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "gray_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "light_gray_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "cyan_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "purple_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "blue_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "brown_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "green_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "red_torch", 0, 0, 0, 0, 0, 0 },
+        { 0, "black_torch", 0, 0, 0, 0, 0, 0 },
     };
     const size_t kLootEntryCount = sizeof(kLootEntries) / sizeof(kLootEntries[0]);
 
@@ -5859,6 +5876,23 @@ namespace Game {
         { 1, 1734, 1, 1785, 1, 0, 0 },
         // Sky Block (2026-10-02), appended by hand: its one pool (survives_explosion, shared row 1540).
         { 1, 1735, 1, 1540, 1, 0, 0 },
+        // Dyed torches (2026-10-10), appended by hand: one pool each (survives_explosion, the torch's row 1543).
+        { 1, 1736, 1, 1543, 1, 0, 0 },
+        { 1, 1737, 1, 1543, 1, 0, 0 },
+        { 1, 1738, 1, 1543, 1, 0, 0 },
+        { 1, 1739, 1, 1543, 1, 0, 0 },
+        { 1, 1740, 1, 1543, 1, 0, 0 },
+        { 1, 1741, 1, 1543, 1, 0, 0 },
+        { 1, 1742, 1, 1543, 1, 0, 0 },
+        { 1, 1743, 1, 1543, 1, 0, 0 },
+        { 1, 1744, 1, 1543, 1, 0, 0 },
+        { 1, 1745, 1, 1543, 1, 0, 0 },
+        { 1, 1746, 1, 1543, 1, 0, 0 },
+        { 1, 1747, 1, 1543, 1, 0, 0 },
+        { 1, 1748, 1, 1543, 1, 0, 0 },
+        { 1, 1749, 1, 1543, 1, 0, 0 },
+        { 1, 1750, 1, 1543, 1, 0, 0 },
+        { 1, 1751, 1, 1543, 1, 0, 0 },
     };
     const size_t kLootPoolCount = sizeof(kLootPools) / sizeof(kLootPools[0]);
 
@@ -7336,6 +7370,23 @@ namespace Game {
         { "potted_golden_oak_sapling", 1509, 2, 0, 0 },
         { "potted_white_flower", 1511, 2, 0, 0 },
         { "potted_purple_flower", 1513, 2, 0, 0 },
+        // Dyed torches (2026-10-10), appended by hand (LootTables looks tables up by slug).
+        { "white_torch", 1516, 1, 0, 0 },
+        { "orange_torch", 1517, 1, 0, 0 },
+        { "magenta_torch", 1518, 1, 0, 0 },
+        { "light_blue_torch", 1519, 1, 0, 0 },
+        { "yellow_torch", 1520, 1, 0, 0 },
+        { "lime_torch", 1521, 1, 0, 0 },
+        { "pink_torch", 1522, 1, 0, 0 },
+        { "gray_torch", 1523, 1, 0, 0 },
+        { "light_gray_torch", 1524, 1, 0, 0 },
+        { "cyan_torch", 1525, 1, 0, 0 },
+        { "purple_torch", 1526, 1, 0, 0 },
+        { "blue_torch", 1527, 1, 0, 0 },
+        { "brown_torch", 1528, 1, 0, 0 },
+        { "green_torch", 1529, 1, 0, 0 },
+        { "red_torch", 1530, 1, 0, 0 },
+        { "black_torch", 1531, 1, 0, 0 },
     };
     const size_t kLootTableCount = sizeof(kLootTables) / sizeof(kLootTables[0]);
 

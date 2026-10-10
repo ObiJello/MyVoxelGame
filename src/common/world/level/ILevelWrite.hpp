@@ -107,6 +107,11 @@ namespace Game {
         // says the same thing by handing ClientLevel a BlackholeTickAccess.
         virtual ScheduledTickAccess* Ticks() { return nullptr; }
 
+        // Engine (vein mine): a falling block here waits — its fall is put
+        // off while a spreading vein mine still means to break it
+        // (World::HoldFall). False everywhere else.
+        virtual bool IsFallHeld(const glm::ivec3& pos) const { (void)pos; return false; }
+
         // ── Neighbour notification (MC Level / NeighborUpdater) ────────────
         //
         // The writable half of the update machinery, which redstone lives on.

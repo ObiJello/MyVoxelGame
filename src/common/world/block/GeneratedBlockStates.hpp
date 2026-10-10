@@ -201,9 +201,9 @@ namespace Game {
     // the size of the global state id space, and MC's
     // Block.BLOCK_STATE_REGISTRY.size(). Generated, never a literal: the
     // palette width is derived from it and must move when it does.
-    inline constexpr uint32_t kBlockStateCount = 44280;
+    inline constexpr uint32_t kBlockStateCount = 44360;
     inline constexpr int      kBlockStateBits  = 16;
-    inline constexpr size_t   kStatefulBlockCount = 991;
+    inline constexpr size_t   kStatefulBlockCount = 1007;
 
     static_assert(kBlockStateCount <= (1u << kBlockStateBits),
                   "state id space does not fit the generated palette width");

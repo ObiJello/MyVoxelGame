@@ -130,6 +130,24 @@ ALIAS_EXACT = {
     "blue_redstone_wall_torch": "redstone_wall_torch",
     # Sky Block (2026-10-02): a plain cube, no properties.
     "sky_block": "tinted_glass",
+    # Coloured torches (2026-10-10): TorchBlock / WallTorchBlock — vanilla's
+    # torch in everything but their light's colour (BlockLightColor.inc).
+    "white_torch": "torch", "white_wall_torch": "wall_torch",
+    "orange_torch": "torch", "orange_wall_torch": "wall_torch",
+    "magenta_torch": "torch", "magenta_wall_torch": "wall_torch",
+    "light_blue_torch": "torch", "light_blue_wall_torch": "wall_torch",
+    "yellow_torch": "torch", "yellow_wall_torch": "wall_torch",
+    "lime_torch": "torch", "lime_wall_torch": "wall_torch",
+    "pink_torch": "torch", "pink_wall_torch": "wall_torch",
+    "gray_torch": "torch", "gray_wall_torch": "wall_torch",
+    "light_gray_torch": "torch", "light_gray_wall_torch": "wall_torch",
+    "cyan_torch": "torch", "cyan_wall_torch": "wall_torch",
+    "purple_torch": "torch", "purple_wall_torch": "wall_torch",
+    "blue_torch": "torch", "blue_wall_torch": "wall_torch",
+    "brown_torch": "torch", "brown_wall_torch": "wall_torch",
+    "green_torch": "torch", "green_wall_torch": "wall_torch",
+    "red_torch": "torch", "red_wall_torch": "wall_torch",
+    "black_torch": "torch", "black_wall_torch": "wall_torch",
     # 26.2/26.3 blocks (2026-09-05) — the upstream data is 1.21.6, so every
     # one of them copies the older block MC registers with the same class.
     "cinnabar": "stone", "chiseled_cinnabar": "stone", "polished_cinnabar": "stone",

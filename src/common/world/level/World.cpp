@@ -14,6 +14,7 @@
 #include "../block/entity/BlockEntityType.hpp"
 #include "../block/entity/BlockEntityTypes.hpp"
 #include "../block/entity/DoubleChest.hpp"   // IsCopperChestBlock: the kept block entity
+#include "../block/entity/SkyFacesBlockEntity.hpp"   // SkyFaces::AppliesTo: the kept block entity
 #include "common/world/block/entity/JukeboxBlockEntity.hpp"
 #include "../chunk/Chunk.hpp"
 #include "../math/WorldCoordinates.hpp"
@@ -587,8 +588,11 @@ namespace Game {
         // chest oxidizing, being waxed or scraped stays the same chest with
         // the same contents (CopperChestBlock: `oldState.is(#copper_chests)`).
         // CopperGolemStatueBlock: `oldState.is(#copper_golem_statues)`.
+        // A door's sky faces (SkyFacesBlockEntity) stay with it while the
+        // cell stays a door — a copper door weathering or being waxed.
         const bool keepBlockEntity = (IsCopperChestBlock(blockId) && IsCopperChestBlock(oldBlockId)) ||
-                                     (IsCopperGolemStatue(blockId) && IsCopperGolemStatue(oldBlockId));
+                                     (IsCopperGolemStatue(blockId) && IsCopperGolemStatue(oldBlockId)) ||
+                                     (SkyFaces::AppliesTo(blockId) && SkyFaces::AppliesTo(oldBlockId));
         // MayHaveBlockEntity, not HasBlockEntity: a block whose entity is
         // attached lazily (a crafting table's stored grid under the
         // shared_crafting_tables rule) must lose it — and spill it — too.
@@ -1466,6 +1470,28 @@ namespace Game {
     // advance to the front to match MC exactly would shift GetGameTime() by one
     // for every other subsystem in the tick, which is not this feature's call
     // to make.
+    namespace {
+        // MC BlockPos.asLong.
+        uint64_t FallHoldKey(const glm::ivec3& pos) {
+            return ((static_cast<uint64_t>(static_cast<uint32_t>(pos.x)) & 0x3FFFFFFull) << 38) |
+                   ((static_cast<uint64_t>(static_cast<uint32_t>(pos.z)) & 0x3FFFFFFull) << 12) |
+                    (static_cast<uint64_t>(static_cast<uint32_t>(pos.y)) & 0xFFFull);
+        }
+    } // namespace
+
+    void World::HoldFall(const glm::ivec3& pos) {
+        ++m_fallHolds[FallHoldKey(pos)];
+    }
+
+    void World::ReleaseFall(const glm::ivec3& pos) {
+        const auto it = m_fallHolds.find(FallHoldKey(pos));
+        if (it != m_fallHolds.end() && --it->second <= 0) m_fallHolds.erase(it);
+    }
+
+    bool World::IsFallHeld(const glm::ivec3& pos) const {
+        return !m_fallHolds.empty() && m_fallHolds.count(FallHoldKey(pos)) != 0;
+    }
+
     void World::ProcessBlockUpdates() {
         PROFILE_ZONE_N("BlockTicks");
         if (!m_chunkProvider) return;

@@ -816,6 +816,8 @@ set(GAME_SOURCES
             src/client/input/KeyMapping.cpp
             src/client/input/Input.hpp
             src/client/input/PlayerController.cpp
+            src/client/input/VeinMineClient.hpp
+            src/client/input/VeinMineClient.cpp
             src/client/input/PlayerController.hpp
             
             # Client entity
@@ -1401,6 +1403,8 @@ set(GAME_SOURCES
             src/common/world/block/entity/LecternBlockEntity.cpp
             src/common/world/block/entity/CraftingTableBlockEntity.hpp
             src/common/world/block/entity/CraftingTableBlockEntity.cpp
+            src/common/world/block/entity/SkyFacesBlockEntity.hpp
+            src/common/world/block/entity/SkyFacesBlockEntity.cpp
             src/common/world/block/entity/JukeboxBlockEntity.hpp
             src/common/world/block/entity/JukeboxBlockEntity.cpp
             src/common/world/block/entity/BrushableBlockEntity.cpp
@@ -1565,6 +1569,8 @@ set(GAME_SOURCES
             src/common/world/level/GameRules.cpp
             src/common/world/level/GameRules.hpp
             src/common/world/level/World.cpp
+            src/common/world/level/VeinMine.hpp
+            src/common/world/level/VeinMine.cpp
             src/common/world/level/World.hpp
             src/common/world/level/WorldGlobals.hpp
 

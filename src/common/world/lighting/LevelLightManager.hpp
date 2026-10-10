@@ -108,7 +108,7 @@ namespace Game::Lighting {
         Chunk* Lookup(int cx, int cz);
         void   Register(const std::shared_ptr<Chunk>& chunk);
         void   ReconcileBorders(Chunk& chunk);
-        void   ReconcileFace(Chunk& a, Chunk& b, Direction aToB);
+        void   ReconcileFace(Chunk& a, Chunk& b, Direction aToB, bool channels);
         void   DrainEvictions();
         void   ReleaseRunLocks();
 
@@ -118,6 +118,26 @@ namespace Game::Lighting {
         std::unordered_map<int64_t, std::vector<int64_t>> m_deferredChecks;   // chunk key -> block positions
         std::unordered_set<int64_t> m_missing;          // lookups that found nothing, this run
         SectionSet m_affected;
+
+        // ── Coloured light (ChunkLight's header note) ───────────────────────
+        // The three channels are propagated only where coloured light can be:
+        // within two chunks of a coloured emitter. Everywhere else they are
+        // block light, so a run with no coloured emitter near any of its
+        // checks propagates block light alone and then hands every affected
+        // section's channels block light's storage (FinishChannels). Light
+        // reaches 15 blocks, so a cell a check can change (within 15 of it)
+        // is lit only by emitters within 30 — two chunks.
+        //   m_coloredChunks       registered chunks with coloredEmitters > 0
+        //   m_channelCandidates   this run's checked positions
+        //   m_channelRun          a check this run needs the channels (a
+        //                         coloured emitter placed / removed, or one near)
+        std::unordered_set<int64_t> m_coloredChunks;
+        std::vector<int64_t>        m_channelCandidates;
+        bool                        m_channelRun = false;
+        bool ColorNear(int cx, int cz, int radius) const;
+        void NoteColoredEmitters(const Chunk& chunk);
+        void QueueCheck(int x, int y, int z);
+        void FinishChannels();
 
         bool m_inRun = false;
         std::vector<std::unique_lock<std::shared_mutex>> m_runLocks;

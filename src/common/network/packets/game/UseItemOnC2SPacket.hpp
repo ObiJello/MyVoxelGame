@@ -54,6 +54,12 @@ namespace Network {
         bool     hasLookRotation = false;
         float    lookYaw   = 0.0f;
         float    lookPitch = 0.0f;
+        // The sneak and sprint KEYS were both held at the click: the sky-face
+        // gesture (Game::SkyFaces — a sky block held against a door's face
+        // opens that face onto the sky). Keys, not states: sneaking stops a
+        // grounded sprint (Player::Tick), so the server's sprint flag can
+        // never be on with sneak. Trailing, optional.
+        bool     skyFaceGesture = false;
 
         UseItemOnC2SPacket() = default;
         UseItemOnC2SPacket(uint32_t h, int32_t x, int32_t y, int32_t z, uint32_t dir,
@@ -86,6 +92,7 @@ namespace Network {
                 buffer.WriteFloat(packet.lookYaw);
                 buffer.WriteFloat(packet.lookPitch);
             }
+            buffer.WriteByte(packet.skyFaceGesture ? 0x01 : 0x00);
             return buffer.GetData();
         }
 
@@ -117,6 +124,7 @@ namespace Network {
                     packet.lookYaw = packet.lookPitch = 0.0f;
                 }
             }
+            packet.skyFaceGesture = reader.HasMore() ? (reader.ReadByte() != 0) : false;
             return packet;
         }
 

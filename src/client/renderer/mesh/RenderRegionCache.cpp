@@ -36,6 +36,10 @@ namespace Render {
         copy->hasLight = true;
         copy->skyLight = chunk->chunkData->light.sky[static_cast<size_t>(sectionY + 1)];
         copy->blockLight = chunk->chunkData->light.block[static_cast<size_t>(sectionY + 1)];
+        for (size_t c = 0; c < copy->channelLight.size(); ++c) {
+            copy->channelLight[c] = chunk->chunkData->light.channel[c][static_cast<size_t>(sectionY + 1)];
+        }
+        copy->hasColor = chunk->chunkData->light.HasColor(sectionY + 1);
         if (sectionY < 0 || sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
             auto lightOnly = SectionCopyPtr(std::move(copy));   // allAir, no biomes
             m_sections.emplace(key, lightOnly);

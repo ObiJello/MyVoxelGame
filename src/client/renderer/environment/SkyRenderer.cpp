@@ -1398,8 +1398,8 @@ namespace Render {
         const float sunAngleRad = glm::radians(env.sunAngleDeg);
 
         PipelineState state;
-        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
-        state.depthCompareOp = CompareOp::LessEqual;
+        state.depthTestEnabled = m_depthMode != DepthMode::Off;   // SetDepthMode (sky_vk.vert: the far plane)
+        state.depthCompareOp = DepthCompareOp();
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1545,8 +1545,8 @@ namespace Render {
         const glm::mat4 vp = proj * viewRotation;
 
         PipelineState state;
-        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
-        state.depthCompareOp = CompareOp::LessEqual;
+        state.depthTestEnabled = m_depthMode != DepthMode::Off;   // SetDepthMode (sky_vk.vert: the far plane)
+        state.depthCompareOp = DepthCompareOp();
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1627,8 +1627,8 @@ namespace Render {
         const glm::mat4 vp = proj * viewRotation;
 
         PipelineState state;
-        state.depthTestEnabled = m_depthTested;   // the late sky: LessEqual at the far plane (sky_vk.vert)
-        state.depthCompareOp = CompareOp::LessEqual;
+        state.depthTestEnabled = m_depthMode != DepthMode::Off;   // SetDepthMode (sky_vk.vert: the far plane)
+        state.depthCompareOp = DepthCompareOp();
         state.depthWriteEnabled = false;
         state.blendEnabled = false;
         state.cullMode = CullMode::None;
@@ -1790,8 +1790,8 @@ namespace Render {
         PumpLayerResidency(other, /*active=*/false, dayTime, timeOfDay, rain, thunder, now);
 
         PipelineState state;
-        state.depthTestEnabled  = m_depthTested;   // the late sky (sky_vk.vert)
-        state.depthCompareOp    = CompareOp::LessEqual;
+        state.depthTestEnabled  = m_depthMode != DepthMode::Off;   // SetDepthMode (sky_vk.vert)
+        state.depthCompareOp    = DepthCompareOp();
         state.depthWriteEnabled = false;
         state.blendEnabled      = true;
         state.cullMode          = CullMode::None;

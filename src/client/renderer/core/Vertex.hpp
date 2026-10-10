@@ -99,10 +99,19 @@ namespace Render {
     //                          buffer adds the array's slab position at upload.
     //   light     RGBA8        r = block light, g = sky light, each 0..240 (MC
     //                          "smooth" light coords: level * 16, fractions
-    //                          from smooth lighting's blends); b, a = 0,
-    //                          reserved. The vertex shader samples the
+    //                          from smooth lighting's blends). b | a << 8 =
+    //                          the coloured light's TINT (engine; LightTint):
+    //                          how much of each channel the block light lacks,
+    //                          RGB565, 0 = white — what every vanilla vertex
+    //                          carries. The vertex shader samples the
     //                          lightmap with it (MC terrain.vsh:
-    //                          vertexColor = Color * sample_lightmap(UV2)).
+    //                          vertexColor = Color * sample_lightmap(UV2)), and
+    //                          for a tinted vertex once per channel at that
+    //                          channel's share of the block light. Face-map
+    //                          records and quad records carry no tint: a
+    //                          tinted face is always emitted as vertices
+    //                          (Mesher::TryStashGreedyQuad). Shader packs read
+    //                          r and g only.
     //                          A face-mapped rectangle ignores it: each
     //                          block's four corner lights are in its face-map
     //                          record and the fragment shader lights it per
@@ -151,6 +160,23 @@ namespace Render {
         }
         // MC LightCoordsUtil.FULL_BRIGHT.
         static constexpr uint32_t kFullBrightLight = 0xF0F0u;
+
+        // The coloured light's tint bits (bytes b and a) for channel levels
+        // r, g, b (any common scale): each channel's shortfall from the
+        // brightest, as 1 - level / max in RGB565, so white — and darkness —
+        // is 0. The shader scales the block light by 1 - shortfall per
+        // channel. OR it into a LightWord.
+        static uint32_t LightTint(int r, int g, int b) {
+            const int top = std::max({r, g, b});
+            if (top <= 0 || (r == g && g == b)) return 0;
+            const auto shortfall = [top](int level, int bits) {
+                const int maxCode = (1 << bits) - 1;
+                return static_cast<uint32_t>((maxCode * (top - level) + top / 2) / top);
+            };
+            const uint32_t tint = shortfall(r, 5) | (shortfall(g, 6) << 5) | (shortfall(b, 5) << 11);
+            return tint << 16;
+        }
+        static constexpr uint32_t kTintMask = 0xFFFF0000u;
 
         static uint16_t EncodeUnorm16(float f) {
             return static_cast<uint16_t>(glm::clamp(f, 0.0f, 1.0f) * 65535.0f + 0.5f);

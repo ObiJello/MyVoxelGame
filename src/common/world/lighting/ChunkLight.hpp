@@ -18,6 +18,17 @@
 // sky data only up to the column's top non-empty section and derives the
 // rest; homogeneous layers make storing all of them free, and the values are
 // the same everywhere a surface can be).
+//
+// COLOURED LIGHT (engine). Three more layers per light section — red, green
+// and blue block light — each propagated exactly as block light is, from the
+// state's channel emission (BlockLightProperties::ChannelEmission). Block
+// light stays the gameplay value (spawning, crops, MC parity) and is always
+// the maximum of the three. They are for drawing only: the mesher tints a
+// face by them. Where a channel reads the same as block light — everywhere
+// no coloured emitter reaches — it SHARES the block layer's storage
+// (ShareWhiteChannels; DataLayer copy-on-write keeps the two apart the
+// moment either is written), so a world without coloured light carries no
+// extra bytes, on disk (ChunkSerializer) or on the wire (NetCodec) either.
 #pragma once
 
 #include "common/core/Config.hpp"
@@ -29,7 +40,12 @@
 
 namespace Game::Lighting {
 
-    enum class LightLayer : uint8_t { Sky = 0, Block = 1 };
+    // Red / Green / Blue are the coloured block-light channels (see the
+    // header note); LightChannel order.
+    enum class LightLayer : uint8_t { Sky = 0, Block = 1, Red = 2, Green = 3, Blue = 4 };
+    inline constexpr LightLayer ChannelLayer(int channel) {
+        return static_cast<LightLayer>(static_cast<int>(LightLayer::Red) + channel);
+    }
 
     inline constexpr int kLightSectionCount = Math::SECTIONS_PER_CHUNK + 2;     // 26
     // World section coordinate (y >> 4) of light index 0.
@@ -44,6 +60,8 @@ namespace Game::Lighting {
     struct ChunkLight {
         std::array<DataLayer, kLightSectionCount> sky{};
         std::array<DataLayer, kLightSectionCount> block{};
+        // Red, green, blue (LightChannel order) — see the header note.
+        std::array<std::array<DataLayer, kLightSectionCount>, 3> channel{};
         ChunkSkyLightSources skySources;
 
         // MC ChunkAccess.isLightCorrect / the Anvil "isLightOn" flag: the
@@ -54,8 +72,46 @@ namespace Game::Lighting {
         // packet carried none.
         bool lightCorrect = false;
 
-        DataLayer&       Layer(LightLayer l, int index)       { return l == LightLayer::Sky ? sky[static_cast<size_t>(index)] : block[static_cast<size_t>(index)]; }
-        const DataLayer& Layer(LightLayer l, int index) const { return l == LightLayer::Sky ? sky[static_cast<size_t>(index)] : block[static_cast<size_t>(index)]; }
+        // The blocks in this chunk whose light is coloured (server; set by
+        // LightChunk / LevelLightManager::Register, kept by OnBlockChanged;
+        // not saved). Where none is near, the channels are block light and
+        // the level engine does not propagate them (LevelLightManager).
+        int coloredEmitters = 0;
+
+        DataLayer& Layer(LightLayer l, int index) {
+            const size_t i = static_cast<size_t>(index);
+            switch (l) {
+                case LightLayer::Sky:   return sky[i];
+                case LightLayer::Block: return block[i];
+                default:                return channel[static_cast<size_t>(l) - static_cast<size_t>(LightLayer::Red)][i];
+            }
+        }
+        const DataLayer& Layer(LightLayer l, int index) const {
+            return const_cast<ChunkLight*>(this)->Layer(l, index);
+        }
+
+        // Light index `li` has light that is not white: a channel differs from
+        // block light. Exact after ShareWhiteChannels.
+        bool HasColor(int li) const {
+            const size_t i = static_cast<size_t>(li);
+            for (const auto& c : channel) {
+                if (!c[i].SharesWith(block[i])) return true;
+            }
+            return false;
+        }
+
+        // Every channel layer that reads the same as block light takes the
+        // block layer's storage (see the header note). O(2048) per differing
+        // pair; the shared case is a pointer compare.
+        void ShareWhiteChannels(int li) {
+            const size_t i = static_cast<size_t>(li);
+            for (auto& c : channel) {
+                if (!c[i].SharesWith(block[i]) && c[i].ContentEquals(block[i])) c[i] = block[i];
+            }
+        }
+        void ShareWhiteChannels() {
+            for (int li = 0; li < kLightSectionCount; ++li) ShareWhiteChannels(li);
+        }
 
         // Raw level at chunk-local (x, z) and world y. Sky above the light
         // range reads 15; below it, the bottom layer's lowest row (MC's
@@ -63,7 +119,7 @@ namespace Game::Lighting {
         // light outside the range reads 0.
         int Get(LightLayer l, int localX, int worldY, int localZ) const {
             const int li = LightIndexForY(worldY);
-            if (li >= kLightSectionCount) return l == LightLayer::Sky ? 15 : 0;
+            if (li >= kLightSectionCount) return l == LightLayer::Sky ? 15 : 0;   // block and channels: 0
             if (li < 0) return l == LightLayer::Sky ? sky[0].Get(localX, 0, localZ) : 0;
             return Layer(l, li).Get(localX, worldY & 15, localZ);
         }
@@ -71,20 +127,31 @@ namespace Game::Lighting {
         void Reset() {
             for (auto& d : sky) d = DataLayer();
             for (auto& d : block) d = DataLayer();
+            for (auto& c : channel) for (auto& d : c) d = DataLayer();
             skySources = ChunkSkyLightSources();
             lightCorrect = false;
+            coloredEmitters = 0;
         }
 
-        // Drop arrays whose nibbles are all equal (after a full relight).
+        // Drop arrays whose nibbles are all equal (after a full relight), and
+        // share every white channel with block light.
         void Compact() {
             for (auto& d : sky) d.Compact();
             for (auto& d : block) d.Compact();
+            for (auto& c : channel) for (auto& d : c) d.Compact();
+            ShareWhiteChannels();
         }
 
+        // A channel sharing block light's array is not counted twice.
         size_t HeapBytes() const {
             size_t n = 0;
             for (const auto& d : sky) n += d.HeapBytes();
             for (const auto& d : block) n += d.HeapBytes();
+            for (const auto& c : channel) {
+                for (size_t i = 0; i < c.size(); ++i) {
+                    if (!c[i].SharesWith(block[i])) n += c[i].HeapBytes();
+                }
+            }
             return n;
         }
     };

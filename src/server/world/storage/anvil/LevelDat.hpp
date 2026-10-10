@@ -77,7 +77,6 @@ namespace Game::Anvil {
         bool dimensionStack  = false;   // engine world option
         bool redstonePlus    = false;   // engine rule (RedstonePlus.hpp)
         bool redstoneChunks  = false;   // engine rule (ChunkKeeper.hpp)
-        int  veinMineMaxBlocks = 64;    // engine rule (PlayerSession::VeinMineFrom)
         int  playerStepHeight = 6;      // engine rule (ServerPlayer::applyStepHeightRule), tenths of a block
         bool sharedVitals    = false;   // engine rule (PlayerSessionManager::ShareVitals)
         bool advancementsWithCheats = false;   // engine rule (server/advancements: progress with cheats on)

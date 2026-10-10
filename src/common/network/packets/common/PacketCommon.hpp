@@ -21,6 +21,10 @@ namespace Network {
         START_DESTROY = 3,  // player started mining a block
         ABORT_DESTROY = 4,  // player released LMB / looked away mid-mine
         STOP_DESTROY  = 5,  // mining completed; server should remove the block
+        // Engine: the vein-mine keys were let go — the server stops every
+        // vein mine of this player still spreading (PlayerSession::
+        // StopVeinMines). No position.
+        VEIN_MINE_RELEASE = 6,
     };
 
     // ── Relative-flag bitmask (ClientboundPlayerPositionPacket) ─────────────

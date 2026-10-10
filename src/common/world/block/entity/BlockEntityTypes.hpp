@@ -130,6 +130,10 @@ namespace Game {
         // table's stored 3x3 grid (CraftingTableBlockEntity), saved as
         // `obeycraft:crafting_table`. Attached lazily — see LazyForBlock.
         constexpr uint16_t OBEY_CRAFTING_TABLE = 56;
+        // Engine block entity: a door's faces opened onto the sky
+        // (SkyFacesBlockEntity), saved as `obeycraft:sky_faces`. Lazy, as
+        // the crafting table's.
+        constexpr uint16_t OBEY_SKY_FACES      = 57;
         constexpr uint16_t MAX_ID        = 64;
     }
 
@@ -157,7 +161,8 @@ namespace Game {
         // mesher and pistons treat the block as entity-less): the crafting
         // table's, which exists only while the shared_crafting_tables rule
         // has items stored in it or players using it. Whoever needs one
-        // creates it through this type.
+        // creates it through this type. Every door's is the sky-face mask
+        // (SkyFacesBlockEntity), created on its first sky face.
         static const BlockEntityType* LazyForBlock(BlockID id);
         // HasBlockEntity, or a lazy type: whether a block entity found at a
         // cell of this block belongs there — World::SetBlock's removal of

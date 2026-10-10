@@ -65,6 +65,30 @@ namespace Game::Lighting::LightCoords {
         return SmoothPack(block, sky);
     }
 
+    // ── Coloured light tint (engine; ChunkLight's header note) ───────────
+    // Packed coords leave bits 8..15 and 24..31 unused. The entity side
+    // (EntityEnvironment::PackedLightAt / LevelLightCoordsAt) carries the
+    // block light's tint there — each channel's shortfall from the brightest,
+    // 5 bits, red in bits 8..12, green in 13..15 + 24..25, blue in 26..30 (bit
+    // 31 stays clear, so coords stay non-negative). Every helper above masks
+    // or rebuilds and so drops it (white): only a straight hand-off to
+    // EntityEnvironment::LightColor keeps the colour. 0 = white.
+    inline constexpr int kTintBitsMask = 0x7F00FF00;
+    inline constexpr int Tint15(int coords) {
+        return ((coords >> 8) & 0xFF) | (((coords >> 24) & 0x7F) << 8);
+    }
+    // `coords` with the tint of channel levels r, g, b (any common scale).
+    inline constexpr int WithTint(int coords, int r, int g, int b) {
+        const int top = std::max(r, std::max(g, b));
+        coords &= ~kTintBitsMask;
+        if (top <= 0 || (r == g && g == b)) return coords;
+        const int sr = (31 * (top - r) + top / 2) / top;
+        const int sg = (31 * (top - g) + top / 2) / top;
+        const int sb = (31 * (top - b) + top / 2) / top;
+        const int t = sr | (sg << 5) | (sb << 10);
+        return coords | ((t & 0xFF) << 8) | (((t >> 8) & 0x7F) << 24);
+    }
+
     // The 16-bit form the terrain vertex carries (TerrainVertex::light):
     // block8 in the low byte, sky8 in the high byte. Takes either format.
     inline constexpr uint16_t ToVertex(int smoothOrPacked) {

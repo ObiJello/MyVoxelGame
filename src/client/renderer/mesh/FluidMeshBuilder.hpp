@@ -74,6 +74,9 @@ namespace Render {
         // emissiveRendering state), supplied by the Mesher from its light
         // cache. Null: everything reads full sky.
         std::function<int(int, int, int)> lightProvider;
+        // A cell's coloured-light tint bits (TerrainVertex::LightTint), 0 for
+        // white; null = always white.
+        std::function<uint32_t(int, int, int)> tintProvider;
 
         // The level's cardinal lighting is MC's NETHER table (up/down 0.9),
         // set by the Mesher from its job's dimension.

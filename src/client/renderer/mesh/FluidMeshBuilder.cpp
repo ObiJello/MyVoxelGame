@@ -409,8 +409,16 @@ namespace Render {
     uint32_t FluidMeshBuilder::FluidLight(int worldX, int worldY, int worldZ) const {
         namespace LC = Game::Lighting::LightCoords;
         if (!lightProvider) return TerrainVertex::LightWord(LC::kFullSky);
-        return TerrainVertex::LightWord(LC::Max(lightProvider(worldX, worldY, worldZ),
-                                                lightProvider(worldX, worldY + 1, worldZ)));
+        const int here  = lightProvider(worldX, worldY, worldZ);
+        const int above = lightProvider(worldX, worldY + 1, worldZ);
+        uint32_t word = TerrainVertex::LightWord(LC::Max(here, above));
+        // The tint of whichever cell gives the block light (engine coloured
+        // light); a plate merges only with equal words, tint included.
+        if (tintProvider) {
+            const bool aboveBrighter = (above & 0xFF) > (here & 0xFF);
+            word |= tintProvider(worldX, aboveBrighter ? worldY + 1 : worldY, worldZ);
+        }
+        return word;
     }
 
     bool FluidMeshBuilder::EmitFluidQuad(FluidType fluidType,

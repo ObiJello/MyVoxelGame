@@ -8,16 +8,24 @@
 // the cube.
 //
 // ── How ─────────────────────────────────────────────────────────────────
-// Every view draws its sky first, over the whole frame, before any terrain.
-// Right after that, before the first terrain pass, this renderer draws the
-// visible sky-block faces DEPTH-ONLY (colour writes off, depth test and
-// write on, back faces culled). Where a face is the nearest surface the
-// colour buffer therefore still holds the sky, and the depth it wrote keeps
-// everything behind it — terrain, entities, water, clouds, rain — from
-// drawing over it; anything in front draws over it as usual. No copy of the
-// frame, no second sky render, no shader that has to know about skyboxes:
-// the hole shows exactly what the sky pass drew, which makes it right for
-// every sky the engine has and every dimension at no extra cost.
+// Before the first terrain pass this renderer draws the visible sky-block
+// faces DEPTH-ONLY (colour writes off, depth test and write on, back faces
+// culled). The depth they write keeps everything behind them — terrain,
+// entities, water, clouds, rain — from drawing over them; anything in front
+// draws over them as usual. What shows in the hole is the sky pass's own
+// output — no copy of the frame, no shader that has to know about skyboxes —
+// so it is right for every sky the engine has (sun, moon, stars, a user /
+// OptiFine skybox with its time-of-day rotation and fades) in every
+// dimension:
+//   - A view that draws its sky first (portal far sides, gun portals,
+//     panorama faces, the main view under OBEY_LATE_SKY=0) already has the
+//     sky in the colour buffer under the faces.
+//   - The main view draws its sky late, depth-tested at the far plane, which
+//     the faces' depth would keep out. Right after the faces ChunkRenderer
+//     calls its sky-windows hook, and the sky is drawn into exactly the
+//     face pixels (SkyRenderer::DepthMode::Windows: Greater against the far
+//     plane, no depth write) before any terrain; the late pass fills the
+//     rest of the frame afterwards.
 //
 // It is called from ChunkRenderer::RenderAll (after PrepareVisibleSections,
 // before the opaque pass) so it runs for EVERY view the chunk renderer draws
@@ -35,6 +43,15 @@
 // blocks through ClientChunkManager's per-chunk index (ClientChunk::
 // skyBlocks / SkyBlockChunks), the EndPortalRenderer arrangement. A world
 // without sky blocks costs one empty() check per view.
+//
+// ── Doors' sky faces ────────────────────────────────────────────────────
+// A door's faces can be opened onto the sky too (Game::SkyFaces — a sky
+// block used on the face with the sneak and sprint keys down). Those are
+// the door model's own faces, named by the door's SkyFacesBlockEntity
+// mask: the mesher leaves them out (Mesher::SetSkyFaces, published by
+// ClientChunkManager) and this pass draws them depth-only with the sky
+// blocks' faces, from ClientChunkManager::SkyFaces and the door's live
+// state, so they follow the door as it swings.
 #pragma once
 
 #include "../backend/RenderTypes.hpp"

@@ -293,6 +293,11 @@ namespace Input {
         KeyMapping* Drop = nullptr;
         KeyMapping* SwapOffhand = nullptr;
         KeyMapping* VeinMine = nullptr;
+        KeyMapping* VeinMineShape = nullptr;
+        KeyMapping* VeinMineTaller = nullptr;
+        KeyMapping* VeinMineShorter = nullptr;
+        KeyMapping* VeinMineWider = nullptr;
+        KeyMapping* VeinMineNarrower = nullptr;
         KeyMapping* Inventory = nullptr;
         KeyMapping* Advancements = nullptr;
         KeyMapping* Chat = nullptr;
@@ -382,6 +387,20 @@ namespace Input {
         // does for any shared key; rebind either to clear it.)
         Binds::VeinMine    = &Register("key.veinMine",    "Gameplay", "Vein Mine (Hold + Sneak)",
                                        BoundKey::Keyboard(GLFW_KEY_LEFT_CONTROL));
+        // The vein mine's shape: tap to cycle, hold with the size keys (the
+        // arrows, shared with the orbit camera on purpose — it ignores them
+        // while the vein mine is being resized) or the wheel to resize. The
+        // size keys and wheel also resize while Sneak + Vein Mine are held.
+        Binds::VeinMineShape    = &Register("key.veinMineShape",    "Gameplay", "Vein Mine Shape (Tap: Cycle)",
+                                            BoundKey::Keyboard(GLFW_KEY_R));
+        Binds::VeinMineTaller   = &Register("key.veinMineTaller",   "Gameplay", "Vein Mine Shape: Taller",
+                                            BoundKey::Keyboard(GLFW_KEY_UP));
+        Binds::VeinMineShorter  = &Register("key.veinMineShorter",  "Gameplay", "Vein Mine Shape: Shorter",
+                                            BoundKey::Keyboard(GLFW_KEY_DOWN));
+        Binds::VeinMineWider    = &Register("key.veinMineWider",    "Gameplay", "Vein Mine Shape: Wider",
+                                            BoundKey::Keyboard(GLFW_KEY_RIGHT));
+        Binds::VeinMineNarrower = &Register("key.veinMineNarrower", "Gameplay", "Vein Mine Shape: Narrower",
+                                            BoundKey::Keyboard(GLFW_KEY_LEFT));
 
         Binds::Inventory = &Register("key.inventory", "Inventory", "Open/Close Inventory",
                                      BoundKey::Keyboard(GLFW_KEY_E));

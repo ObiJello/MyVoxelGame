@@ -173,6 +173,12 @@ namespace Game {
                 brushable->CheckReset(level);
             }
         }
+        // A spreading vein mine still means to break this one: the fall
+        // waits, re-booked until the mine reaches it or lets it go.
+        if (level.IsFallHeld(pos)) {
+            ScheduleFall(TicksOf(level), pos, state);
+            return;
+        }
         // MC FallingBlock.tick.
         if (pos.y < World::MIN_Y) return;
         const glm::ivec3 below = pos + kDown;

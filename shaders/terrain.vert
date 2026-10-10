@@ -64,6 +64,24 @@ vec3 sampleLightmap(vec2 uv) {
     return texture(uLightmap, clamp(uv / 256.0 + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0))).rgb;
 }
 
+// Engine coloured light (TerrainVertex::light): bytes b | a << 8 are the
+// tint, each channel's shortfall from the brightest as RGB565 (0 = white,
+// every vanilla vertex). A tinted vertex samples the lightmap once per
+// channel, at that channel's share of the block light, and keeps that
+// channel of the sample — white light reads exactly the one sample.
+vec3 terrainLight(vec4 light) {
+    vec2 uv = light.rg * 255.0;
+    uint tint = uint(light.b * 255.0 + 0.5) | (uint(light.a * 255.0 + 0.5) << 8u);
+    if (tint == 0u) return sampleLightmap(uv);
+    vec3 share = vec3(1.0) - vec3(float(tint & 31u) / 31.0,
+                                  float((tint >> 5u) & 63u) / 63.0,
+                                  float(tint >> 11u) / 31.0);
+    vec3 level = uv.x * share;
+    return vec3(sampleLightmap(vec2(level.r, uv.y)).r,
+                sampleLightmap(vec2(level.g, uv.y)).g,
+                sampleLightmap(vec2(level.b, uv.y)).b);
+}
+
 // Output to fragment shader
 out vec2 fragTexCoord;
 out vec2 fragFog;         // MC terrain.vsh: (spherical, cylindrical) fog distance, interpolated
@@ -159,7 +177,7 @@ void main() {
     // per block in the fragment shader from the face map, so its vertices
     // carry no light of their own. World Lighting off: the lightmap is
     // white, so the sample is skipped.
-    if (!mapped && uWorldLighting != 0) fragColor.rgb *= sampleLightmap(aLight.rg * 255.0);
+    if (!mapped && uWorldLighting != 0) fragColor.rgb *= terrainLight(aLight);
     // The fade rides in fragAux's bits 16..23 (a flat varying fewer).
     fragAux |= int(visibility * 255.0 + 0.5) << 16;
 }

@@ -17,7 +17,9 @@
 // Sources: tools/gen_block_light.py → GeneratedBlockLight.inc (MC Blocks.java
 // rules + class overrides, engine blocks through their slug alias), then
 // EngineBlockLight.inc (hand-maintained engine glow values), evaluated per
-// state against BlockRegistry's shapes and state properties.
+// state against BlockRegistry's shapes and state properties. The light's
+// colour, for the few blocks whose light is not white, is
+// BlockLightColor.inc (engine feature: coloured light).
 //
 // Built once by Init(), called at the end of BlockRegistry::PrewarmShapeCaches
 // (the shapes are final there). Read-only afterwards: every thread may query.
@@ -30,13 +32,22 @@
 
 namespace Game::Lighting {
 
+    // The three coloured light channels (ChunkLight::Channel). Each
+    // propagates exactly like block light, from the state's channel emission;
+    // block light is their maximum (see BlockLightProperties::ChannelEmission).
+    enum class LightChannel : uint8_t { Red = 0, Green = 1, Blue = 2 };
+    constexpr int kLightChannelCount = 3;
+
     struct StateLightInfo {
         uint8_t  emission  = 0;
         uint8_t  dampening = 0;
         uint8_t  flags     = 0;
         uint8_t  reserved  = 0;
         uint16_t faceSlot  = 0;     // 1-based index into the face-shape table; 0 = empty shape
-        uint16_t reserved2 = 0;
+        // Coloured emission (BlockLightColor.inc): red | green << 4 | blue << 8,
+        // each 0..15 with the brightest equal to `emission`. 0 for a white
+        // emitter, whose every channel is `emission`.
+        uint16_t emissionRgb = 0;
     };
 
     class BlockLightProperties {
@@ -61,6 +72,16 @@ namespace Game::Lighting {
         static const StateLightInfo& Info(BlockState state);
 
         static int  Emission(BlockState s)     { return Info(s).emission; }
+        // The emission of one coloured channel: `emission` for a white
+        // emitter, the colour's share of it otherwise — the brightest channel
+        // always equals `emission`, so block light (every source's emission)
+        // is exactly the maximum of the three propagated channels.
+        static int  ChannelEmission(const StateLightInfo& i, LightChannel c) {
+            if (i.emissionRgb == 0) return i.emission;
+            return (i.emissionRgb >> (4 * static_cast<int>(c))) & 15;
+        }
+        static int  ChannelEmission(BlockState s, LightChannel c) { return ChannelEmission(Info(s), c); }
+        static bool ColoredEmission(BlockState s) { return Info(s).emissionRgb != 0; }
         static int  Dampening(BlockState s)    { return Info(s).dampening; }
         static bool SolidRender(BlockState s)  { return (Info(s).flags & kSolidRender) != 0; }
         static bool SkyDown(BlockState s)      { return (Info(s).flags & kSkyDown) != 0; }

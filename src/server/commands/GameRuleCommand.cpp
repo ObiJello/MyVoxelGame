@@ -136,17 +136,6 @@ namespace Server {
                     [](bool v) { if (g_integratedServer) g_integratedServer->SetRedstoneChunks(v); },
                 },
                 EngineRule{
-                    // How far one vein mine reaches (PlayerSession::
-                    // VeinMineFrom). Per world (level.dat obeycraft).
-                    "vein_mine_max_blocks", "veinMineMaxBlocks", "Vein mine block limit",
-                    "How many extra blocks one vein mine (hold Sneak and the Vein Mine key while a block breaks) takes with the block that was dug. 0 turns vein mining off.",
-                    [] { return g_integratedServer ? g_integratedServer->VeinMineMaxBlocks()
-                                                   : IntegratedServer::kDefaultVeinMineMaxBlocks; },
-                    [](int v) { if (g_integratedServer) g_integratedServer->SetVeinMineMaxBlocks(v); },
-                    /*isInt*/ true, /*min*/ 0, /*max*/ IntegratedServer::kMaxVeinMineMaxBlocks,
-                    /*default*/ IntegratedServer::kDefaultVeinMineMaxBlocks,
-                },
-                EngineRule{
                     // Every player's step-up height, in tenths of a block —
                     // an engine extension over MC's minecraft:step_height
                     // attribute (vanilla has no such game rule; it changes

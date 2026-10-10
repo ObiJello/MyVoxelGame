@@ -12,6 +12,8 @@
 #include "common/core/Profiling_Tracy.hpp"
 #include "common/world/block/BlockRegistry.hpp"
 #include "common/world/block/entity/BlockEntityTypes.hpp"
+#include "common/world/block/entity/SkyFacesBlockEntity.hpp"
+#include "common/world/block/BlockModel.hpp"
 #include "common/world/chunk/Chunk.hpp"
 #include "common/world/math/WorldMath.hpp"
 #include "common/world/block/BlockState.hpp"
@@ -90,6 +92,20 @@ void main() {
             if (Game::BlockEntityTypes::HasBlockEntity(id) && !brushable) return false;
             return Game::BlockRegistry::IsOcclusionFullCube(Game::BlockStates::FromIndex(id, stateIndex));
         }
+
+        // A model face key (Game::FaceDir: up, down, north, south, west,
+        // east) as an MC Direction — the order of kNeighbour / kCorners.
+        Game::Direction FaceDirToDirection(Game::FaceDir dir) {
+            switch (dir) {
+                case Game::FaceDir::Up:    return Game::Direction::Up;
+                case Game::FaceDir::Down:  return Game::Direction::Down;
+                case Game::FaceDir::North: return Game::Direction::North;
+                case Game::FaceDir::South: return Game::Direction::South;
+                case Game::FaceDir::West:  return Game::Direction::West;
+                case Game::FaceDir::East:  return Game::Direction::East;
+            }
+            return Game::Direction::Up;
+        }
     } // namespace
 
     SkyBlockRenderer::~SkyBlockRenderer() { Shutdown(); }
@@ -159,10 +175,21 @@ void main() {
         const Client::ClientChunkManager* chunkMgr = Client::g_clientChunkManager;
         if (!chunkMgr) return false;
         const auto& skyChunks = chunkMgr->SkyBlockChunks();
-        if (skyChunks.empty()) return false;   // the common case: nothing at all
+        const auto& skyFaces  = chunkMgr->SkyFaces();
+        if (skyChunks.empty() && skyFaces.empty()) return false;   // the common case: nothing at all
 
         PROFILE_ZONE_N("SkyBlockWindows");
         m_verts.clear();
+
+        // One face of the box [from, to] (block units, render space), wound
+        // counter-clockwise seen from outside — kCorners scaled onto it.
+        auto pushFace = [&](const glm::vec3& from, const glm::vec3& to, int face) {
+            static const int kOrder[6] = {0, 1, 2, 0, 2, 3};
+            for (int i : kOrder) {
+                const glm::vec3 v = from + kCorners[face][i] * (to - from);
+                m_verts.push_back({v.x, v.y, v.z, 0.0f, 0.0f, 255, 255, 255, 255});
+            }
+        };
 
         for (const Game::Math::ChunkPos& pos : skyChunks) {
             const Client::ClientChunk* chunk = chunkMgr->GetChunk(pos);
@@ -196,11 +223,39 @@ void main() {
                 for (int f = 0; f < kFaceCount; ++f) {
                     const auto [nid, nstate] = blockAt(block + kNeighbour[f]);
                     if (HidesFace(nid, nstate)) continue;
-                    static const int kOrder[6] = {0, 1, 2, 0, 2, 3};
-                    for (int i : kOrder) {
-                        const glm::vec3 v = base + kCorners[f][i];
-                        m_verts.push_back({v.x, v.y, v.z, 0.0f, 0.0f, 255, 255, 255, 255});
+                    pushFace(base, base + glm::vec3(1.0f), f);
+                }
+            }
+        }
+
+        // Doors' sky faces (SkyFacesBlockEntity): the faces of the door's
+        // model the mask names, which the mesher left out. The model's face
+        // keys are world directions (pre-rotated by the blockstate); the
+        // mask is in the door's frame. A face that declares a cullface is
+        // dropped where the mesher would cull it.
+        for (const auto& [pos, mask] : skyFaces) {
+            const Game::Math::ChunkPos chunkPos{pos.x >> 4, pos.z >> 4};
+            if (!sections.IsSectionVisible(chunkPos, (pos.y - Config::MinY) >> 4)) continue;
+            const auto [id, stateIndex] = chunkMgr->GetBlockAndStateAt(pos);
+            if (!Game::SkyFaces::AppliesTo(id)) continue;   // a predicted break, not yet confirmed
+            const Game::BlockState state = Game::BlockStates::FromIndex(id, stateIndex);
+            const Game::BlockModel& model = Game::BlockRegistry::GetBlockModel(state);
+            const glm::vec3 base = Render::ToRender(glm::dvec3(pos));
+            for (const auto& element : model.elements) {
+                if (!element.rotation.IsIdentity()) continue;   // not an axis-aligned box
+                const glm::vec3 from = base + element.from / 16.0f;
+                const glm::vec3 to   = base + element.to / 16.0f;
+                for (const auto& [faceDir, faceDef] : element.faces) {
+                    const Game::Direction dir = FaceDirToDirection(faceDir);
+                    if (!(mask & Game::SkyFaces::Bit(Game::SkyFaces::ToDoorFrame(state, dir)))) continue;
+                    if (faceDef.cullfaceDir >= 0) {
+                        const Game::Direction cull =
+                            FaceDirToDirection(static_cast<Game::FaceDir>(faceDef.cullfaceDir));
+                        const auto [nid, nstate] =
+                            chunkMgr->GetBlockAndStateAt(pos + kNeighbour[static_cast<int>(cull)]);
+                        if (HidesFace(nid, nstate)) continue;
                     }
+                    pushFace(from, to, static_cast<int>(dir));
                 }
             }
         }

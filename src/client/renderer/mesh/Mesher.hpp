@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 
 // **NEW**: Forward declaration to avoid circular dependency
 namespace Game {
@@ -102,6 +103,18 @@ namespace Render {
             glm::ivec3 max{0};
             glm::ivec3 dir{0};
         };
+        // Door cells with faces opened onto the sky (Game::SkyFaces,
+        // SkyFacesBlockEntity): world position → door-frame face mask. Those
+        // faces are left out of the mesh — Render::SkyBlockRenderer draws
+        // them, depth-only, as windows onto the sky.
+        struct SkyFaceHash {
+            size_t operator()(const glm::ivec3& p) const noexcept {
+                return (static_cast<size_t>(static_cast<uint32_t>(p.x)) * 73856093u) ^
+                       (static_cast<size_t>(static_cast<uint32_t>(p.y)) * 19349663u) ^
+                       (static_cast<size_t>(static_cast<uint32_t>(p.z)) * 83492791u);
+            }
+        };
+        using SkyFaceMap = std::unordered_map<glm::ivec3, uint8_t, SkyFaceHash>;
         explicit Mesher(const MeshConfig& config = MeshConfig{});
 
         // **NEW**: Set world reference for cross-chunk neighbor access
@@ -223,6 +236,9 @@ namespace Render {
         // section build so the per-face test below touches no lock.
         std::vector<AoExclusion> m_aoExclusions;
         std::vector<PortalFace>  m_portalFaces;
+        // This dimension's sky faces (SetSkyFaces), the shared snapshot
+        // taken by SetDimension; null when there are none.
+        std::shared_ptr<const SkyFaceMap> m_skyFaces;
         bool IsPortalFace(int worldX, int worldY, int worldZ, const glm::ivec3& dir) const {
             for (const PortalFace& f : m_portalFaces) {
                 if (f.dir != dir) continue;
@@ -295,6 +311,10 @@ namespace Render {
         // ── Portal faces (see PortalFace) ────────────────────────────────
         static void SetPortalFaces(Game::DimensionId dimension, const std::vector<PortalFace>& faces);
         static std::vector<PortalFace> PortalFacesFor(Game::DimensionId dimension);
+        // ── Sky faces (see SkyFaceMap) ───────────────────────────────────
+        // Replaced whole by the level's ClientChunkManager whenever one
+        // changes; the sections concerned are remeshed by the caller.
+        static void SetSkyFaces(Game::DimensionId dimension, std::shared_ptr<const SkyFaceMap> faces);
         // The level this mesher instance is building for (the worker sets it
         // per job); takes that dimension's exclusion snapshot at the same time.
         void SetDimension(Game::DimensionId dimension);
@@ -411,7 +431,19 @@ namespace Render {
         // side neighbours (base + corner + direction), which for a full face
         // on a section edge is two cells out.
         bool m_lightPermeable[20][20][20];
+        // Coloured light (ChunkLight's header note): the three channels per
+        // halo cell, red | green << 4 | blue << 8, filled only when the
+        // section's neighbourhood has any (m_hasColor). Off, every face is
+        // white and is lit exactly as before.
+        uint16_t m_rgbCache[18][18][18];
+        bool     m_hasColor = false;
         void FillLightCaches(const Client::Render::RegionSnapshot* region, const Game::IBlockAccess* blocks);
+        // One channel's level at a cell, raised to `state`'s channel emission
+        // (LightCoordsWith's rule, per channel). Valid when m_hasColor.
+        int ChannelLevelWith(Game::BlockState state, int channel, int worldX, int worldY, int worldZ) const;
+        // A cell's tint bits (TerrainVertex::LightTint) from its own channels
+        // and emission — the flat tint a fluid plate takes.
+        uint32_t TintAt(int worldX, int worldY, int worldZ) const;
         // MC LightCoordsUtil.getLightCoords(state, level, pos): the light at
         // a cell, with `state`'s emission raising its block light and an
         // emissiveRendering state reading FULL_BRIGHT. Packed coords.
@@ -426,6 +458,9 @@ namespace Render {
         // (BlockCubeEntityRenderer), so a block handed between the two is
         // lit identically.
         struct LighterLevel;
+        // The same, reading one coloured channel as its "block light": the
+        // smooth blend run per channel gives each vertex its tint.
+        struct ChannelLighterLevel;
         // The four vertices' light words (TerrainVertex::light) for one face:
         // MC prepareQuadAmbientOcclusion's light half when `smooth`, else
         // prepareQuadFlat. `localPos` = the vertices relative to the block

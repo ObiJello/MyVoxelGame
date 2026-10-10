@@ -115,11 +115,24 @@ namespace Input {
         extern KeyMapping* Drop;
         extern KeyMapping* SwapOffhand;
         // Engine-specific: held together with Sneak while a block breaks,
-        // every touching block of the same kind breaks with it (the
-        // "vein miner" convention). A held modifier, never clicked — its
+        // the vein-mine shape's blocks break with it, spreading outward over
+        // a second (Game::VeinMine; the plain vein is every touching block
+        // of the same kind — the "vein miner" convention). Held with a block
+        // under the crosshair, it highlights them first; let go, it stops a
+        // mine still spreading. A held modifier, never clicked — its
         // clicks are drained each frame (PlatformMain) so a rebinding onto
         // a clicked key does not queue up stale presses.
         extern KeyMapping* VeinMine;
+        // Engine-specific: the vein mine's shape (Client::VeinMineClient).
+        // Tapped, it cycles the shape; held, the four size keys change the
+        // shape's height and width and the wheel its length. The size keys
+        // act only while it is held (they share the arrows with the orbit
+        // camera, which ignores them meanwhile).
+        extern KeyMapping* VeinMineShape;
+        extern KeyMapping* VeinMineTaller;
+        extern KeyMapping* VeinMineShorter;
+        extern KeyMapping* VeinMineWider;
+        extern KeyMapping* VeinMineNarrower;
 
         extern KeyMapping* Inventory;
         // MC keyAdvancements (key.categories.misc, L): opens the
