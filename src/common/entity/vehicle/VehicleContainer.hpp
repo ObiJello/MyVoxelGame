@@ -24,7 +24,7 @@ namespace Game {
 
     class Entity;
     class LivingEntity;
-    class EntityLevel;
+    struct EntityLevel;
 
     class VehicleContainer : public IContainer {
     public:

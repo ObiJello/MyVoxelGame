@@ -230,7 +230,10 @@ namespace Server {
     // duration) or cancels (0) with a CooldownS2C.
     class ServerItemCooldowns : public Game::ItemCooldowns {
     public:
-        explicit ServerItemCooldowns(const ServerPlayer& owner) : m_owner(owner) {}
+        // Takes a pointer: binding `*this` to a const reference in the member
+        // initializer below makes MSVC treat `this` as const for every later
+        // default member initializer.
+        explicit ServerItemCooldowns(const ServerPlayer* owner) : m_owner(*owner) {}
 
     protected:
         void OnCooldownStarted(const std::string& group, int duration) override;
@@ -1217,7 +1220,7 @@ namespace Server {
         bool     m_attributesSent = false;
         float m_fallDistance = 0.0f;
         Game::ImpulseContext m_impulseContext;
-        ServerItemCooldowns  m_itemCooldowns{*this};
+        ServerItemCooldowns  m_itemCooldowns{this};
         // Set by teleport(); setPosition() bypasses the anti-cheat
         // distance check while this is in the future. Without it, a
         // portal teleport that fires server-side races against the

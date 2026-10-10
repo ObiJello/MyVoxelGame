@@ -309,9 +309,9 @@ namespace Server {
                 // ground — and keeps his own view.
                 const glm::dvec3 eye = me + glm::dvec3(0.0, player->getEyeHeight(), 0.0);
                 const glm::vec3 look = Game::Mth::ViewVector(player->getPitch(), player->getYaw());
-                const glm::dvec3 far = eye + glm::dvec3(look) * 160.0;
+                const glm::dvec3 farPoint = eye + glm::dvec3(look) * 160.0;
                 glm::ivec3 hit;
-                if (!ClipBlocksCollider(*blocks, eye, far, hit)) return;
+                if (!ClipBlocksCollider(*blocks, eye, farPoint, hit)) return;
                 // The face the ray entered the hit cell through: the axis
                 // whose slab the ray crosses last on the way in.
                 glm::ivec3 normal(0);

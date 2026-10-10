@@ -185,14 +185,14 @@ namespace Render {
                     return glm::dot(d, d) >= 256.0;
                 };
                 if (p.life == 0 && p.playSound) {
-                    const bool far = farFromCamera();
+                    const bool isFar = farFromCamera();
                     bool large = explosions.size() >= 3;
                     for (const Game::FireworkExplosion& e : explosions) {
                         if (e.shape == Game::FireworkExplosion::Shape::LargeBall) { large = true; break; }
                     }
-                    const char* sound = large ? (far ? Game::SoundEvents::FIREWORK_ROCKET_LARGE_BLAST_FAR
+                    const char* sound = large ? (isFar ? Game::SoundEvents::FIREWORK_ROCKET_LARGE_BLAST_FAR
                                                      : Game::SoundEvents::FIREWORK_ROCKET_LARGE_BLAST)
-                                              : (far ? Game::SoundEvents::FIREWORK_ROCKET_BLAST_FAR
+                                              : (isFar ? Game::SoundEvents::FIREWORK_ROCKET_BLAST_FAR
                                                      : Game::SoundEvents::FIREWORK_ROCKET_BLAST);
                     Client::Sounds::PlayLocal(glm::dvec3(p.x, p.y, p.z), sound, Game::SoundSource::Ambient, 20.0f,
                                               0.95f + m_rng.NextFloat() * 0.1f, true);
@@ -311,9 +311,9 @@ namespace Render {
                 ++p.life;
                 if (p.life > p.lifetime) {
                     if (p.twinkleDelay && p.playSound) {
-                        const bool far = farFromCamera();
+                        const bool isFar = farFromCamera();
                         Client::Sounds::PlayLocal(glm::dvec3(p.x, p.y, p.z),
-                                                  far ? Game::SoundEvents::FIREWORK_ROCKET_TWINKLE_FAR
+                                                  isFar ? Game::SoundEvents::FIREWORK_ROCKET_TWINKLE_FAR
                                                       : Game::SoundEvents::FIREWORK_ROCKET_TWINKLE,
                                                   Game::SoundSource::Ambient, 20.0f, 0.9f + m_rng.NextFloat() * 0.15f, true);
                     }

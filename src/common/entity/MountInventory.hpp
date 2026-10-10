@@ -26,7 +26,7 @@
 namespace Game {
 
     class Mob;
-    class EntityLevel;
+    struct EntityLevel;
 
     class MountInventory {
     public:

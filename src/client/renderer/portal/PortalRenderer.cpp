@@ -1318,9 +1318,9 @@ void main() {
                     for (int i = 0; i < 4; ++i) quad[i] = visible[i];
                 }
                 const glm::dmat4 M = PortalTransform::SrcToDst(src, dst);
-                glm::vec3 far[4];
-                for (int i = 0; i < 4; ++i) far[i] = glm::vec3(glm::dvec3(M * glm::dvec4(quad[i], 1.0)));
-                return Frustum::ThroughQuad(glm::vec3(virt.position), far, baseFrust);
+                glm::vec3 farQuad[4];
+                for (int i = 0; i < 4; ++i) farQuad[i] = glm::vec3(glm::dvec3(M * glm::dvec4(quad[i], 1.0)));
+                return Frustum::ThroughQuad(glm::vec3(virt.position), farQuad, baseFrust);
             }();
 
             g_renderBackend->SetStencilOverride(

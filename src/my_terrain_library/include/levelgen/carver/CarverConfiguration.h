@@ -4,6 +4,7 @@
 #include "levelgen/WorldgenRandom.h"
 #include "random/XoroshiroRandomSource.h"
 #include "random/LegacyRandomSource.h"
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <functional>

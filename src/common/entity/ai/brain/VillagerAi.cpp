@@ -2162,10 +2162,10 @@ namespace Game {
                 std::optional<glm::ivec3> pos;
                 if (poi) {
                     // find(home, any, bodyPos, close+1, ANY).filter(closerToCenter(close))
-                    const auto near = poi->FindAllWithType(isHome, {}, body.BlockPosition(), m_close + 1,
+                    const auto nearHomes = poi->FindAllWithType(isHome, {}, body.BlockPosition(), m_close + 1,
                                                            PoiManager::Occupancy::Any);
-                    if (!near.empty() && CloserToCenterThan(near.front().second, body.position, m_close)) {
-                        pos = near.front().second;
+                    if (!nearHomes.empty() && CloserToCenterThan(nearHomes.front().second, body.position, m_close)) {
+                        pos = nearHomes.front().second;
                     }
                     if (!pos) {
                         // getRandom(home, radius, ANY): a shuffled walk.

@@ -20,6 +20,7 @@
 
 #include "../chunk/IBlockAccess.hpp"
 #include "../block/Direction.hpp"
+#include "../block/entity/BlockEntity.hpp"   // complete type for TakeBlockEntity's unique_ptr (MSVC)
 #include "DimensionId.hpp"
 #include "common/sound/LevelSound.hpp"
 #include "common/core/Uuid.hpp"
@@ -33,7 +34,7 @@ namespace Game {
 
     struct ScheduledTickAccess;
     class  BlockEntity;
-    class  EntityLevel;
+    struct  EntityLevel;
     class  JavaRandom;
     enum class ParticleKind : uint8_t;   // EntityLevel.hpp
     struct ParticleOptions;              // common/particle/ParticleOptions.hpp

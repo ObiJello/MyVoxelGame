@@ -1275,8 +1275,8 @@ namespace Game {
     void Sentry::Tick() {
         // Sentry.tick: wake after 24 ticks near a player; sleep without one.
         if (m_level && !m_level->IsClientSide()) {
-            LivingEntity* near = m_level->GetNearestPlayer(position.x, position.y, position.z, 8.0);
-            if (near && !near->IsSpectator()) {
+            LivingEntity* nearPlayer = m_level->GetNearestPlayer(position.x, position.y, position.z, 8.0);
+            if (nearPlayer && !nearPlayer->IsSpectator()) {
                 if (!m_awake) {
                     if (m_timeSpotted >= 24.0f) m_awake = true;
                     m_timeSpotted += 1.0f;

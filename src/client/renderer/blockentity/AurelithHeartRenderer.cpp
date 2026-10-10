@@ -506,19 +506,19 @@ namespace Render {
             return v;
         }
         const double dt = dtRaw;
-        const double near = viewerNear ? nearAmount : 0.0;
+        const double nearness = viewerNear ? nearAmount : 0.0;
         // Behind the shared clock: a little faster than the city's pace
         // until caught up (never past it); ahead of it (a stage restarted
         // the integral): a little slower. Velocity stays continuous.
         const double lag = sharedClock - v.tau;
         const double correction = std::clamp(kCatchUpMax * lag / kCatchUpTicks, -0.5 * pace, kCatchUpMax);
-        const double target = (pace + correction) * (1.0 - near) + kStillSpeed * near;
+        const double target = (pace + correction) * (1.0 - nearness) + kStillSpeed * nearness;
         v.speed += (target - v.speed) * (1.0 - std::exp(-dt / kSpeedEase));
         const double next = v.tau + dt * v.speed;
         v.tau = lag > 0.0 ? std::min(sharedClock, next) : next;
 
         const double prevNotice = v.notice;
-        v.notice += (near - v.notice) * (1.0 - std::exp(-dt / kNoticeEase));
+        v.notice += (nearness - v.notice) * (1.0 - std::exp(-dt / kNoticeEase));
         if (prevNotice < 0.5 && v.notice >= 0.5) v.pulseStart = ticks;   // it has seen you
         v.lastTicks = ticks;
         return v;
@@ -657,8 +657,8 @@ namespace Render {
             const double dist = std::hypot(d.x, d.z);
             const double nearAmount = 1.0 - SmoothStep(kNoticeFull, kNoticeNone, dist);
             // A waking Heart is singing, not watching.
-            const bool near = !waking && nearAmount > 0.0 && std::abs(d.y) < kNoticeHeight;
-            const ViewState& v = UpdateViewState(pos, ticks, shared, pace, near, nearAmount);
+            const bool isNear = !waking && nearAmount > 0.0 && std::abs(d.y) < kNoticeHeight;
+            const ViewState& v = UpdateViewState(pos, ticks, shared, pace, isNear, nearAmount);
             tau = v.tau;
             notice = v.notice;
             pulseAge = (ticks - v.pulseStart) / 20.0;

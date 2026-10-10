@@ -37,7 +37,13 @@ namespace Render {
         }
     }
 
-    void SetMetal4Requested(bool requested) { g_metal4Requested = requested; }
+    void SetMetal4Requested(bool requested) {
+#ifdef HAS_METAL
+        g_metal4Requested = requested;
+#else
+        (void)requested;
+#endif
+    }
 
     std::unique_ptr<RenderBackend> CreateRenderBackend(BackendType type) {
         switch (type) {

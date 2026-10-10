@@ -33,7 +33,7 @@
 namespace Game {
 
     class Entity;
-    class EntityLevel;
+    struct EntityLevel;
     class LivingEntity;
 
     // MC FallLocation — where a fall started, for "fell off a ladder".

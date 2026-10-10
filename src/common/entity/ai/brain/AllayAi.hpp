@@ -14,7 +14,7 @@
 
 namespace Game {
     class Allay;
-    class EntityLevel;
+    struct EntityLevel;
     namespace AllayAi {
         void InitBrain(Allay& allay, Brain& brain);
         void UpdateActivity(Allay& allay);

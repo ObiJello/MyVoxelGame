@@ -1276,8 +1276,8 @@ namespace Render {
         // the far distance (1.21.1's max(render distance, 32 blocks)) — the
         // beta Aether's hazy distance. The sky fog is vanilla's.
         if (fogEnabled) {
-            const float far = std::max(static_cast<float>(renderDistChunks) * 16.0f, 32.0f);
-            m_frame.fogRdStart = far * 0.5f;
+            const float farDist = std::max(static_cast<float>(renderDistChunks) * 16.0f, 32.0f);
+            m_frame.fogRdStart = farDist * 0.5f;
         }
     }
 
