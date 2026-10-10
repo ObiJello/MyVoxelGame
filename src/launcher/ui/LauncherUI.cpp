@@ -1384,13 +1384,19 @@ namespace Launcher {
             float rowH = 52.0f;
             const GameRendererInfo& info = GameRendererInfoFor(state.renderer);
             Txt(dl, g_fontSmall, p + ImVec2(0, 10), TextBody, "Renderer");
-            Txt(dl, g_fontMono10, p + ImVec2(0, 29), TextFaint, info.arg[0] ? info.arg : "default (no flag)");
+            const bool overridden = state.customArgsEnabled && LaunchArgsNameARenderer(state.customArgs);
+            Txt(dl, g_fontMono10, p + ImVec2(0, 29), TextFaint,
+                overridden ? "OVERRIDDEN BY LAUNCH ARGUMENTS" : (info.arg[0] ? info.arg : "default (no flag)"));
             const ImVec2 size(150.0f, 30.0f);
             DrawRendererPicker(state, "##rendererRow", ImVec2(p.x + w - size.x, p.y + (rowH - size.y) * 0.5f), size);
             ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
             dl->AddLine(ImVec2(p.x, p.y + rowH), ImVec2(p.x + w, p.y + rowH), BorderSoft);
             ImGui::Dummy(ImVec2(0, 0));
         }
+
+        m_appIconPicker.DrawRow(state.appIcon, w);
+
+        DrawLaunchArgsRow(state);
 
         // Game directory row: OPEN reveals the folder in the file browser,
         // the path itself is a click-to-copy target (brightens on hover).
@@ -1454,6 +1460,46 @@ namespace Launcher {
             ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
             ImGui::Dummy(ImVec2(0, 0));
         }
+    }
+
+    // Launch arguments row: a toggle and a text field. On, the field's text
+    // is appended to the game's command line as typed; a renderer flag in it
+    // (--metal, --metal3, --metal4, --vulkan, --opengl) replaces the
+    // picker's choice, anything else rides along with it. Off, the field is
+    // greyed out and takes no input, and nothing is added.
+    void LauncherUI::DrawLaunchArgsRow(LauncherUIState& state) {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        float w = ImGui::GetContentRegionAvail().x;
+
+        // Two-way sync with the state (config load), unless mid-edit.
+        if (state.customArgs != m_lastSyncedCustomArgs) {
+            std::snprintf(m_customArgs, sizeof(m_customArgs), "%s", state.customArgs.c_str());
+            m_lastSyncedCustomArgs = state.customArgs;
+        }
+
+        ImVec2 p = ImGui::GetCursorScreenPos();
+        const float rowH = 56.0f;
+        Txt(dl, g_fontSmall, p + ImVec2(0, 10), TextBody, "Launch arguments");
+        Txt(dl, g_fontMono10, p + ImVec2(0, 29), TextFaint,
+            state.customArgsEnabled ? "ADDED TO THE COMMAND LINE - A RENDERER FLAG WINS"
+                                    : "OFF - NOTHING ADDED");
+
+        const float inputW = 236.0f;
+        const float inputH = 36.0f;
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - inputW - 12 - 34, p.y + 2 + (inputH - 19) * 0.5f));
+        if (Widgets::Toggle("##customArgsOn", state.customArgsEnabled)) state.customArgsEnabled = !state.customArgsEnabled;
+
+        ImGui::SetCursorScreenPos(ImVec2(p.x + w - inputW, p.y + 2));
+        // Widgets::Input (not this file's wrapper): it has the disabled look.
+        if (Widgets::Input("##customArgs", "--metal3 --env OBEY_X=1", m_customArgs, sizeof(m_customArgs),
+                           inputW, inputH, g_fontInput13, 0, nullptr, 9.0f, 13.0f, state.customArgsEnabled)) {
+            state.customArgs = m_customArgs;
+            m_lastSyncedCustomArgs = state.customArgs;
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + rowH));
+        dl->AddLine(ImVec2(p.x, p.y + rowH), ImVec2(p.x + w, p.y + rowH), BorderSoft);
+        ImGui::Dummy(ImVec2(0, 0));
     }
 
     void LauncherUI::DrawUsernameRow(LauncherUIState& state) {

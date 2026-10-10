@@ -29,7 +29,9 @@ namespace Render {
         // shaders, pipelines. Then the command side moves to Metal 4; if
         // that fails the Metal 3 path it just set up carries on.
         if (!MetalBackend::Initialize(window)) return false;
-        if (!M4Setup()) Log::Warning("Metal4Backend: Metal 4 objects unavailable - the Metal 3 path runs");
+        // Not an error: every Mac before macOS 26 / Apple silicon lands here.
+        if (!M4Setup()) Log::Info("Metal4Backend: this Mac offers no Metal 4 - the Metal 3 path runs");
+        else            Log::Info("Metal4Backend: the Metal 4 path runs");
         return true;
     }
 

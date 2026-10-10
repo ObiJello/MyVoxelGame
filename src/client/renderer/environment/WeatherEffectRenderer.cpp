@@ -214,6 +214,12 @@ void main() {
         return true;
     }
 
+    std::vector<ShaderHandle> WeatherEffectRenderer::PackShaders() const {
+        std::vector<ShaderHandle> out;
+        if (m_shader != INVALID_SHADER) out.push_back(m_shader);
+        return out;
+    }
+
     bool WeatherEffectRenderer::CreateStreakShaders() {
         RenderBackend& b = *g_renderBackend;
         // Locations 3..6: four vec4 per instance (StreakInstance).
@@ -644,7 +650,7 @@ void main() {
         // resolution here; OpenGL splits the frame for it.
         const bool halfWanted = allowHalfResolution && !vulkan && clipPlane == glm::vec4(0.0f) &&
                                 HalfResolutionAvailable() && Platform::g_gameSettings.GetRainHalfResolution() &&
-                                !m_halfFailed && !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf");
+                                !m_halfFailed && !m_shaderPack && !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf");
 
         Batch batch;
         if (!BuildColumns(dimension, cameraPos, partialTick, batch)) return;
@@ -690,7 +696,7 @@ void main() {
         const Game::DimensionId dimension = Client::ClientLevels::BoundDimension();
         const bool canRain = Game::DimensionCanHaveWeather(dimension);
         const float intensity = canRain ? Client::ClientWeather::RainLevelIn(dimension, partialTick) : 0.0f;
-        const bool gate = halfOption && Client::g_clientBlockAccess && intensity > 0.0f &&
+        const bool gate = halfOption && Client::g_clientBlockAccess && intensity > 0.0f && !m_shaderPack &&
                           !ImprovedTransparency::Get().Active() && !DevSkip("rainhalf") && !DevSkip("weather");
         // This frame keeps its depth (store op), hands it to the next one,
         // and its hand, portal gun and GUI items draw into depth bands

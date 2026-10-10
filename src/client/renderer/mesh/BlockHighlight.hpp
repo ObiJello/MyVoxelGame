@@ -49,8 +49,6 @@ namespace Render {
         TextureHandle m_dummyTexture = INVALID_TEXTURE;
 
         // Shader source code (used by GL backend's CreateShader)
-        static const char* vertexShaderSource;
-        static const char* fragmentShaderSource;
     };
 
     // Global highlight renderer instance

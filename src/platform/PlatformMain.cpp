@@ -106,6 +106,7 @@
 #endif
 #include "client/renderer/particle/MobParticleSystem.hpp"
 #include "client/world/ClientParticleTicks.hpp"
+#include "client/world/ClientWeather.hpp"
 #include "client/renderer/gui/GuiAtlas.hpp"
 #include "client/renderer/gui/GuiRenderState.hpp"
 #include "client/renderer/gui/GuiRenderer.hpp"
@@ -234,6 +235,13 @@ extern void SetTeleportCallback(std::function<void(double, double, double, float
 #include "common/core/DeferredDispose.hpp"
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#include "client/renderer/gui/BlockIcon.hpp"   // the app icon (--icon)
+#include <random>
+#ifdef __APPLE__
+#include <stb_image_write.h>   // a drawn Dock icon goes to NSImage as PNG
+#elif !defined(_WIN32)
+#include <stb_image.h>   // the pre-rendered X11 window icon
+#endif
 
 // Pointing-hand cursor for clickable chat components (MC swaps the cursor over
 // a click event). Kept at file scope with an explicit reset so closing chat
@@ -540,6 +548,93 @@ static uint16_t     s_lastPresencePort = 0;
         return GetVanillaAssetPath(relativePath);
     }
 
+#ifdef __APPLE__
+    // NSApp.applicationIconImage = an NSImage made with `init` (one of
+    // initWithContentsOfFile: / initWithData:) from `arg`.
+    static bool SetDockIcon(SEL init, id arg) {
+        id image = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSImage"), sel_registerName("alloc"));
+        image = ((id (*)(id, SEL, id))objc_msgSend)(image, init, arg);
+        if (!image) return false;
+        id app = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSApplication"),
+                                                 sel_registerName("sharedApplication"));
+        ((void (*)(id, SEL, id))objc_msgSend)(app, sel_registerName("setApplicationIconImage:"), image);
+        ((void (*)(id, SEL))objc_msgSend)(image, sel_registerName("release"));
+        return true;
+    }
+#endif
+
+    // The app icon, from --icon (the launcher's Settings → App icon): a full
+    // block's id, `random` for a new one every launch, or nothing / `tnt`
+    // for the default — the pre-rendered TNT (src/platform/icon/), which a
+    // block that does not load falls back to as well. Drawn blocks come from
+    // Render::BlockIcon, as the launcher's thumbnails do.
+    //   macOS:   the Dock icon, set at run time as MC's `-Xdock:icon=…
+    //            /icons/minecraft.icns` JVM argument does — macOS 26 shows the
+    //            bare block that way, where the bundle icon alone (Finder's)
+    //            would sit on the system's grey plate for not being a rounded
+    //            square.
+    //   Windows: the pre-rendered icon is the exe's GLFW_ICON resource, which
+    //            GLFW gives the window by itself; a drawn block replaces it.
+    //   Linux:   X11 only has what the window is given.
+    static void SetAppIcon(GLFWwindow* window, const std::string& iconArg) {
+        namespace Icon = Render::BlockIcon;
+        std::optional<Icon::Model> block;
+        if (!iconArg.empty() && iconArg != Icon::kDefaultBlock) {
+            const std::filesystem::path assetsDir = GetVanillaAssetPath("assets");
+            block = iconArg == Icon::kRandom ? Icon::LoadRandomFullBlock(assetsDir, std::random_device{}())
+                                             : Icon::LoadFullBlock(assetsDir, iconArg);
+            if (block) {
+                Log::Info("[AppIcon] %s%s", block->id.c_str(), iconArg == Icon::kRandom ? " (random)" : "");
+            } else {
+                Log::Warning("[AppIcon] '%s' is not a full block; using %s", iconArg.c_str(), Icon::kDefaultBlock);
+            }
+        }
+
+#ifdef __APPLE__
+        (void)window;
+        if (block) {
+            // 512 px: the largest the Dock draws (256 pt at 2x).
+            const Icon::Image icon = Icon::Render(*block, 512);
+            std::vector<unsigned char> png;
+            stbi_write_png_to_func(
+                [](void* context, void* data, int size) {
+                    auto* out = static_cast<std::vector<unsigned char>*>(context);
+                    const auto* bytes = static_cast<const unsigned char*>(data);
+                    out->insert(out->end(), bytes, bytes + size);
+                },
+                &png, icon.width, icon.height, 4, icon.rgba.data(), icon.width * 4);
+            id data = ((id (*)(id, SEL, const void*, unsigned long))objc_msgSend)(
+                (id)objc_getClass("NSData"), sel_registerName("dataWithBytes:length:"),
+                png.data(), static_cast<unsigned long>(png.size()));
+            if (!png.empty() && SetDockIcon(sel_registerName("initWithData:"), data)) return;
+        }
+        if (const std::string iconPath = GetVanillaAssetPath("AppIcon.icns"); std::filesystem::exists(iconPath)) {
+            id path = ((id (*)(id, SEL, const char*))objc_msgSend)(
+                (id)objc_getClass("NSString"), sel_registerName("stringWithUTF8String:"), iconPath.c_str());
+            SetDockIcon(sel_registerName("initWithContentsOfFile:"), path);
+        }
+#else
+        if (block) {
+            // The sizes a title bar, taskbar and Alt-Tab pick from.
+            std::vector<Icon::Image> sizes;
+            for (int size : {16, 32, 48, 256}) sizes.push_back(Icon::Render(*block, size));
+            std::vector<GLFWimage> images;
+            for (Icon::Image& image : sizes) images.push_back(GLFWimage{image.width, image.height, image.rgba.data()});
+            glfwSetWindowIcon(window, static_cast<int>(images.size()), images.data());
+            return;
+        }
+    #ifndef _WIN32
+        int iconW = 0, iconH = 0, iconChannels = 0;
+        if (unsigned char* pixels = stbi_load(GetVanillaAssetPath("assets/game_icon.png").c_str(),
+                                              &iconW, &iconH, &iconChannels, 4)) {
+            const GLFWimage icon{iconW, iconH, pixels};
+            glfwSetWindowIcon(window, 1, &icon);
+            stbi_image_free(pixels);
+        }
+    #endif
+#endif
+    }
+
     // The local player is a spectator this frame (set by the frame loop
     // before the world pass) — the block outline's shouldRenderBlockOutline.
     static bool s_outlineViewerSpectator = false;
@@ -626,15 +721,23 @@ static uint16_t     s_lastPresencePort = 0;
     // automatically when the window is too small for it. This is what makes
     // the UI hold a constant on-screen size as the window shrinks (taking up
     // a growing fraction of it) instead of shrinking with the window.
+    //
+    // Auto deviates from MC on purpose (user's call, 2026-10-09): it keeps a
+    // 640×480 GUI space instead of MC's 320×240, so it lands one step
+    // below MC's largest fit — 4 on a 3420×2146 Retina framebuffer, 2 on
+    // the same screen with Retina Resolution off — the same on-screen size
+    // either way, at half MC's. An explicit setting stays byte-for-byte MC.
     float ComputeGuiScale(int framebufferWidth, int framebufferHeight, int /*windowWidth*/) {
         const int setting = Platform::g_gameSettings.GetGuiScale();
         const int cap = setting >= 1 ? setting : 0x7FFFFFFF; // 0 → Auto (uncapped)
+        const int minWidth  = setting >= 1 ? 320 : 640;
+        const int minHeight = setting >= 1 ? 240 : 480;
 
         int scale = 1;
         while (scale != cap &&
                scale < framebufferWidth && scale < framebufferHeight &&
-               framebufferWidth / (scale + 1) >= 320 &&
-               framebufferHeight / (scale + 1) >= 240) {
+               framebufferWidth / (scale + 1) >= minWidth &&
+               framebufferHeight / (scale + 1) >= minHeight) {
             ++scale;
         }
         return static_cast<float>(scale);
@@ -3434,6 +3537,7 @@ static uint16_t     s_lastPresencePort = 0;
         // --skin, --skin-model, --cape, --stick-figure. Loaded after the
         // loop; nothing given = the plain stick figure in `playerColor`.
         Game::AppearanceArgs appearanceArgs;
+        std::string appIconArg;   // --icon: a full block, "random", or none = TNT (SetAppIcon)
         // Friends-service identity (from the launcher; empty token = guest).
         std::string friendsSessionToken;
         int64_t friendsAccountId = 0;
@@ -3629,11 +3733,19 @@ static uint16_t     s_lastPresencePort = 0;
                 Log::Info("Metal backend requested via --metal flag");
             }
             if (arg == "--metal4") {
-                // The Metal 4 runtime path where this Mac offers it; the
-                // Metal 3 backend otherwise (docs/metal4.md).
+                // The default since 2026-10-09: the Metal 4 runtime path
+                // where this Mac offers it, the Metal 3 backend otherwise
+                // (docs/metal4.md). Kept as a flag for scripts.
                 useMetal = true;
                 Render::SetMetal4Requested(true);
                 Log::Info("Metal 4 path requested via --metal4 flag");
+            }
+            if (arg == "--metal3") {
+                // The Metal 3 backend even where Metal 4 is offered (the
+                // A/B, a Metal 4 driver problem); OBEY_METAL4=0 does the same.
+                useMetal = true;
+                Render::SetMetal4Requested(false);
+                Log::Info("Metal 3 backend requested via --metal3 flag");
             }
             if (arg == "--vanilla-portals") {
                 vanillaPortals = true;
@@ -3685,6 +3797,9 @@ static uint16_t     s_lastPresencePort = 0;
             }
             if (arg == "--stick-figure" && i + 1 < argc) {
                 appearanceArgs.stickFigurePath = argv[++i];
+            }
+            if (arg == "--icon" && i + 1 < argc) {
+                appIconArg = argv[++i];
             }
             if (arg == "--session" && i + 1 < argc) {
                 friendsSessionToken = argv[++i];
@@ -3918,6 +4033,7 @@ static uint16_t     s_lastPresencePort = 0;
             glfwTerminate();
             return -2;
         }
+        SetAppIcon(window, appIconArg);
 #ifdef __APPLE__
         // What macOS Game Mode will see: the running bundle's category. It
         // engages only for a games category in native full screen, and a
@@ -5200,6 +5316,34 @@ static uint16_t     s_lastPresencePort = 0;
         float fovModifier    = 1.0f;   // current (this tick)
         float fovModifierOld = 1.0f;   // previous tick — render lerps between
         double fovTickAccum  = 0.0;
+        // MC AbstractClientPlayer.getFieldOfViewModifier (line 103) — what
+        // the smoothing settles on for the player's state right now:
+        //   modifier  = 1
+        //   if flying          → modifier *= 1.1
+        //   speedFactor        = MOVEMENT_SPEED / walkingSpeed
+        //   modifier *= (speedFactor + 1) / 2
+        //   modifier  = lerp(fovEffectScale, 1, modifier)
+        // Our currentSpeed is the direct analogue of the MOVEMENT_SPEED
+        // attribute (walk/sprint plus the consecutive-jump bonus), so
+        // dividing by WALK_SPEED reproduces MC's ratio exactly: walking
+        // gives 1.0 (no change) and sprinting 1.3 → ×1.15.
+        //
+        // This holds ONLY because sneaking is kept out of currentSpeed.
+        // MC drives sneak through a separate mechanism — an input scale
+        // via Attributes.SNEAKING_SPEED in LocalPlayer.modifyInput, not a
+        // MOVEMENT_SPEED modifier — so vanilla sits at exactly 1.0 while
+        // crouched. Folding sneak back into currentSpeed (UpdateBaseSpeed)
+        // would make this ratio drop below 1 and zoom the FOV *in* while
+        // shifting, which is a bug, not a feature.
+        auto fovModifierTarget = [&]() {
+            float target = 1.0f;
+            if (player.physics.isFlying) target *= 1.1f;
+            const float speedFactor =
+                player.physics.currentSpeed / Game::PlayerPhysics::WALK_SPEED;
+            target *= (speedFactor + 1.0f) * 0.5f;
+            const float effectScale = Platform::g_gameSettings.GetFOVEffectScale();
+            return 1.0f + (target - 1.0f) * effectScale;
+        };
 
         // Set by the pause menu's "Save and Quit to Title": breaks the main
         // loop, the session teardown below runs, and the outer session loop
@@ -7907,33 +8051,10 @@ static uint16_t     s_lastPresencePort = 0;
             playerController.Tick(dt);
 
             // === Speed-driven FOV ==========================================
-            // MC AbstractClientPlayer.getFieldOfViewModifier (line 103):
-            //   modifier  = 1
-            //   if flying          → modifier *= 1.1
-            //   speedFactor        = MOVEMENT_SPEED / walkingSpeed
-            //   modifier *= (speedFactor + 1) / 2
-            //   modifier  = lerp(fovEffectScale, 1, modifier)
-            // Our currentSpeed is the direct analogue of the MOVEMENT_SPEED
-            // attribute (walk/sprint plus the consecutive-jump bonus), so
-            // dividing by WALK_SPEED reproduces MC's ratio exactly: walking
-            // gives 1.0 (no change) and sprinting 1.3 → ×1.15.
-            //
-            // This holds ONLY because sneaking is kept out of currentSpeed.
-            // MC drives sneak through a separate mechanism — an input scale
-            // via Attributes.SNEAKING_SPEED in LocalPlayer.modifyInput, not a
-            // MOVEMENT_SPEED modifier — so vanilla sits at exactly 1.0 while
-            // crouched. Folding sneak back into currentSpeed (UpdateBaseSpeed)
-            // would make this ratio drop below 1 and zoom the FOV *in* while
-            // shifting, which is a bug, not a feature.
+            // MC GameRenderer.tickFov: the modifier eases towards
+            // fovModifierTarget() (the formula is with its definition).
             {
-                float target = 1.0f;
-                if (player.physics.isFlying) target *= 1.1f;
-                const float speedFactor =
-                    player.physics.currentSpeed / Game::PlayerPhysics::WALK_SPEED;
-                target *= (speedFactor + 1.0f) * 0.5f;
-
-                const float effectScale = Platform::g_gameSettings.GetFOVEffectScale();
-                target = 1.0f + (target - 1.0f) * effectScale;
+                const float target = fovModifierTarget();
 
                 // MC advances this once per client tick with a fixed 0.5
                 // blend; run the same discrete step so the ease-in duration
@@ -8713,6 +8834,10 @@ static uint16_t     s_lastPresencePort = 0;
             if (Render::g_renderBackend) {
                 // The "GPU Pass Timers" toggle (ImGui) also drives the
                 // per-encoder GPU timestamps of a backend that has them.
+                // OBEY_PACK_DUMP (ShaderPipeline): the terrain pass timers too,
+                // so a shader pack's frame is accounted for end to end.
+                static const bool s_packDump = std::getenv("OBEY_PACK_DUMP") != nullptr;
+                if (s_packDump && Render::ShaderPipeline::Get().Active()) Render::g_enableGpuPassTimers = true;
                 Render::g_renderBackend->SetGpuTimersEnabled(Render::g_enableGpuPassTimers);
                 Render::g_renderBackend->BeginFrame();
             }
@@ -9031,9 +9156,18 @@ static uint16_t     s_lastPresencePort = 0;
                         // turns 2°/s, so a long sit there is a long way back
                         // — the cap keeps that from becoming a wait.
                         const float seconds = std::clamp(std::max(yawTravel, pitchTravel) / 90.0f, 0.6f, 1.2f);
+                        // The lens the world will actually draw with at the
+                        // hand-over: the settings' FOV times the speed/flight
+                        // modifier (×1.1 for a player who left flying — the
+                        // join abilities packet has restored the flag by now).
+                        // The modifier is settled here as well, so the world
+                        // does not ease it from 1.0 over its first ticks and
+                        // zoom out again right after the picture has landed.
+                        const float fovTarget = fovModifierTarget();
+                        fovModifier = fovModifierOld = fovTarget;
                         Render::g_panoramaRenderer.EaseTo(yawOffsetTo,
                                                           Render::PanoramaRenderer::LastWorldLeavePitch(),
-                                                          Platform::g_gameSettings.GetFOV(), seconds);
+                                                          Platform::g_gameSettings.GetFOV() * fovTarget, seconds);
                         joinTransition.easing = true;
                         joinTransition.easeAt = now;
                         Log::Info("[Join] level ready %.2f s after the click; easing %.2f s to the leave look",
@@ -9840,6 +9974,10 @@ static uint16_t     s_lastPresencePort = 0;
             // Rain Resolution: Half on Vulkan — drawn now, before anything
             // else opens the frame's render pass, from the previous frame's
             // depth; the weather pass below lays it over the frame.
+            // A pack draws the rain through its gbuffers_weather program:
+            // MC's quads, full resolution, nothing ahead of the frame
+            // (WeatherEffectRenderer).
+            Render::g_weatherEffectRenderer.SetShaderPackActive(Render::ShaderPipeline::Get().Active());
             Render::g_weatherEffectRenderer.RenderAhead(proj, view, camera.position, weatherPartialTickNow());
             // What a shader pack's uniforms are built from this frame; set on
             // its gbuffers programs before the terrain draws, and given to
@@ -9862,6 +10000,10 @@ static uint16_t     s_lastPresencePort = 0;
                 in.dayTime        = static_cast<long long>(Render::EnvironmentState::Get().DayTime());
                 in.isEyeInWater   = player.physics.isEyeInWater ? 1
                                   : (player.physics.isEyeInLava ? 2 : 0);
+                // MC rainStrength / thunderStrength: the level's rain and
+                // thunder levels at the weather's partial tick.
+                in.rainStrength    = Client::ClientWeather::RainLevel(weatherPartialTickNow());
+                in.thunderStrength = Client::ClientWeather::ThunderLevel(weatherPartialTickNow());
                 // MC eyeBrightness: the packed light at the camera
                 // entity's eye (getPackedLightCoords), from the chunk light.
                 in.eyeSkyLight = 15;

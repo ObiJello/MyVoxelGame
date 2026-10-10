@@ -47,8 +47,6 @@ namespace Render {
         MeshHandle m_mesh = INVALID_MESH;
 
         // Shader source code (for GL backend's CreateShader)
-        static const char* vertexShaderSource;
-        static const char* fragmentShaderSource;
 
         // Load the crosshair texture through backend
         bool LoadTexture(const std::string& texturePath);

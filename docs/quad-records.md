@@ -1,6 +1,8 @@
-# Quad records: one 16-byte record per cube face (plan, 2026-10-08)
+# Quad records: one 16-byte record per cube face (2026-10-08/09)
 
-Status: PLAN, not started. Decided after the sprite array shipped and the 16-byte
+Status: IMPLEMENTED 2026-10-09 behind `OBEY_QUAD_RECORDS=0` (mesher switch),
+measured on the M4 Air still frame — see "Measured results" at the end and
+engineering-notes (GPU structural work, step 3). Planned 2026-10-08, after the sprite array shipped and the 16-byte
 vertex was declined (every 16-byte packing of today's per-corner vertex loses
 either light or geometry precision — see engineering-notes, GPU structural
 work). This design loses neither: it stops sending per-corner data for the
@@ -171,3 +173,35 @@ For the free vertex stream (the 20-byte corners that stay):
 
 Nothing there is worth doing before the record stream exists; after it, the
 free stream is small enough that its 20 bytes stop mattering.
+
+## Measured results (2026-10-09, M4 Air, still frame, RD 32, clear)
+
+What shipped matches the plan: `Render::QuadRecord` (Vertex.hpp), records in the
+slab's RGBA32UI face-map view, `terrain_rec*.vert` pulling vertices, the shared
+quad index pattern, two streams per opaque/cutout layer, translucent on vertices.
+Census: 1.65 M rectangles + 1.89 M single faces as records, 0 single faces kept as
+vertices for light (every cube-face light is on quarter levels in practice).
+
+| | records off | records on |
+|---|---|---|
+| fps (clean pairs) | — | −1.0 / −1.4 % (one −8.7 % first-run outlier) |
+| `Gpu/EncFrameUs` | — | +1.4–2.1 % |
+| `Mtl/Draws` | 5861 | 6827 (+16 %, the second stream) |
+| `Mtl/DeviceAllocMB` | 764 | 657–684 (−80..−107 MB) |
+| opaque pool | 10 slabs | 9 slabs, 6.9 MB used |
+
+Findings: the one-texel face-map change alone is ≈ −1.5 % fps; smaller slabs
+(128 k opaque) raise sub-draws +9 % with no memory gain, because the opaque pool
+is slot-bound (1024 sections a slab) once the cube faces leave the vertex stream
+— reverted to 256 k. Look parity against the same build with records off:
+structurally identical, ≈ 2× the control's noise (mean ≤ 0.7/255), streaks on
+distant leaves from single faces now sampling the sprite array via the record
+path. The expected "fps nil here" held; the expected memory saving arrived at
+device level (−10..14 %), smaller than the per-slab estimate because slots, not
+bytes, bound the opaque pool and the free stream keeps its slabs.
+
+Tried on top (2026-10-09): a rectangle's one sprite carried in the record so
+the fragment shader could sample it without waiting for the block record
+(the greedy scan merging only equal sprites). Null on frames (−0.5 % ± 2.6 %),
++9 % rectangles, +28 MB — reverted; see engineering-notes, "Fragment stage,
+round two".

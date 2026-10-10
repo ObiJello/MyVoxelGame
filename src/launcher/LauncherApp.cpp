@@ -13,6 +13,7 @@
 #include "platform/GameDirectory.hpp"
 #include "net/FriendsServiceClient.hpp"
 #include "appearance/AppearanceSettings.hpp"
+#include "client/renderer/gui/BlockIcon.hpp"
 #include "common/core/FriendsServiceConfig.hpp"
 #include "common/core/Log.hpp"
 
@@ -62,6 +63,12 @@ namespace Launcher {
         std::string launcherVersion;
         bool autoUpdate = true;
         GameRenderer renderer = GameRenderer::OpenGL;
+        // Settings → Launch arguments: the user's own command-line additions
+        // (GameRenderer.hpp LaunchArgs*), only while the toggle is on.
+        bool        customArgsEnabled = false;
+        std::string customArgs;
+        // Settings → App icon: a full block, "random", or the default "tnt".
+        std::string appIcon = Render::BlockIcon::kDefaultBlock;
         std::string playerName;             // Empty → server auto-assigns "PlayerN"
         std::string playerColor;            // "" or "default" → neon green; otherwise palette slug ("pink", "blue"...)
         std::string lastJoinIP;             // Pre-fill the quick-connect fields
@@ -104,6 +111,9 @@ namespace Launcher {
                 accountName = json.value("account_name", "");
                 accountCreated = json.value("account_created", static_cast<int64_t>(0));
                 friendsService = json.value("friends_service", "");
+                customArgsEnabled = json.value("custom_args_enabled", false);
+                customArgs = json.value("custom_args", "");
+                appIcon = json.value("app_icon", std::string(Render::BlockIcon::kDefaultBlock));
                 if (json.contains("appearance") && json["appearance"].is_object()) {
                     appearance = json["appearance"];
                 }
@@ -133,6 +143,9 @@ namespace Launcher {
                 json["launcher_version"] = launcherVersion;
                 json["auto_update"] = autoUpdate;
                 json["renderer"] = GameRendererInfoFor(renderer).slug;
+                json["custom_args_enabled"] = customArgsEnabled;
+                json["custom_args"] = customArgs;
+                json["app_icon"] = appIcon;
                 json["use_vulkan"] = renderer == GameRenderer::Vulkan;   // read by older launchers
                 json["player_name"] = playerName;
                 json["player_color"] = playerColor;
@@ -411,7 +424,16 @@ namespace Launcher {
 #endif
 
         uiState.gameInstalled = std::filesystem::exists(gameExePath);
+        // The installed game's assets (Settings → App icon reads its blocks).
+#ifdef __APPLE__
+        ui.SetGameAssetsDir(std::filesystem::path(gameExePath) / "Contents" / "Resources" / "assets");
+#else
+        ui.SetGameAssetsDir(std::filesystem::path(gameExePath).parent_path() / "assets");
+#endif
         uiState.renderer = config.renderer;
+        uiState.customArgsEnabled = config.customArgsEnabled;
+        uiState.customArgs = config.customArgs;
+        uiState.appIcon = config.appIcon;
         uiState.playerName = config.playerName;
         uiState.playerColor = config.playerColor;
         uiState.appearance = Appearance::Settings::FromJson(config.appearance);
@@ -697,10 +719,27 @@ namespace Launcher {
             if (appearanceFiles.stickFigurePath.empty()) return "";
             return " --stick-figure " + Appearance::QuoteArg(appearanceFiles.stickFigurePath);
         };
-        // The renderer picker: --vulkan / --metal, nothing for OpenGL.
+        // Settings → Launch arguments: appended as typed while the toggle
+        // is on; a renderer flag among them replaces the picker's.
+        auto customArgsActive = [&]() -> bool {
+            return uiState.customArgsEnabled && !LaunchArgsForGame(uiState.customArgs).empty();
+        };
+        auto buildCustomArgs = [&]() -> std::string {
+            if (!customArgsActive()) return "";
+            return " " + LaunchArgsForGame(uiState.customArgs);
+        };
+        // The renderer picker: --vulkan / --metal, nothing for OpenGL —
+        // unless the launch arguments name a renderer themselves.
         auto buildRendererArg = [&]() -> std::string {
+            if (customArgsActive() && LaunchArgsNameARenderer(uiState.customArgs)) return "";
             const char* arg = GameRendererInfoFor(uiState.renderer).arg;
             return arg[0] ? std::string(" ") + arg : std::string();
+        };
+        // Settings → App icon: "--icon <block|random>"; nothing for the
+        // default TNT, which the game shows pre-rendered.
+        auto buildAppIconArg = [&]() -> std::string {
+            if (uiState.appIcon.empty() || uiState.appIcon == Render::BlockIcon::kDefaultBlock) return "";
+            return " --icon " + uiState.appIcon;
         };
         auto buildAppearanceArgs = [&]() -> std::string {
             prepareAppearance();
@@ -728,10 +767,13 @@ namespace Launcher {
             config.playerName = uiState.playerName;
             config.playerColor = uiState.playerColor;
             config.renderer = uiState.renderer;
+            config.customArgsEnabled = uiState.customArgsEnabled;
+            config.customArgs = uiState.customArgs;
+            config.appIcon = uiState.appIcon;
             uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
             std::string args = buildRendererArg() + buildNameArg() + buildColorArg() + buildAppearanceArgs() +
-                               buildSessionArgs();
+                               buildAppIconArg() + buildSessionArgs() + buildCustomArgs();
             if (LaunchGame(gameExePath, args)) {
                 // Close launcher after a brief delay
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
@@ -754,11 +796,14 @@ namespace Launcher {
             config.lastJoinPort = uiState.lastJoinPort;
             config.servers = uiState.servers;
             config.renderer = uiState.renderer;
+            config.customArgsEnabled = uiState.customArgsEnabled;
+            config.customArgs = uiState.customArgs;
+            config.appIcon = uiState.appIcon;
             uiState.appearance.ToJson(config.appearance);
             config.Save(configPath);
             std::string serverArg = "--server " + host + ":" + std::to_string(port)
                                   + buildRendererArg() + buildNameArg() + buildColorArg() + buildAppearanceArgs()
-                                  + buildSessionArgs();
+                                  + buildAppIconArg() + buildSessionArgs() + buildCustomArgs();
             if (LaunchGame(gameExePath, serverArg)) {
                 glfwSetWindowShouldClose(window, GLFW_TRUE);
             } else {
@@ -1195,6 +1240,7 @@ namespace Launcher {
         ++pingGeneration;
 
         config.renderer = uiState.renderer;
+        config.appIcon = uiState.appIcon;
         config.playerName = uiState.playerName;
         config.playerColor = uiState.playerColor;
         config.lastJoinIP = uiState.lastJoinIP;

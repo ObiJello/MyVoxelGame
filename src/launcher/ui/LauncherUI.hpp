@@ -4,9 +4,11 @@
 #include "launcher/GameRenderer.hpp"
 #include "launcher/appearance/AppearanceSettings.hpp"
 #include "launcher/appearance/AppearanceView.hpp"
+#include "launcher/ui/AppIconPicker.hpp"
 
 #include <string>
 #include <atomic>
+#include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -51,6 +53,13 @@ namespace Launcher {
         bool gameInstalled = false;
         bool launcherUpdateReady = false;  // true when a launcher update has been installed
         GameRenderer renderer = GameRenderer::OpenGL;   // the backend the game starts with (GameRenderer.hpp)
+        // Settings → Launch arguments: the user's own command-line additions,
+        // used only while the toggle is on (GameRenderer.hpp LaunchArgs*).
+        bool        customArgsEnabled = false;
+        std::string customArgs;
+        // Settings → App icon: a full block's id, "random", or the default
+        // "tnt" (AppIconPicker.hpp); reaches the game as --icon.
+        std::string appIcon = Render::BlockIcon::kDefaultBlock;
 
         // ── Release metadata (set by the update-check drain) ──
         std::string publishedAt;        // ISO 8601 timestamp of the latest game release
@@ -125,10 +134,17 @@ namespace Launcher {
         // directory, the bundled default skins).
         void SetAppearancePaths(const Appearance::Paths& paths) { m_appearanceView.SetPaths(paths); }
 
+        // The installed game's assets, where the App icon picker reads blocks.
+        void SetGameAssetsDir(const std::filesystem::path& dir) { m_appIconPicker.SetAssetsDir(dir); }
+
         // Frees the UI's GL objects (the 3D previews, skin and cape
-        // textures). Call while the GL context is still current, before the
-        // ImGui backend and the window are torn down.
-        void Shutdown() { m_appearanceView.ReleaseGpu(); }
+        // textures, the block icon thumbnails). Call while the GL context is
+        // still current, before the ImGui backend and the window are torn
+        // down.
+        void Shutdown() {
+            m_appearanceView.ReleaseGpu();
+            m_appIconPicker.ReleaseGpu();
+        }
 
         // Render the full launcher UI. Call once per frame between ImGui::NewFrame and ImGui::Render.
         void Render(LauncherUIState& state);
@@ -154,6 +170,7 @@ namespace Launcher {
         // The renderer select (Play view controls row and Settings row).
         void DrawRendererPicker(LauncherUIState& state, const char* id, ImVec2 pos, ImVec2 size);
         void DrawUsernameRow(LauncherUIState& state);
+        void DrawLaunchArgsRow(LauncherUIState& state);
 
         // Sync account-pane navigation with auth state changes coming from the app.
         void SyncAccountPane(LauncherUIState& state);
@@ -174,6 +191,8 @@ namespace Launcher {
 
         // The Appearance view (stick figure, skin, capes) and its skin editor.
         Appearance::AppearanceView m_appearanceView;
+        // Settings → App icon.
+        AppIconPicker m_appIconPicker;
 
         GLuint m_logoTexture = 0;
         int m_logoWidth = 0;
@@ -202,6 +221,8 @@ namespace Launcher {
         // ── Username row (two-way sync with state.playerName) ──
         char m_playerName[32] = "";
         std::string m_lastSyncedName;
+        char m_customArgs[512] = "";       // the Launch arguments field's edit buffer
+        std::string m_lastSyncedCustomArgs;
         double m_nameEditTime = 0.0;   // >0 when an edit is pending an availability check
 
         // ── Release-notes cache (reparsed only when the source string changes) ──

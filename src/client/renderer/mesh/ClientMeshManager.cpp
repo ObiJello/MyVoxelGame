@@ -68,8 +68,19 @@ namespace Render {
 
         // Initialize mega-buffer slab pools (one pool per render layer).
         // Slab sizes: fixed-size GPU buffers that never grow (new slabs allocated when full).
-        m_opaqueMegaBuffer.Initialize(512000, 1024000, false, "opaque");   // 512K verts/slab (~12MB each)
-        m_cutoutMegaBuffer.Initialize(256000, 512000, false, "cutout");     // 256K verts/slab (~6MB each)
+        // A slab holds at most kSlotsPerSlab (1024) sections, so its bytes
+        // should match ~1024 sections' worth. With quad records (16 bytes a
+        // cube face instead of 104) an opaque section is a third of its old
+        // size and the old 512K-vertex opaque slab was slot-bound at a
+        // third full (2026-10-08, the Mesh/*Slabs|AllocMB|UsedMB plots).
+        // 256K vertex units / 512K indices (6.9 MB) for opaque — the same
+        // slab COUNT as 512K at half the bytes; 128K (3.6 MB) was tried and
+        // cost +9 % sub-draws (sections spread over more slabs fuse less,
+        // 2026-10-09). Cutout is byte-bound (plants are vertices) at 128K /
+        // 256K (3.4 MB: 24 of 30 MB used). A single section layer (at most
+        // 65,536 vertices plus its records) fits either.
+        m_opaqueMegaBuffer.Initialize(256000, 512000, false, "opaque");
+        m_cutoutMegaBuffer.Initialize(128000, 256000, false, "cutout");
         // Per-section index buffers for TRANSLUCENT only — MC's layout
         // (CompiledSectionMesh -> SectionBuffers per layer). Re-sorts rewrite
         // this layer's indices constantly, and writing into a shared slab IBO
@@ -156,6 +167,17 @@ namespace Render {
         m_opaqueMegaBuffer.RetireFreedRegions();
         m_cutoutMegaBuffer.RetireFreedRegions();
         m_translucentMegaBuffer.RetireFreedRegions();
+        // The pools' footprint, per frame: slabs holding buffers, the bytes
+        // those buffers take, and the bytes live sections use of them — the
+        // gap is slab granularity (a slab is slot-bound at 1024 sections or
+        // byte-bound, whichever comes first).
+        PROFILE_PLOT("Mesh/OpaqueSlabs",   static_cast<int64_t>(m_opaqueMegaBuffer.GetLiveSlabCount()));
+        PROFILE_PLOT("Mesh/OpaqueAllocMB", static_cast<int64_t>(m_opaqueMegaBuffer.GetMemoryUsageBytes() >> 20));
+        PROFILE_PLOT("Mesh/OpaqueUsedMB",  static_cast<int64_t>(m_opaqueMegaBuffer.GetUsedBytes() >> 20));
+        PROFILE_PLOT("Mesh/CutoutSlabs",   static_cast<int64_t>(m_cutoutMegaBuffer.GetLiveSlabCount()));
+        PROFILE_PLOT("Mesh/CutoutAllocMB", static_cast<int64_t>(m_cutoutMegaBuffer.GetMemoryUsageBytes() >> 20));
+        PROFILE_PLOT("Mesh/CutoutUsedMB",  static_cast<int64_t>(m_cutoutMegaBuffer.GetUsedBytes() >> 20));
+        PROFILE_PLOT("Mesh/TranslucentAllocMB", static_cast<int64_t>(m_translucentMegaBuffer.GetMemoryUsageBytes() >> 20));
 
         // Periodic cleanup: release empty slabs from mega-buffer pools.
         // With slab pool architecture, this just frees unused GPU memory — no
@@ -735,6 +757,27 @@ namespace Render {
         cmd.hasFacing = true;
     }
 
+    // The quad-record stream's command: indexOffset = the first record's
+    // slab texel, indexCount = the record count, facing ranges in texels
+    // (the renderer draws 6 x quads indices of the shared pattern with
+    // baseVertex 4 x texel).
+    static void SetRecordCmd(GPUSectionData::CachedDrawCmd& cmd, const ChunkMegaBuffer::DrawCommand& dc,
+                             const uint32_t ranges[kFacingCount + 1]) {
+        cmd = {};
+        if (dc.recordCount == 0) return;
+        cmd.indexCount  = static_cast<int32_t>(dc.recordCount);
+        cmd.indexOffset = dc.recordTexel;
+        cmd.slabIndex   = dc.slabIndex;
+        cmd.valid       = true;
+        cmd.hasFacing   = false;
+        if (ranges[kFacingCount] != dc.recordCount || ranges[0] != 0) return;
+        for (int i = 0; i < kFacingCount; ++i) {
+            if (ranges[i + 1] < ranges[i]) return;
+        }
+        for (int i = 0; i <= kFacingCount; ++i) cmd.facingRanges[i] = dc.recordTexel + ranges[i];
+        cmd.hasFacing = true;
+    }
+
     bool ClientMeshManager::ValidateMeshBuildResult(const Network::MeshBuildResult& result) {
         // Validate section index
         if (result.sectionY < 0 || result.sectionY >= Game::Math::SECTIONS_PER_CHUNK) {
@@ -742,8 +785,8 @@ namespace Render {
         }
         
         // Check if mesh is completely empty (all air) - this is valid
-        bool hasOpaque = !result.meshData.opaqueVertices.empty();
-        bool hasCutout = !result.meshData.cutoutVertices.empty();
+        bool hasOpaque = !result.meshData.opaqueVertices.empty() || !result.meshData.opaqueRecords.empty();
+        bool hasCutout = !result.meshData.cutoutVertices.empty() || !result.meshData.cutoutRecords.empty();
         bool hasTranslucent = !result.meshData.translucentVertices.empty();
         
         if (!hasOpaque && !hasCutout && !hasTranslucent) {
@@ -763,6 +806,9 @@ namespace Render {
             if (result.meshData.opaqueIndexCount != result.meshData.opaqueIndices.size()) {
                 return false;
             }
+            if (result.meshData.opaqueRecordCount * 4 != result.meshData.opaqueRecords.size()) {
+                return false;   // four words per QuadRecord
+            }
         }
         
         // Cutout layer
@@ -774,6 +820,9 @@ namespace Render {
                 return false;
             }
             if (result.meshData.cutoutIndexCount != result.meshData.cutoutIndices.size()) {
+                return false;
+            }
+            if (result.meshData.cutoutRecordCount * 4 != result.meshData.cutoutRecords.size()) {
                 return false;
             }
         }
@@ -1059,43 +1108,64 @@ namespace Render {
         gpuData.opaqueDrawCmd = {};
         gpuData.cutoutDrawCmd = {};
         gpuData.translucentDrawCmd = {};
+        gpuData.opaqueRecordCmd = {};
+        gpuData.cutoutRecordCmd = {};
+        gpuData.opaqueRecordCount = 0;
+        gpuData.cutoutRecordCount = 0;
         gpuData.visibilitySet = visSet;
         bool uploadFailed = false;
 
         // Upload each non-empty layer into its mega-buffer and cache draw commands
-        if (!meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty()) {
+        // A layer is uploaded when it has a vertex stream (vertices AND
+        // indices) or a quad-record stream; the mega buffer takes either or
+        // both in one region.
+        const bool opaqueVerts = !meshData.opaqueVertices.empty() && !meshData.opaqueIndices.empty();
+        if (opaqueVerts || !meshData.opaqueRecords.empty()) {
             if (!m_opaqueMegaBuffer.UploadSection(megaKey,
-                meshData.opaqueVertices.data(),
-                meshData.opaqueVertexCount,
-                meshData.opaqueIndices.data(),
-                meshData.opaqueIndexCount,
+                opaqueVerts ? meshData.opaqueVertices.data() : nullptr,
+                opaqueVerts ? meshData.opaqueVertexCount : 0,
+                opaqueVerts ? meshData.opaqueIndices.data() : nullptr,
+                opaqueVerts ? meshData.opaqueIndexCount : 0,
                 meshData.opaqueFaceMap.data(),
                 meshData.opaqueFaceMap.size(),
+                meshData.opaqueRecords.data(),
+                meshData.opaqueRecordCount,
                 fadeStart)) uploadFailed = true;
-            gpuData.opaqueVertexCount = static_cast<uint32_t>(meshData.opaqueVertexCount);
-            gpuData.opaqueIndexCount = static_cast<uint32_t>(meshData.opaqueIndexCount);
+            gpuData.opaqueVertexCount = static_cast<uint32_t>(opaqueVerts ? meshData.opaqueVertexCount : 0);
+            gpuData.opaqueIndexCount = static_cast<uint32_t>(opaqueVerts ? meshData.opaqueIndexCount : 0);
+            gpuData.opaqueRecordCount = static_cast<uint32_t>(meshData.opaqueRecordCount);
             // Cache draw command to avoid per-frame hash lookup in RenderLayerPass
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_opaqueMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                gpuData.opaqueDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
-                SetFacingRanges(gpuData.opaqueDrawCmd, meshData.opaqueFacingRanges);
+                if (cmd.indexCount > 0) {
+                    gpuData.opaqueDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
+                    SetFacingRanges(gpuData.opaqueDrawCmd, meshData.opaqueFacingRanges);
+                }
+                SetRecordCmd(gpuData.opaqueRecordCmd, cmd, meshData.opaqueRecordRanges);
             }
         }
-        if (!meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty()) {
+        const bool cutoutVerts = !meshData.cutoutVertices.empty() && !meshData.cutoutIndices.empty();
+        if (cutoutVerts || !meshData.cutoutRecords.empty()) {
             if (!m_cutoutMegaBuffer.UploadSection(megaKey,
-                meshData.cutoutVertices.data(),
-                meshData.cutoutVertexCount,
-                meshData.cutoutIndices.data(),
-                meshData.cutoutIndexCount,
+                cutoutVerts ? meshData.cutoutVertices.data() : nullptr,
+                cutoutVerts ? meshData.cutoutVertexCount : 0,
+                cutoutVerts ? meshData.cutoutIndices.data() : nullptr,
+                cutoutVerts ? meshData.cutoutIndexCount : 0,
                 meshData.cutoutFaceMap.data(),
                 meshData.cutoutFaceMap.size(),
+                meshData.cutoutRecords.data(),
+                meshData.cutoutRecordCount,
                 fadeStart)) uploadFailed = true;
-            gpuData.cutoutVertexCount = static_cast<uint32_t>(meshData.cutoutVertexCount);
-            gpuData.cutoutIndexCount = static_cast<uint32_t>(meshData.cutoutIndexCount);
+            gpuData.cutoutVertexCount = static_cast<uint32_t>(cutoutVerts ? meshData.cutoutVertexCount : 0);
+            gpuData.cutoutIndexCount = static_cast<uint32_t>(cutoutVerts ? meshData.cutoutIndexCount : 0);
+            gpuData.cutoutRecordCount = static_cast<uint32_t>(meshData.cutoutRecordCount);
             ChunkMegaBuffer::DrawCommand cmd;
             if (m_cutoutMegaBuffer.GetDrawCommand(megaKey, cmd)) {
-                gpuData.cutoutDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
-                SetFacingRanges(gpuData.cutoutDrawCmd, meshData.cutoutFacingRanges);
+                if (cmd.indexCount > 0) {
+                    gpuData.cutoutDrawCmd = {cmd.indexCount, cmd.indexOffset, true, cmd.slabIndex};
+                    SetFacingRanges(gpuData.cutoutDrawCmd, meshData.cutoutFacingRanges);
+                }
+                SetRecordCmd(gpuData.cutoutRecordCmd, cmd, meshData.cutoutRecordRanges);
             }
         }
         if (!meshData.translucentVertices.empty() && !meshData.translucentIndices.empty()) {
@@ -1105,7 +1175,7 @@ namespace Render {
                 meshData.translucentVertexCount,
                 meshData.translucentIndices.data(),
                 meshData.translucentIndexCount,
-                nullptr, 0, fadeStart)) uploadFailed = true;
+                nullptr, 0, nullptr, 0, fadeStart)) uploadFailed = true;
             gpuData.translucentVertexCount = static_cast<uint32_t>(meshData.translucentVertexCount);
             gpuData.translucentIndexCount = static_cast<uint32_t>(meshData.translucentIndexCount);
             ChunkMegaBuffer::DrawCommand cmd;

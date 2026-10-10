@@ -18,41 +18,6 @@ namespace Render {
     //
     // UVs are NORMALIZED into the sub-rect [0,1] — the fragment shader maps
     // them into the atlas sub-rect for the current stage via uUvMin/uUvMax.
-    const char* BlockBreakOverlay::vertexShaderSource = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-
-uniform mat4 uMVP;
-uniform vec2 uUVMin;
-uniform vec2 uUVMax;
-
-out vec2 vUV;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vUV = mix(uUVMin, uUVMax, aUV);
-}
-)";
-
-    const char* BlockBreakOverlay::fragmentShaderSource = R"(
-#version 330 core
-in vec2 vUV;
-out vec4 FragColor;
-uniform sampler2D uAtlas;
-void main() {
-    vec4 t = texture(uAtlas, vUV);
-    // MC's "crumbling" pass: blendFuncSeparate(DST_COLOR, SRC_COLOR, ONE, ZERO).
-    // Formula: out.rgb = src.rgb * dst.rgb + dst.rgb * src.rgb = 2 * src * dst.
-    // The destroy_stage_X.png is grey cracks on a transparent background, so:
-    //   • At non-crack pixels (alpha = 0) we MUST discard — otherwise the
-    //     2 * 0 * dst = 0 would punch a black hole in the block.
-    //   • At crack pixels the grey RGB multiplicatively darkens the block,
-    //     preserving its underlying texture/color (vs. drawing flat black).
-    if (t.a < 0.05) discard;
-    FragColor = vec4(t.rgb, 1.0);
-}
-)";
 
     BlockBreakOverlay::~BlockBreakOverlay() { Shutdown(); }
 
@@ -70,12 +35,8 @@ void main() {
             return false;
         }
 
-        // Try SPIR-V (Vulkan), then fall back to GLSL source (OpenGL).
         m_shader = g_renderBackend->CreateShaderFromFiles(
             "shaders/block_break_overlay.vert", "shaders/block_break_overlay.frag");
-        if (m_shader == INVALID_SHADER) {
-            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
-        }
         if (m_shader == INVALID_SHADER) {
             Log::Error("BlockBreakOverlay: failed to create shader");
             return false;

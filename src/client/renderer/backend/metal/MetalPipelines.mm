@@ -11,6 +11,7 @@
 #include "common/core/Log.hpp"
 #include "common/core/Profiling_Tracy.hpp"
 #include "platform/GameDirectory.hpp"
+#include "client/shader/PackCompiler.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -85,19 +86,21 @@ namespace Render {
         // Transparency's three pass shapes (VKBackend::OitPassConfig + 1).
         struct AttachmentConfig {
             uint32_t count;
-            MTLPixelFormat formats[2];
+            MTLPixelFormat formats[8];
         };
         AttachmentConfig AttachmentsFor(uint8_t config) {
             switch (config) {
-                case 1:  return {1, {MTLPixelFormatRGBA32Float, MTLPixelFormatInvalid}};   // depth bounds (MAX)
+                case 1:  return {1, {MTLPixelFormatRGBA32Float}};                            // depth bounds (MAX)
                 case 2:  return {2, {MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA16Float}}; // transmittance
-                case 3:  return {1, {MTLPixelFormatRGBA16Float, MTLPixelFormatInvalid}};   // accumulate
-                default: return {1, {MTLPixelFormatBGRA8Unorm, MTLPixelFormatInvalid}};   // the frame, targets (4: no depth)
+                case 3:  return {1, {MTLPixelFormatRGBA16Float}};                            // accumulate
+                default: return {1, {MTLPixelFormatBGRA8Unorm}};                             // the frame, targets (4: no depth)
             }
         }
-        // Config 4 (MetalBackend::kConfigTargetNoDepth) has no depth/stencil
-        // attachment: its pipelines bake no depth format, its draws no test.
-        bool ConfigHasDepth(uint8_t config) { return config != 4; }
+        // Configs 4 (MetalBackend::kConfigTargetNoDepth) and 6 have no
+        // depth/stencil attachment: their pipelines bake no depth format,
+        // their draws no test. Configs 5 / 6 are targets over the caller's
+        // textures, whose formats the pass carries (Pass::formats).
+        bool ConfigHasDepth(uint8_t config) { return config != 4 && config != 6; }
         // Configs 1..3 are Improved Transparency's passes (MC's OIT snippets:
         // One/One blends, pipelines that live and die with the option). A
         // depth-less target is an ordinary pass: `config != 0` is NOT the
@@ -171,7 +174,18 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             NSError* error = nil;
             MTLCompileOptions* options = [MTLCompileOptions new];
             options.languageVersion = MTLLanguageVersion2_4;
-            m_internalLibrary = [m_device newLibraryWithSource:@(kInternalSource) options:options error:&error];
+            // The clear's multi-target twins (clear_fragmentN writes N colour
+            // outputs): a shader pack's gbuffers target has up to eight.
+            std::string source = kInternalSource;
+            for (int n = 2; n <= 8; ++n) {
+                source += "struct ClearOut" + std::to_string(n) + " {";
+                for (int i = 0; i < n; ++i) source += " float4 c" + std::to_string(i) + " [[color(" + std::to_string(i) + ")]];";
+                source += " };\nfragment ClearOut" + std::to_string(n) + " clear_fragment" + std::to_string(n) +
+                          "(ClearOut in [[stage_in]], constant ClearParams& p [[buffer(0)]]) { ClearOut" + std::to_string(n) + " o;";
+                for (int i = 0; i < n; ++i) source += " o.c" + std::to_string(i) + " = p.color;";
+                source += " return o; }\n";
+            }
+            m_internalLibrary = [m_device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
             if (!m_internalLibrary) {
                 Log::Error("MetalBackend: internal shaders failed to compile: %s",
                            error ? error.localizedDescription.UTF8String : "unknown");
@@ -320,37 +334,281 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             m_oitSkipDraw = variant == INVALID_SHADER;
             if (!m_oitSkipDraw) handle = variant;
         }
+        // Override mode (the shader pack pipeline): the pack's program and
+        // its render target in place of the engine's, or the engine's program
+        // into the default target — the OpenGL backend's rule.
+        RenderTargetHandle target = INVALID_RENDER_TARGET;
+        ShaderHandle layoutSource = INVALID_SHADER;
+        if (m_overrideMode) {
+            target = m_overrideDefaultTarget;
+            auto ov = m_shaderOverrides.find(handle);
+            if (ov != m_shaderOverrides.end()) {
+                if (ov->second.shader != INVALID_SHADER && ov->second.shader != handle) {
+                    layoutSource = handle;   // the pack program draws this shader's meshes
+                    handle = ov->second.shader;
+                }
+                if (ov->second.target != INVALID_RENDER_TARGET) target = ov->second.target;
+            }
+        }
+        if (m_packLayoutSource != layoutSource) m_drawStateDirty = true;
+        m_packLayoutSource = layoutSource;
         m_boundShader = handle;
         auto it = m_shaders.find(handle);
         m_boundShaderInfo = it != m_shaders.end() ? &it->second : nullptr;
+        if (m_boundShaderInfo && m_boundShaderInfo->layoutType == kLayoutPack) m_packFrame = true;
         m_drawStateDirty = true;
+        if (target != INVALID_RENDER_TARGET) BindRenderTarget(target);
+    }
+
+    // ── pack programs ────────────────────────────────────────────────────
+
+    ShaderHandle MetalBackend::CreatePackShader(const PackShaderDesc& desc) {
+        if (!m_device) return INVALID_SHADER;
+        PROFILE_ZONE_N("Mtl.CreatePackShader");
+        @autoreleasepool {
+            MTLCompileOptions* options = [MTLCompileOptions new];
+            // Fast math, as for every shader (precise functions cost the
+            // pack's deferred passes 5x on 2026-10-09); the translation
+            // guards pow at zero, the one NaN fast math gave a pack.
+            options.fastMathEnabled = YES;
+            // OBEY_PACK_MSL=<flags>: compile-side experiments for a pack's
+            // programs, for A/B against the default — `noinline` drops
+            // SPIRV-Cross's always_inline so the Metal compiler decides
+            // (register pressure), `size` the size optimisation level,
+            // `mathapi` the macOS 15 math-mode API in place of fastMathEnabled.
+            static const std::string s_mslFlags = std::getenv("OBEY_PACK_MSL") ? std::getenv("OBEY_PACK_MSL") : "";
+            const bool noInline = s_mslFlags.find("noinline") != std::string::npos;
+            if (s_mslFlags.find("size") != std::string::npos) options.optimizationLevel = MTLLibraryOptimizationLevelSize;
+            if (s_mslFlags.find("mathapi") != std::string::npos) {
+                if (@available(macOS 15.0, *)) {
+                    options.mathMode = MTLMathModeFast;
+                    options.mathFloatingPointFunctions = MTLMathFloatingPointFunctionsFast;
+                }
+            }
+            NSError* error = nil;
+            // A stage's library and entry function from its MSL; nil on
+            // failure (logged with the stage).
+            auto compileLibrary = [&](const std::string& mslIn, const char* stage) -> id<MTLLibrary> {
+                std::string msl = mslIn;
+                if (noInline) {
+                    static const std::string kInline = "static inline __attribute__((always_inline))";
+                    for (size_t at = msl.find(kInline); at != std::string::npos; at = msl.find(kInline, at)) {
+                        msl.replace(at, kInline.size(), "static");
+                    }
+                }
+                id<MTLLibrary> library = [m_device newLibraryWithSource:[NSString stringWithUTF8String:msl.c_str()] options:options error:&error];
+                if (!library) {
+                    Log::Error("MetalBackend: pack program %s %s: %s", desc.label.c_str(), stage,
+                               error ? error.localizedDescription.UTF8String : "no library");
+                }
+                return library;
+            };
+            auto entryFunction = [&](id<MTLLibrary> library, const std::string& entry, const char* stage) -> id<MTLFunction> {
+                id<MTLFunction> function = [library newFunctionWithName:[NSString stringWithUTF8String:entry.c_str()]];
+                if (!function) {
+                    Log::Error("MetalBackend: pack program %s %s: no entry point %s", desc.label.c_str(), stage, entry.c_str());
+                    return nil;
+                }
+                function.label = [NSString stringWithFormat:@"%s.%s", desc.label.c_str(), stage];
+                return function;
+            };
+            // The MSL: the caller's, or translated here from the SPIR-V with
+            // this backend's indices (the pack block, the user block, the
+            // texture slots).
+            std::string vertexMsl = desc.vertexMsl, fragmentMsl = desc.fragmentMsl, translateError;
+            if (vertexMsl.empty() &&
+                !Shaders::PackCompiler::ToMetal(desc.vertexSpirv, true, MetalBindings::kPackUniforms,
+                                                MetalBindings::kUserUniform, vertexMsl, translateError)) {
+                Log::Error("MetalBackend: pack program %s: %s", desc.label.c_str(), translateError.c_str());
+                return INVALID_SHADER;
+            }
+            if (fragmentMsl.empty() &&
+                !Shaders::PackCompiler::ToMetal(desc.fragmentSpirv, false, MetalBindings::kPackUniforms,
+                                                MetalBindings::kUserUniform, fragmentMsl, translateError)) {
+                Log::Error("MetalBackend: pack program %s: %s", desc.label.c_str(), translateError.c_str());
+                return INVALID_SHADER;
+            }
+            if (const char* dump = std::getenv("OBEY_PACK_DUMP"); dump && std::strcmp(dump, "msl") == 0) {
+                // Next to the pipeline's translated GLSL (ShaderPipeline::DumpSource).
+                std::string gameDir = Platform::g_gameDirectory.GetGameDirectory();
+                if (gameDir.empty()) gameDir = Platform::GameDirectory::GetDefaultGameDirectory();
+                const std::filesystem::path dir = std::filesystem::path(gameDir) / "shaderpacks" / ".translated";
+                std::error_code ec;
+                std::filesystem::create_directories(dir, ec);
+                std::ofstream(dir / (desc.label + ".vsh.metal")) << vertexMsl;
+                std::ofstream(dir / (desc.label + ".fsh.metal")) << fragmentMsl;
+            }
+            ShaderInfo info;
+            info.vertLibrary = compileLibrary(vertexMsl, "vsh");
+            if (!info.vertLibrary) return INVALID_SHADER;
+            info.vertex = entryFunction(info.vertLibrary, desc.vertexEntry, "vsh");
+            if (!info.vertex) return INVALID_SHADER;
+            info.fragLibrary = compileLibrary(fragmentMsl, "fsh");
+            if (!info.fragLibrary) return INVALID_SHADER;
+            info.fragment = entryFunction(info.fragLibrary, desc.fragmentEntry, "fsh");
+            if (!info.fragment) return INVALID_SHADER;
+            info.vertPath = "pack:" + desc.label + ".vsh";
+            info.fragPath = "pack:" + desc.label + ".fsh";
+            info.layoutType = kLayoutPack;
+            info.packBlockSize = desc.uniformBlockSize;
+            info.packBlock.assign(desc.uniformBlockSize, 0);
+            for (const PackUniformDesc& u : desc.uniforms) info.packUniforms[u.name] = u;
+            info.packSampler2D = desc.sampler2DSlots;
+            const uint32_t handle = AllocHandle();
+            m_shaders[handle] = std::move(info);
+            ++m_memStats.shaderCount;
+            return handle;
+        }
+    }
+
+    bool MetalBackend::SetPackUniform(ShaderHandle shader, const std::string& name, const void* data, size_t bytes) {
+        // The engine sets its uniforms on its own handles; under an override
+        // they land in the pack program drawn in its place.
+        if (m_overrideMode) {
+            auto ov = m_shaderOverrides.find(shader);
+            if (ov != m_shaderOverrides.end() && ov->second.shader != INVALID_SHADER) shader = ov->second.shader;
+        }
+        auto it = m_shaders.find(shader);
+        if (it == m_shaders.end() || it->second.layoutType != kLayoutPack) return false;
+        ShaderInfo& info = it->second;
+        // `name[i]`: element i of an array member.
+        size_t element = 0;
+        std::string base;
+        const std::string* key = &name;
+        if (!name.empty() && name.back() == ']') {
+            const size_t br = name.find('[');
+            if (br == std::string::npos) return true;
+            base = name.substr(0, br);
+            element = static_cast<size_t>(std::atoi(name.c_str() + br + 1));
+            key = &base;
+        }
+        auto u = info.packUniforms.find(*key);
+        if (u == info.packUniforms.end()) return true;   // not a uniform of this program (a sampler's unit, an unused one)
+        const PackUniformDesc& d = u->second;
+        if (element >= std::max<uint32_t>(1, d.arrayLength)) return true;
+        const uint32_t elementSize = d.arrayLength > 1 ? d.arrayStride : d.size;
+        const uint32_t offset = d.offset + static_cast<uint32_t>(element) * d.arrayStride;
+        if (offset + elementSize > info.packBlock.size()) return true;
+        uint8_t* dst = info.packBlock.data() + offset;
+        const uint8_t* src = static_cast<const uint8_t*>(data);
+        // No depth remap here (SpirvUniforms does one for the engine's own
+        // uMVP): a pack program's matrices stay GL-style, and its translated
+        // vertex stage remaps clip z itself (ShaderPackGlsl::Vulkanize).
+        // OBEY_PACK_DUMP=block[:<program substring>]: the first writes, with values.
+        {
+            static const char* s_dump = std::getenv("OBEY_PACK_DUMP");
+            static const bool s_dumpBlock = s_dump && std::strncmp(s_dump, "block", 5) == 0;
+            static const std::string s_filter = s_dumpBlock && s_dump[5] == ':' ? std::string(s_dump + 6) : std::string();
+            static int s_logged = 0;
+            if (s_dumpBlock && s_logged < 3000 && (s_filter.empty() || info.vertPath.find(s_filter) != std::string::npos)) {
+                ++s_logged;
+                const float* f = reinterpret_cast<const float*>(src);
+                const size_t n = std::min<size_t>(bytes / 4, 4);
+                std::string vals;
+                for (size_t i = 0; i < n; ++i) vals += (i ? ", " : "") + std::to_string(f[i]);
+                Log::Info("[PackBlock] %s %s[%zu] kind %d offset %u size %u: %s", info.vertPath.c_str(), key->c_str(), element,
+                          static_cast<int>(d.kind), offset, elementSize, vals.c_str());
+            }
+        }
+        switch (d.kind) {
+            case PackUniformKind::Mat3:
+                // Three std140 columns, 16 bytes apart, from glm's packed 36.
+                for (int c = 0; c < 3 && bytes >= 36; ++c) std::memcpy(dst + c * 16, src + c * 12, 12);
+                break;
+            case PackUniformKind::Bool:
+            case PackUniformKind::Int:
+            case PackUniformKind::Float:
+                std::memcpy(dst, src, std::min<size_t>(bytes, 4));
+                break;
+            default:
+                std::memcpy(dst, src, std::min<size_t>(bytes, elementSize));
+                break;
+        }
+        info.packDirty = true;
+        return true;
+    }
+
+    void MetalBackend::SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) {
+        m_overrideMode = on;
+        m_overrideDefaultTarget = on ? defaultTarget : INVALID_RENDER_TARGET;
+        m_drawStateDirty = true;
+    }
+
+    void MetalBackend::SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) {
+        if (engine == INVALID_SHADER) return;
+        if (pack == INVALID_SHADER && target == INVALID_RENDER_TARGET) { m_shaderOverrides.erase(engine); return; }
+        m_shaderOverrides[engine] = {pack, target};
+    }
+
+    std::vector<ShaderHandle> MetalBackend::FindShadersBySource(
+        const std::function<bool(const std::string&, const std::string&)>& match) {
+        // The engine's shaders are loaded by their GLSL paths; the sources
+        // behind them are what the pack pipeline's predicates read.
+        auto readFile = [](const std::string& path) {
+            std::ifstream in(path, std::ios::binary);
+            if (!in.is_open()) return std::string();
+            std::stringstream ss;
+            ss << in.rdbuf();
+            return ss.str();
+        };
+        std::vector<ShaderHandle> out;
+        for (auto& [handle, info] : m_shaders) {
+            if (info.layoutType == kLayoutPack || info.vertPath.empty()) continue;
+            if (!info.sourcesLoaded) {
+                info.vertexSource = readFile(info.vertPath);
+                info.fragmentSource = readFile(info.fragPath);
+                info.sourcesLoaded = true;
+            }
+            if (match(info.vertexSource, info.fragmentSource)) out.push_back(handle);
+        }
+        return out;
+    }
+
+    void MetalBackend::ClearShaderOverrides() {
+        m_shaderOverrides.clear();
+        m_overrideMode = false;
+        m_overrideDefaultTarget = INVALID_RENDER_TARGET;
     }
 
     // ========================================================================
     // PIPELINES
     // ========================================================================
 
-    uint64_t MetalBackend::PipelineKey(const PipelineState& state, ShaderHandle shader, uint8_t config) {
+    MetalBackend::PipelineKeyT MetalBackend::PipelineKey(const PipelineState& state, ShaderHandle shader, uint8_t config) const {
         // What a Metal pipeline bakes: the shader (its vertex input with it),
         // the attachments' formats and the blend. Depth, stencil, cull,
         // winding, fill, bias and topology are encoder state.
         uint64_t key = shader;
         key |= static_cast<uint64_t>(config & 7u) << 32;
+        // A target over the caller's textures: its formats are the pass's,
+        // so the key carries them (PrepareDraw keys on the current pass).
+        if (ConfigFromPass(config)) key |= static_cast<uint64_t>(m_pass.attachmentsKey & 0x3FFFFu) << 46;
         key |= static_cast<uint64_t>(state.blendEnabled ? 1 : 0) << 35;
         key |= static_cast<uint64_t>(state.srcBlendFactor) << 36;
         key |= static_cast<uint64_t>(state.dstBlendFactor) << 40;
         key |= static_cast<uint64_t>(state.blendAlphaLikeColor ? 1 : 0) << 44;
         key |= static_cast<uint64_t>(state.colorWriteEnabled ? 1 : 0) << 45;
-        return key;
+        PipelineKeyT k;
+        k.a = key;
+        // A pack program under an override: the engine shader's layout.
+        if (m_packLayoutSource != INVALID_SHADER && shader == m_boundShader) k.b = m_packLayoutSource;
+        return k;
     }
 
     id<MTLRenderPipelineState> MetalBackend::PipelineFor(const PipelineState& state, ShaderHandle shader, uint8_t config) {
-        const uint64_t key = PipelineKey(state, shader, config);
+        const PipelineKeyT key = PipelineKey(state, shader, config);
         auto it = m_pipelines.find(key);
         if (it != m_pipelines.end()) return it->second.pipeline;
         auto sit = m_shaders.find(shader);
         if (sit == m_shaders.end()) return nil;
         const ShaderInfo& info = sit->second;
+        // The vertex input a pack program draws with: the overridden engine
+        // shader's (PipelineKeyT::b), else its own registration.
+        const ShaderInfo* layoutInfo = &info;
+        if (key.b != 0) {
+            auto lit = m_shaders.find(key.b);
+            if (lit != m_shaders.end()) layoutInfo = &lit->second;
+        }
         // A Metal pipeline compile (the MSL was compiled with the library):
         // mid-frame it is a hitch, which WarmPipelines takes off the frame.
         PROFILE_ZONE_N("Mtl.CreatePipeline");
@@ -371,8 +629,8 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             // Vertex input: the shader's registered layout, else the 24-byte
             // block layout (pos3f + uv2f + colour4u8) — Vulkan's rule. Only
             // the attributes the function actually reads are described.
-            VertexLayout layout = info.vertexLayout;
-            if (layout.attributes.empty()) {
+            VertexLayout layout = layoutInfo->vertexLayout;
+            if (layout.attributes.empty() && !layout.noVertexInput) {
                 layout.stride = 24;
                 layout.attributes = {{0, 3, 0, false, AttribType::Float},
                                      {1, 2, 12, false, AttribType::Float},
@@ -385,19 +643,34 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             if (used.count > 0) {
                 MTLVertexDescriptor* vd = [MTLVertexDescriptor vertexDescriptor];
                 bool anyVertex = false, anyInstance = false;
+                NSMutableSet<NSNumber*>* described = [NSMutableSet set];
                 for (const VertexAttribute& a : layout.attributes) {
                     if (![used containsObject:@(a.location)]) continue;
                     vd.attributes[a.location].format = ToMtl(a);
                     vd.attributes[a.location].offset = a.offset;
                     vd.attributes[a.location].bufferIndex = MetalBindings::kVertexStream;
+                    [described addObject:@(a.location)];
                     anyVertex = true;
                 }
-                for (const VertexAttribute& a : info.instanceLayout.attributes) {
+                for (const VertexAttribute& a : layoutInfo->instanceLayout.attributes) {
                     if (![used containsObject:@(a.location)]) continue;
                     vd.attributes[a.location].format = ToMtl(a);
                     vd.attributes[a.location].offset = a.offset;
                     vd.attributes[a.location].bufferIndex = MetalBindings::kInstanceStream;
+                    [described addObject:@(a.location)];
                     anyInstance = true;
+                }
+                if (info.layoutType == kLayoutPack && anyVertex) {
+                    // A pack program reading an attribute this layout lacks
+                    // (a mesh without colour, say): described anyway, four
+                    // bytes at the vertex's start, so the pipeline builds;
+                    // OpenGL handed such attributes their default.
+                    for (NSNumber* n in used) {
+                        if ([described containsObject:n] || n.unsignedIntegerValue >= 31) continue;
+                        vd.attributes[n.unsignedIntegerValue].format = MTLVertexFormatUChar4Normalized;
+                        vd.attributes[n.unsignedIntegerValue].offset = 0;
+                        vd.attributes[n.unsignedIntegerValue].bufferIndex = MetalBindings::kVertexStream;
+                    }
                 }
                 if (anyVertex) {
                     vd.layouts[MetalBindings::kVertexStream].stride = layout.stride;
@@ -411,7 +684,11 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
                 desc.vertexDescriptor = vd;
             }
 
-            const AttachmentConfig att = AttachmentsFor(config);
+            AttachmentConfig att = AttachmentsFor(config);
+            if (ConfigFromPass(config)) {
+                att.count = static_cast<uint32_t>(std::min<size_t>(m_pass.formats.size(), 8));
+                for (uint32_t i = 0; i < att.count; ++i) att.formats[i] = m_pass.formats[i];
+            }
             const bool oit = ConfigIsOit(config);
             for (uint32_t i = 0; i < att.count; ++i) {
                 MTLRenderPipelineColorAttachmentDescriptor* c = desc.colorAttachments[i];
@@ -591,6 +868,7 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
         std::vector<std::string> lines;
         for (const auto& [key, rec] : m_pipelines) {
             if (!rec.pipeline || ConfigIsOit(rec.config)) continue;   // OIT passes' pipelines live with the option
+            if (ConfigFromPass(rec.config)) continue;                   // a shader pack's targets: their formats are the pack's
             auto it = m_shaders.find(rec.shader);
             if (it == m_shaders.end() || it->second.vertPath.empty() || it->second.layoutType >= 3) continue;
             // The frame's (0) and the depth-less targets' (4) pipelines.
@@ -763,6 +1041,24 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
                 if (it != m_buffers.end()) bindBoth(MetalBindings::kUserUniform, it->second.buffer, m_boundUniformOffset);
             }
         }
+        if (layoutType == kLayoutPack) {
+            // The program's uniform block: a ring window per change (and per
+            // frame — a window is the frame slot's), bound to both stages;
+            // the terrain family's section-origin table too.
+            ShaderInfo& info = *const_cast<ShaderInfo*>(m_boundShaderInfo);
+            if (info.packBlockSize > 0) {
+                if (info.packDirty || info.packRingFrame != m_frameNumber || !info.packRing) {
+                    info.packRing = RingAllocate(info.packBlock.size(), info.packRingOffset, info.packBlock.data());
+                    info.packRingFrame = m_frameNumber;
+                    info.packDirty = false;
+                }
+                bindBoth(MetalBindings::kPackUniforms, info.packRing, info.packRingOffset);
+            }
+            if (m_boundUniformBuffer != INVALID_BUFFER) {
+                auto it = m_buffers.find(m_boundUniformBuffer);
+                if (it != m_buffers.end()) bindBoth(MetalBindings::kUserUniform, it->second.buffer, m_boundUniformOffset);
+            }
+        }
         if (layoutType == 3 || layoutType == 4) {
             if (m_metal4) {
                 size_t offset = 0;
@@ -810,8 +1106,22 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
                 m_cache.vertexSamplers[index] = sampler;
             }
         };
+        const int layoutType = m_boundShaderInfo->layoutType;
+        if (layoutType == kLayoutPack) {
+            // A pack program: every slot at its own index, with its sampler.
+            const uint32_t plain = m_boundShaderInfo->packSampler2D;
+            for (uint32_t slot = 0; slot < MetalBindings::kPackTextureSlots; ++slot) {
+                const TextureInfo* tex = m_boundTextureInfo[slot];
+                if (tex && (!tex->texture || tex->bufferTexture || tex->layers > 1) && (plain & (1u << slot))) {
+                    tex = m_lastTexture2D[slot];   // the slot's plain texture, not the engine's array
+                }
+                if (!tex || !tex->texture || tex->bufferTexture) continue;
+                bind(slot, FrameTexture(*tex), tex->sampler);
+            }
+            return;
+        }
         const TextureInfo* slot0 = nullptr;
-        for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
+        for (uint32_t slot = 0; slot < MetalBindings::kTextureSlots; ++slot) {
             const TextureInfo* tex = m_boundTextureInfo[slot];
             if (tex && !tex->texture) tex = nullptr;
             if (slot == 0) slot0 = tex;
@@ -827,7 +1137,6 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             if (slot >= 4 && tex->layers <= 1) continue;
             bind(MetalBindings::TextureIndexOfSlot(slot), FrameTexture(*tex), tex->bufferTexture ? nil : tex->sampler);
         }
-        const int layoutType = m_boundShaderInfo->layoutType;
         if ((layoutType == 3 || layoutType == 4) && m_oitCreated) {
             // Improved Transparency's set 6 for the stage last set: the depth
             // bounds stage reads the ORIGINAL bounds, the others the culled
@@ -899,10 +1208,12 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
         }
         // Counter-clockwise = front, as on OpenGL and on Vulkan's flipped
         // viewport: the image is upright on all three.
-        const int winding = static_cast<int>(m_state.frontFace);
+        // A pack texture target's flipped viewport (ApplyViewport) mirrors
+        // every triangle's screen winding: the rule flips with it.
+        const bool ccwFront = (m_state.frontFace == FrontFace::CounterClockwise) != ConfigFromPass(m_pass.config);
+        const int winding = ccwFront ? 1 : 0;
         if (winding != m_cache.winding) {
-            [enc setFrontFacingWinding:m_state.frontFace == FrontFace::CounterClockwise ? MTLWindingCounterClockwise
-                                                                                         : MTLWindingClockwise];
+            [enc setFrontFacingWinding:ccwFront ? MTLWindingCounterClockwise : MTLWindingClockwise];
             m_cache.winding = winding;
         }
         const int fill = static_cast<int>(m_state.polygonMode);
@@ -1062,7 +1373,18 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             depth = stencil = false;   // nothing to clear there
             if (!color) return;
         }
-        const uint32_t key = static_cast<uint32_t>(m_pass.config) | (color ? 8u : 0u);
+        // A texture target (a shader pack's): every colour attachment clears,
+        // as glClear did; the engine's own passes clear attachment 0 only,
+        // as vkCmdClearAttachments did.
+        const bool fromPass = ConfigFromPass(m_pass.config);
+        AttachmentConfig att = AttachmentsFor(m_pass.config);
+        if (fromPass) {
+            att.count = static_cast<uint32_t>(std::min<size_t>(m_pass.formats.size(), 8));
+            for (uint32_t i = 0; i < att.count; ++i) att.formats[i] = m_pass.formats[i];
+        }
+        const uint32_t colorOutputs = fromPass && color ? att.count : 1u;
+        uint64_t key = static_cast<uint64_t>(m_pass.config) | (color ? 8u : 0u);
+        if (fromPass) key |= static_cast<uint64_t>(m_pass.attachmentsKey) << 8;
         id<MTLRenderPipelineState> pipeline = nil;
         auto it = m_clearPipelines.find(key);
         if (it != m_clearPipelines.end()) {
@@ -1071,12 +1393,11 @@ fragment float4 clear_fragment(ClearOut in [[stage_in]], constant ClearParams& p
             @autoreleasepool {
                 MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
                 desc.vertexFunction = [m_internalLibrary newFunctionWithName:@"clear_vertex"];
-                desc.fragmentFunction = [m_internalLibrary newFunctionWithName:@"clear_fragment"];
-                const AttachmentConfig att = AttachmentsFor(m_pass.config);
+                NSString* fragment = colorOutputs > 1 ? [NSString stringWithFormat:@"clear_fragment%u", colorOutputs] : @"clear_fragment";
+                desc.fragmentFunction = [m_internalLibrary newFunctionWithName:fragment];
                 for (uint32_t i = 0; i < att.count; ++i) {
                     desc.colorAttachments[i].pixelFormat = att.formats[i];
-                    // Colour attachment 0 only, as vkCmdClearAttachments did.
-                    desc.colorAttachments[i].writeMask = (color && i == 0) ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
+                    desc.colorAttachments[i].writeMask = (color && i < colorOutputs) ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
                 }
                 desc.depthAttachmentPixelFormat = ConfigHasDepth(m_pass.config) ? kDepthFormat : MTLPixelFormatInvalid;
                 desc.stencilAttachmentPixelFormat = ConfigHasDepth(m_pass.config) ? kDepthFormat : MTLPixelFormatInvalid;

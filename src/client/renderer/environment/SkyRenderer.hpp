@@ -393,8 +393,6 @@ namespace Render {
         glm::ivec3 m_observerBlock{0};
         uint16_t   m_observerBiome = 0;
 
-        static const char* vertexShaderSource;
-        static const char* fragmentShaderSource;
 
         ShaderHandle m_shader = INVALID_SHADER;
         TextureHandle m_whiteTexture = INVALID_TEXTURE;

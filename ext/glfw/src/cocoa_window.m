@@ -38,6 +38,23 @@
 //       having been (according to documentation) added in Mac OS X 10.7
 #define NSWindowCollectionBehaviorFullScreenNone (1 << 9)
 
+// ObeyCraft: the framebuffer rect the GLFW_SCALE_FRAMEBUFFER hint asked
+// for. A window without a client API (Metal, Vulkan) is layer-backed, and
+// convertRectToBacking reports the display's backing scale whatever the
+// hint said — stock GLFW only passes the hint on to the Vulkan surface's
+// CAMetalLayer, so glfwGetFramebufferSize kept saying 2x while the layer
+// drew 1x (Retina Resolution off did nothing on Metal and mismatched the
+// swapchain on Vulkan). With the hint off such a window's framebuffer is
+// its content rect in points; OpenGL windows keep AppKit's answer, which
+// honours wantsBestResolutionOpenGLSurface.
+//
+static NSRect framebufferRectForWindow(_GLFWwindow* window, NSRect contentRect)
+{
+    if (!window->ns.scaleFramebuffer && window->context.client == GLFW_NO_API)
+        return contentRect;
+    return [window->ns.view convertRectToBacking:contentRect];
+}
+
 // Returns whether the cursor is in the content area of the specified window
 //
 static GLFWbool cursorInContentArea(_GLFWwindow* window)
@@ -245,7 +262,7 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
     }
 
     const NSRect contentRect = [window->ns.view frame];
-    const NSRect fbRect = [window->ns.view convertRectToBacking:contentRect];
+    const NSRect fbRect = framebufferRectForWindow(window, contentRect);
 
     if (fbRect.size.width != window->ns.fbWidth ||
         fbRect.size.height != window->ns.fbHeight)
@@ -508,7 +525,7 @@ static const NSRange kEmptyRange = { NSNotFound, 0 };
 - (void)viewDidChangeBackingProperties
 {
     const NSRect contentRect = [window->ns.view frame];
-    const NSRect fbRect = [window->ns.view convertRectToBacking:contentRect];
+    const NSRect fbRect = framebufferRectForWindow(window, contentRect);
     const float xscale = fbRect.size.width / contentRect.size.width;
     const float yscale = fbRect.size.height / contentRect.size.height;
 
@@ -1133,7 +1150,7 @@ void _glfwGetFramebufferSizeCocoa(_GLFWwindow* window, int* width, int* height)
     @autoreleasepool {
 
     const NSRect contentRect = [window->ns.view frame];
-    const NSRect fbRect = [window->ns.view convertRectToBacking:contentRect];
+    const NSRect fbRect = framebufferRectForWindow(window, contentRect);
 
     if (width)
         *width = (int) fbRect.size.width;
@@ -1172,7 +1189,7 @@ void _glfwGetWindowContentScaleCocoa(_GLFWwindow* window,
     @autoreleasepool {
 
     const NSRect points = [window->ns.view frame];
-    const NSRect pixels = [window->ns.view convertRectToBacking:points];
+    const NSRect pixels = framebufferRectForWindow(window, points);
 
     if (xscale)
         *xscale = (float) (pixels.size.width / points.size.width);

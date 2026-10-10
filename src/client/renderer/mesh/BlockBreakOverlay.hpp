@@ -64,8 +64,6 @@ namespace Render {
 
         // Embedded shader source (used by GL CreateShader fallback when the
         // SPIR-V files for Vulkan aren't found).
-        static const char* vertexShaderSource;
-        static const char* fragmentShaderSource;
 
         bool ResolveAtlas();
     };

@@ -59,10 +59,11 @@ namespace Launcher::Widgets {
                  bool enabled, ImFont* font = nullptr, float tracking = 1.5f);
 
     // Styled single-line text input of exact pixel height at the cursor.
+    // `enabled` false draws it greyed out and takes no clicks or keys.
     bool Input(const char* id, const char* hint, char* buf, size_t bufSize,
                float width, float height, ImFont* font,
                ImGuiInputTextFlags flags = 0, ImGuiInputTextCallback cb = nullptr,
-               float rounding = 10.0f, float padX = 14.0f);
+               float rounding = 10.0f, float padX = 14.0f, bool enabled = true);
 
     // A click-to-open select: a field at `pos` (exact `size`) showing the
     // selected option's label and a chevron; a click opens a menu of the

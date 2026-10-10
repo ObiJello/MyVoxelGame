@@ -512,6 +512,73 @@ namespace Server {
         }
     }
 
+    // Map the mob-system source onto ServerPlayer's own enum so the death
+    // message tells the truth — a player killed by poison ticks reads
+    // "was killed by magic", not "was slain by".
+    DamageSource PlayerEntityView::PlayerDamageSourceOf(Game::MobDamageSource source) const {
+        switch (source) {
+            case Game::MobDamageSource::Magic:
+                return DamageSource::MAGIC;
+            case Game::MobDamageSource::Wither:
+                return DamageSource::WITHER;
+            case Game::MobDamageSource::Fire:
+                return DamageSource::FIRE;
+            case Game::MobDamageSource::Lava:
+                return DamageSource::LAVA;
+            // Explosion used to fall through to ENTITY_ATTACK, which made
+            // DamageSource::EXPLOSION unreachable and reported every creeper
+            // kill as "was slain by Creeper" instead of "blew up".
+            case Game::MobDamageSource::Explosion:
+                return DamageSource::EXPLOSION;
+            case Game::MobDamageSource::Fall:
+                return DamageSource::FALL;
+            case Game::MobDamageSource::Drown:
+                return DamageSource::DROWNING;
+            case Game::MobDamageSource::Void:
+                return DamageSource::VOID_DAMAGE;
+            case Game::MobDamageSource::FallingBlock:
+                return DamageSource::FALLING_BLOCK;
+            case Game::MobDamageSource::FallingAnvil:
+                return DamageSource::FALLING_ANVIL;
+            case Game::MobDamageSource::FallingStalactite:
+                return DamageSource::FALLING_STALACTITE;
+            case Game::MobDamageSource::Stalagmite:
+                return DamageSource::STALAGMITE;
+            case Game::MobDamageSource::Thorns:
+                return DamageSource::THORNS;
+            case Game::MobDamageSource::MaceSmash:
+                return DamageSource::MACE_SMASH;
+            case Game::MobDamageSource::Fireworks:
+                return DamageSource::FIREWORKS;
+            case Game::MobDamageSource::FlyIntoWall:
+                return DamageSource::FLY_INTO_WALL;
+            case Game::MobDamageSource::Lightning:
+                return DamageSource::LIGHTNING_BOLT;
+            case Game::MobDamageSource::Spear:
+                return DamageSource::SPEAR;
+            // The contact-damage blocks (cactus, berry bush, magma, campfire).
+            case Game::MobDamageSource::Cactus:
+                return DamageSource::CACTUS;
+            case Game::MobDamageSource::SweetBerryBush:
+                return DamageSource::SWEET_BERRY_BUSH;
+            case Game::MobDamageSource::HotFloor:
+                return DamageSource::HOT_FLOOR;
+            case Game::MobDamageSource::Campfire:
+                return DamageSource::CAMPFIRE;
+            // DamageSources.trident(trident, owner): the thrown trident is
+            // the direct entity of the projectile hit.
+            case Game::MobDamageSource::Projectile:
+                if (const Game::Entity* direct = HurtDirectEntity();
+                    direct && direct->GetType() == Game::EntityTypeId::Trident) {
+                    return DamageSource::TRIDENT;
+                }
+                break;
+            default:
+                break;
+        }
+        return DamageSource::ENTITY_ATTACK;
+    }
+
     void PlayerEntityView::ActuallyHurt(Game::MobDamageSource source, float amount,
                                         Game::Entity* attacker) {
         if (!m_player) return;
@@ -528,92 +595,7 @@ namespace Server {
         // CombatTracker uses.
         std::string attackerName;
         if (attacker) attackerName = Game::EntityDisplayName(*attacker, m_level);
-        // Map the mob-system source onto ServerPlayer's own enum so the death
-        // message tells the truth — a player killed by poison ticks reads
-        // "was killed by magic", not "was slain by".
-        DamageSource playerSource = DamageSource::ENTITY_ATTACK;
-        switch (source) {
-            case Game::MobDamageSource::Magic:
-                playerSource = DamageSource::MAGIC;
-                break;
-            case Game::MobDamageSource::Wither:
-                playerSource = DamageSource::WITHER;
-                break;
-            case Game::MobDamageSource::Fire:
-                playerSource = DamageSource::FIRE;
-                break;
-            case Game::MobDamageSource::Lava:
-                playerSource = DamageSource::LAVA;
-                break;
-            // Explosion used to fall through to ENTITY_ATTACK, which made
-            // DamageSource::EXPLOSION unreachable and reported every creeper
-            // kill as "was slain by Creeper" instead of "blew up".
-            case Game::MobDamageSource::Explosion:
-                playerSource = DamageSource::EXPLOSION;
-                break;
-            case Game::MobDamageSource::Fall:
-                playerSource = DamageSource::FALL;
-                break;
-            case Game::MobDamageSource::Drown:
-                playerSource = DamageSource::DROWNING;
-                break;
-            case Game::MobDamageSource::Void:
-                playerSource = DamageSource::VOID_DAMAGE;
-                break;
-            case Game::MobDamageSource::FallingBlock:
-                playerSource = DamageSource::FALLING_BLOCK;
-                break;
-            case Game::MobDamageSource::FallingAnvil:
-                playerSource = DamageSource::FALLING_ANVIL;
-                break;
-            case Game::MobDamageSource::FallingStalactite:
-                playerSource = DamageSource::FALLING_STALACTITE;
-                break;
-            case Game::MobDamageSource::Stalagmite:
-                playerSource = DamageSource::STALAGMITE;
-                break;
-            case Game::MobDamageSource::Thorns:
-                playerSource = DamageSource::THORNS;
-                break;
-            case Game::MobDamageSource::MaceSmash:
-                playerSource = DamageSource::MACE_SMASH;
-                break;
-            case Game::MobDamageSource::Fireworks:
-                playerSource = DamageSource::FIREWORKS;
-                break;
-            case Game::MobDamageSource::FlyIntoWall:
-                playerSource = DamageSource::FLY_INTO_WALL;
-                break;
-            case Game::MobDamageSource::Lightning:
-                playerSource = DamageSource::LIGHTNING_BOLT;
-                break;
-            case Game::MobDamageSource::Spear:
-                playerSource = DamageSource::SPEAR;
-                break;
-            // The contact-damage blocks (cactus, berry bush, magma, campfire).
-            case Game::MobDamageSource::Cactus:
-                playerSource = DamageSource::CACTUS;
-                break;
-            case Game::MobDamageSource::SweetBerryBush:
-                playerSource = DamageSource::SWEET_BERRY_BUSH;
-                break;
-            case Game::MobDamageSource::HotFloor:
-                playerSource = DamageSource::HOT_FLOOR;
-                break;
-            case Game::MobDamageSource::Campfire:
-                playerSource = DamageSource::CAMPFIRE;
-                break;
-            // DamageSources.trident(trident, owner): the thrown trident is
-            // the direct entity of the projectile hit.
-            case Game::MobDamageSource::Projectile:
-                if (const Game::Entity* direct = HurtDirectEntity();
-                    direct && direct->GetType() == Game::EntityTypeId::Trident) {
-                    playerSource = DamageSource::TRIDENT;
-                }
-                break;
-            default:
-                break;
-        }
+        const DamageSource playerSource = PlayerDamageSourceOf(source);
         // MC's whole DamageSource rides along for the enchantment effects
         // (Protection's damage-type tags, Breach through the attacker's
         // weapon, Frost Walker's immunity). The difficulty pass already ran
@@ -692,6 +674,11 @@ namespace Server {
 
     bool PlayerEntityView::Hurt(Game::MobDamageSource source, float amount,
                                 Game::Entity* attacker) {
+        // MC ServerPlayer/Player.hurtServer: `isInvulnerableTo(level, source)`
+        // and `abilities.invulnerable` return false before LivingEntity
+        // .hurtServer — a creative player brushing a cactus opens no hurt
+        // window, so watchers see no red flash on the position broadcast.
+        if (m_player && m_player->isInvulnerableTo(PlayerDamageSourceOf(source))) return false;
         // MC ServerPlayer.hurtServer (:1045-1060): a hit whose causing entity
         // is a player — a melee blow, or an arrow a player shot — is refused
         // outright while the pvp rule is off (canHarmPlayer -> isPvpAllowed).

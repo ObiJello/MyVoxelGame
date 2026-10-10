@@ -760,8 +760,15 @@ namespace Threading {
                                                                           Game::DimensionId dimension) {
         Network::MeshBuildResult result(chunkPos, sectionY);
 
-        // Opaque layer
-        if (!sectionMesh.opaqueVerts.empty()) {
+        // The layer's quad records (Render::QuadRecord), as words.
+        auto copyRecords = [](const std::vector<Render::QuadRecord>& records, std::vector<uint32_t>& out) {
+            static_assert(sizeof(Render::QuadRecord) == 4 * sizeof(uint32_t));
+            const auto* words = reinterpret_cast<const uint32_t*>(records.data());
+            out.assign(words, words + records.size() * 4);
+        };
+
+        // Opaque layer (vertices, records, or both)
+        if (!sectionMesh.opaqueVerts.empty() || !sectionMesh.opaqueRecords.empty()) {
             CopyVertexLayer(sectionMesh.opaqueVerts, result.meshData.opaqueVertices);
             result.meshData.opaqueIndices = sectionMesh.opaqueIdxs;
             result.meshData.opaqueVertexCount = sectionMesh.opaqueVerts.size();
@@ -769,10 +776,14 @@ namespace Threading {
             std::copy(std::begin(sectionMesh.opaqueFacingRanges), std::end(sectionMesh.opaqueFacingRanges),
                       std::begin(result.meshData.opaqueFacingRanges));
             result.meshData.opaqueFaceMap = sectionMesh.opaqueFaceMap;
+            copyRecords(sectionMesh.opaqueRecords, result.meshData.opaqueRecords);
+            result.meshData.opaqueRecordCount = sectionMesh.opaqueRecords.size();
+            std::copy(std::begin(sectionMesh.opaqueRecordRanges), std::end(sectionMesh.opaqueRecordRanges),
+                      std::begin(result.meshData.opaqueRecordRanges));
         }
 
         // Cutout layer
-        if (!sectionMesh.cutoutVerts.empty()) {
+        if (!sectionMesh.cutoutVerts.empty() || !sectionMesh.cutoutRecords.empty()) {
             CopyVertexLayer(sectionMesh.cutoutVerts, result.meshData.cutoutVertices);
             result.meshData.cutoutIndices = sectionMesh.cutoutIdxs;
             result.meshData.cutoutVertexCount = sectionMesh.cutoutVerts.size();
@@ -780,6 +791,10 @@ namespace Threading {
             std::copy(std::begin(sectionMesh.cutoutFacingRanges), std::end(sectionMesh.cutoutFacingRanges),
                       std::begin(result.meshData.cutoutFacingRanges));
             result.meshData.cutoutFaceMap = sectionMesh.cutoutFaceMap;
+            copyRecords(sectionMesh.cutoutRecords, result.meshData.cutoutRecords);
+            result.meshData.cutoutRecordCount = sectionMesh.cutoutRecords.size();
+            std::copy(std::begin(sectionMesh.cutoutRecordRanges), std::end(sectionMesh.cutoutRecordRanges),
+                      std::begin(result.meshData.cutoutRecordRanges));
         }
 
         // Translucent layer

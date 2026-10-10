@@ -71,10 +71,13 @@ namespace Render {
         // 16-bit unorm per channel. Buffer textures only today.
         RGBA16,
         // 16-bit unsigned integer per channel (usamplerBuffer /
-        // texture_buffer<uint>). Buffer textures only: the terrain face map
-        // reads one 8-byte record texel per fetch as integers — no unorm →
-        // float → int round trip in the fragment shader.
+        // texture_buffer<uint>). Buffer textures only — no unorm → float →
+        // int round trip in the shader.
         RGBA16UI,
+        // 32-bit unsigned integer per channel, buffer textures only: the
+        // terrain face map's 16-byte records (a block's colour, AO, sprite
+        // and four lights, or a quad record) are one texel each.
+        RGBA32UI,
         R11G11B10F
     };
 
@@ -104,6 +107,35 @@ namespace Render {
     //
     // colorFormat MUST be an HDR float format for HDR rendering; depth
     // is typically Depth24Stencil8 to match the default backbuffer.
+    // A shader pack program for the Vulkan and Metal backends
+    // (docs/shader-packs-port.md): compiled at run time by
+    // Shaders::PackCompiler, its uniforms in one block the backend writes
+    // by name at the reflected offsets, its samplers on texture slots.
+    enum class PackUniformKind { Float, Int, Bool, Vec2, Vec3, Vec4, IVec2, IVec3, IVec4, Mat3, Mat4, Other };
+    struct PackUniformDesc {
+        std::string     name;
+        PackUniformKind kind = PackUniformKind::Other;
+        uint32_t        offset = 0;
+        uint32_t        size = 0;
+        uint32_t        arrayStride = 0;
+        uint32_t        arrayLength = 1;
+    };
+    constexpr uint32_t kPackTextureSlots = 16;
+    struct PackShaderDesc {
+        std::string label;
+        // Metal: MSL sources and their entry points.
+        std::string vertexMsl, fragmentMsl;
+        std::string vertexEntry = "main0", fragmentEntry = "main0";
+        // Vulkan: SPIR-V.
+        std::vector<uint32_t> vertexSpirv, fragmentSpirv;
+        std::vector<PackUniformDesc> uniforms;
+        uint32_t uniformBlockSize = 0;
+        std::vector<uint32_t> samplerSlots;   // the slots the program samples
+        uint32_t sampler2DSlots = 0;          // bit per slot sampled as a plain 2D texture
+        std::vector<uint32_t> vertexInputLocations;   // the attributes the vertex stage reads
+        uint32_t colorOutputs = 1;             // fragment outputs (= the pass's draw buffers)
+    };
+
     struct RenderTargetDesc {
         int           width        = 0;
         int           height       = 0;
@@ -227,6 +259,13 @@ namespace Render {
     struct VertexLayout {
         uint32_t stride = 0;
         std::vector<VertexAttribute> attributes;
+        // The shader reads no vertex attributes at all (vertex pulling: it
+        // fetches its data by gl_VertexIndex — the terrain record shader).
+        // Vulkan builds the pipeline with no vertex binding; Metal and
+        // OpenGL need nothing (a bound stream the shader ignores is legal).
+        // Distinct from an empty `attributes`, which means "the default
+        // 24-byte block layout".
+        bool noVertexInput = false;
     };
 
     // What the F3 overlay's system_specs entry prints (MC DeviceInfo):
@@ -372,6 +411,14 @@ namespace Render {
     // Every attribute is normalized: the shader turns the unorm floats back
     // into integers (value * 65535, exact in fp32), so neither backend needs
     // an integer attribute path.
+    // The terrain RECORD shaders (terrain_rec*.vert): no vertex input, the
+    // quad comes from the slab's record texels by gl_VertexIndex.
+    inline VertexLayout GetNoVertexInputLayout() {
+        VertexLayout layout;
+        layout.noVertexInput = true;
+        return layout;
+    }
+
     inline VertexLayout GetTerrainVertexLayout() {
         VertexLayout layout;
         layout.stride = 20;

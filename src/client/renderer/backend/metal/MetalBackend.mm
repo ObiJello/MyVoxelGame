@@ -312,6 +312,7 @@ namespace Render {
         ApplyDisplaySync();
         PROFILE_ZONE_N("Mtl.BeginFrame");
         m_frameActive = false;
+        m_packFrame = false;
         m_depthHandoff = false;   // asked for again by the frame that wants it
         @autoreleasepool {
             // The frame slot's previous use must be done on the GPU: with two
@@ -707,7 +708,7 @@ namespace Render {
             if (m_metal4) {
                 // A pass that loads any attachment continues earlier passes'
                 // output: its barrier waits for their fragment work.
-                bool resumed = false;
+                bool resumed = m_packFrame;   // a shader pack's passes sample each other's output
                 MTLRenderPassDescriptor* d = m_pass.desc;
                 for (NSUInteger i = 0; i < 8 && d.colorAttachments[i].texture; ++i) {
                     if (d.colorAttachments[i].loadAction == MTLLoadActionLoad) resumed = true;
@@ -732,6 +733,14 @@ namespace Render {
             return false;
         }
         if (m_pass.kind == PassKind::Frame) m_frameOpened = true;
+        // A target bound for overwriting (colour loads DontCare) resumes,
+        // if its pass is ever split, with what its first encoder drew.
+        if (m_pass.kind == PassKind::Target) {
+            MTLRenderPassDescriptor* d = m_pass.desc;
+            for (NSUInteger i = 0; i < 8 && d.colorAttachments[i].texture; ++i) {
+                if (d.colorAttachments[i].loadAction == MTLLoadActionDontCare) d.colorAttachments[i].loadAction = MTLLoadActionLoad;
+            }
+        }
         m_pass.clears = false;
         m_cache = EncoderCache{};
         for (const char* name : m_debugGroups) [m_encoder pushDebugGroup:DebugGroupName(name)];
@@ -783,11 +792,17 @@ namespace Render {
         m_pass = Pass{};
     }
 
+    void MetalBackend::BindRenderTargetOverwriting(RenderTargetHandle handle) {
+        m_bindDiscardColor = true;
+        BindRenderTarget(handle);
+        m_bindDiscardColor = false;
+    }
+
     void MetalBackend::BindRenderTarget(RenderTargetHandle handle) {
         if (!m_frameActive || handle == m_activeTarget) return;
         if (m_oitPassOpen) return;   // an OIT pass is open: OitEndPass returns to the frame
         auto rtIt = handle != INVALID_RENDER_TARGET ? m_targets.find(handle) : m_targets.end();
-        if (handle != INVALID_RENDER_TARGET && (rtIt == m_targets.end() || !rtIt->second.color)) return;
+        if (handle != INVALID_RENDER_TARGET && (rtIt == m_targets.end() || (!rtIt->second.color && !rtIt->second.depth))) return;
 
         // Leaving the frame before its pass opened (a target drawn ahead of
         // it): the frame stays unopened — its first use opens it, clearing.
@@ -803,9 +818,22 @@ namespace Render {
         } else {
             TargetInfo& rt = rtIt->second;
             MTLRenderPassDescriptor* d = [MTLRenderPassDescriptor renderPassDescriptor];
-            d.colorAttachments[0].texture = rt.color;
-            d.colorAttachments[0].loadAction = MTLLoadActionLoad;
-            d.colorAttachments[0].storeAction = MTLStoreActionStore;
+            // A texture target draws every colour attachment it wraps (a
+            // shader pack's DRAWBUFFERS); the engine's own targets one.
+            const size_t colorCount = rt.ownsImages ? 1u : rt.colors.size();
+            for (size_t i = 0; i < colorCount; ++i) {
+                d.colorAttachments[i].texture = rt.ownsImages ? rt.color : rt.colors[i];
+                // A pass that overwrites every pixel (BindRenderTargetOverwriting)
+                // skips the tile load of what is there.
+                d.colorAttachments[i].loadAction = m_bindDiscardColor ? MTLLoadActionDontCare : MTLLoadActionLoad;
+                d.colorAttachments[i].storeAction = MTLStoreActionStore;
+            }
+            if (!rt.ownsImages && colorCount == 0) {
+                // Depth-only (a depth snapshot's target): the pass takes its
+                // size from the depth attachment.
+                d.renderTargetWidth = static_cast<NSUInteger>(rt.width);
+                d.renderTargetHeight = static_cast<NSUInteger>(rt.height);
+            }
             if (rt.depth) {
                 d.depthAttachment.texture = rt.depth;
                 d.depthAttachment.loadAction = MTLLoadActionLoad;
@@ -821,8 +849,16 @@ namespace Render {
             m_pass.width = static_cast<uint32_t>(rt.width);
             m_pass.height = static_cast<uint32_t>(rt.height);
             // No depth attachment: its own pipeline shape, and every draw's
-            // depth / stencil test off (PrepareDraw).
-            m_pass.config = rt.depth ? 0 : kConfigTargetNoDepth;
+            // depth / stencil test off (PrepareDraw). A texture target's
+            // pipelines bake its formats (configs 5 / 6, keyed by the set).
+            if (rt.ownsImages) {
+                m_pass.config = rt.depth ? 0 : kConfigTargetNoDepth;
+            } else {
+                m_pass.config = rt.depth ? kConfigTextures : kConfigTexturesNoDepth;
+                m_pass.formats = rt.formats;
+                m_pass.attachmentsKey = rt.attachmentsKey;
+                m_pass.colorCount = static_cast<uint8_t>(colorCount);
+            }
             m_activeTarget = handle;
             if (auto texIt = m_textures.find(rt.colorTexture); texIt != m_textures.end()) {
                 texIt->second.lastUsedFrame = m_frameNumber;
@@ -850,9 +886,14 @@ namespace Render {
             if (m_pass.kind == PassKind::None || !m_pass.desc) return;
             MTLRenderPassDescriptor* d = m_pass.desc;
             if (color) {
-                d.colorAttachments[0].loadAction = MTLLoadActionClear;
-                d.colorAttachments[0].clearColor = MTLClearColorMake(m_clearColor[0], m_clearColor[1],
-                                                                     m_clearColor[2], m_clearColor[3]);
+                // Every attachment of a texture target (glClear's rule);
+                // attachment 0 of the engine's passes (vkCmdClearAttachments').
+                const uint32_t count = ConfigFromPass(m_pass.config) ? m_pass.colorCount : 1u;
+                for (uint32_t i = 0; i < count; ++i) {
+                    d.colorAttachments[i].loadAction = MTLLoadActionClear;
+                    d.colorAttachments[i].clearColor = MTLClearColorMake(m_clearColor[0], m_clearColor[1],
+                                                                         m_clearColor[2], m_clearColor[3]);
+                }
                 if (m_pass.kind == PassKind::Frame && !m_frameOpened) m_frameClearColor = m_clearColor;
             }
             if (depth && d.depthAttachment.texture) {
@@ -916,7 +957,16 @@ namespace Render {
 
     void MetalBackend::ApplyViewport() {
         if (!m_encoder) return;
-        const MTLViewport v = ToMetalViewport(m_viewport, m_depthRangeMin, m_depthRangeMax);
+        MTLViewport v = ToMetalViewport(m_viewport, m_depthRangeMin, m_depthRangeMax);
+        // A shader pack's texture target stores its image the OpenGL way, row
+        // 0 at the scene's bottom (its programs sample it with GL's v and
+        // read gl_FragCoord bottom-up): the viewport runs the other way for
+        // every draw into one, and the winding flips with it (PrepareDraw).
+        // The final pass draws into the frame, upright.
+        if (ConfigFromPass(m_pass.config)) {
+            v.originY += v.height;
+            v.height = -v.height;
+        }
         const MTLViewport& c = m_cache.viewport;
         if (m_cache.viewportValid && c.originX == v.originX && c.originY == v.originY && c.width == v.width &&
             c.height == v.height && c.znear == v.znear && c.zfar == v.zfar) return;
@@ -971,6 +1021,63 @@ namespace Render {
         if (m_pass.kind != PassKind::Frame || !EnsureEncoder()) return false;
         EndPass();
         return true;
+    }
+
+    void MetalBackend::BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) {
+        if (!m_frameActive || m_oitPassOpen) return;
+        auto s = m_targets.find(src);
+        auto d = m_targets.find(dst);
+        if (s == m_targets.end() || d == m_targets.end() || !s->second.depth || !d->second.depth) return;
+        if (s->second.depth == d->second.depth) return;
+        if (s->second.width != d->second.width || s->second.height != d->second.height) {
+            Log::Warning("MetalBackend: BlitRenderTargetDepth: %dx%d into %dx%d (sizes must match)",
+                         s->second.width, s->second.height, d->second.width, d->second.height);
+            return;
+        }
+        CopyBetweenPasses(s->second.depth, d->second.depth, @"Depth copy");
+    }
+
+    bool MetalBackend::CopyTexture(TextureHandle src, TextureHandle dst) {
+        if (!m_frameActive || m_oitPassOpen) return false;
+        auto s = m_textures.find(src);
+        auto d = m_textures.find(dst);
+        if (s == m_textures.end() || d == m_textures.end() || !s->second.texture || !d->second.texture) return false;
+        if (s->second.bufferTexture || d->second.bufferTexture || s->second.texture == d->second.texture) return false;
+        if (s->second.width != d->second.width || s->second.height != d->second.height || s->second.format != d->second.format) {
+            Log::Warning("MetalBackend: CopyTexture: %dx%d (format %d) into %dx%d (format %d): sizes and formats must match",
+                         s->second.width, s->second.height, static_cast<int>(s->second.format),
+                         d->second.width, d->second.height, static_cast<int>(d->second.format));
+            return false;
+        }
+        CopyBetweenPasses(FrameTexture(s->second), FrameTexture(d->second), @"Texture copy");
+        d->second.lastUsedFrame = s->second.lastUsedFrame = m_frameNumber;
+        return true;
+    }
+
+    void MetalBackend::CopyBetweenPasses(id<MTLTexture> src, id<MTLTexture> dst, NSString* label) {
+        @autoreleasepool {
+            // Whatever pass is recording ends (the copy reads what it drew),
+            // the image copies whole, and the pass resumes with its viewport
+            // and scissor.
+            const RenderTargetHandle active = m_activeTarget;
+            const VkStyleViewport viewport = m_viewport;
+            const MTLScissorRect scissor = m_scissor;
+            if (m_pass.kind == PassKind::Frame && !m_frameOpened && !m_encoder && !m_pass.clears) m_pass = Pass{};
+            else EndPass();
+            id blit = MakeBlitEncoder(m_cmd, label);
+            [blit copyFromTexture:src toTexture:dst];
+            EndBlitEncoder(blit);
+            if (active != INVALID_RENDER_TARGET) {
+                m_activeTarget = INVALID_RENDER_TARGET;
+                BindRenderTarget(active);
+            } else {
+                BeginFramePass(/*resume=*/m_frameOpened);
+            }
+            m_viewport = viewport;
+            m_scissor = scissor;
+            ApplyViewport();
+            ApplyScissor();
+        }
     }
 
     bool MetalBackend::RequestBackbufferReadback(int x, int y, int w, int h) {

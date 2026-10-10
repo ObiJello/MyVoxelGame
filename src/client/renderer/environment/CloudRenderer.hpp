@@ -71,8 +71,6 @@ namespace Render {
         void DestroyMeshBuffers(bool deferred);
         void DestroySlot(size_t slot, bool deferred);
 
-        static const char* vertexShaderSource;
-        static const char* fragmentShaderSource;
 
         ShaderHandle m_shader = INVALID_SHADER;
         TextureHandle m_whiteTexture = INVALID_TEXTURE;

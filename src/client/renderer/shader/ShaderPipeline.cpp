@@ -8,9 +8,11 @@
 #include "../core/Frustum.hpp"
 #include "../core/RenderOrigin.hpp"
 #include "../mesh/ChunkRenderer.hpp"
+#include "../environment/WeatherEffectRenderer.hpp"
 #include "../texture/AtlasBuilder.hpp"
 #include "client/shader/ShaderOptions.hpp"
 #include "client/shader/ShaderPacks.hpp"
+#include "client/shader/PackCompiler.hpp"
 #include "common/core/Log.hpp"
 #include "common/world/block/BlockModel.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -25,6 +27,7 @@
 #include <filesystem>
 #include <fstream>
 #include <regex>
+#include <set>
 #include <sstream>
 
 namespace Render {
@@ -55,6 +58,13 @@ namespace Render {
         constexpr int kGbufShadowColor = 10;
         constexpr int kGbufShadow1     = 11;
         constexpr int kGbufEntityMap   = 12;   // the block.properties map (EnsureEntityMap)
+        // The colour buffers a gbuffers program samples (Sildur's water reads
+        // colortex4 and colortex6 for its reflections) — up to three, on the
+        // last units GL 3.3 guarantees a fragment stage (16). Unbound, their
+        // samplers defaulted to unit 0, the block atlas: rainbow water
+        // (2026-10-09).
+        constexpr int kGbufColorFirst  = 13;
+        constexpr int kGbufColorMax    = 3;
         constexpr int kGbufSpriteTable = 1;    // the engine's sprite table (ChunkRenderer::BindSpriteTable)
 
         constexpr int kMaxShadowRes = 8192;
@@ -164,9 +174,11 @@ namespace Render {
             return;
         }
         if (!g_renderBackend) return;
-        if (g_renderBackend->GetType() != BackendType::OpenGL) {
+        if (g_renderBackend->GetType() != BackendType::OpenGL && !Shaders::PackCompiler::Available()) {
             Unload();
-            m_status = "Shader packs need the OpenGL backend (this session runs on Vulkan)";
+            m_status = std::string("Shader packs need the OpenGL renderer (this session runs on ") +
+                       (g_renderBackend->GetType() == BackendType::Metal ? "Metal" : "Vulkan") +
+                       ") — pick OpenGL in the launcher's renderer setting";
             return;
         }
         Shaders::PackInfo pack;
@@ -185,12 +197,14 @@ namespace Render {
         if (!Load(root, error)) {
             Unload();
             m_status = pack.name + ": " + error;
+            Log::Error("[ShaderPipeline] %s", m_status.c_str());
             return;
         }
         m_status = pack.name + ": " + std::to_string(m_passes.size() + m_deferred.size()) + " pass" +
                    (m_passes.size() + m_deferred.size() == 1 ? "" : "es") + ", " +
                    std::to_string(m_gbufferCount) + " gbuffers program" + (m_gbufferCount == 1 ? "" : "s") +
                    (m_gbuffers[kFamShadow].shader != INVALID_SHADER ? ", shadows" : "");
+        Log::Info("[ShaderPipeline] %s", m_status.c_str());
     }
 
     bool ShaderPipeline::ReadPackFile(const std::string& rel, std::string& out) const {
@@ -365,6 +379,23 @@ namespace Render {
                 }
                 const Game::BlockID id = Game::BlockStates::FromSlug(name).Block();
                 if (id == Game::BlockID::Air && name != "air") continue;   // not a block this engine has
+                if (id == Game::BlockID::Water || id == Game::BlockID::Lava) {
+                    // A fluid has no block model: its faces come from
+                    // FluidMeshBuilder with the fluid sprites, so the sprites
+                    // are mapped directly — or water is never ENTITY_WATER to
+                    // the pack (no waves, no reflections: plain glass-like
+                    // water, 2026-10-09).
+                    static const char* const kWaterSprites[] = {"block/water_still", "block/water_flow", "block/water_overlay"};
+                    static const char* const kLavaSprites[]  = {"block/lava_still", "block/lava_flow"};
+                    const bool water = id == Game::BlockID::Water;
+                    const char* const* keys = water ? kWaterSprites : kLavaSprites;
+                    const size_t n = water ? 3 : 2;
+                    for (size_t k = 0; k < n; ++k) {
+                        AtlasUVRect r;
+                        if (g_atlasBuilder->GetUVRect(keys[k], r)) idBySprite[r.spriteId] = m.id;
+                    }
+                    continue;
+                }
                 const uint32_t count = Game::BlockStates::Count(id);
                 for (uint32_t i = 0; i < count; ++i) {
                     const Game::BlockState state = Game::BlockStates::FromIndex(id, static_cast<Game::BlockStateIndex>(i));
@@ -483,8 +514,9 @@ namespace Render {
         vars["eyeBrightness"]       = Value::Vec(static_cast<float>(std::clamp(in.eyeBlockLight, 0, 15) * 16),
                                                  static_cast<float>(std::clamp(in.eyeSkyLight, 0, 15) * 16), 0.0f, 0.0f, 2);
         vars["eyeBrightnessSmooth"] = Value::Vec(std::round(m_eyeBrightnessSmooth.x), std::round(m_eyeBrightnessSmooth.y), 0.0f, 0.0f, 2);
-        vars["rainStrength"]        = Value::Scalar(0.0f);
-        vars["wetness"]             = Value::Scalar(0.0f);
+        vars["rainStrength"]        = Value::Scalar(in.rainStrength);
+        vars["thunderStrength"]     = Value::Scalar(in.thunderStrength);
+        vars["wetness"]             = Value::Scalar(m_wetness);
         vars["nightVision"]         = Value::Scalar(0.0f);
         vars["blindness"]           = Value::Scalar(0.0f);
         vars["darknessFactor"]      = Value::Scalar(0.0f);
@@ -590,6 +622,71 @@ namespace Render {
         return "";
     }
 
+    // Vulkan / Metal (docs/shader-packs-port.md): a core-GLSL program
+    // rewritten as Vulkan GLSL (every uniform into one block, samplers at
+    // their texture slots), compiled to SPIR-V at run time and reflected;
+    // the backend builds its program from that.
+    ShaderHandle ShaderPipeline::CreatePackProgram(const std::string& vertexCore, const std::string& fragmentCore,
+                                                   Layout layout, int fragmentOutputs, const std::string& name,
+                                                   std::string& error) {
+        PackGlsl::Vulkanized vk;
+        if (!PackGlsl::Vulkanize(vertexCore, fragmentCore, SamplerUnits(layout), fragmentOutputs, vk)) {
+            error = name + ": " + vk.error;
+            Log::Error("[ShaderPipeline] %s", error.c_str());
+            return INVALID_SHADER;
+        }
+        Shaders::PackCompiler::Program program;
+        if (!Shaders::PackCompiler::Compile(vk.vertex, vk.fragment, name, program)) {
+            Log::Error("[ShaderPipeline] %s", program.error.c_str());
+            if (std::getenv("OBEY_PACK_DUMP")) DumpSource(name, vk.vertex, vk.fragment);
+            error = name + " failed to compile (see the log)";
+            return INVALID_SHADER;
+        }
+        if (std::getenv("OBEY_PACK_DUMP")) DumpSource(name, vk.vertex, vk.fragment);
+        PackShaderDesc desc;
+        desc.label = name;
+        desc.vertexSpirv = std::move(program.vertexSpirv);
+        desc.fragmentSpirv = std::move(program.fragmentSpirv);
+        desc.uniformBlockSize = program.uniformBlockSize;
+        desc.colorOutputs = static_cast<uint32_t>(std::max(1, fragmentOutputs));
+        for (const Shaders::PackCompiler::Uniform& u : program.uniforms) {
+            PackUniformDesc d;
+            d.name = u.name;
+            d.offset = u.offset;
+            d.size = u.size;
+            d.arrayStride = u.arrayStride;
+            d.arrayLength = u.arrayLength;
+            switch (u.kind) {
+                case Shaders::PackCompiler::Uniform::Float: d.kind = PackUniformKind::Float; break;
+                case Shaders::PackCompiler::Uniform::Int:   d.kind = PackUniformKind::Int; break;
+                case Shaders::PackCompiler::Uniform::Bool:  d.kind = PackUniformKind::Bool; break;
+                case Shaders::PackCompiler::Uniform::Vec2:  d.kind = PackUniformKind::Vec2; break;
+                case Shaders::PackCompiler::Uniform::Vec3:  d.kind = PackUniformKind::Vec3; break;
+                case Shaders::PackCompiler::Uniform::Vec4:  d.kind = PackUniformKind::Vec4; break;
+                case Shaders::PackCompiler::Uniform::IVec2: d.kind = PackUniformKind::IVec2; break;
+                case Shaders::PackCompiler::Uniform::IVec3: d.kind = PackUniformKind::IVec3; break;
+                case Shaders::PackCompiler::Uniform::IVec4: d.kind = PackUniformKind::IVec4; break;
+                case Shaders::PackCompiler::Uniform::Mat3:  d.kind = PackUniformKind::Mat3; break;
+                case Shaders::PackCompiler::Uniform::Mat4:  d.kind = PackUniformKind::Mat4; break;
+                default:                                    d.kind = PackUniformKind::Other; break;
+            }
+            desc.uniforms.push_back(std::move(d));
+        }
+        desc.vertexInputLocations = program.vertexInputLocations;
+        for (const Shaders::PackCompiler::Sampler& smp : program.samplers) {
+            desc.samplerSlots.push_back(smp.binding);
+            if (smp.plain2D && smp.binding < 32) desc.sampler2DSlots |= 1u << smp.binding;
+        }
+        const ShaderHandle shader = g_renderBackend->CreatePackShader(desc);
+        if (shader == INVALID_SHADER) {
+            error = name + ": the backend could not build the program (see the log)";
+            return INVALID_SHADER;
+        }
+        Log::Info("[ShaderPipeline] %s: pack program (%zu uniforms in %u bytes, %zu samplers)", name.c_str(),
+                  desc.uniforms.size(), desc.uniformBlockSize, desc.samplerSlots.size());
+        return shader;
+    }
+
     bool ShaderPipeline::CompileProgram(const std::string& dir, const std::string& name, bool gbuffers, bool entityLayout,
                                         Program& out, std::string& error) {
         const std::string fragRel = dir + name + ".fsh";
@@ -629,13 +726,40 @@ namespace Render {
             if (FindConst(*src, "sunPathRotation", v))     m_sunPathRotation = static_cast<float>(std::atof(v.c_str()));
         }
 
-        out.name = name;
-        out.shader = g_renderBackend->CreateShader(tv.source, tf.source);
-        out.ownsShader = true;
-        if (out.shader == INVALID_SHADER) {
-            error = name + " failed to compile (see the log)";
-            return false;
+        // OBEY_PACK_PROBE=<program>:<glsl>: that program's first fragment
+        // output becomes `vec4(<glsl>)` — a value inside the pack's own
+        // fragment stage, seen on screen through OBEY_PACK_SHOW. Any
+        // backend. Example: gbuffers_water:texture2D(texture, texcoord.xy)
+        if (const char* probe = std::getenv("OBEY_PACK_PROBE")) {
+            const std::string spec = probe;
+            const size_t colon = spec.find(':');
+            if (colon != std::string::npos && spec.substr(0, colon) == name) {
+                static const std::regex kMain(R"(\bvoid[ \t]+main[ \t]*\([ \t]*(void)?[ \t]*\))");
+                std::string src = std::regex_replace(tf.source, kMain, "void sp_probeMain()", std::regex_constants::format_first_only);
+                src += "\nvoid main() { sp_probeMain(); sp_FragData[0] = vec4(" + spec.substr(colon + 1) + "); }\n";
+                tf.source = src;
+                Log::Info("[ShaderPipeline] %s: fragment output probed: %s", name.c_str(), spec.c_str() + colon + 1);
+            }
         }
+        out.name = name;
+        out.ownsShader = true;
+        if (g_renderBackend->GetType() != BackendType::OpenGL) {
+            int outputs = 0;
+            for (int b : tf.drawBuffers) if (b >= 0 && b < kColorBuffers) ++outputs;
+            out.shader = CreatePackProgram(tv.source, tf.source, gbuffers ? Layout::Gbuffers : Layout::Composite,
+                                           std::max(1, outputs), name, error);
+            if (out.shader == INVALID_SHADER) return false;
+        } else {
+            out.shader = g_renderBackend->CreateShader(tv.source, tf.source);
+            if (out.shader == INVALID_SHADER) {
+                error = name + " failed to compile (see the log)";
+                return false;
+            }
+        }
+        // The terrain families draw the chunk renderer's meshes: their
+        // vertex input is the packed terrain vertex (the backends that bake
+        // the input into the pipeline need telling; OpenGL reads the VAO).
+        if (gbuffers && !entityLayout) g_renderBackend->RegisterShaderVertexLayout(out.shader, GetTerrainVertexLayout());
         out.drawBuffers.clear();
         for (int b : tf.drawBuffers) {
             if (b < 0 || b >= kColorBuffers) continue;
@@ -653,6 +777,51 @@ namespace Render {
     }
 
     // Every program of the pack for one dimension folder.
+    // The colour buffers the gbuffers programs sample, scanned from the
+    // chosen programs' sources before they compile: they ride the kGbufColor
+    // units, which the Vulkan translation bakes into the programs.
+    void ShaderPipeline::ScanGbufferColorReads(const std::string& dir, const std::string* chosen) {
+        // The colour buffers the gbuffers programs sample, from their
+    // sampler declarations (colortexN, or the legacy gaux/gcolor names):
+    // bound on the kGbufColor units. More than kGbufColorMax distinct
+    // buffers cannot be served on this layout; the rest read white.
+    {
+        static const std::regex kColorSampler(R"(uniform[ \t]+sampler2D[ \t]+(colortex([0-7])|gaux([1-4])|gcolor|gdepth|gnormal|composite)\b)");
+        std::set<int> reads;
+        std::set<std::string> seen;
+        for (int fam = 0; fam < kFamilyCount; ++fam) {
+            const std::string& name = chosen[fam];
+            if (name.empty() || !seen.insert(name).second) continue;
+            for (const char* ext : {".fsh", ".vsh"}) {
+                std::string src;
+                if (!ReadPackFile((fs::path(dir) / (name + ext)).string(), src)) continue;
+                for (std::sregex_iterator it(src.begin(), src.end(), kColorSampler), end; it != end; ++it) {
+                    const std::smatch& m = *it;
+                    int idx = -1;
+                    if (m[2].matched)      idx = std::stoi(m[2].str());
+                    else if (m[3].matched) idx = 3 + std::stoi(m[3].str());
+                    else {
+                        const std::string n = m[1].str();
+                        idx = n == "gcolor" ? 0 : n == "gdepth" ? 1 : n == "gnormal" ? 2 : 3;
+                    }
+                    if (idx >= 0 && idx < kColorBuffers) reads.insert(idx);
+                }
+            }
+        }
+        m_gbufColorReads.assign(reads.begin(), reads.end());
+        if (!m_gbufColorReads.empty()) {
+            std::string list;
+            for (int idx : m_gbufColorReads) list += (list.empty() ? "" : " ") + std::string("colortex") + std::to_string(idx);
+            Log::Info("[ShaderPipeline] gbuffers programs sample %s (units %d..)", list.c_str(), kGbufColorFirst);
+        }
+        if (m_gbufColorReads.size() > static_cast<size_t>(kGbufColorMax)) {
+            Log::Warning("[ShaderPipeline] gbuffers programs sample %zu colour buffers; only %d can be bound — the rest read white",
+                         m_gbufColorReads.size(), kGbufColorMax);
+            m_gbufColorReads.resize(static_cast<size_t>(kGbufColorMax));
+        }
+    }
+    }
+
     bool ShaderPipeline::LoadPrograms(const std::string& dir, std::string& error) {
         DestroyPrograms();
         m_dir = dir;
@@ -705,13 +874,21 @@ namespace Render {
             {kFamSky,       {"gbuffers_skybasic", "gbuffers_skytextured", "gbuffers_textured", "gbuffers_basic"}, true},
             {kFamClouds,    {"gbuffers_clouds", "gbuffers_textured", "gbuffers_basic"}, true},
             {kFamParticles, {"gbuffers_textured", "gbuffers_textured_lit", "gbuffers_basic"}, true},
+            {kFamWeather,   {"gbuffers_weather", "gbuffers_textured", "gbuffers_textured_lit", "gbuffers_basic"}, true},
             {kFamShadow,    {"shadow"}, false},
         };
+        // The program each family takes, chosen before anything compiles:
+        // the colour buffers they sample (below) are part of the sampler
+        // layout the Vulkan translation bakes in.
+        std::string chosenFor[kFamilyCount];
+        for (const FamilySpec& spec : specs) {
+            for (const char* n : spec.chain) if (exists(n) && ProgramEnabled(n)) { chosenFor[spec.fam] = n; break; }
+        }
+        ScanGbufferColorReads(dir, chosenFor);
         std::map<std::string, Program> compiled;   // key: name + layout
         m_gbufferCount = 0;
         for (const FamilySpec& spec : specs) {
-            std::string chosen;
-            for (const char* n : spec.chain) if (exists(n) && ProgramEnabled(n)) { chosen = n; break; }
+            const std::string chosen = chosenFor[spec.fam];
             if (chosen.empty()) continue;
             const std::string key = chosen + (spec.entityLayout ? "|entity" : "|terrain");
             auto it = compiled.find(key);
@@ -731,10 +908,35 @@ namespace Render {
         if (m_gbuffers[kFamShadow].shader != INVALID_SHADER) --m_gbufferCount;
         if (m_shadowRes == 0 && m_gbuffers[kFamShadow].shader != INVALID_SHADER) m_shadowRes = 1024;
 
+        // The depth snapshots (depthtex1 / depthtex2 / shadowtex1) are copied
+        // only for a pack that samples them, in any of its programs.
+        {
+            std::set<std::string> names;
+            for (const std::vector<Program>* list : {&m_passes, &m_deferred}) for (const Program& p : *list) names.insert(p.name);
+            for (int fam = 0; fam < kFamilyCount; ++fam) if (m_gbuffers[fam].shader != INVALID_SHADER) names.insert(m_gbuffers[fam].name);
+            std::string all;
+            for (const std::string& n : names) {
+                for (const char* ext : {".fsh", ".vsh"}) {
+                    std::string src;
+                    if (ReadPackFile((fs::path(dir) / (n + ext)).string(), src)) all += src;
+                }
+            }
+            // Comments do not count (a pack's notes mention every sampler).
+            all = std::regex_replace(all, std::regex(R"(/\*[\s\S]*?\*/)"), " ");
+            all = std::regex_replace(all, std::regex(R"(//[^\n]*)"), " ");
+            auto samples = [&](const char* sampler) {
+                return std::regex_search(all, std::regex(std::string(R"(\b)") + sampler + R"(\b)"));
+            };
+            m_usesDepth1 = samples("depthtex1") || g_renderBackend->UsesVkShaders();   // the gbuffers' depthtex0 there
+            m_usesDepth2 = samples("depthtex2");
+            m_usesShadow1 = samples("shadowtex1");
+            Log::Info("[ShaderPipeline] depth snapshots in use: depthtex1 %s, depthtex2 %s, shadowtex1 %s",
+                      m_usesDepth1 ? "yes" : "no", m_usesDepth2 ? "yes" : "no", m_usesShadow1 ? "yes" : "no");
+        }
         // Sampler units: uniform values persist with the program. The block
         // map's size is set when the map is built (EnsureEntityMap).
         // MC_RENDER_STAGE_* for the `renderStage` uniform, per family.
-        static const int kRenderStage[kFamilyCount] = { 8, 17, 11, 12, 1, 20, 19, 0 };
+        static const int kRenderStage[kFamilyCount] = { 8, 17, 11, 12, 1, 20, 19, 21, 0 };
         for (int fam = 0; fam < kFamilyCount; ++fam) {
             const Program& p = m_gbuffers[fam];
             if (p.shader == INVALID_SHADER || !p.ownsShader) continue;
@@ -786,7 +988,7 @@ namespace Render {
     bool ShaderPipeline::Load(const std::string& packRoot, std::string& error) {
         Unload();
         if (!g_renderBackend) { error = "no render backend"; return false; }
-        if (g_renderBackend->GetType() != BackendType::OpenGL) {
+        if (g_renderBackend->GetType() != BackendType::OpenGL && !Shaders::PackCompiler::Available()) {
             error = "shader packs need the OpenGL backend";
             return false;
         }
@@ -806,6 +1008,11 @@ namespace Render {
         }
         ParseProperties();
         ParseBlockProperties();
+        // The wetness half-lives (ticks; OptiFine/Iris defaults).
+        m_wetnessHalflife = 600.0f;
+        m_drynessHalflife = 200.0f;
+        if (auto it = m_props.find("wetnessHalflife"); it != m_props.end()) m_wetnessHalflife = static_cast<float>(std::atof(it->second.c_str()));
+        if (auto it = m_props.find("drynessHalflife"); it != m_props.end()) m_drynessHalflife = static_cast<float>(std::atof(it->second.c_str()));
         m_dimension = m_frame.dimension;
         if (!LoadPrograms(DimensionFolder(m_dimension), error)) { DestroyPrograms(); return false; }
 
@@ -815,7 +1022,7 @@ namespace Render {
         m_active = true;
         m_havePrev = false;
         m_haveShadow = false;
-        m_frameCounter = 0;   // the diagnostic probes run again for this load
+        m_frameCounter = 0;
         Log::Info("[ShaderPipeline] %s: %zu composite, %zu deferred, %d gbuffers program(s)%s (folder '%s')",
                   m_packName.c_str(), m_passes.size(), m_deferred.size(), m_gbufferCount,
                   m_gbuffers[kFamShadow].shader != INVALID_SHADER ? ", shadow pass" : "", m_dir.c_str());
@@ -833,6 +1040,7 @@ namespace Render {
         if (g_renderBackend && m_entityMap != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(m_entityMap); m_entityMap = INVALID_TEXTURE; }
         m_entityMapAtlas = INVALID_TEXTURE;
         m_haveEyeSmooth = false;
+        m_haveWetness = false;
         m_active = false;
         m_inScene = false;
         m_packRoot.clear();
@@ -899,13 +1107,27 @@ namespace Render {
             m_lightmapUploaded = false;
         }
         if (m_blit == INVALID_SHADER) {
-            m_blit = g_renderBackend->CreateShader(
+            // One declaration a line: the Vulkan translation gives varyings
+            // their locations line by line.
+            const char* vs =
                 "#version 330 core\n"
-                "layout(location = 0) in vec3 aPos; layout(location = 1) in vec2 aUV;\n"
-                "out vec2 vUV; void main() { vUV = aUV; gl_Position = vec4(aPos.xy * 2.0 - 1.0, 0.0, 1.0); gl_ClipDistance[0] = 1.0; }\n",
+                "layout(location = 0) in vec3 aPos;\n"
+                "layout(location = 1) in vec2 aUV;\n"
+                "out vec2 vUV;\n"
+                "void main() { vUV = aUV; gl_Position = vec4(aPos.xy * 2.0 - 1.0, 0.0, 1.0); gl_ClipDistance[0] = 1.0; }\n";
+            const char* fs =
                 "#version 330 core\n"
-                "uniform sampler2D colortex0; in vec2 vUV; out vec4 frag;\n"
-                "void main() { frag = texture(colortex0, vUV); }\n");
+                "uniform sampler2D colortex0;\n"
+                "in vec2 vUV;\n"
+                "layout(location = 0) out vec4 frag;\n"
+                "void main() { frag = texture(colortex0, vUV); }\n";
+            if (g_renderBackend->GetType() == BackendType::OpenGL) {
+                m_blit = g_renderBackend->CreateShader(vs, fs);
+            } else {
+                std::string err;
+                m_blit = CreatePackProgram(vs, fs, Layout::Composite, 1, "blit", err);
+                if (m_blit == INVALID_SHADER) Log::Error("[ShaderPipeline] %s", err.c_str());
+            }
         }
     }
 
@@ -931,7 +1153,22 @@ namespace Render {
             if (i != 0 && !c.used) continue;
             c.main = g_renderBackend->CreateTexture2D(width, height, c.format, nullptr);
             c.alt  = g_renderBackend->CreateTexture2D(width, height, c.format, nullptr);
-            for (TextureHandle t : {c.main, c.alt}) {
+            // A snapshot only for a buffer a gbuffers program both samples
+            // AND draws into (Sildur's water: colortex4); one it only samples
+            // (its sky panorama, colortex6) is read live, no copy.
+            // OBEY_PACK_FEEDBACK=all snapshots every sampled buffer.
+            static const bool s_feedbackAll = std::getenv("OBEY_PACK_FEEDBACK") && std::string(std::getenv("OBEY_PACK_FEEDBACK")) == "all";
+            bool writtenByGbuffers = s_feedbackAll;
+            for (int fam = 0; fam < kFamilyCount && !writtenByGbuffers; ++fam) {
+                if (fam == kFamShadow) continue;
+                const std::vector<int>& outs = m_gbuffers[fam].drawBuffers;
+                writtenByGbuffers = std::find(outs.begin(), outs.end(), i) != outs.end();
+            }
+            const bool feedback = g_renderBackend->UsesVkShaders() && writtenByGbuffers &&
+                                  std::find(m_gbufColorReads.begin(), m_gbufColorReads.end(), i) != m_gbufColorReads.end();
+            c.feedback = feedback ? g_renderBackend->CreateTexture2D(width, height, c.format, nullptr) : INVALID_TEXTURE;
+            for (TextureHandle t : {c.main, c.alt, c.feedback}) {
+                if (t == INVALID_TEXTURE) continue;
                 g_renderBackend->SetTextureFilter(t, TextureFilter::Linear, TextureFilter::Linear);
                 g_renderBackend->SetTextureWrap(t, TextureWrap::ClampToEdge, TextureWrap::ClampToEdge);
             }
@@ -944,10 +1181,17 @@ namespace Render {
         };
         m_depth  = depthTexture(width, height);
         m_depth1 = depthTexture(width, height);
-        m_depth2 = depthTexture(width, height);
+        // depthtex2 is MC's depth before the hand. Our hand is never in the
+        // pipeline's depth, so at both points a pack samples it (the
+        // deferred passes, the composites) it equals depthtex0 itself:
+        // Depth2() binds m_depth and no snapshot is taken. OBEY_PACK_DEPTH2=1
+        // restores the two full-resolution copies per frame.
+        static const bool s_depth2Copies = std::getenv("OBEY_PACK_DEPTH2") != nullptr;
+        m_depth2 = s_depth2Copies ? depthTexture(width, height) : INVALID_TEXTURE;
 
         m_depth1Target = g_renderBackend->CreateRenderTargetFromTextures(nullptr, 0, m_depth1);
-        m_depth2Target = g_renderBackend->CreateRenderTargetFromTextures(nullptr, 0, m_depth2);
+        m_depth2Target = m_depth2 != INVALID_TEXTURE ? g_renderBackend->CreateRenderTargetFromTextures(nullptr, 0, m_depth2)
+                                                     : INVALID_RENDER_TARGET;
 
         RebuildGbufferTargets();
         // The buffers kept across frames start defined: both copies cleared
@@ -1016,6 +1260,7 @@ namespace Render {
         for (ColorBuffer& c : m_color) {
             if (c.main != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(c.main); c.main = INVALID_TEXTURE; }
             if (c.alt  != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(c.alt);  c.alt  = INVALID_TEXTURE; }
+            if (c.feedback != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(c.feedback); c.feedback = INVALID_TEXTURE; }
         }
         for (TextureHandle* t : {&m_depth, &m_depth1, &m_depth2}) {
             if (*t != INVALID_TEXTURE) { g_renderBackend->DestroyTexture(*t); *t = INVALID_TEXTURE; }
@@ -1083,8 +1328,17 @@ namespace Render {
             m_familyEngineShaders[kFamParticles] = b.FindShadersBySource([&](const std::string& vs, const std::string& fs) {
                 return !has(vs, "aPosSlot") && has(fs, "uSprite;");
             });
+            // The weather renderer draws MC's rain and snow quads with the
+            // particle program — the same sources as the particle system's,
+            // so it names its own handles (WeatherEffectRenderer::PackShaders)
+            // and they leave the particles family for gbuffers_weather.
+            m_familyEngineShaders[kFamWeather] = g_weatherEffectRenderer.PackShaders();
+            for (ShaderHandle w : m_familyEngineShaders[kFamWeather]) {
+                std::vector<ShaderHandle>& particles = m_familyEngineShaders[kFamParticles];
+                particles.erase(std::remove(particles.begin(), particles.end(), w), particles.end());
+            }
         }
-        for (int fam = kFamEntities; fam <= kFamParticles; ++fam) {
+        for (int fam = kFamEntities; fam <= kFamWeather; ++fam) {
             const Program& p = m_gbuffers[fam];
             for (ShaderHandle engine : m_familyEngineShaders[fam]) {
                 b.SetShaderOverride(engine, p.shader, p.shader != INVALID_SHADER ? p.target : m_sceneTarget);
@@ -1101,7 +1355,7 @@ namespace Render {
                 ChunkRenderer::PassOverride o;
                 const Program& p = shadow ? m_gbuffers[kFamShadow]
                                           : m_gbuffers[pass == ChunkRenderer::kPassTranslucent ? kFamWater : kFamTerrain];
-                o.shader = ((kDebugEngineTerrain || m_abEngineTerrain) && !shadow) ? INVALID_SHADER : p.shader;
+                o.shader = (kDebugEngineTerrain && !shadow) ? INVALID_SHADER : p.shader;
                 o.target = p.shader != INVALID_SHADER ? p.target : (shadow ? m_shadowTarget : m_sceneTarget);
                 g_chunkRenderer->SetPassOverride(static_cast<ChunkRenderer::TerrainPass>(pass), o);
             }
@@ -1110,14 +1364,14 @@ namespace Render {
                 if (!g_renderBackend) return;
                 if (m_inShadowPass) {
                     // shadowtex1: the shadow depth without the translucents.
-                    if (m_shadowTarget != INVALID_RENDER_TARGET && m_shadow1Target != INVALID_RENDER_TARGET) {
+                    if (m_usesShadow1 && m_shadowTarget != INVALID_RENDER_TARGET && m_shadow1Target != INVALID_RENDER_TARGET) {
                         g_renderBackend->BlitRenderTargetDepth(m_shadowTarget, m_shadow1Target);
                     }
                     return;
                 }
                 // depthtex1: the depth before the translucents; then the
                 // deferred passes.
-                if (m_sceneTarget != INVALID_RENDER_TARGET && m_depth1Target != INVALID_RENDER_TARGET) {
+                if (m_usesDepth1 && m_sceneTarget != INVALID_RENDER_TARGET && m_depth1Target != INVALID_RENDER_TARGET) {
                     g_renderBackend->BlitRenderTargetDepth(m_sceneTarget, m_depth1Target);
                 }
                 // depthtex2 too: MC's "before the hand" copy is taken after the
@@ -1125,17 +1379,26 @@ namespace Render {
                 // mask (depthtex2 > depthtex0) is false everywhere else. Our
                 // hand is never in this depth, so the copy is made now, before
                 // the deferred passes read it, and again at the end.
-                if (m_sceneTarget != INVALID_RENDER_TARGET && m_depth2Target != INVALID_RENDER_TARGET) {
+                if (m_usesDepth2 && m_sceneTarget != INVALID_RENDER_TARGET && m_depth2Target != INVALID_RENDER_TARGET) {
                     g_renderBackend->BlitRenderTargetDepth(m_sceneTarget, m_depth2Target);
                 }
-                if ((m_frameCounter % 300 >= 30 && m_frameCounter % 300 <= 33) || m_abEngineTerrain) {
-                    ProbeThree(m_abEngineTerrain ? "after terrain, ENGINE shader (A/B)" : "after terrain, pack shader");
-                    if (!m_abEngineTerrain) {
-                        ProbeTexture(m_color[1].main, "after terrain, colortex1 (lightmap x,y / mats)");
-                        ProbeNormals(m_frame);
+                RunDeferred();
+                // Vulkan / Metal: the buffers the translucent programs sample
+                // AND draw into, as they stand now (ColorBuffer::feedback).
+                for (size_t k = 0; k < m_gbufColorReads.size(); ++k) {
+                    ColorBuffer& c = m_color[m_gbufColorReads[k]];
+                    if (c.feedback == INVALID_TEXTURE || c.main == INVALID_TEXTURE) continue;
+                    if (g_renderBackend->CopyTexture(c.main, c.feedback)) {
+                        g_renderBackend->BindTexture(c.feedback, static_cast<uint32_t>(kGbufColorFirst + static_cast<int>(k)));
+                    } else {
+                        static bool s_warned = false;
+                        if (!s_warned) {
+                            s_warned = true;
+                            Log::Warning("[ShaderPipeline] colortex%d could not be copied for the translucent pass; it is read live",
+                                         m_gbufColorReads[k]);
+                        }
                     }
                 }
-                RunDeferred();
             });
         }
     }
@@ -1157,8 +1420,34 @@ namespace Render {
         if (suspended && m_active) RemoveOverrides();
     }
 
+    // ── phase timers (OBEY_PACK_DUMP) ─────────────────────────────────────
+    void ShaderPipeline::BeginPhaseTimer(PackPhase phase) {
+        if (!m_phaseTimersOn || !g_renderBackend || m_phaseTimer[phase] != INVALID_GPU_TIMER) return;
+        static const char* kNames[kPhaseCount] = { "pack.shadow", "pack.deferred", "pack.composite" };
+        m_phaseTimer[phase] = g_renderBackend->BeginGPUTimer(kNames[phase]);
+    }
+    void ShaderPipeline::EndPhaseTimer(PackPhase phase) {
+        if (!m_phaseTimersOn || !g_renderBackend) return;
+        // The handle stays until its result is read (CollectPhaseTimers).
+        if (m_phaseTimer[phase] != INVALID_GPU_TIMER) g_renderBackend->EndGPUTimer(m_phaseTimer[phase]);
+    }
+    void ShaderPipeline::CollectPhaseTimers() {
+        if (!m_phaseTimersOn || !g_renderBackend) return;
+        for (int i = 0; i < kPhaseCount; ++i) {
+            if (m_phaseTimer[i] == INVALID_GPU_TIMER) continue;
+            const float ms = g_renderBackend->GetGPUTimerResultMs(m_phaseTimer[i]);
+            if (ms < 0.0f) continue;   // not on the GPU yet: polled again next frame, no new query meanwhile
+            m_phaseMsSum[i] += ms;
+            ++m_phaseSamples[i];
+            m_phaseTimer[i] = INVALID_GPU_TIMER;
+        }
+    }
+
     void ShaderPipeline::BeginScene(int width, int height) {
         if (!m_active || m_suspended || !g_renderBackend || width <= 0 || height <= 0) return;
+        static const bool s_dumpTimers = std::getenv("OBEY_PACK_DUMP") != nullptr;
+        m_phaseTimersOn = s_dumpTimers;
+        CollectPhaseTimers();
         // A dimension change: the pack's folder for it (world-1, world1).
         if (m_frame.dimension != m_dimension) {
             const std::string dir = DimensionFolder(m_frame.dimension);
@@ -1186,7 +1475,6 @@ namespace Render {
             }
         }
         m_inShadowPass = false;
-        m_abEngineTerrain = m_frameCounter >= 40 && m_frameCounter <= 43;
         // Per-vertex attributes need per-block quads: greedy meshing off
         // while a pack is active. Checked here rather than only at load,
         // because the chunk renderer does not exist yet when the selected
@@ -1198,21 +1486,22 @@ namespace Render {
         }
         g_renderBackend->CheckErrors("ShaderPipeline.BeginScene.before");
         InstallOverrides();
-        if (m_frameCounter == 0 || m_frameCounter == 120) {
+        if (m_frameCounter == 0) {
             Log::Info("[ShaderPipeline] frame %d: scene %dx%d, targets scene=%u clearGroups=%u depth1=%u depth2=%u shadow=%u (%d px)",
                       m_frameCounter, m_width, m_height,
                       static_cast<unsigned>(m_sceneTarget), static_cast<unsigned>(m_clearGroups.size()),
                       static_cast<unsigned>(m_depth1Target), static_cast<unsigned>(m_depth2Target),
                       static_cast<unsigned>(m_shadowTarget), m_shadowRes);
-            Log::Info("[ShaderPipeline]   gbuffer targets terrain=%u water=%u entities=%u block=%u sky=%u clouds=%u particles=%u shadow=%u",
+            Log::Info("[ShaderPipeline]   gbuffer targets terrain=%u water=%u entities=%u block=%u sky=%u clouds=%u particles=%u weather=%u shadow=%u",
                       static_cast<unsigned>(m_gbuffers[kFamTerrain].target), static_cast<unsigned>(m_gbuffers[kFamWater].target),
                       static_cast<unsigned>(m_gbuffers[kFamEntities].target), static_cast<unsigned>(m_gbuffers[kFamBlock].target),
                       static_cast<unsigned>(m_gbuffers[kFamSky].target), static_cast<unsigned>(m_gbuffers[kFamClouds].target),
-                      static_cast<unsigned>(m_gbuffers[kFamParticles].target), static_cast<unsigned>(m_gbuffers[kFamShadow].target));
-            Log::Info("[ShaderPipeline]   engine programs matched: entities=%zu block=%zu sky=%zu clouds=%zu particles=%zu",
+                      static_cast<unsigned>(m_gbuffers[kFamParticles].target), static_cast<unsigned>(m_gbuffers[kFamWeather].target),
+                      static_cast<unsigned>(m_gbuffers[kFamShadow].target));
+            Log::Info("[ShaderPipeline]   engine programs matched: entities=%zu block=%zu sky=%zu clouds=%zu particles=%zu weather=%zu",
                       m_familyEngineShaders[kFamEntities].size(), m_familyEngineShaders[kFamBlock].size(),
                       m_familyEngineShaders[kFamSky].size(), m_familyEngineShaders[kFamClouds].size(),
-                      m_familyEngineShaders[kFamParticles].size());
+                      m_familyEngineShaders[kFamParticles].size(), m_familyEngineShaders[kFamWeather].size());
             for (int i = 0; i < kColorBuffers; ++i) {
                 if (m_color[i].main == INVALID_TEXTURE) continue;
                 Log::Info("[ShaderPipeline]   colortex%d format %d", i, static_cast<int>(m_color[i].format));
@@ -1263,6 +1552,7 @@ namespace Render {
         // sun passes overhead. The uniform form has the camera at the
         // origin, as MC's; the pass form is the same rotation in render
         // space. Orthographic over the pack's shadowDistance.
+        BeginPhaseTimer(kPhaseShadow);
         const glm::vec3 sunDir = SunDirection(in.sunAngleDeg, m_sunPathRotation);
         const glm::vec3 lightDir = SunAngle(in.sunAngleDeg) < 0.5f ? sunDir : -sunDir;
         const glm::vec3 up(0.0f, 0.0f, 1.0f);
@@ -1299,6 +1589,7 @@ namespace Render {
         g_chunkRenderer->RenderAll(cam, frustum, m_shadowProjection, /*exactProjection=*/true);
         g_chunkRenderer->ClearDirectionalViewKeepSections();
         g_renderBackend->CheckErrors("ShaderPipeline.ShadowPass");
+        EndPhaseTimer(kPhaseShadow);
         m_inShadowPass = false;
         InstallOverrides();
         m_haveShadow = true;
@@ -1318,8 +1609,37 @@ namespace Render {
             const float k = 1.0f - std::pow(0.5f, std::max(0.0f, in.deltaSeconds) / 0.5f);
             m_eyeBrightnessSmooth += (eye - m_eyeBrightnessSmooth) * k;
         }
+        // wetness: rainStrength eased toward its value with the pack's
+        // half-lives in ticks — the wetting one while the rain is above the
+        // eased value, the drying one after (Iris SmoothedFloat).
+        if (!m_haveWetness) { m_wetness = in.rainStrength; m_haveWetness = true; }
+        else {
+            const float halflife = std::max(1.0f, in.rainStrength > m_wetness ? m_wetnessHalflife : m_drynessHalflife);
+            const float k = 1.0f - std::pow(0.5f, std::max(0.0f, in.deltaSeconds) * 20.0f / halflife);
+            m_wetness += (in.rainStrength - m_wetness) * k;
+        }
         EvaluateCustomUniforms(in);
         UpdateLightmap(in.skyBrightness);
+        // OBEY_PACK_DUMP=1: the frame's pack inputs once a second, for
+        // reading a wrong look against the pack's own math.
+        static const bool s_dump = std::getenv("OBEY_PACK_DUMP") != nullptr;
+        if (s_dump && (m_frameCounter % 60) == 0) {
+            const glm::mat3 rot(in.view);
+            const glm::vec3 sunPos = rot * (SunDirection(in.sunAngleDeg, m_sunPathRotation) * 100.0f);
+            Log::Info("[PackDump] day %lld sunAngleDeg %.1f sunAngle %.3f sunPos (%.1f,%.1f,%.1f) up (%.1f,%.1f,%.1f) "
+                      "eye block %d sky %d smooth (%.0f,%.0f) inWater %d sky (%.2f,%.2f,%.2f) fog (%.2f,%.2f,%.2f) start %.0f end %.0f "
+                      "near %.2f far %.0f cam (%.1f,%.1f,%.1f) bright %.2f",
+                      in.dayTime, in.sunAngleDeg, SunAngle(in.sunAngleDeg), sunPos.x, sunPos.y, sunPos.z,
+                      (rot * glm::vec3(0.0f, 100.0f, 0.0f)).x, (rot * glm::vec3(0.0f, 100.0f, 0.0f)).y, (rot * glm::vec3(0.0f, 100.0f, 0.0f)).z,
+                      in.eyeBlockLight, in.eyeSkyLight, m_eyeBrightnessSmooth.x, m_eyeBrightnessSmooth.y, in.isEyeInWater,
+                      in.skyColor.r, in.skyColor.g, in.skyColor.b, in.fogColor.r, in.fogColor.g, in.fogColor.b, in.fogStart, in.fogEnd,
+                      in.nearPlane, in.farPlane, in.cameraPosition.x, in.cameraPosition.y, in.cameraPosition.z, in.skyBrightness);
+            auto avg = [&](int i) { return m_phaseSamples[i] > 0 ? m_phaseMsSum[i] / static_cast<float>(m_phaseSamples[i]) : 0.0f; };
+            Log::Info("[PackDump] GPU ms/frame: shadow %.2f  deferred %.2f  composite+final %.2f  (%d/%d/%d samples; the gbuffers passes are the engine's own)",
+                      avg(kPhaseShadow), avg(kPhaseDeferred), avg(kPhaseComposite),
+                      m_phaseSamples[kPhaseShadow], m_phaseSamples[kPhaseDeferred], m_phaseSamples[kPhaseComposite]);
+            for (int i = 0; i < kPhaseCount; ++i) { m_phaseMsSum[i] = 0.0f; m_phaseSamples[i] = 0; }
+        }
         RenderShadowPass(in);
         for (int fam = 0; fam < kFamilyCount; ++fam) {
             const Program& p = m_gbuffers[fam];
@@ -1330,97 +1650,13 @@ namespace Render {
         g_renderBackend->BindRenderTarget(m_sceneTarget);
     }
 
-    // The average of a 16x16 patch at the centre of the bound target's first
-    // attachment, logged against the frame's clear colour: says whether
-    // anything was drawn there. Diagnostics only (frames 30..33).
-    void ShaderPipeline::ProbeCentre(const char* what) {
-        RenderBackend& b = *g_renderBackend;
-        if (!b.RequestBackbufferReadback(m_width / 2 - 8, m_height / 2 - 8, 16, 16)) return;
-        std::vector<uint8_t> px;
-        int w = 0, h = 0;
-        if (!b.TakeBackbufferReadback(px, w, h) || px.size() < 4) return;
-        unsigned long r = 0, g = 0, bl = 0;
-        for (size_t i = 0; i + 3 < px.size(); i += 4) { r += px[i]; g += px[i + 1]; bl += px[i + 2]; }
-        const size_t n = px.size() / 4;
-        Log::Info("[ShaderPipeline] probe %s: avg (%lu, %lu, %lu) vs clear (%d, %d, %d)", what,
-                  r / n, g / n, bl / n, static_cast<int>(m_frame.fogColor.r * 255),
-                  static_cast<int>(m_frame.fogColor.g * 255), static_cast<int>(m_frame.fogColor.b * 255));
-    }
-
-    // Three points down the screen (top, centre, low), colour of the bound
-    // target's first attachment and the live depth, in one line.
-    void ShaderPipeline::ProbeThree(const char* what) {
-        RenderBackend& b = *g_renderBackend;
-        const int ys[3] = { m_height * 9 / 10, m_height / 2, m_height / 10 };
-        std::string line = std::string("[ShaderPipeline] probe3 ") + what + ":";
-        for (int i = 0; i < 3; ++i) {
-            std::vector<uint8_t> px;
-            int w = 0, hh = 0;
-            unsigned long r = 0, g = 0, bl = 0;
-            size_t n = 1;
-            if (b.RequestBackbufferReadback(m_width / 2 - 4, ys[i] - 4, 8, 8) && b.TakeBackbufferReadback(px, w, hh) && px.size() >= 4) {
-                for (size_t k = 0; k + 3 < px.size(); k += 4) { r += px[k]; g += px[k + 1]; bl += px[k + 2]; }
-                n = px.size() / 4;
-            }
-            float d = -1.0f;
-            b.ReadDepthPixel(m_sceneTarget, m_width / 2, ys[i], d);
-            char buf[96];
-            std::snprintf(buf, sizeof(buf), " [%s (%lu,%lu,%lu) depth %.5f]", i == 0 ? "top" : i == 1 ? "centre" : "low", r / n, g / n, bl / n, d);
-            line += buf;
-        }
-        Log::Info("%s", line.c_str());
-    }
-
-    // The terrain's encoded view-space normals at three points, decoded the
-    // way packs decode them (Lambert azimuthal), beside the view-space up
-    // and sun vectors the pack lights with. A top face must decode close to
-    // "up" and its NdotL close to dot(up, sun).
-    void ShaderPipeline::ProbeNormals(const ShaderFrameInput& in) {
-        if (m_color[2].main == INVALID_TEXTURE) return;
-        RenderBackend& b = *g_renderBackend;
-        const RenderTargetHandle rt = b.CreateRenderTargetFromTextures(&m_color[2].main, 1, INVALID_TEXTURE);
-        if (rt == INVALID_RENDER_TARGET) return;
-        b.BindRenderTarget(rt);
-        const glm::mat3 rot(in.view);
-        const glm::vec3 up = glm::normalize(rot * glm::vec3(0.0f, 1.0f, 0.0f));
-        const glm::vec3 sun = glm::normalize(rot * SunDirection(in.sunAngleDeg, m_sunPathRotation));
-        char line[512];
-        std::snprintf(line, sizeof(line), "[ShaderPipeline] normals: view up (%.2f,%.2f,%.2f) sun (%.2f,%.2f,%.2f) SdotU %.2f sunAngleDeg %.1f dayTime %lld |",
-                      up.x, up.y, up.z, sun.x, sun.y, sun.z, glm::dot(up, sun), in.sunAngleDeg, in.dayTime);
-        std::string out = line;
-        const int ys[3] = { m_height * 9 / 10, m_height / 2, m_height / 10 };
-        for (int i = 0; i < 3; ++i) {
-            std::vector<uint8_t> px;
-            int w = 0, h = 0;
-            if (!b.RequestBackbufferReadback(m_width / 2, ys[i], 1, 1) || !b.TakeBackbufferReadback(px, w, h) || px.size() < 4) continue;
-            const glm::vec2 enc(px[0] / 255.0f, px[1] / 255.0f);
-            const glm::vec2 fenc = enc * 4.0f - 2.0f;
-            const float f = glm::dot(fenc, fenc);
-            const float g = std::sqrt(std::max(0.0f, 1.0f - f / 4.0f));
-            const glm::vec3 n(fenc * g, 1.0f - f / 2.0f);
-            std::snprintf(line, sizeof(line), " [%s n (%.2f,%.2f,%.2f) NdotU %.2f NdotL %.2f]",
-                          i == 0 ? "top" : i == 1 ? "centre" : "low", n.x, n.y, n.z, glm::dot(n, up), glm::dot(n, sun));
-            out += line;
-        }
-        Log::Info("%s", out.c_str());
-        b.DestroyRenderTarget(rt);
-    }
-
-    void ShaderPipeline::ProbeTexture(TextureHandle tex, const char* what) {
-        if (tex == INVALID_TEXTURE) return;
-        RenderBackend& b = *g_renderBackend;
-        const RenderTargetHandle rt = b.CreateRenderTargetFromTextures(&tex, 1, INVALID_TEXTURE);
-        if (rt == INVALID_RENDER_TARGET) return;
-        b.BindRenderTarget(rt);
-        ProbeThree(what);
-        b.DestroyRenderTarget(rt);
-    }
-
     void ShaderPipeline::RunDeferred() {
         if (m_deferred.empty() || !g_renderBackend) return;
         RenderBackend& b = *g_renderBackend;
         b.SetShaderOverrideMode(false, INVALID_RENDER_TARGET);
+        BeginPhaseTimer(kPhaseDeferred);
         RunPasses(m_deferred, m_frame);
+        EndPhaseTimer(kPhaseDeferred);
         // The passes flipped buffers: the gbuffer targets follow the mains.
         RebuildGbufferTargets();
         InstallOverrides();
@@ -1428,7 +1664,6 @@ namespace Render {
         BindInputs(Layout::Gbuffers);
         PipelineState def;
         b.SetPipelineState(def);
-        m_deferredRanThisFrame = true;
     }
 
     void ShaderPipeline::BindInputs(Layout layout) {
@@ -1444,7 +1679,7 @@ namespace Render {
             b.BindTexture(shadow0, kCompShadow0);
             b.BindTexture(shadowColor, kCompShadowColor);
             b.BindTexture(m_depth1, kCompDepth1);
-            b.BindTexture(m_depth2, kCompDepth2);
+            b.BindTexture(Depth2(), kCompDepth2);
             b.BindTexture(m_lightmap, kCompLightmap);
             b.BindTexture(shadow1, kCompShadow1);
         } else {
@@ -1452,13 +1687,64 @@ namespace Render {
             b.BindTexture(m_flatNormal, kGbufNormals);
             b.BindTexture(m_white, kGbufSpecular);
             b.BindTexture(m_noise, kGbufNoise);
-            b.BindTexture(m_depth, kGbufDepth0);
+            // Vulkan / Metal: the gbuffers stage draws into m_depth, so its
+            // depthtex0 is the snapshot (the same values until the
+            // translucents, which is where a pack reads it).
+            b.BindTexture(b.UsesVkShaders() && m_depth1 != INVALID_TEXTURE ? m_depth1 : m_depth, kGbufDepth0);
             b.BindTexture(m_depth1, kGbufDepth1);
             b.BindTexture(shadow0, kGbufShadow0);
             b.BindTexture(shadowColor, kGbufShadowColor);
             b.BindTexture(shadow1, kGbufShadow1);
             b.BindTexture(m_entityMap != INVALID_TEXTURE ? m_entityMap : m_white, kGbufEntityMap);
+            for (size_t k = 0; k < m_gbufColorReads.size(); ++k)
+                b.BindTexture(colorOr(m_gbufColorReads[k]), static_cast<uint32_t>(kGbufColorFirst + static_cast<int>(k)));
         }
+    }
+
+    // The pipeline's name → texture slot table, the one SetSamplerUniforms
+    // tells OpenGL and the Vulkan translation bakes in.
+    std::map<std::string, int> ShaderPipeline::SamplerUnits(Layout layout) const {
+        std::map<std::string, int> units;
+        static const char* kColorNames[kColorBuffers]  = { "colortex0", "colortex1", "colortex2", "colortex3", "colortex4", "colortex5", "colortex6", "colortex7" };
+        static const char* kLegacyNames[kColorBuffers] = { "gcolor", "gdepth", "gnormal", "composite", "gaux1", "gaux2", "gaux3", "gaux4" };
+        if (layout == Layout::Composite) {
+            for (int i = 0; i < kColorBuffers; ++i) { units[kColorNames[i]] = i; units[kLegacyNames[i]] = i; }
+            units["depthtex0"] = kCompDepth0; units["gdepthtex"] = kCompDepth0;
+            units["depthtex1"] = kCompDepth1; units["depthtex2"] = kCompDepth2;
+            units["noisetex"] = kCompNoise;
+            units["shadowtex0"] = kCompShadow0; units["shadow"] = kCompShadow0;
+            units["shadowtex1"] = kCompShadow1; units["watershadow"] = kCompShadow1;
+            units["shadowcolor"] = kCompShadowColor; units["shadowcolor0"] = kCompShadowColor; units["shadowcolor1"] = kCompShadowColor;
+            units["lightmap"] = kCompLightmap;
+            units["normals"] = kCompShadowColor; units["specular"] = kCompShadowColor;
+        } else {
+            units["gtexture"] = 0; units["tex"] = 0; units["texture"] = 0;
+            units["lightmap"] = kGbufLightmap; units["normals"] = kGbufNormals; units["specular"] = kGbufSpecular;
+            units["noisetex"] = kGbufNoise;
+            units["depthtex0"] = kGbufDepth0; units["gdepthtex"] = kGbufDepth0;
+            units["depthtex1"] = kGbufDepth1; units["depthtex2"] = kGbufDepth1;
+            units["shadowtex0"] = kGbufShadow0; units["shadow"] = kGbufShadow0;
+            units["shadowtex1"] = kGbufShadow1; units["watershadow"] = kGbufShadow1;
+            units["shadowcolor"] = kGbufShadowColor; units["shadowcolor0"] = kGbufShadowColor; units["shadowcolor1"] = kGbufShadowColor;
+            units["sp_entityMap"] = kGbufEntityMap; units["sp_spriteTable"] = kGbufSpriteTable;
+            for (size_t k = 0; k < m_gbufColorReads.size(); ++k) {
+                const int idx = m_gbufColorReads[k];
+                units[kColorNames[idx]] = kGbufColorFirst + static_cast<int>(k);
+                units[kLegacyNames[idx]] = kGbufColorFirst + static_cast<int>(k);
+            }
+        }
+        return units;
+    }
+
+    // OBEY_PACK_DUMP: a program's translated sources next to the pack, for
+    // reading a compiler error against the line it names.
+    void ShaderPipeline::DumpSource(const std::string& name, const std::string& vert, const std::string& frag) const {
+        std::error_code ec;
+        const fs::path dir = fs::path(Shaders::PacksDirectory()) / ".translated";
+        fs::create_directories(dir, ec);
+        std::ofstream(dir / (name + ".vsh.glsl")) << vert;
+        std::ofstream(dir / (name + ".fsh.glsl")) << frag;
+        Log::Info("[ShaderPipeline] translated sources written to %s", dir.string().c_str());
     }
 
     void ShaderPipeline::SetSamplerUniforms(const Program& p, Layout layout) {
@@ -1504,7 +1790,21 @@ namespace Render {
             b.SetUniformInt(s, "shadowcolor", kGbufShadowColor);
             b.SetUniformInt(s, "shadowcolor0", kGbufShadowColor);
             b.SetUniformInt(s, "shadowcolor1", kGbufShadowColor);
+            for (size_t k = 0; k < m_gbufColorReads.size(); ++k) {
+                const int idx = m_gbufColorReads[k];
+                b.SetUniformInt(s, kColorNames[idx], kGbufColorFirst + static_cast<int>(k));
+                b.SetUniformInt(s, kLegacyNames[idx], kGbufColorFirst + static_cast<int>(k));
+            }
         }
+    }
+
+    // The projection a pack program and its depth arithmetic see — see
+    // docs/shader-packs-port.md "Coordinate conventions".
+    static glm::mat4 PackProjection(const glm::mat4& projection) {
+        // GL-style on every backend: the Vulkan translation remaps clip z in
+        // the vertex stage itself (ShaderPackGlsl::Vulkanize), so the pack's
+        // matrices, its depth reconstruction and the stored depth agree.
+        return projection;
     }
 
     void ShaderPipeline::SetUniforms(const Program& p, const ShaderFrameInput& in, Layout layout) {
@@ -1514,7 +1814,7 @@ namespace Render {
         const glm::mat4 identity(1.0f);
         if (layout == Layout::Composite) {
             // The quad's own transform (see EnsureQuad).
-            const glm::mat4 ortho = glm::ortho(0.0f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f);
+            const glm::mat4 ortho = PackProjection(glm::ortho(0.0f, 1.0f, 0.0f, 1.0f, -1.0f, 1.0f));
             b.SetUniformMat4(s, "sp_ModelViewMatrix", identity);
             b.SetUniformMat4(s, "sp_ProjectionMatrix", ortho);
             b.SetUniformMat4(s, "sp_ModelViewProjectionMatrix", ortho);
@@ -1526,10 +1826,11 @@ namespace Render {
             // A gbuffers program transforms the engine's render-space vertex
             // with the frame's view and projection (uMVP, the product, is
             // the renderer's own upload).
+            const glm::mat4 projection = PackProjection(in.projection);
             b.SetUniformMat4(s, "sp_ModelViewMatrix", in.view);
-            b.SetUniformMat4(s, "sp_ProjectionMatrix", in.projection);
+            b.SetUniformMat4(s, "sp_ProjectionMatrix", projection);
             b.SetUniformMat4(s, "sp_ModelViewMatrixInverse", glm::inverse(in.view));
-            b.SetUniformMat4(s, "sp_ProjectionMatrixInverse", glm::inverse(in.projection));
+            b.SetUniformMat4(s, "sp_ProjectionMatrixInverse", glm::inverse(projection));
             b.SetUniformMat4(s, "sp_TextureMatrix[0]", identity);
             // MC's lightmap matrix: 0..240 texel units to 1/32 .. 31/32.
             glm::mat4 lm(1.0f);
@@ -1551,15 +1852,16 @@ namespace Render {
         // inverse is then camera-relative and cameraPosition completes it.
         const glm::mat4 modelView = glm::mat4(rot);
         const glm::mat4 modelViewInv = glm::inverse(modelView);
-        const glm::mat4 projInv = glm::inverse(m_frame.projection);
+        const glm::mat4 projection = PackProjection(m_frame.projection);
+        const glm::mat4 projInv = glm::inverse(projection);
         b.SetUniformMat4(s, "gbufferModelView", modelView);
         b.SetUniformMat4(s, "gbufferModelViewInverse", modelViewInv);
-        b.SetUniformMat4(s, "gbufferProjection", m_frame.projection);
+        b.SetUniformMat4(s, "gbufferProjection", projection);
         b.SetUniformMat4(s, "gbufferProjectionInverse", projInv);
         b.SetUniformMat4(s, "gbufferPreviousModelView", m_havePrev ? m_prevModelView : modelView);
-        b.SetUniformMat4(s, "gbufferPreviousProjection", m_havePrev ? m_prevProjection : m_frame.projection);
+        b.SetUniformMat4(s, "gbufferPreviousProjection", m_havePrev ? PackProjection(m_prevProjection) : projection);
         const glm::mat4& sv = m_haveShadow || m_inShadowPass ? m_shadowView : identity;
-        const glm::mat4& spj = m_haveShadow || m_inShadowPass ? m_shadowProjection : identity;
+        const glm::mat4 spj = m_haveShadow || m_inShadowPass ? PackProjection(m_shadowProjection) : identity;
         b.SetUniformMat4(s, "shadowModelView", sv);
         b.SetUniformMat4(s, "shadowModelViewInverse", glm::inverse(sv));
         b.SetUniformMat4(s, "shadowProjection", spj);
@@ -1602,9 +1904,12 @@ namespace Render {
         b.SetUniformFloat(s, "fogEnd", in.fogEnd);
         b.SetUniformFloat(s, "fogDensity", 0.0f);
 
-        // Weather and effects the engine does not model yet.
-        b.SetUniformFloat(s, "rainStrength", 0.0f);
-        b.SetUniformFloat(s, "wetness", 0.0f);
+        // Weather: MC's rain / thunder levels at the frame's partial tick,
+        // and the eased wetness (SetFrameInput).
+        b.SetUniformFloat(s, "rainStrength", in.rainStrength);
+        b.SetUniformFloat(s, "thunderStrength", in.thunderStrength);
+        b.SetUniformFloat(s, "wetness", m_wetness);
+        // Effects the engine does not model yet.
         b.SetUniformFloat(s, "nightVision", 0.0f);
         b.SetUniformFloat(s, "blindness", 0.0f);
         b.SetUniformFloat(s, "darknessFactor", 0.0f);
@@ -1635,8 +1940,50 @@ namespace Render {
         }
     }
 
+    // OBEY_PACK_SHOW=<buffer>: the final pass shows that buffer as it stands
+    // (colortex0..7, depthtex0/1/2, shadowtex0, shadowcolor0, noisetex,
+    // lightmap) instead of the pack's final image — the way to compare a
+    // stage between backends from screenshots.
+    TextureHandle ShaderPipeline::ShownBuffer() const {
+        static const char* s_show = std::getenv("OBEY_PACK_SHOW");
+        if (!s_show) return INVALID_TEXTURE;
+        std::string name = s_show, stage;
+        if (const size_t at = name.find('@'); at != std::string::npos) { stage = name.substr(at + 1); name = name.substr(0, at); }
+        if (name.rfind("colortex", 0) == 0 && name.size() == 9) {
+            const int i = name[8] - '0';
+            // @deferred: the snapshot taken after the deferred passes, before
+            // the translucents (ColorBuffer::feedback, the Vulkan-style backends).
+            if (i >= 0 && i < kColorBuffers) return stage == "deferred" && m_color[i].feedback != INVALID_TEXTURE ? m_color[i].feedback : m_color[i].main;
+        }
+        if (name == "depthtex0") return m_depth;
+        if (name == "depthtex1") return m_depth1;
+        if (name == "depthtex2") return Depth2();
+        if (name == "shadowtex0") return m_shadowDepth0;
+        if (name == "shadowcolor0") return m_shadowColor0;
+        if (name == "noisetex") return m_noise;
+        if (name == "lightmap") return m_lightmap;
+        return INVALID_TEXTURE;
+    }
+
     void ShaderPipeline::DrawPass(const Program& p, const ShaderFrameInput& in) {
         RenderBackend& b = *g_renderBackend;
+        if (p.isFinal && ShownBuffer() != INVALID_TEXTURE && m_blit != INVALID_SHADER) {
+            b.BindRenderTarget(INVALID_RENDER_TARGET);
+            b.SetViewport(0, 0, m_width, m_height);
+            b.SetClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            b.Clear(true, true, true);
+            PipelineState state;
+            state.depthTestEnabled = false;
+            state.depthWriteEnabled = false;
+            state.blendEnabled = false;
+            state.cullMode = CullMode::None;
+            b.SetPipelineState(state);
+            b.BindShader(m_blit);
+            b.BindTexture(ShownBuffer(), 0);
+            b.SetUniformInt(m_blit, "colortex0", 0);
+            b.DrawIndexed(m_quad, 6, 0);
+            return;
+        }
         if (p.isFinal) {
             b.BindRenderTarget(INVALID_RENDER_TARGET);
             b.SetViewport(0, 0, m_width, m_height);
@@ -1652,7 +1999,16 @@ namespace Render {
             for (int idx : p.drawBuffers) outs.push_back(m_color[idx].alt);
             const RenderTargetHandle rt = b.CreateRenderTargetFromTextures(outs.data(), static_cast<int>(outs.size()), INVALID_TEXTURE);
             if (rt == INVALID_RENDER_TARGET) return;
-            b.BindRenderTarget(rt);
+            // Named for the GPU tools (an encoder per pass: "composite1 (WxH)").
+            b.SetDebugLabel(DebugLabelKind::RenderTarget, rt, p.name.c_str());
+            // The quad overwrites every pixel of the outputs unless the pass
+            // blends (shaders.properties blend.<program>), so the backend
+            // may skip loading them (OBEY_PACK_LOAD=1 keeps the loads, for A/B).
+            static const bool s_keepLoads = std::getenv("OBEY_PACK_LOAD") != nullptr;
+            const auto blendIt = m_props.find("blend." + p.name);
+            const bool blends = blendIt != m_props.end() && blendIt->second != "off";
+            if (s_keepLoads || blends) b.BindRenderTarget(rt);
+            else                       b.BindRenderTargetOverwriting(rt);
             const_cast<Program&>(p).target = rt;
         }
 
@@ -1677,12 +2033,8 @@ namespace Render {
         b.BindShader(p.shader);
         BindInputs(Layout::Composite);
         SetUniforms(p, in, Layout::Composite);
-        if (p.isFinal && m_frameCounter % 300 >= 30 && m_frameCounter % 300 <= 31) {
-            Log::Info("[ShaderPipeline] GL state before final draw: %s", b.DebugStateSummary().c_str());
-        }
         b.DrawIndexed(m_quad, 6, 0);
         b.CheckErrors(p.isFinal ? "ShaderPipeline.final" : "ShaderPipeline.pass");
-        if (p.isFinal && m_frameCounter % 300 >= 30 && m_frameCounter % 300 <= 33) ProbeThree("backbuffer after final");
 
         if (!p.isFinal) {
             b.DestroyRenderTarget(p.target);
@@ -1692,14 +2044,7 @@ namespace Render {
     }
 
     void ShaderPipeline::RunPasses(std::vector<Program>& passes, const ShaderFrameInput& in) {
-        const bool probe = m_frameCounter % 300 >= 30 && m_frameCounter % 300 <= 33;
-        for (const Program& p : passes) {
-            DrawPass(p, in);
-            if (probe && !p.drawBuffers.empty() && !p.isFinal) {
-                const int first = p.drawBuffers[0];
-                ProbeTexture(m_color[first].main, (std::string("after ") + p.name + ", colortex" + std::to_string(first)).c_str());
-            }
-        }
+        for (const Program& p : passes) DrawPass(p, in);
     }
 
     void ShaderPipeline::EndScene(const ShaderFrameInput& in) {
@@ -1709,25 +2054,19 @@ namespace Render {
         b.SetShaderOverrideMode(false, INVALID_RENDER_TARGET);
 
         b.CheckErrors("ShaderPipeline.EndScene.before");
-        if (m_frameCounter % 300 >= 30 && m_frameCounter % 300 <= 33) {
-            b.BindRenderTarget(m_sceneTarget);
-            ProbeCentre(m_deferredRanThisFrame ? "after level, colortex0 (deferred ran)" : "after level, colortex0");
-        }
-        m_deferredRanThisFrame = false;
         // depthtex2: the level's depth before the hand.
-        if (m_depth2Target != INVALID_RENDER_TARGET) b.BlitRenderTargetDepth(m_sceneTarget, m_depth2Target);
+        if (m_usesDepth2 && m_depth2Target != INVALID_RENDER_TARGET) b.BlitRenderTargetDepth(m_sceneTarget, m_depth2Target);
         b.CheckErrors("ShaderPipeline.EndScene.blit");
 
         bool hadFinal = false;
-        if (!kDebugNoComposites) {
-            RunPasses(m_passes, in);
-            for (const Program& p : m_passes) hadFinal = hadFinal || p.isFinal;
-        }
-        // Diagnostic (frames 34..37): the engine's own blit of colortex4 onto
-        // the backbuffer, through the same quad, after the pack's final.
-        if (m_frameCounter % 300 >= 34 && m_frameCounter % 300 <= 37 && m_color[4].main != INVALID_TEXTURE) {
+        // OBEY_PACK_SHOW=<buffer>@gbuffers: the buffer as the gbuffers and
+        // deferred passes left it — the composites are skipped.
+        static const bool s_showGbuffers = std::getenv("OBEY_PACK_SHOW") && std::string(std::getenv("OBEY_PACK_SHOW")).find("@gbuffers") != std::string::npos;
+        if (s_showGbuffers) {
             b.BindRenderTarget(INVALID_RENDER_TARGET);
             b.SetViewport(0, 0, m_width, m_height);
+            b.SetClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+            b.Clear(true, true, true);
             PipelineState state;
             state.depthTestEnabled = false;
             state.depthWriteEnabled = false;
@@ -1735,11 +2074,15 @@ namespace Render {
             state.cullMode = CullMode::None;
             b.SetPipelineState(state);
             b.BindShader(m_blit);
-            b.BindTexture(m_color[4].main, 0);
+            b.BindTexture(ShownBuffer(), 0);
             b.SetUniformInt(m_blit, "colortex0", 0);
             b.DrawIndexed(m_quad, 6, 0);
-            b.CheckErrors("ShaderPipeline.blitTest");
-            ProbeThree("backbuffer after engine blit of colortex4");
+            hadFinal = true;
+        } else if (!kDebugNoComposites) {
+            BeginPhaseTimer(kPhaseComposite);
+            RunPasses(m_passes, in);
+            EndPhaseTimer(kPhaseComposite);
+            for (const Program& p : m_passes) hadFinal = hadFinal || p.isFinal;
         }
         if (!hadFinal) {
             // No final program: show colortex0 as it stands.

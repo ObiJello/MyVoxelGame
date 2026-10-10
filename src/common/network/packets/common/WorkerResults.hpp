@@ -101,6 +101,15 @@ namespace Network {
             std::vector<uint32_t> opaqueFaceMap;
             std::vector<uint32_t> cutoutFaceMap;
 
+            // Quad records (Render::QuadRecord, four words each): the layer's
+            // cube faces as records, in facing-group order, with the group
+            // boundaries in RECORDS ([7] = record count). Uploaded behind the
+            // face map; empty when the mesher emitted none.
+            std::vector<uint32_t> opaqueRecords;
+            std::vector<uint32_t> cutoutRecords;
+            uint32_t opaqueRecordRanges[8] = {};
+            uint32_t cutoutRecordRanges[8] = {};
+
             // Layer counts for validation
             size_t opaqueVertexCount      = 0;
             size_t opaqueIndexCount       = 0;
@@ -108,9 +117,12 @@ namespace Network {
             size_t cutoutIndexCount       = 0;
             size_t translucentVertexCount = 0;
             size_t translucentIndexCount  = 0;
+            size_t opaqueRecordCount      = 0;
+            size_t cutoutRecordCount      = 0;
 
             bool IsEmpty() const {
-                return opaqueVertices.empty() && cutoutVertices.empty() && translucentVertices.empty();
+                return opaqueVertices.empty() && cutoutVertices.empty() && translucentVertices.empty() &&
+                       opaqueRecords.empty() && cutoutRecords.empty();
             }
 
             size_t GetTotalVertexCount() const {

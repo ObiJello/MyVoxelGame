@@ -46,6 +46,25 @@ namespace Render {
             g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, m_originsUbo, "Terrain section origins");
         }
 
+        // The shared index pattern for the quad-record stream (see
+        // BindSlabForRecords): kMaxQuadsPerRun quads of 0 1 2 0 2 3 over
+        // four vertex ids each, uint16, static.
+        if (g_renderBackend && m_quadPatternIbo == INVALID_BUFFER) {
+            std::vector<uint16_t> pattern(static_cast<size_t>(QuadRecord::kMaxQuadsPerRun) * 6u);
+            for (uint32_t q = 0; q < QuadRecord::kMaxQuadsPerRun; ++q) {
+                const uint16_t b = static_cast<uint16_t>(q * 4u);
+                uint16_t* p = &pattern[static_cast<size_t>(q) * 6u];
+                p[0] = b; p[1] = static_cast<uint16_t>(b + 1); p[2] = static_cast<uint16_t>(b + 2);
+                p[3] = b; p[4] = static_cast<uint16_t>(b + 2); p[5] = static_cast<uint16_t>(b + 3);
+            }
+            m_quadPatternIbo = g_renderBackend->CreateBuffer(BufferUsage::Index, pattern.size() * sizeof(uint16_t),
+                                                             pattern.data(), BufferAccess::Static);
+            if (m_quadPatternIbo == INVALID_BUFFER) {
+                Log::Error("ChunkMegaBuffer: failed to create the quad-record index pattern");
+            }
+            g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, m_quadPatternIbo, "Terrain quad index pattern");
+        }
+
         // Allocate the first slab
         AllocateSlab();
 
@@ -75,8 +94,10 @@ namespace Render {
             for (auto& slab : m_slabs) destroySlab(slab);
             if (m_spareSlab) destroySlab(*m_spareSlab);
             if (m_originsUbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(m_originsUbo);
+            if (m_quadPatternIbo != INVALID_BUFFER) g_renderBackend->DestroyBuffer(m_quadPatternIbo);
         }
         m_originsUbo = INVALID_BUFFER;
+        m_quadPatternIbo = INVALID_BUFFER;
         m_spareSlab.reset();
         m_slabs.clear();
         m_regions.clear();
@@ -198,13 +219,14 @@ namespace Render {
         g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, slab.vbo, "Terrain slab VBO");
         g_renderBackend->SetDebugLabel(DebugLabelKind::Buffer, slab.ibo, "Terrain slab IBO");
 
-        // The face map: the same bytes as the VBO, seen by the fragment
-        // shader as RGBA16 texels (one record each). One view per slab,
-        // bound with the slab.
-        // Integer texels: the records are uint16 fields, and the fragment
-        // shader reads them as such (usamplerBuffer) — the unorm view cost
-        // it a multiply-round-convert per fetch (Xcode per-line, 2026-10-07).
-        slab.faceMapTex = g_renderBackend->CreateBufferTexture(slab.vbo, TextureFormat::RGBA16UI);
+        // The face map: the same bytes as the VBO, seen by the shaders as
+        // RGBA32UI texels — one 16-byte record each, a block's record for
+        // the fragment shaders or a quad record for the record vertex
+        // shader (Vertex.hpp). One view per slab, bound with the slab.
+        // Integer texels: the records are integer fields, and the shaders
+        // read them as such (usamplerBuffer) — the unorm view cost a
+        // multiply-round-convert per fetch (Xcode per-line, 2026-10-07).
+        slab.faceMapTex = g_renderBackend->CreateBufferTexture(slab.vbo, TextureFormat::RGBA32UI);
         g_renderBackend->SetDebugLabel(DebugLabelKind::Texture, slab.faceMapTex, "Terrain face map");
         if (slab.faceMapTex == INVALID_TEXTURE) {
             Log::Error("ChunkMegaBuffer: no buffer texture for the face map — "
@@ -301,6 +323,23 @@ namespace Render {
         }
     }
 
+    void ChunkMegaBuffer::BindSlabForRecords(uint32_t slabIndex) const {
+        if (slabIndex >= m_slabs.size() || !g_renderBackend) return;
+        const Slab& slab = m_slabs[slabIndex];
+        if (slab.released) return;
+        // The record shader takes no vertex input; the VBO is bound anyway so
+        // the shared vertex array stays complete on OpenGL. The indices are
+        // the shared pattern; the records come through the face map.
+        g_renderBackend->BindVertexBuffer(slab.vbo, static_cast<uint32_t>(VERTEX_STRIDE));
+        if (m_quadPatternIbo != INVALID_BUFFER) g_renderBackend->BindIndexBuffer(m_quadPatternIbo);
+        if (m_originsUbo != INVALID_BUFFER) {
+            g_renderBackend->BindUniformBuffer(m_originsUbo, slabIndex * kSlotBytes, kSlotBytes);
+        }
+        if (slab.faceMapTex != INVALID_TEXTURE) {
+            g_renderBackend->BindTexture(slab.faceMapTex, 2);
+        }
+    }
+
     // ========================================================================
     // SECTION MANAGEMENT
     // ========================================================================
@@ -321,12 +360,17 @@ namespace Render {
     bool ChunkMegaBuffer::UploadSection(const MegaBufferSectionKey& key,
                                          const float* vertexData, size_t vertexCount,
                                          const uint16_t* indexData, size_t indexCount,
-                                         const uint32_t* faceMap, size_t faceMapTexels,
-                                       int32_t fadeStartMs) {
+                                         const uint32_t* faceMap, size_t faceMapWords,
+                                         const uint32_t* records, size_t recordCount,
+                                         int32_t fadeStartMs) {
         PROFILE_ZONE;
-        if (vertexCount == 0 || indexCount == 0) return false;
-        if (!vertexData || !indexData) return false;
-        if (!faceMap) faceMapTexels = 0;
+        if (!faceMap) faceMapWords = 0;
+        if (!records) recordCount = 0;
+        if (!vertexData || !indexData) { vertexCount = 0; indexCount = 0; }
+        // A vertex stream has both vertices and indices or neither; the
+        // layer has at least one stream.
+        if ((vertexCount == 0) != (indexCount == 0)) return false;
+        if (vertexCount == 0 && recordCount == 0) return false;
 
         // If section already exists, remove it first (re-upload)
         if (m_regions.count(key)) {
@@ -345,12 +389,12 @@ namespace Render {
         for (uint32_t i = 0; i < slabCount; ++i) {
             if (m_slabs[i].released || i == m_drainSlab) continue;
             if (TryUploadToSlab(i, key, vertexData, vertexCount, indexData, indexCount,
-                                faceMap, faceMapTexels, fadeStartMs))
+                                faceMap, faceMapWords, records, recordCount, fadeStartMs))
                 return true;
         }
         if (m_drainSlab < slabCount && !m_slabs[m_drainSlab].released &&
             TryUploadToSlab(m_drainSlab, key, vertexData, vertexCount, indexData, indexCount,
-                            faceMap, faceMapTexels, fadeStartMs)) {
+                            faceMap, faceMapWords, records, recordCount, fadeStartMs)) {
             return true;
         }
 
@@ -359,7 +403,7 @@ namespace Render {
         uint32_t newSlab = AllocateSlab();
         if (newSlab == UINT32_MAX) return false;
         return TryUploadToSlab(newSlab, key, vertexData, vertexCount, indexData, indexCount,
-                               faceMap, faceMapTexels, fadeStartMs);
+                               faceMap, faceMapWords, records, recordCount, fadeStartMs);
     }
 
     bool ChunkMegaBuffer::AllocSlot(Slab& slab, uint16_t& outSlot) {
@@ -382,26 +426,29 @@ namespace Render {
     bool ChunkMegaBuffer::TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                                            const float* vertexData, size_t vertexCount,
                                            const uint16_t* indexData, size_t indexCount,
-                                           const uint32_t* faceMap, size_t faceMapTexels,
+                                           const uint32_t* faceMap, size_t faceMapWords,
+                                           const uint32_t* records, size_t recordCount,
                                            int32_t fadeStartMs) {
         if (!g_renderBackend) return false;
         Slab& slab = m_slabs[slabIndex];
         if (slab.released) return false;
 
-        // Vertex allocation: the vertices plus the face-map records behind
-        // them, in whole vertex-stride units (see Region::allocUnits). The
-        // records must start on an 8-byte texel; a 20-byte vertex run ends
-        // on a 4-byte boundary, so a face-mapped region reserves one spare
-        // unit for the (0 or 4 byte) pad.
-        const size_t faceMapUnits = faceMapTexels > 0
-            ? (faceMapTexels + kWordsPerUnit - 1) / kWordsPerUnit + 1       // faceMapTexels = uint32 words
+        // Vertex allocation: the vertices plus the face-map and quad records
+        // behind them, in whole vertex-stride units (see Region::allocUnits).
+        // The records must start on a 16-byte texel; a 20-byte vertex run
+        // ends on a 4-byte boundary, so a region with records reserves one
+        // spare unit for the (0..12 byte) pad.
+        const size_t faceMapTexels = faceMapWords / TerrainVertex::kFaceMapWordsPerTexel;
+        const size_t texels = faceMapTexels + recordCount;
+        const size_t recordUnits = texels > 0
+            ? (texels * kRecordBytes + VERTEX_STRIDE - 1) / VERTEX_STRIDE + 1
             : 0;
-        const size_t allocUnits = vertexCount + faceMapUnits;
+        const size_t allocUnits = vertexCount + recordUnits;
 
         // Known full for a request this size (see Slab::minFailedUnits):
         // skip without touching the free-lists.
         if (allocUnits >= slab.minFailedUnits) return false;
-        if (!m_perSectionIndexBuffers && indexCount >= slab.minFailedIndices) return false;
+        if (!m_perSectionIndexBuffers && indexCount > 0 && indexCount >= slab.minFailedIndices) return false;
 
         // Origin-table row first: it is the scarcer resource in a slab of
         // small sections, and failing here costs nothing to undo.
@@ -419,7 +466,7 @@ namespace Render {
         // section gets its own buffer below — so there is nothing to reserve and
         // nothing to fail on.
         size_t indexOffset = 0;
-        if (!m_perSectionIndexBuffers) {
+        if (!m_perSectionIndexBuffers && indexCount > 0) {
             if (!AllocRegion(slab.freeIndexBlocks, slab.indexHighWater, slab.iboCapacity, indexCount, indexOffset)) {
                 slab.minFailedIndices = std::min(slab.minFailedIndices, indexCount);
                 // Undo vertex allocation (never more room than before the
@@ -450,14 +497,17 @@ namespace Render {
         // Patch the row number into every vertex (the mesher leaves it 0 and
         // only the flags set) and, for face-mapped vertices, add the slab
         // texel position of this section's records to their record index.
+        // The quad records behind the face map get the same two patches
+        // (QuadRecord: the slot in w1, a rectangle's face-map texel in w3).
         // Then one upload of vertices + records. A memcpy plus one or two
         // stores per vertex, on the render thread, against the upload it
         // precedes.
+        size_t quadTexel = 0;
         {
             const size_t vertexWords = vertexCount * (VERTEX_STRIDE / sizeof(uint32_t));
             const size_t words = allocUnits * (VERTEX_STRIDE / sizeof(uint32_t));
             m_vertexScratch.assign(words, 0u);          // pads and spare unit zeroed
-            std::memcpy(m_vertexScratch.data(), vertexData, vertexCount * VERTEX_STRIDE);
+            if (vertexCount > 0) std::memcpy(m_vertexScratch.data(), vertexData, vertexCount * VERTEX_STRIDE);
             // First record texel: the slab byte just past the vertices,
             // rounded up to a texel.
             const size_t vertexEndByte = (vertexOffset + vertexCount) * VERTEX_STRIDE;
@@ -469,9 +519,19 @@ namespace Render {
                     (verts[i].slot & (TerrainVertex::kFlagMask | TerrainVertex::kNormalMask)) | slot);
                 if (verts[i].slot & TerrainVertex::kMapFlag) verts[i].packedColor += recordBase;
             }
+            const size_t recordWord = vertexWords + (recordByte - vertexEndByte) / sizeof(uint32_t);
             if (faceMapTexels > 0) {
-                const size_t recordWord = vertexWords + (recordByte - vertexEndByte) / sizeof(uint32_t);
-                std::memcpy(m_vertexScratch.data() + recordWord, faceMap, faceMapTexels * sizeof(uint32_t));
+                std::memcpy(m_vertexScratch.data() + recordWord, faceMap, faceMapTexels * kRecordBytes);
+            }
+            if (recordCount > 0) {
+                auto* recs = reinterpret_cast<QuadRecord*>(m_vertexScratch.data() + recordWord +
+                                                           faceMapTexels * (kRecordBytes / sizeof(uint32_t)));
+                std::memcpy(recs, records, recordCount * sizeof(QuadRecord));
+                for (size_t i = 0; i < recordCount; ++i) {
+                    recs[i].w1 = (recs[i].w1 & ~QuadRecord::kSlotMask) | static_cast<uint32_t>(slot);
+                    if (recs[i].IsRect()) recs[i].w3 += recordBase;
+                }
+                quadTexel = static_cast<size_t>(recordBase) + faceMapTexels;
             }
         }
         // Unsynchronised on purpose, on both backends. Every range written
@@ -492,7 +552,9 @@ namespace Render {
         // renderer never has to know which one it is drawing from.
         ConvertToAbsolute(m_indexScratch, indexData, indexCount, vertexOffset);
         BufferHandle sectionIbo = INVALID_BUFFER;
-        if (m_perSectionIndexBuffers) {
+        if (indexCount == 0) {
+            // Records only: no index stream.
+        } else if (m_perSectionIndexBuffers) {
             sectionIbo = g_renderBackend->CreateBuffer(
                 BufferUsage::Index,
                 indexCount * INDEX_SIZE,
@@ -524,6 +586,8 @@ namespace Render {
         region.slot         = slot;
         region.allocUnits   = allocUnits;
         region.sectionIbo   = sectionIbo;
+        region.recordTexel  = quadTexel;
+        region.recordCount  = recordCount;
         m_regions[key] = region;
         slab.sectionCount++;
         slab.usedUnits += allocUnits;
@@ -660,7 +724,7 @@ namespace Render {
                 // void (Slab::minFailedUnits).
                 slab.minFailedUnits = SIZE_MAX;
                 slab.minFailedIndices = SIZE_MAX;
-                if (p.freeIndices) {
+                if (p.freeIndices && p.indexCount > 0) {
                     // Zero the range before it becomes free space. Index 0 is
                     // always a valid vertex (slab vertex 0), so a run of zeros
                     // is a run of zero-area triangles that rasterise nothing —
@@ -797,6 +861,8 @@ namespace Render {
         // buffer; shared mode addresses the slab IBO.
         outCmd.indexOffset = r.sectionIbo != INVALID_BUFFER ? 0u : static_cast<uint32_t>(r.indexOffset);
         outCmd.slabIndex = r.slabIndex;
+        outCmd.recordTexel = static_cast<uint32_t>(r.recordTexel);
+        outCmd.recordCount = static_cast<uint32_t>(r.recordCount);
         return true;
     }
 

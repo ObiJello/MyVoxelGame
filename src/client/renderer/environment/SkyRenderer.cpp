@@ -44,59 +44,6 @@ namespace Render {
 
     // GL shader. VK uses shaders/sky_vk.{vert,frag} (portal pipeline layout:
     // push constants for uMVP/uColor, CommonUBO for uFogColor/uFogEnv).
-    const char* SkyRenderer::vertexShaderSource = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-
-uniform mat4 uMVP;
-
-out vec2 vUV;
-out vec4 vColor;
-out float vSph;
-out float vCyl;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    // The far plane (depth 1.0, the clear) — see shaders/sky_vk.vert.
-    gl_Position.z = gl_Position.w;
-    vUV = aUV;
-    vColor = aColor;
-    // MC sky.vsh: fog distances from the RAW buffer position (the sky is
-    // camera-centered, so model-space distance == camera distance).
-    vSph = length(aPos);
-    vCyl = max(length(aPos.xz), abs(aPos.y));
-}
-)";
-
-    const char* SkyRenderer::fragmentShaderSource = R"(
-#version 330 core
-in vec2 vUV;
-in vec4 vColor;
-in float vSph;
-in float vCyl;
-out vec4 FragColor;
-
-uniform sampler2D uTexture;
-uniform vec4 uColor;
-uniform vec4 uFogColor;
-uniform vec4 uFogEnv;   // (envStart, envEnd, rdStart, rdEnd); 1e9 = fog off
-
-float linearFog(float d, float s, float e) {
-    if (d <= s) return 0.0;
-    if (d >= e) return 1.0;
-    return (d - s) / (e - s);
-}
-
-void main() {
-    vec4 color = texture(uTexture, vUV) * vColor * uColor;
-    if (color.a == 0.0) discard;   // MC position_tex.fsh texel discard
-    float fogValue = max(linearFog(vSph, uFogEnv.x, uFogEnv.y),
-                         linearFog(vCyl, uFogEnv.z, uFogEnv.w));
-    FragColor = vec4(mix(color.rgb, uFogColor.rgb, fogValue * uFogColor.a), color.a);
-}
-)";
 
     namespace {
 
@@ -130,14 +77,11 @@ void main() {
             return LoadTextureFile(PlatformMain::GetAssetPath(relPath));
         }
 
-        ShaderHandle CreateSkyShader(const char* vertSrc, const char* fragSrc) {
-            // The _vk shaders need the UBO-aware (portal) pipeline layout
-            // for uFogColor/uFogEnv; OpenGL falls back to the inline source.
-            ShaderHandle s = g_renderBackend->CreateShaderFromFilesPortal("shaders/sky.vert", "shaders/sky.frag");
-            if (s == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
-                s = g_renderBackend->CreateShader(vertSrc, fragSrc);
-            }
-            return s;
+        ShaderHandle CreateSkyShader() {
+            // The UBO-aware (portal) pipeline layout for uFogColor/uFogEnv;
+            // OpenGL compiles shaders/sky.vert + sky.frag, the others the
+            // _vk twins.
+            return g_renderBackend->CreateShaderFromFilesPortal("shaders/sky.vert", "shaders/sky.frag");
         }
 
         const glm::vec4 kFogOff{1e9f, 1e9f, 1e9f, 1e9f};
@@ -1381,7 +1325,7 @@ void main() {
         if (m_initialized) return true;
         if (!g_renderBackend) return false;
 
-        m_shader = CreateSkyShader(vertexShaderSource, fragmentShaderSource);
+        m_shader = CreateSkyShader();
         if (m_shader == INVALID_SHADER) {
             Log::Warning("SkyRenderer: failed to create shader — sky disabled");
             return false;

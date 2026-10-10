@@ -16,10 +16,13 @@ macOS) runs the Metal 3 backend exactly as today (user requirement,
 
 ## Selection
 
-`--metal4` (dev flag; the launcher's renderer picker stays "Metal" until the
-path is the default) asks for it. `Render::CreateRenderBackend(Metal)` builds
-`Metal4Backend` when the device reports the family under macOS 26, else
-`MetalBackend`, and logs which. `Metal4Backend` derives from `MetalBackend`:
+The default since 2026-10-09: `--metal` (the launcher's "Metal") takes the
+Metal 4 path wherever the device reports the family under macOS 26, the
+Metal 3 backend elsewhere. `Render::CreateRenderBackend(Metal)` builds
+`Metal4Backend`, whose `Initialize` falls back to the Metal 3 path when the
+Metal 4 objects cannot be made, and logs which runs; `--metal3` or
+`OBEY_METAL4=0` keep Metal 3 (the A/B, a driver problem), `--metal4` is the
+old opt-in and now a no-op. `Metal4Backend` derives from `MetalBackend`:
 resources (buffers, textures, samplers, the metallib, pipelines' MSL) stay
 the base's, the command path is overridden milestone by milestone, so the
 game runs on it at every step.

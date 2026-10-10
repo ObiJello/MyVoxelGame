@@ -62,66 +62,6 @@ namespace Render {
 
     // Positions are camera-relative via uModel; fog distance comes from the
     // transformed position (spherical, MC fog_spherical_distance).
-    const char* CloudRenderer::vertexShaderSource = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-
-uniform mat4 uMVP;
-uniform mat4 uModel;
-
-out vec4 vColor;
-out float vDist;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vColor = aColor;
-    vDist = length((uModel * vec4(aPos, 1.0)).xyz);
-}
-)";
-
-    const char* CloudRenderer::fragmentShaderSource = R"(
-#version 330 core
-in vec4 vColor;
-in float vDist;
-#ifndef OIT_ALPHA_ONLY
-out vec4 FragColor;
-#endif
-
-uniform vec4 uColor;     // CLOUD_COLOR attribute (rgba, alpha carries 0.8 base)
-uniform vec4 uFogEnv;    // (0, cloudsEnd, unused, unused)
-
-float linearFog(float d, float s, float e) {
-    if (d <= s) return 0.0;
-    if (d >= e) return 1.0;
-    return (d - s) / (e - s);
-}
-
-
-// Improved Transparency (MC 26.3 OIT): the OIT variants are this source with
-// #define OIT and a stage define; the GL backend splices shaders/oit_lib.glsl
-// in here. The engine's own compile never sees any of it.
-#ifdef OIT
-#pragma oit_library
-#endif
-
-void main() {
-    vec4 color = vColor * uColor;
-#ifndef OIT_DEPTH_BOUNDS
-    color.a *= 1.0 - linearFog(vDist, uFogEnv.x, uFogEnv.y);   // (MC: not in the depth bounds)
-#endif
-    if (color.a <= 0.0) discard;
-#ifdef OIT_ALPHA_ONLY
-    executeAlphaOnlyPhase(gl_FragCoord.z, color.a);   // MC clouds.fsh
-#else
-    FragColor = color;
-#ifdef OIT_ACCUMULATE
-    FragColor = sampleColorForAccumulation(FragColor);   // MC calculateFinalColor
-#endif
-#endif
-}
-)";
 
     CloudRenderer::~CloudRenderer() {
         Shutdown();
@@ -138,12 +78,10 @@ void main() {
         if (m_initialized) return true;
         if (!g_renderBackend) return false;
 
-        // The _vk shaders need the UBO-aware (portal) pipeline layout for
-        // uModel/uFogColor/uFogEnv; OpenGL falls back to the inline source.
+        // The UBO-aware (portal) pipeline layout for uModel/uFogColor/uFogEnv;
+        // OpenGL compiles shaders/clouds.vert + clouds.frag, the others the
+        // _vk twins.
         m_shader = g_renderBackend->CreateShaderFromFilesPortal("shaders/clouds.vert", "shaders/clouds.frag");
-        if (m_shader == INVALID_SHADER && !g_renderBackend->UsesVkShaders()) {
-            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
-        }
         if (m_shader == INVALID_SHADER) {
             Log::Warning("CloudRenderer: failed to create shader — clouds disabled");
             return false;

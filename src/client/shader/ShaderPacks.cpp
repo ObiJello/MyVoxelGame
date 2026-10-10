@@ -9,6 +9,8 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -146,6 +148,11 @@ namespace Shaders {
     }
 
     std::string Selected() {
+        // OBEY_SHADER_PACK=<id>|none: the harness's choice for one run, the
+        // saved setting untouched.
+        if (const char* env = std::getenv("OBEY_SHADER_PACK")) {
+            return std::strcmp(env, "none") == 0 ? std::string() : std::string(env);
+        }
         return Platform::g_gameSettings.GetString(kSettingKey, "");
     }
 

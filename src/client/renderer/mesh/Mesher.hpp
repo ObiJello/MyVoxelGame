@@ -319,6 +319,10 @@ namespace Render {
         // the caller triggers RemeshAll, same as the debug palette.
         static void SetGreedyEnabled(bool enable);
         static bool GreedyEnabled();
+        // Quad records (Vertex.hpp QuadRecord, docs/quad-records.md): the
+        // greedy path emits cube faces as 16-byte records for the record
+        // shader. OBEY_QUAD_RECORDS=0 turns it off (read once at startup).
+        static bool QuadRecordsEnabled();
         // Packed debug-view colors, exposed for FluidMeshBuilder's still-fluid
         // merge pass so water plates read on the same red->green heat scale
         // (and the same ineligible blue-gray) as terrain, from one definition.

@@ -992,14 +992,7 @@ namespace Server {
             return;
         }
         
-        // MC Player.isInvulnerableTo: `abilities.invulnerable &&
-        // !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY)` — creative and
-        // spectator shrug off everything but the tag's members, of which this
-        // port has the void (fell_out_of_world) and /kill (generic_kill, which
-        // goes through kill()). A spectator or creative player who flies 64
-        // blocks under the world floor dies, as in vanilla.
-        if ((m_gameMode == GameMode::CREATIVE || m_gameMode == GameMode::SPECTATOR) &&
-            source != DamageSource::VOID_DAMAGE && source != DamageSource::GENERIC_KILL) {
+        if (isInvulnerableTo(source)) {
             return;
         }
 
@@ -1008,21 +1001,6 @@ namespace Server {
         // no hurt, no cooldown.
         if (isFireSource(source) && hasEffect(Game::MobEffectId::FireResistance)) {
             return;
-        }
-
-        // MC Player.isInvulnerableTo: the per-source game rules — a player
-        // (only a player) takes no fall / fire / drowning damage while the
-        // matching rule is off. Freeze damage has no source here (no powder
-        // snow).
-        {
-            using Game::Rules::Id;
-            // #is_fall: fall and stalagmite (an ender pearl's is FALL here).
-            if ((source == DamageSource::FALL || source == DamageSource::STALAGMITE)
-                                                 && !Game::Rules::GetBool(Id::FallDamage))     return;
-            // #is_fire: on_fire, in_fire, lava, hot_floor and campfire all
-            // sit behind fire_damage.
-            if (isFireSource(source)             && !Game::Rules::GetBool(Id::FireDamage))     return;
-            if (source == DamageSource::DROWNING && !Game::Rules::GetBool(Id::DrowningDamage)) return;
         }
 
         // The hit as MC's DamageSource: the caller's when it had one (the
@@ -1464,6 +1442,33 @@ namespace Server {
             default:
                 return true;
         }
+    }
+
+    bool ServerPlayer::isInvulnerableTo(DamageSource source) const {
+        // MC Player.hurtServer: `abilities.invulnerable &&
+        // !source.is(DamageTypeTags.BYPASSES_INVULNERABILITY)` — creative and
+        // spectator shrug off everything but the tag's members, of which this
+        // port has the void (fell_out_of_world) and /kill (generic_kill, which
+        // goes through kill()). A spectator or creative player who flies 64
+        // blocks under the world floor dies, as in vanilla.
+        if ((m_gameMode == GameMode::CREATIVE || m_gameMode == GameMode::SPECTATOR) &&
+            source != DamageSource::VOID_DAMAGE && source != DamageSource::GENERIC_KILL) {
+            return true;
+        }
+
+        // MC Player.isInvulnerableTo: the per-source game rules — a player
+        // (only a player) takes no fall / fire / drowning damage while the
+        // matching rule is off. Freeze damage has no source here (no powder
+        // snow).
+        using Game::Rules::Id;
+        // #is_fall: fall and stalagmite (an ender pearl's is FALL here).
+        if ((source == DamageSource::FALL || source == DamageSource::STALAGMITE)
+                                             && !Game::Rules::GetBool(Id::FallDamage))     return true;
+        // #is_fire: on_fire, in_fire, lava, hot_floor and campfire all
+        // sit behind fire_damage.
+        if (isFireSource(source)             && !Game::Rules::GetBool(Id::FireDamage))     return true;
+        if (source == DamageSource::DROWNING && !Game::Rules::GetBool(Id::DrowningDamage)) return true;
+        return false;
     }
 
     bool ServerPlayer::isFireSource(DamageSource source) {

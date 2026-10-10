@@ -3,7 +3,11 @@
 
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -216,11 +220,11 @@ namespace Render::PackGlsl {
                  "uniform sampler2D sp_spriteTable;\n"
                  "uniform vec2 sp_entityMapSize;\n"
                  "uniform float sp_unmappedEntity;\n"
-                 "vec3 sp_worldPos; vec3 sp_normal; vec4 sp_color; vec4 sp_mcEntity; vec4 sp_midTexCoord; vec4 sp_tangent;\n"
+                 "vec3 sp_worldPos; vec3 sp_normal; vec4 sp_color; vec4 sp_mcEntity; vec4 sp_midTexCoord; vec4 sp_tangent; vec2 sp_texCoord;\n"
                  "#define attribute in\n"
                  "#define varying out\n"
                  "#define gl_Vertex vec4(sp_worldPos, 1.0)\n"
-                 "#define gl_MultiTexCoord0 vec4(aTexCoord, 0.0, 1.0)\n"
+                 "#define gl_MultiTexCoord0 vec4(sp_texCoord, 0.0, 1.0)\n"
                  "#define gl_MultiTexCoord1 vec4(aLight.xy * 255.0, 0.0, 1.0)\n"
                  "#define gl_MultiTexCoord2 vec4(aLight.xy * 255.0, 0.0, 1.0)\n"
                  "#define gl_Color sp_color\n"
@@ -251,11 +255,26 @@ namespace Render::PackGlsl {
                  "    vec3 t = abs(sp_normal.y) > 0.5 ? vec3(1.0, 0.0, 0.0) : normalize(cross(sp_normal, vec3(0.0, 1.0, 0.0)));\n"
                  "    sp_tangent = vec4(t, 1.0);\n"
                  "    sp_color = vec4(aColor.rgb, 1.0);\n"
-                 "    sp_midTexCoord = vec4(aTexCoord, 0.0, 1.0);\n"
+                 "    // The atlas uv. An untiled vertex carries it; a tiled one (a fluid plate,\n"
+                 "    // or a two-sided plant quad — TerrainVertex::Tiled / TwoSided) carries a\n"
+                 "    // tile-space position and its sprite id, and the uv is the sprite's rect\n"
+                 "    // (sp_spriteTable) at that position: a plant drawn with the packed word as\n"
+                 "    // its uv was a solid green square (2026-10-09).\n"
+                 "    sp_texCoord = aTexCoord;\n"
+                 "    if ((slotRaw & 0x8000) != 0) {\n"
+                 "        int packedTile = int(aTexCoord.x * 65535.0 + 0.5);\n"
+                 "        int spriteV = int(aTexCoord.y * 65535.0 + 0.5);\n"
+                 "        vec2 tile; int sprite;\n"
+                 "        if ((slotRaw & 0x2000) != 0) { tile = vec2(float(packedTile & 0x1F), float((packedTile >> 5) & 0x1F)) / 16.0; sprite = spriteV & 0x7FFF; }\n"
+                 "        else { tile = vec2(float(packedTile & 0xFF), float((packedTile >> 8) & 0xFF)); sprite = spriteV; }\n"
+                 "        vec4 rect = texelFetch(sp_spriteTable, ivec2(sprite & 255, sprite >> 8), 0);\n"
+                 "        sp_texCoord = rect.xy + tile * rect.zw;\n"
+                 "    }\n"
+                 "    sp_midTexCoord = vec4(sp_texCoord, 0.0, 1.0);\n"
                  "    // block.properties id and the sprite's centre, from the atlas-space map (ShaderPipeline::EnsureEntityMap).\n"
                  "    float id = sp_unmappedEntity;\n"
                  "    if (sp_entityMapSize.x > 0.0) {\n"
-                 "        ivec2 cell = ivec2(clamp(floor(aTexCoord * sp_entityMapSize), vec2(0.0), sp_entityMapSize - 1.0));\n"
+                 "        ivec2 cell = ivec2(clamp(floor(sp_texCoord * sp_entityMapSize), vec2(0.0), sp_entityMapSize - 1.0));\n"
                  "        vec4 e = texelFetch(sp_entityMap, cell, 0);\n"
                  "        int idRaw = int(e.r * 255.0 + 0.5) + int(e.g * 255.0 + 0.5) * 256;\n"
                  "        int spriteRaw = int(e.b * 255.0 + 0.5) + int(e.a * 255.0 + 0.5) * 256;\n"
@@ -553,6 +572,365 @@ namespace Render::PackGlsl {
             case Stage::EntityFragment:  t.source = FragmentPrelude(version, true) + body + EntityFragmentEpilogue(); break;
         }
         return t;
+    }
+
+    // ── the Vulkan target ────────────────────────────────────────────────
+
+    namespace {
+        struct UniformDecl { std::string type, name, array; };   // array: "[N]" or ""
+
+        bool IsSamplerType(const std::string& type) {
+            return type.find("sampler") != std::string::npos;
+        }
+        bool StartsWithUniform(const std::string& line, size_t& pos) {
+            pos = line.find_first_not_of(" \t");
+            if (pos == std::string::npos) return false;
+            return line.compare(pos, 7, "uniform") == 0 &&
+                   (pos + 7 >= line.size() || std::isspace(static_cast<unsigned char>(line[pos + 7])));
+        }
+        // `type a = x, b[2], c;` → the declarators, commas inside parentheses
+        // or brackets left alone.
+        std::vector<std::string> SplitDeclarators(const std::string& list) {
+            std::vector<std::string> out;
+            int depth = 0;
+            std::string cur;
+            for (char c : list) {
+                if (c == '(' || c == '[') ++depth;
+                else if (c == ')' || c == ']') --depth;
+                if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); continue; }
+                cur += c;
+            }
+            if (!cur.empty()) out.push_back(cur);
+            return out;
+        }
+        std::string TrimWs(const std::string& t) {
+            const size_t a = t.find_first_not_of(" \t\r\n");
+            if (a == std::string::npos) return "";
+            const size_t b = t.find_last_not_of(" \t\r\n");
+            return t.substr(a, b - a + 1);
+        }
+        // `uniform [precision] type declarators ;` on one line. Returns the
+        // type and the declarators (initializers stripped) or false.
+        bool ParseUniformLine(const std::string& line, std::string& type, std::vector<UniformDecl>& decls,
+                              std::string* rest = nullptr) {
+            static const std::regex kLine(R"(^[ \t]*uniform[ \t]+(?:(?:lowp|mediump|highp)[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)[ \t]+([^;]+);)");
+            std::smatch m;
+            if (!std::regex_search(line, m, kLine)) return false;
+            if (rest) *rest = m.suffix().str();   // whatever follows on the line
+            type = m[1].str();
+            for (std::string d : SplitDeclarators(m[2].str())) {
+                const size_t eq = d.find('=');
+                if (eq != std::string::npos) d = d.substr(0, eq);
+                d = TrimWs(d);
+                UniformDecl u;
+                const size_t br = d.find('[');
+                if (br != std::string::npos) { u.name = TrimWs(d.substr(0, br)); u.array = TrimWs(d.substr(br)); }
+                else u.name = d;
+                u.type = type;
+                if (!u.name.empty()) decls.push_back(u);
+            }
+            return !decls.empty();
+        }
+        // Locations a varying of `type[array]` takes (Vulkan: a column or a
+        // scalar/vector per location, arrays by element).
+        int LocationsOf(const std::string& type, const std::string& array) {
+            int per = 1;
+            if (type == "mat4" || type == "mat4x4") per = 4;
+            else if (type == "mat3" || type == "mat3x3") per = 3;
+            else if (type == "mat2" || type == "mat2x2") per = 2;
+            else if (type == "dvec3" || type == "dvec4") per = 2;
+            int count = 1;
+            if (!array.empty()) count = std::max(1, std::atoi(array.c_str() + 1));
+            return per * count;
+        }
+        // `[flat|smooth|noperspective|centroid]* (in|out|varying) type
+        // name[array];` with no layout of its own — `varying` is the
+        // compatibility spelling the prelude #defines to the stage's
+        // direction, so it counts as that direction here.
+        // Returns the length of the declaration matched at the start of
+        // `line` (0: none), so a caller can walk a line of several.
+        size_t ParseVarying(const std::string& line, const char* direction, std::string& qualifiers,
+                            std::string& type, std::string& name, std::string& array) {
+            if (line.find("layout") != std::string::npos) return 0;
+            static const std::regex kOut(R"(^[ \t]*((?:(?:flat|smooth|noperspective|centroid)[ \t]+)*)(?:out|varying)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*(\[[0-9]+\])?[ \t]*;)");
+            static const std::regex kIn(R"(^[ \t]*((?:(?:flat|smooth|noperspective|centroid)[ \t]+)*)(?:in|varying)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*(\[[0-9]+\])?[ \t]*;)");
+            std::smatch m;
+            if (!std::regex_search(line, m, direction[0] == 'o' ? kOut : kIn)) return 0;
+            qualifiers = m[1].str();
+            type = m[2].str();
+            name = m[3].str();
+            array = m[4].matched ? m[4].str() : "";
+            return static_cast<size_t>(m[0].length());
+        }
+    } // namespace
+
+    bool Vulkanize(const std::string& vertexCore, const std::string& fragmentCore,
+                   const std::map<std::string, int>& samplerUnits, int fragmentOutputs,
+                   Vulkanized& out) {
+        out = Vulkanized{};
+        // The block members, in first-seen order, and the sampler slots.
+        std::vector<UniformDecl> members;
+        std::set<std::string> memberNames;
+        // The samplers both stages declare (name → type), then their slots:
+        // the pipeline's units for the ones it binds; a free slot for the
+        // rest (they read whatever the slot holds, as on OpenGL); and when
+        // the layout is full, an ALIAS of a same-type sampler declared in
+        // the same stage — such samplers (Distant Horizons' dhDepthTex*, an
+        // optional feature's input) are read only on paths that are off.
+        std::map<std::string, std::string> declared[2];   // [0] vertex, [1] fragment
+        auto collect = [&](const std::string& src, int stage) {
+            std::istringstream in(src);
+            std::string line;
+            while (std::getline(in, line)) {
+                size_t pos;
+                std::string type;
+                std::vector<UniformDecl> decls;
+                if (!StartsWithUniform(line, pos) || !ParseUniformLine(line, type, decls) || !IsSamplerType(type)) continue;
+                for (const UniformDecl& d : decls) declared[stage].emplace(d.name, type);
+            }
+        };
+        collect(vertexCore, 0);
+        collect(fragmentCore, 1);
+        std::map<std::string, int> samplerSlot;            // name → slot, both stages
+        std::map<std::string, std::string> samplerAlias;   // name → the sampler it stands for
+        {
+            std::set<int> usedSlots;
+            std::vector<std::string> unbound;
+            for (const auto& decls : declared) {
+                for (const auto& [name, type] : decls) {
+                    if (samplerSlot.count(name)) continue;
+                    auto known = samplerUnits.find(name);
+                    if (known != samplerUnits.end()) { samplerSlot[name] = known->second; usedSlots.insert(known->second); }
+                    else if (std::find(unbound.begin(), unbound.end(), name) == unbound.end()) unbound.push_back(name);
+                }
+            }
+            for (const std::string& name : unbound) {
+                int slot = -1;
+                for (int s = 15; s >= 0; --s) if (!usedSlots.count(s)) { slot = s; break; }
+                if (slot >= 0) { samplerSlot[name] = slot; usedSlots.insert(slot); continue; }
+                // Full: an alias in every stage that declares it.
+                std::string type;
+                for (const auto& decls : declared) if (auto it = decls.find(name); it != decls.end()) type = it->second;
+                std::string alias;
+                for (const auto& decls : declared) {
+                    if (!decls.count(name)) continue;
+                    std::string candidate;
+                    for (const auto& [other, otherType] : decls) {
+                        if (other != name && otherType == type && samplerSlot.count(other)) { candidate = other; break; }
+                    }
+                    if (candidate.empty()) { out.error = "no free texture slot for sampler " + name + " (" + type + ")"; return false; }
+                    if (alias.empty()) alias = candidate;
+                    else if (alias != candidate && !decls.count(alias)) alias = candidate;   // must exist in this stage too
+                }
+                samplerAlias[name] = alias;
+            }
+        }
+        auto slotFor = [&](const std::string& name, std::string& error) -> int {
+            auto it = samplerSlot.find(name);
+            if (it != samplerSlot.end()) return it->second;
+            error = "sampler " + name + " has no slot";
+            return -1;
+        };
+        // Varying locations from the vertex stage, by name.
+        std::map<std::string, int> varyingLocation;
+        int nextLocation = 0;
+        int nextAttribute = 8;   // the engine's inputs are 0..3
+        // What each stage declared, by name: a fragment input the vertex
+        // stage never writes gets a vertex output (Vulkan pairs them; an
+        // unwritten one read undefined on OpenGL too).
+        struct VaryingDecl { std::string qualifiers, type, array; int location = 0; };
+        std::map<std::string, VaryingDecl> vertexOuts, fragmentIns;
+
+        auto process = [&](const std::string& src, bool vertex, std::string& result) -> bool {
+            std::istringstream in(src);
+            std::string line;
+            std::vector<std::string> lines;
+            std::deque<std::string> pending;
+            bool hasTextureSampler = false;
+            for (;;) {
+                if (!pending.empty()) { line = pending.front(); pending.pop_front(); }
+                else if (!std::getline(in, line)) break;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                size_t pos;
+                if (line.rfind("#version", line.find_first_not_of(" \t")) != std::string::npos &&
+                    line.find("#version") == line.find_first_not_of(" \t")) {
+                    lines.push_back("#version 450");
+                    lines.push_back("// PackUniforms (ShaderPackGlsl::Vulkanize) is declared below the preprocessor lines.");
+                    // Fast math (the backends' usual, and what the pack's own
+                    // GL driver gives it) computes pow as exp2(y * log2(x)),
+                    // NaN at x = 0; packs raise black to 2.2 everywhere
+                    // (Sildur's water fog, 2026-10-09). A base clamped just
+                    // above zero: the same result to the eighth decimal, no NaN.
+                    lines.push_back("#define pow(x, y) pow(max((x), 1e-7), (y))");
+                    continue;
+                }
+                if (StartsWithUniform(line, pos)) {
+                    std::string type, rest;
+                    std::vector<UniformDecl> decls;
+                    if (ParseUniformLine(line, type, decls, &rest)) {
+                        // The line may go on (`uniform sampler2D a; in vec2 v;`):
+                        // the remainder is the next line to translate.
+                        if (rest.find_first_not_of(" \t\r") != std::string::npos) pending.push_front(rest);
+                        if (IsSamplerType(type)) {
+                            std::string rebuilt;
+                            for (const UniformDecl& d : decls) {
+                                std::string name = d.name;
+                                if (name == "texture") { hasTextureSampler = true; name = "sp_texture"; }
+                                auto alias = samplerAlias.find(d.name);
+                                if (alias != samplerAlias.end()) {
+                                    const std::string target = alias->second == "texture" ? "sp_texture" : alias->second;
+                                    rebuilt += "#define " + name + " " + target + "\n";
+                                    continue;
+                                }
+                                std::string err;
+                                const int slot = slotFor(d.name, err);
+                                if (slot < 0) { out.error = err; return false; }
+                                rebuilt += "layout(set = 0, binding = " + std::to_string(slot) + ") uniform " + type + " " + name + d.array + "; ";
+                            }
+                            if (!rebuilt.empty() && rebuilt.back() == '\n') rebuilt.pop_back();
+                            lines.push_back(rebuilt);
+                        } else {
+                            for (const UniformDecl& d : decls) {
+                                if (memberNames.insert(d.name).second) members.push_back(d);
+                            }
+                            lines.push_back("// uniform " + type + " -> PackUniforms");
+                        }
+                        continue;
+                    }
+                }
+                // The engine's own std140 block (the terrain prelude's
+                // SectionOrigins): the user uniform set, as the engine's
+                // Vulkan shaders bind it.
+                if (line.find("layout(std140) uniform ") != std::string::npos) {
+                    lines.push_back(std::regex_replace(line, std::regex(R"(layout\(std140\)[ \t]+uniform)"),
+                                                       "layout(std140, set = 3, binding = 0) uniform"));
+                    continue;
+                }
+                // A pack's own vertex attribute (`attribute type name;`, one
+                // the engine does not feed): an input location past the
+                // engine's own, so it compiles and reads zero.
+                static const std::regex kAttribute(R"(^[ \t]*attribute[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*;)");
+                std::smatch am;
+                if (vertex && std::regex_search(line, am, kAttribute)) {
+                    lines.push_back("layout(location = " + std::to_string(nextAttribute) + ") in " + am[1].str() + " " + am[2].str() + ";");
+                    nextAttribute += LocationsOf(am[1].str(), "");
+                    continue;
+                }
+                // Varyings: locations. Several may share a line, and the line
+                // may go on after them (`out vec2 vUV; void main() {`).
+                {
+                    std::string rest = line, rebuilt;
+                    bool any = false;
+                    for (;;) {
+                        std::string q, type, name, array;
+                        const size_t len = ParseVarying(rest, vertex ? "out" : "in", q, type, name, array);
+                        if (len == 0) break;
+                        int loc;
+                        auto known = varyingLocation.find(name);
+                        if (known != varyingLocation.end()) loc = known->second;
+                        else {
+                            loc = nextLocation;
+                            nextLocation += LocationsOf(type, array);
+                            varyingLocation[name] = loc;
+                        }
+                        rebuilt += "layout(location = " + std::to_string(loc) + ") " + q + (vertex ? "out " : "in ") + type + " " + name + array + "; ";
+                        (vertex ? vertexOuts : fragmentIns)[name] = VaryingDecl{q, type, array, loc};
+                        rest = rest.substr(len);
+                        any = true;
+                    }
+                    if (any) { lines.push_back(rebuilt + rest); continue; }
+                }
+                lines.push_back(line);
+            }
+            // Second pass: the renames, and the fragment output count.
+            std::string joined;
+            for (const std::string& l : lines) { joined += l; joined += '\n'; }
+            joined = std::regex_replace(joined, std::regex(R"(\bgl_VertexID\b)"), "gl_VertexIndex");
+            joined = std::regex_replace(joined, std::regex(R"(\bgl_InstanceID\b)"), "gl_InstanceIndex");
+            if (hasTextureSampler) {
+                // The identifier, never the function: `texture(` stays.
+                joined = std::regex_replace(joined, std::regex(R"(\btexture\b(?![ \t]*\())"), "sp_texture");
+            }
+            if (!vertex) {
+                const std::string outputs = std::to_string(std::max(1, std::min(fragmentOutputs, 8)));
+                joined = std::regex_replace(joined, std::regex(R"(out[ \t]+vec4[ \t]+sp_FragData\[8\])"), "out vec4 sp_FragData[" + outputs + "]");
+            }
+            result = std::move(joined);
+            return true;
+        };
+
+        std::string vert, frag;
+        if (!process(vertexCore, true, vert)) return false;
+        if (!process(fragmentCore, false, frag)) return false;
+        for (const auto& [name, d] : fragmentIns) {
+            if (vertexOuts.count(name)) continue;
+            vert += "\nlayout(location = " + std::to_string(d.location) + ") " + d.qualifiers + "out " + d.type + " " + name + d.array + ";\n";
+        }
+        // Clip space: the pack's matrices stay GL-style everywhere (its
+        // own depth arithmetic — gbufferProjectionInverse on depth*2-1 —
+        // needs them so), and the vertex stage remaps clip z from GL's
+        // [-w, w] to Vulkan's [0, w] after the pack's main: the depth the
+        // backends store then equals OpenGL's (z_ndc + 1) / 2.
+        {
+            static const std::regex kMain(R"(\bvoid[ \t]+main[ \t]*\([ \t]*(void)?[ \t]*\))");
+            std::smatch m;
+            if (std::regex_search(vert, m, kMain)) {
+                // (The core translation's own main — the clip-distance wrapper
+                // around the pack's sp_packMain — is what gets wrapped here.)
+                vert = std::regex_replace(vert, kMain, "void sp_vkMain()", std::regex_constants::format_first_only);
+                vert += "\nvoid main() { sp_vkMain(); gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5; }\n";
+            } else {
+                out.error = "vertex stage has no main()";
+                return false;
+            }
+        }
+
+        // The block, the same text in both stages, placed after the last
+        // preprocessor line at the top (version, extensions, the prelude's
+        // defines) — before any declaration that could use a member.
+        std::string block = "layout(std140, set = 1, binding = 0) uniform PackUniforms {\n";
+        for (const UniformDecl& m : members) block += "    " + m.type + " " + m.name + m.array + ";\n";
+        block += "};\n";
+        auto insertBlock = [&](std::string& src) {
+            if (members.empty()) return;
+            // After the version, the extensions and the prelude's defines —
+            // and never inside a conditional block, whose other branch would
+            // then lack it: the insertion point is the end of the last
+            // directive line at #if depth 0 before the first declaration.
+            size_t p = 0, candidate = 0;
+            int depth = 0;
+            size_t ifStart = std::string::npos;
+            while (p < src.size()) {
+                const size_t eol = src.find('\n', p);
+                const size_t next = eol == std::string::npos ? src.size() : eol + 1;
+                const std::string l = src.substr(p, next - p);
+                const size_t first = l.find_first_not_of(" \t\r\n");
+                const bool blank = first == std::string::npos;
+                const bool directive = !blank && (l[first] == '#' || l.compare(first, 2, "//") == 0);
+                if (!blank && !directive) {
+                    if (depth > 0 && ifStart != std::string::npos) candidate = ifStart;
+                    break;
+                }
+                if (directive && l[first] == '#') {
+                    const std::string d = l.substr(first + 1);
+                    const size_t w = d.find_first_not_of(" \t");
+                    const std::string word = w == std::string::npos ? "" : d.substr(w, d.find_first_of(" \t\r\n", w) - w);
+                    if (word == "if" || word == "ifdef" || word == "ifndef") { if (depth == 0) ifStart = p; ++depth; }
+                    else if (word == "endif") { if (depth > 0) --depth; if (depth == 0) { ifStart = std::string::npos; candidate = next; } }
+                    else if (depth == 0) candidate = next;
+                } else if (depth == 0) {
+                    candidate = next;
+                }
+                p = next;
+            }
+            src.insert(candidate, block);
+        };
+        insertBlock(vert);
+        insertBlock(frag);
+        out.vertex = std::move(vert);
+        out.fragment = std::move(frag);
+        for (const auto& [name, slot] : samplerSlot) out.samplers.emplace_back(name, slot);
+        return true;
     }
 
 } // namespace Render::PackGlsl

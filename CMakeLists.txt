@@ -199,6 +199,46 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(libdeflate)
 # ────────────────────────────────────────────────────────────────────────────
 
+# ── glslang + SPIRV-Cross: the run-time compiler shader packs need on Vulkan
+# and Metal (src/client/shader/PackCompiler, docs/shader-packs-port.md).
+# Static, tools and tests off, glslang without its optimizer (no SPIRV-Tools
+# dependency). OpenGL compiles pack GLSL itself and does not need them.
+option(SHADER_PACK_SPIRV "Shader packs on Vulkan and Metal: build glslang + SPIRV-Cross for run-time compilation" ON)
+if(SHADER_PACK_SPIRV)
+    set(ENABLE_OPT               OFF CACHE BOOL "" FORCE)
+    set(ENABLE_HLSL              OFF CACHE BOOL "" FORCE)
+    set(ENABLE_GLSLANG_BINARIES  OFF CACHE BOOL "" FORCE)
+    set(ENABLE_SPVREMAPPER       OFF CACHE BOOL "" FORCE)
+    set(ENABLE_CTEST             OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_TESTS            OFF CACHE BOOL "" FORCE)
+    set(GLSLANG_ENABLE_INSTALL   OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXTERNAL           OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+            glslang
+            GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+            GIT_TAG 16.6.0
+            GIT_SHALLOW TRUE
+    )
+    set(SPIRV_CROSS_CLI             OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_TESTS    OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_HLSL     OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_CPP      OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_REFLECT  OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_C_API    OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_ENABLE_UTIL     OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SHARED          OFF CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_STATIC          ON  CACHE BOOL "" FORCE)
+    set(SPIRV_CROSS_SKIP_INSTALL    ON  CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+            spirv_cross
+            GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+            GIT_TAG vulkan-sdk-1.4.363.0
+            GIT_SHALLOW TRUE
+    )
+    FetchContent_MakeAvailable(glslang spirv_cross)
+endif()
+# ────────────────────────────────────────────────────────────────────────────
+
 # ── Add Sentry Native SDK for crash reporting ────────────────────────────────
 set(SENTRY_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SENTRY_BUILD_TESTS OFF CACHE BOOL "" FORCE)
@@ -518,6 +558,7 @@ if(HAS_VULKAN)
             ${VK_SHADER_DIR}/block_opaque_vk.frag
             ${VK_SHADER_DIR}/block_solid_vk.frag
             ${VK_SHADER_DIR}/terrain_vk.vert
+            ${VK_SHADER_DIR}/terrain_rec_vk.vert
             ${VK_SHADER_DIR}/terrain_opaque_vk.frag
             ${VK_SHADER_DIR}/terrain_cutout_vk.frag
             ${VK_SHADER_DIR}/terrain_solid_vk.frag
@@ -639,6 +680,14 @@ if(HAS_VULKAN)
             COMMENT "Compiling SPIR-V: terrain_f16_vk.vert"
         )
         list(APPEND VK_SPV_FILES ${VK_SPV_DIR}/terrain_f16_vk.vert.spv)
+        # The quad-record vertex shader's twin (terrain_rec_vk.vert, no vertex input).
+        add_custom_command(
+            OUTPUT ${VK_SPV_DIR}/terrain_rec_f16_vk.vert.spv
+            COMMAND ${GLSLC} -fshader-stage=vert -DTERRAIN_F16 ${VK_SHADER_DIR}/terrain_rec_vk.vert -o ${VK_SPV_DIR}/terrain_rec_f16_vk.vert.spv
+            DEPENDS ${VK_SHADER_DIR}/terrain_rec_vk.vert
+            COMMENT "Compiling SPIR-V: terrain_rec_f16_vk.vert"
+        )
+        list(APPEND VK_SPV_FILES ${VK_SPV_DIR}/terrain_rec_f16_vk.vert.spv)
         foreach(OIT_STAGE ${VK_OIT_STAGES})
             set(OIT_SPV ${VK_SPV_DIR}/terrain_solid_oit_${OIT_STAGE}_f16_vk.frag.spv)
             add_custom_command(
@@ -964,6 +1013,8 @@ set(GAME_SOURCES
             src/client/renderer/debug/Crosshair.hpp
 
             # Client rendering - GUI
+            src/client/renderer/gui/BlockIcon.hpp
+            src/client/renderer/gui/BlockIcon.cpp
             src/client/renderer/gui/GuiAtlas.hpp
             src/client/renderer/gui/GuiAtlas.cpp
             src/client/renderer/gui/GuiRenderState.hpp
@@ -1036,6 +1087,8 @@ set(GAME_SOURCES
             src/client/resource/ResourcePacks.cpp
             src/client/shader/ShaderPacks.hpp
             src/client/shader/ShaderPacks.cpp
+            src/client/shader/PackCompiler.hpp
+            src/client/shader/PackCompiler.cpp
             src/client/renderer/shader/ShaderExpr.hpp
             src/client/renderer/shader/ShaderExpr.cpp
             src/client/renderer/shader/ShaderPackGlsl.hpp
@@ -2464,6 +2517,27 @@ set(GAME_SOURCES
             src/client/renderer/viewmodel/ItemMeshBuilder.hpp
 )
 
+# ── App icon ──────────────────────────────────────────────────────────────────
+# The pre-rendered TNT icon tools/make_game_icon.py draws into src/platform/icon/
+# — the default; the launcher's other picks (--icon) are drawn at startup by
+# client/renderer/gui/BlockIcon. macOS: AppIcon.icns in the bundle's Resources
+# (Info.plist CFBundleIconFile, and the Dock icon set at run time as MC's
+# -Xdock:icon does — PlatformMain). Windows: AppIcon.ico as the exe's GLFW_ICON
+# resource — GLFW gives every window that icon by itself. Linux: window.png
+# staged as assets/game_icon.png for glfwSetWindowIcon.
+set(GAME_ICON_DIR "${PROJECT_SOURCE_DIR}/src/platform/icon")
+if(APPLE)
+    set_source_files_properties("${GAME_ICON_DIR}/AppIcon.icns"
+            PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    list(APPEND GAME_SOURCES "${GAME_ICON_DIR}/AppIcon.icns")
+elseif(WIN32)
+    file(TO_NATIVE_PATH "${GAME_ICON_DIR}/AppIcon.ico" _game_icon_ico)
+    string(REPLACE "\\" "\\\\" _game_icon_ico "${_game_icon_ico}")
+    file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/game_icon.rc"
+            CONTENT "GLFW_ICON ICON \"${_game_icon_ico}\"\n")
+    list(APPEND GAME_SOURCES "${CMAKE_BINARY_DIR}/game_icon.rc")
+endif()
+
 if(APPLE)
     add_executable(MyVoxelGame MACOSX_BUNDLE ${GAME_SOURCES})
     # Add Vulkan backend source if available
@@ -2688,6 +2762,12 @@ target_link_libraries(MyVoxelGame PRIVATE
 # Link with Asio if using standalone
 if(TARGET asio)
     target_link_libraries(MyVoxelGame PRIVATE asio)
+endif()
+# The run-time shader compiler for packs on Vulkan and Metal (PackCompiler).
+if(SHADER_PACK_SPIRV)
+    target_link_libraries(MyVoxelGame PRIVATE glslang glslang-default-resource-limits SPIRV spirv-cross-core spirv-cross-glsl spirv-cross-msl)
+    target_include_directories(MyVoxelGame PRIVATE "${glslang_SOURCE_DIR}" "${spirv_cross_SOURCE_DIR}")
+    target_compile_definitions(MyVoxelGame PRIVATE HAS_PACK_SPIRV=1)
 endif()
 
 # ─── Hard-error on unconditional self-recursion ─────────────────────────────
@@ -3055,6 +3135,12 @@ else()
     foreach(payload IN LISTS GAME_PAYLOAD_DIRS)
         add_game_payload_copy(${payload} "$<TARGET_FILE_DIR:MyVoxelGame>/${payload}")
     endforeach()
+    # The window icon (see App icon above): X11 takes it from the window.
+    if(NOT WIN32)
+        add_custom_command(TARGET MyVoxelGame POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${GAME_ICON_DIR}/window.png" "$<TARGET_FILE_DIR:MyVoxelGame>/assets/game_icon.png")
+    endif()
 endif()
 
 # ── The Windows package manifest ──────────────────────────────────────────────
@@ -3390,6 +3476,7 @@ if(CURL_FOUND)
         src/launcher/platform/ProcessLauncher.cpp
         # Appearance view: stick-figure painter, skins, capes, skin editor
         src/launcher/ui/LauncherWidgets.cpp
+        src/launcher/ui/AppIconPicker.cpp
         src/launcher/appearance/AppearanceSettings.cpp
         src/launcher/appearance/AppearanceView.cpp
         src/launcher/appearance/CapeLibrary.cpp
@@ -3408,6 +3495,8 @@ if(CURL_FOUND)
         src/common/entity/PlayerAppearance.cpp
         src/common/entity/StickFigureDrawing.cpp
         src/client/renderer/entity/StickFigureGeometry.cpp
+        # Settings → App icon: the block icons, drawn as the game draws them.
+        src/client/renderer/gui/BlockIcon.cpp
         src/platform/GameDirectory.cpp
         # GameSettings (in GameDirectory.cpp) picks its first-run defaults from
         # the detected hardware tier; only dependency is Log.cpp, already above.

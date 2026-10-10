@@ -254,11 +254,13 @@ namespace Render {
         // words (LightWord's low 16 bits, block8 | sky8 << 8), in the same
         // tile-corner order — word 2 = (0,0) | (1,0) << 16, word 3 = (0,1) |
         // (1,1) << 16 — so light varies per block and never splits a merge.
-        // The vertex's record index counts TEXELS.
-        // Records start 8-byte aligned in the slab (ChunkMegaBuffer pads the
-        // 20-byte vertex run up to the next texel).
+        // The vertex's record index counts TEXELS — since the quad records
+        // (QuadRecord below) ONE RGBA32UI texel of 16 bytes per record, i.e.
+        // one fetch for colour, AO, sprite and the four lights. Records start
+        // 16-byte aligned in the slab (ChunkMegaBuffer pads the 20-byte
+        // vertex run up to the next texel).
         static constexpr uint32_t kFaceMapWordsPerRecord = 4;
-        static constexpr uint32_t kFaceMapWordsPerTexel  = 2;
+        static constexpr uint32_t kFaceMapWordsPerTexel  = 4;
         static uint32_t FaceMapTexel0(uint32_t baseColor, uint8_t aoByte) {
             return (baseColor & 0x00FFFFFFu) | (static_cast<uint32_t>(aoByte) << 24);
         }
@@ -273,5 +275,99 @@ namespace Render {
 
     static_assert(sizeof(TerrainVertex) == 20,
                   "TerrainVertex must match GetTerrainVertexLayout / ChunkMegaBuffer::VERTEX_STRIDE");
+
+    // ── Quad records (docs/quad-records.md) ─────────────────────────────────
+    //
+    // A full cube face needs no per-corner data: the block, the side and the
+    // corner number say where every corner is, and the sprite array gives the
+    // uv from the corner alone. So the greedy path emits ONE 16-byte record
+    // per cube-face quad — the same RGBA32UI texel the face map's block
+    // records are — instead of four 20-byte vertices and six indices (104
+    // bytes). The record vertex shader (terrain_rec_vk.vert) is drawn with no
+    // vertex input over a shared 16-bit index pattern (0 1 2 0 2 3 per quad):
+    // gl_VertexIndex >> 2 is the record's texel in the slab, & 3 the corner,
+    // and it emits exactly the varyings the vertex path does, so the three
+    // terrain fragment shaders are shared. Everything that is not a cube
+    // face (stairs, fluids, plants, offset or rotated elements) stays a
+    // TerrainVertex; the translucent layer stays vertices entirely (one
+    // back-to-front order per section). OBEY_QUAD_RECORDS=0 keeps the
+    // mesher on vertices for everything.
+    //
+    //   w0  bits 0..11   block x y z inside the section (4 bits each)
+    //       bits 12..14  side: 0..5 = -X +X -Y +Y -Z +Z (SectionMesh's kFacing*)
+    //       bit  15      0 = a single face (kModeSingle), 1 = a greedy
+    //                    rectangle (kModeRect) whose per-block records are
+    //                    in the face map
+    //       bits 16..31  single: light bits 32..47 (below)
+    //                    rect:   w-1 (bits 16..19), h-1 (bits 20..23), the
+    //                            rectangle's size in blocks along the grid's
+    //                            u and v (Greedy::CellOf), 24..31 spare
+    //   w1  bits 0..9    the section's origin-table row (patched at upload,
+    //                    as TerrainVertex::slot is; the mesher writes 0)
+    //       bits 10..25  sprite id (single; a rect's sprites are per block)
+    //   w2  bits 0..23   tint x face shade, rgb (single)
+    //       bits 24..31  the four AO corner codes, tile-corner order
+    //                    (TryStashGreedyQuad's aoByte) (single)
+    //   w3  single: light bits 0..31; rect: the texel index of the
+    //       rectangle's first face-map record, RELATIVE to the layer's
+    //       record array (the mega buffer adds the slab position at upload,
+    //       as for TerrainVertex::Mapped).
+    //
+    // A single face's four corner lights are EXACT in 48 bits: a full cube
+    // face's smooth light is MC's four-cell average of levels that are
+    // multiples of 16 (LightCoordsUtil.smoothBlend), so every corner is a
+    // multiple of 4 and six bits per channel hold it bit for bit — quarter
+    // levels, block6 | sky6 << 6 per corner (PackLight12). The mesher checks
+    // (LightIsQuarterLevel) and falls back to vertices otherwise, so nothing
+    // ever rounds. Corners c = 0..3 in tile-corner order; the 48 bits are
+    // laid out as w3 = l0 | l1 << 12 | (l2 & 0xFF) << 24 and
+    // w0.hi16 = l2 >> 8 | l3 << 4.
+    struct QuadRecord {
+        uint32_t w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+
+        static constexpr uint32_t kModeSingle = 0;
+        static constexpr uint32_t kModeRect   = 1;
+        static constexpr uint32_t kRectBit    = 1u << 15;
+        static constexpr uint32_t kSlotMask   = 0x3FFu;      // w1
+        // A draw run over the shared index pattern covers at most this many
+        // quads (16-bit indices, four per quad); a section layer holds fewer
+        // (16^3 / 2 blocks x 6 faces = 12,288).
+        static constexpr uint32_t kMaxQuadsPerRun = 16384;
+
+        // block8 | sky8 << 8 (TerrainVertex::LightWord), both multiples of 4.
+        static constexpr bool LightIsQuarterLevel(uint32_t lightWord) {
+            return (lightWord & 0x0303u) == 0;
+        }
+        static constexpr uint32_t PackLight12(uint32_t lightWord) {
+            return ((lightWord & 0xFFu) >> 2) | ((((lightWord >> 8) & 0xFFu) >> 2) << 6);
+        }
+
+        static QuadRecord Single(int bx, int by, int bz, int side, uint16_t spriteId, uint32_t tint,
+                                 uint8_t aoByte, const uint32_t (&tileLight)[4]) {
+            uint32_t l[4];
+            for (int k = 0; k < 4; ++k) l[k] = PackLight12(tileLight[k]);
+            const uint32_t hi16 = (l[2] >> 8) | (l[3] << 4);
+            QuadRecord r;
+            r.w0 = static_cast<uint32_t>(bx & 15) | (static_cast<uint32_t>(by & 15) << 4) |
+                   (static_cast<uint32_t>(bz & 15) << 8) | (static_cast<uint32_t>(side & 7) << 12) |
+                   (hi16 << 16);
+            r.w1 = static_cast<uint32_t>(spriteId) << 10;
+            r.w2 = (tint & 0x00FFFFFFu) | (static_cast<uint32_t>(aoByte) << 24);
+            r.w3 = l[0] | (l[1] << 12) | ((l[2] & 0xFFu) << 24);
+            return r;
+        }
+        static QuadRecord Rect(int bx, int by, int bz, int side, int w, int h, uint32_t recordTexel) {
+            QuadRecord r;
+            r.w0 = static_cast<uint32_t>(bx & 15) | (static_cast<uint32_t>(by & 15) << 4) |
+                   (static_cast<uint32_t>(bz & 15) << 8) | (static_cast<uint32_t>(side & 7) << 12) | kRectBit |
+                   (static_cast<uint32_t>((w - 1) & 15) << 16) | (static_cast<uint32_t>((h - 1) & 15) << 20);
+            r.w1 = 0;
+            r.w2 = 0;
+            r.w3 = recordTexel;
+            return r;
+        }
+        bool IsRect() const { return (w0 & kRectBit) != 0; }
+    };
+    static_assert(sizeof(QuadRecord) == 16, "a quad record is one RGBA32UI texel");
 
 } // namespace Render

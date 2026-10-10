@@ -876,6 +876,7 @@ namespace Render {
             case TextureFormat::RGBA8:   internalFormat = GL_RGBA8;   break;
             case TextureFormat::RGBA16:  internalFormat = GL_RGBA16;  break;
             case TextureFormat::RGBA16UI: internalFormat = GL_RGBA16UI; break;
+            case TextureFormat::RGBA32UI: internalFormat = GL_RGBA32UI; break;
             case TextureFormat::RGBA16F: internalFormat = GL_RGBA16F; break;
             case TextureFormat::RGBA32F: internalFormat = GL_RGBA32F; break;
             default:

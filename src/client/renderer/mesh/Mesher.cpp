@@ -5,6 +5,8 @@
 #include "common/world/block/GeneratedBlockStates.hpp"
 #include "MeshCensus.hpp"
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include "MeshJobData.hpp"
 #include "../culling/VisGraph.hpp"
 #include "common/world/block/BlockRegistry.hpp"
@@ -445,6 +447,21 @@ namespace Render {
         }
     }
 
+    // Quad records (Vertex.hpp QuadRecord, docs/quad-records.md): the greedy
+    // path's cube faces leave as one 16-byte record each instead of four
+    // vertices. OBEY_QUAD_RECORDS=0 is the kill switch (vertices for
+    // everything, exactly as before); a shader pack turns greedy meshing
+    // off, which turns records off with it.
+    bool Mesher::QuadRecordsEnabled() {
+        static const bool s_enabled = [] {
+            const char* v = std::getenv("OBEY_QUAD_RECORDS");
+            const bool on = !(v && std::strcmp(v, "0") == 0);
+            Log::Info("Mesher: quad records %s", on ? "on" : "off (OBEY_QUAD_RECORDS=0)");
+            return on;
+        }();
+        return s_enabled;
+    }
+
     // Greedy-debug coloring state + totals. Plain atomics: read per flush /
     // per quad-emit only while the debug view is on.
     static std::atomic<bool>     s_greedyDebugColors{false};
@@ -472,6 +489,11 @@ namespace Render {
     static std::atomic<uint64_t> s_greedyRectsMulti{0};
     static std::atomic<uint64_t> s_greedyRectsMixedSprite{0};
     static std::atomic<uint64_t> s_greedyCellsMixedSprite{0};
+    // Quad records emitted (rectangles, single faces) and single faces that
+    // kept their vertices because a corner light was not a quarter level.
+    static std::atomic<uint64_t> s_recordRects{0};
+    static std::atomic<uint64_t> s_recordSingles{0};
+    static std::atomic<uint64_t> s_recordLightFallback{0};
 
     void Mesher::SetGreedyDebugColors(bool enable) {
         // exchange, not store: the palette generation must move only when the
@@ -2223,11 +2245,15 @@ namespace Render {
                       (unsigned long long)c[1][0], (unsigned long long)c[1][1], (unsigned long long)c[1][2],
                       (unsigned long long)c[2][0], (unsigned long long)c[2][1], (unsigned long long)c[2][2],
                       PerBlockLayers() ? " (OBEY_BLOCK_LAYERS: rule layer in use)" : "");
-            Log::Info("[GreedyCensus] rectangles %llu, multi-block %llu, of them mixed-sprite %llu (%llu blocks)",
+            Log::Info("[GreedyCensus] rectangles %llu, multi-block %llu, of them mixed-sprite %llu (%llu blocks); "
+                      "quad records: %llu rectangles, %llu single faces, %llu single faces kept vertices (light)",
                       (unsigned long long)s_greedyRectsOut.load(std::memory_order_relaxed),
                       (unsigned long long)s_greedyRectsMulti.load(std::memory_order_relaxed),
                       (unsigned long long)s_greedyRectsMixedSprite.load(std::memory_order_relaxed),
-                      (unsigned long long)s_greedyCellsMixedSprite.load(std::memory_order_relaxed));
+                      (unsigned long long)s_greedyCellsMixedSprite.load(std::memory_order_relaxed),
+                      (unsigned long long)s_recordRects.load(std::memory_order_relaxed),
+                      (unsigned long long)s_recordSingles.load(std::memory_order_relaxed),
+                      (unsigned long long)s_recordLightFallback.load(std::memory_order_relaxed));
         }
 
         using Greedy::PendingQuad;
@@ -2263,13 +2289,41 @@ namespace Render {
         // math), so merged geometry never cracks against unmerged neighbours.
         // UVs are TILE-space (0..16 block repeats); the fragment shader folds
         // them back onto the sprite with fract().
+        // Quad records (QuadRecord): a cube face — merged rectangle or lone
+        // survivor — as one record for the record vertex shader instead of
+        // four vertices and six indices. Off under the greedy debug view
+        // (its heat colours ride the vertices).
+        const bool useRecords = QuadRecordsEnabled() && !s_greedyDebugColors.load(std::memory_order_relaxed);
+        // The record's side code (SectionMesh's kFacing*: 0..5 = -X +X -Y +Y
+        // -Z +Z) and the block at grid cell (plane, u, v) — Greedy::CellOf
+        // inverted.
+        auto sideOf = [](int face) -> int {
+            switch (static_cast<BlockFace>(face)) {
+                case BlockFace::NegativeX: return kFacingNegX;
+                case BlockFace::PositiveX: return kFacingPosX;
+                case BlockFace::NegativeY: return kFacingNegY;
+                case BlockFace::PositiveY: return kFacingPosY;
+                case BlockFace::NegativeZ: return kFacingNegZ;
+                default:                   return kFacingPosZ;
+            }
+        };
+        auto cellOrigin = [](int face, int plane, int u, int v) -> glm::ivec3 {
+            switch (static_cast<BlockFace>(face)) {
+                case BlockFace::PositiveY:
+                case BlockFace::NegativeY: return {u, plane, v};
+                case BlockFace::PositiveZ:
+                case BlockFace::NegativeZ: return {u, v, plane};
+                default:                   return {plane, v, u};
+            }
+        };
+
         auto emitMerged = [&](int face, int plane, int u0, int v0, int w, int h,
                               const int32_t (&grid)[16][16],
                               std::vector<TerrainVertex>& outVerts,
                               std::vector<uint16_t>& outIdxs,
                               std::vector<uint32_t>& faceMap) {
             // Same 16-bit cap policy as GenerateQuad.
-            if (outVerts.size() + 4 > 65536) return;
+            if (!useRecords && outVerts.size() + 4 > 65536) return;
             const PendingQuad& q = Greedy::t_pending[static_cast<size_t>(grid[v0][u0] - 1)];
 
             const float fu0 = static_cast<float>(u0);
@@ -2359,7 +2413,8 @@ namespace Render {
             const bool debug = s_greedyDebugColors.load(std::memory_order_relaxed);
             const uint32_t heat = debug ? GreedyHeatColor(w * h) : 0u;
             const uint32_t recordBase = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerRecord);
-            // The vertices address records by TEXEL (two per record).
+            // The vertices (and a quad record) address records by TEXEL —
+            // one 16-byte texel per record.
             const uint32_t recordTexel = static_cast<uint32_t>(faceMap.size() / TerrainVertex::kFaceMapWordsPerTexel);
             faceMap.resize(faceMap.size() +
                            static_cast<size_t>(w * h) * TerrainVertex::kFaceMapWordsPerRecord);
@@ -2386,6 +2441,21 @@ namespace Render {
                     s_greedyRectsMixedSprite.fetch_add(1, std::memory_order_relaxed);
                     s_greedyCellsMixedSprite.fetch_add(static_cast<uint64_t>(w * h), std::memory_order_relaxed);
                 }
+            }
+            if (useRecords) {
+                // The rectangle as one record: the record shader rebuilds
+                // local[] and tileUV per corner from (block, side, w, h)
+                // with these very tables (terrain_rec_vk.vert).
+                const bool opaqueLayer = &outVerts == &outMesh.opaqueVerts;
+                std::vector<QuadRecord>& recs = opaqueLayer ? outMesh.opaqueRecords : outMesh.cutoutRecords;
+                std::vector<uint8_t>& recFacing = opaqueLayer ? outMesh.opaqueRecordFacing : outMesh.cutoutRecordFacing;
+                const glm::ivec3 o = cellOrigin(face, plane, u0, v0);
+                const int side = sideOf(face);
+                recs.push_back(QuadRecord::Rect(o.x, o.y, o.z, side, w, h, recordTexel));
+                recFacing.push_back(static_cast<uint8_t>(side));
+                s_recordRects.fetch_add(1, std::memory_order_relaxed);
+                MeshCensus::Count(q.blockId, opaqueLayer ? 0 : 1, true, static_cast<uint32_t>(w * h));
+                return;
             }
             // local[] is already section-relative and on integer grid
             // coordinates, as is the tile-space uv — both encode exactly.
@@ -2456,6 +2526,27 @@ namespace Render {
                         // but found nothing to merge with.
                         grid[v][u] = 0;
                         ++survivorQuads;
+                        // As one record when its four corner lights are
+                        // quarter levels (QuadRecord stores them in 12 bits
+                        // each — exact for a full face's smooth light, see
+                        // Vertex.hpp); any other value keeps the vertices.
+                        if (useRecords &&
+                            QuadRecord::LightIsQuarterLevel(q.tileLight[0]) &&
+                            QuadRecord::LightIsQuarterLevel(q.tileLight[1]) &&
+                            QuadRecord::LightIsQuarterLevel(q.tileLight[2]) &&
+                            QuadRecord::LightIsQuarterLevel(q.tileLight[3])) {
+                            std::vector<QuadRecord>& recs = pr.layer == 0 ? outMesh.opaqueRecords : outMesh.cutoutRecords;
+                            std::vector<uint8_t>& recFacing = pr.layer == 0 ? outMesh.opaqueRecordFacing : outMesh.cutoutRecordFacing;
+                            const glm::ivec3 o = cellOrigin(pr.face, pr.plane, u, v);
+                            const int side = sideOf(pr.face);
+                            recs.push_back(QuadRecord::Single(o.x, o.y, o.z, side, q.spriteId, q.color, q.aoByte,
+                                                              q.tileLight));
+                            recFacing.push_back(static_cast<uint8_t>(side));
+                            s_recordSingles.fetch_add(1, std::memory_order_relaxed);
+                            MeshCensus::Count(q.blockId, pr.layer, false);
+                            continue;
+                        }
+                        if (useRecords) s_recordLightFallback.fetch_add(1, std::memory_order_relaxed);
                         if (s_greedyDebugColors.load(std::memory_order_relaxed)) {
                             std::array<Vertex, 4> dbg = q.verts;
                             const uint32_t red = GreedyHeatColor(1);

@@ -18,40 +18,6 @@ namespace Render {
 
     // Shader sources for 2D orthographic rendering
     // Layout matches GetBlockVertexLayout(): pos3 (loc 0), uv2 (loc 1), color4 ubyte (loc 2)
-    const char* Crosshair::vertexShaderSource = R"(
-#version 330 core
-
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
-layout(location = 2) in vec4 aColor;
-
-uniform mat4 uMVP;
-
-out vec2 TexCoord;
-
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    TexCoord = aTexCoord;
-}
-)";
-
-    const char* Crosshair::fragmentShaderSource = R"(
-#version 330 core
-
-in vec2 TexCoord;
-out vec4 FragColor;
-
-uniform sampler2D uTexture;
-
-void main() {
-    vec4 texColor = texture(uTexture, TexCoord);
-    if (texColor.a < 0.5) discard;
-    // Force alpha to 1.0 — OneMinusDstColor blending zeroes alpha against
-    // an opaque framebuffer (1 - 1 = 0), making the crosshair invisible.
-    // We only want RGB inversion; alpha must stay opaque.
-    FragColor = vec4(texColor.rgb, 1.0);
-}
-)";
 
     Crosshair::Crosshair()
         : isVisible(true), crosshairSize(32), isInitialized(false) {
@@ -80,11 +46,7 @@ void main() {
             return false;
         }
 
-        // Create shader — try SPIR-V files first (Vulkan), fall back to source (GL)
         m_shader = g_renderBackend->CreateShaderFromFiles("shaders/crosshair.vert", "shaders/crosshair.frag");
-        if (m_shader == INVALID_SHADER) {
-            m_shader = g_renderBackend->CreateShader(vertexShaderSource, fragmentShaderSource);
-        }
         if (m_shader == INVALID_SHADER) {
             Log::Error("Crosshair: Failed to create shader");
             return false;

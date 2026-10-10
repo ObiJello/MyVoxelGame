@@ -92,8 +92,12 @@ namespace Render {
         // terrain vertex shader subtracts it from the section-origin
         // table in INTEGER arithmetic. Appended, as the fog block was.
         glm::ivec4 uRenderOrigin= {0, 0, 0, 0};     // 368 — xyz = origin, w unused
+        // x = the terrain light mode (ChunkRenderer::SetEnvironmentUniforms:
+        // 0 four lightmap samples blended, 1 the light coords blended and
+        // one sample); yzw spare.
+        glm::vec4 uTerrainLight= {0, 0, 0, 0};      // 384
     };                                              // 384 bytes
-    static_assert(sizeof(CommonUBO) == 384, "CommonUBO matches the shaders' std140 block");
+    static_assert(sizeof(CommonUBO) == 400, "CommonUBO matches the shaders' std140 block");
 
     // 96-mat4 bone palette UBO for the viewmodel skinning shader.
     // 6144 bytes — well within the typical UBO size limit (16 KB).

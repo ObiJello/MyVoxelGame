@@ -43,6 +43,37 @@ namespace Launcher {
         return kGameRendererCount - 1;
     }
 
+    // ── The user's own launch arguments (Settings → Launch arguments) ──
+    // Appended to the game's command line as typed. A renderer flag among
+    // them stands in for the picker's choice: --metal, --metal3, --metal4,
+    // --vulkan, or --opengl (the game's "no flag", dropped from what is
+    // passed). Anything else simply rides along with the picker's flag.
+    inline bool LaunchArgTokenIsRenderer(const std::string& token) {
+        return token == "--metal" || token == "--metal3" || token == "--metal4" ||
+               token == "--vulkan" || token == "--opengl";
+    }
+    inline bool LaunchArgsNameARenderer(const std::string& args) {
+        std::string token;
+        for (size_t i = 0; i <= args.size(); ++i) {
+            const bool sep = i == args.size() || args[i] == ' ' || args[i] == '\t' || args[i] == '\n';
+            if (!sep) { token += args[i]; continue; }
+            if (LaunchArgTokenIsRenderer(token)) return true;
+            token.clear();
+        }
+        return false;
+    }
+    // The arguments as the game gets them: single-spaced, --opengl removed.
+    inline std::string LaunchArgsForGame(const std::string& args) {
+        std::string out, token;
+        for (size_t i = 0; i <= args.size(); ++i) {
+            const bool sep = i == args.size() || args[i] == ' ' || args[i] == '\t' || args[i] == '\n';
+            if (!sep) { token += args[i]; continue; }
+            if (!token.empty() && token != "--opengl") out += (out.empty() ? "" : " ") + token;
+            token.clear();
+        }
+        return out;
+    }
+
     // A stored slug; one this platform does not offer (Metal off macOS, an
     // unknown name) is `fallback`.
     inline GameRenderer GameRendererFromSlug(const std::string& slug, GameRenderer fallback) {

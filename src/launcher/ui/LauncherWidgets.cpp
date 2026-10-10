@@ -130,18 +130,22 @@ namespace Launcher::Widgets {
     bool Input(const char* id, const char* hint, char* buf, size_t bufSize,
                float width, float height, ImFont* font,
                ImGuiInputTextFlags flags, ImGuiInputTextCallback cb,
-               float rounding, float padX) {
+               float rounding, float padX, bool enabled) {
         FontScope f(font);
         const float textH = ImGui::GetTextLineHeight();
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(padX, (height - textH) * 0.5f));
         ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, rounding);
-        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(TextPrimary));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImGui::ColorConvertU32ToFloat4(enabled ? TextPrimary : TextGhost));
         ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImGui::ColorConvertU32ToFloat4(TextGhost));
+        // Disabled: ImGui dims the frame and the text and ignores the mouse
+        // and keyboard for it.
+        if (!enabled) ImGui::BeginDisabled(true);
         ImGui::SetNextItemWidth(width);
         const bool changed = ImGui::InputTextWithHint(id, hint, buf, bufSize, flags, cb);
+        if (!enabled) ImGui::EndDisabled();
         ImGui::PopStyleColor(2);
         ImGui::PopStyleVar(2);
-        return changed;
+        return changed && enabled;
     }
 
     int Segmented(const char* id, const char* const* labels, int count, int active,

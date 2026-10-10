@@ -6,6 +6,7 @@
 #include "../RenderBackend.hpp"
 #include "../SpirvUniforms.hpp"
 #include <vulkan/vulkan.h>
+#include <map>
 #include <unordered_map>
 #include <deque>
 #include <vector>
@@ -172,6 +173,23 @@ namespace Render {
         void SetUniformFloat(ShaderHandle handle, const std::string& name, float value) override;
         void SetUniformInt(ShaderHandle handle, const std::string& name, int value) override;
         void SetUniformIVec3(ShaderHandle handle, const std::string& name, const glm::ivec3& value) override;
+        void SetUniformIVec2(ShaderHandle handle, const std::string& name, const glm::ivec2& value) override;
+        // Shader pack programs (docs/shader-packs-port.md): runtime SPIR-V
+        // with their own descriptor layout — set 0 sixteen samplers (one
+        // per texture slot), set 1 the program's uniform block, set 3 the
+        // user uniform block — and the override mode the pack pipeline
+        // drives the engine's renderers through.
+        bool PackShadersSupported() const override { return true; }
+        ShaderHandle CreatePackShader(const PackShaderDesc& desc) override;
+        void SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) override;
+        void SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) override;
+        void ClearShaderOverrides() override;
+        std::vector<ShaderHandle> FindShadersBySource(
+            const std::function<bool(const std::string&, const std::string&)>& match) override;
+        RenderTargetHandle CreateRenderTargetFromTextures(const TextureHandle* colors, int colorCount,
+                                                          TextureHandle depth) override;
+        void BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) override;
+        bool CopyTexture(TextureHandle src, TextureHandle dst) override;
 
         // Meshes
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer,
@@ -499,6 +517,10 @@ namespace Render {
             BufferHandle buffer = INVALID_BUFFER;
             MeshHandle mesh = INVALID_MESH;
             TextureHandle texture = INVALID_TEXTURE;   // buffer-texture views, freed before their buffer
+            // A pack texture target's pass objects: the frame recording now
+            // may still name them (a target cleared and dropped mid-frame).
+            VkFramebuffer framebuffer = VK_NULL_HANDLE;
+            VkRenderPass  renderPass = VK_NULL_HANDLE;
         };
         std::array<std::vector<DeferredDeletion>, MAX_FRAMES_IN_FLIGHT> m_deletionQueues;
         // The slot whose fence guards the last frame that can still read a
@@ -714,6 +736,15 @@ namespace Render {
             // Needed to reallocate the image in ReserveTextureMipLevels; an
             // image's mip count is fixed at creation in Vulkan.
             VkFormat             format = VK_FORMAT_R8G8B8A8_UNORM;
+            // Shader pack attachments (CreateRenderTargetFromTextures): a
+            // depth texture (depth aspect view, sampled as depthtex*), and
+            // the layout the image rests in now — SHADER_READ_ONLY between
+            // passes, an attachment while its target is bound, TRANSFER_*
+            // during a depth copy (TransitionTexture keeps it).
+            bool                 depth = false;
+            bool                 attachment = false;   // created with an attachment usage
+            VkImageView          attachmentView = VK_NULL_HANDLE;   // depth textures: both aspects, for the framebuffer
+            VkImageLayout        layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             // CreateBufferTexture: a texel-buffer view over another handle's
             // VkBuffer (image/sampler/memory stay null); descriptorSet is
             // then a m_texelBufferLayout set (portal pipeline layout set 4).
@@ -809,8 +840,78 @@ namespace Render {
             // uMVP / uModel alone does not give them a fresh UBO slot.
             // See SetShaderIgnoresCommonMatrices.
             bool ignoresCommonMatrices = false;
+            // Pack programs (layoutType 5): the uniform block's CPU copy,
+            // written by name (SetPackUniform), uploaded to the frame's
+            // ring when a draw needs it; the slots sampled as plain 2D.
+            uint32_t packBlockSize = 0;
+            std::vector<uint8_t> packBlock;
+            std::unordered_map<std::string, PackUniformDesc> packUniforms;
+            bool     packDirty = true;
+            uint64_t packRingFrame = ~0ull;
+            uint32_t packRingOffset = 0;
+            uint32_t packSampler2D = 0;
+            std::vector<uint32_t> packInputLocations;
+            // The GLSL sources behind the paths, read on the first
+            // FindShadersBySource (the pack pipeline's family lookup).
+            std::string vertexSource, fragmentSource;
+            bool sourcesLoaded = false;
         };
         std::unordered_map<uint32_t, VKShaderInfo> m_shaders;
+        static constexpr int kLayoutPack = 5;
+
+        // ── Shader pack programs ─────────────────────────────────────────
+        VkDescriptorSetLayout m_packSamplerLayout = VK_NULL_HANDLE;   // set 0: 16 combined samplers
+        VkDescriptorSetLayout m_packUboLayout     = VK_NULL_HANDLE;   // set 1: the program's block (dynamic)
+        VkPipelineLayout      m_packPipelineLayout = VK_NULL_HANDLE;  // {0, 1, empty, m_uniformBlockLayout}
+        static constexpr uint32_t kPackUboRange = 16384;              // a block's largest size (the descriptor's range)
+        static constexpr VkDeviceSize kPackUboBytes = 4u * 1024u * 1024u;   // per frame slot
+        struct PackFrame {
+            VkDescriptorPool pool = VK_NULL_HANDLE;   // the frame's sampler sets, reset each BeginFrame
+            VkBuffer         ubo = VK_NULL_HANDLE;    // the frame's block ring
+            VkDeviceMemory   uboMemory = VK_NULL_HANDLE;
+            uint8_t*         mapped = nullptr;
+            VkDeviceSize     cursor = 0;
+            VkDescriptorSet  uboSet = VK_NULL_HANDLE;
+            bool             exhaustWarned = false;
+        };
+        std::array<PackFrame, MAX_FRAMES_IN_FLIGHT> m_packFrames;
+        bool m_packResourcesReady = false;
+        bool EnsurePackResources();
+        void DestroyPackResources();
+        bool SetPackUniform(ShaderHandle shader, const std::string& name, const void* data, size_t bytes);
+        bool BindPackDescriptorsForDraw(VkCommandBuffer cmd);
+        // Pipelines built for a pack program, or for any shader drawing
+        // into a pack texture target: keyed by (target attachment set,
+        // the engine shader whose vertex layout a pack program draws with),
+        // then by the state key. Never in the manifest.
+        std::unordered_map<uint64_t, std::unordered_map<size_t, PipelineRecord>> m_packPipelines;
+        // The shader-override mode (RenderBackend::SetShaderOverrideMode).
+        struct ShaderOverride { ShaderHandle shader = INVALID_SHADER; RenderTargetHandle target = INVALID_RENDER_TARGET; };
+        bool m_overrideMode = false;
+        RenderTargetHandle m_overrideDefaultTarget = INVALID_RENDER_TARGET;
+        std::unordered_map<uint32_t, ShaderOverride> m_shaderOverrides;
+        ShaderHandle m_packLayoutSource = INVALID_SHADER;   // under an override: the engine shader the bound pack program stands in for
+        bool m_boundIsPack = false;
+        // The last plain 2D texture bound to each slot: what a pack program
+        // samples where the engine has since bound a 2D array or a buffer
+        // texture (the terrain's sprite arrays on 4 / 5, where a pack's
+        // normals / specular live — OpenGL keeps the two targets apart).
+        TextureHandle m_lastTexture2D[kPackTextureSlots] = {};   // kMaxTextureSlots, declared below
+        TextureHandle m_packWhite = INVALID_TEXTURE;        // the slot nothing is bound to
+        // Every distinct (colour formats, depth) a texture target has had,
+        // numbered from 1 (VKRenderTargetInfo::attachmentsKey).
+        std::map<std::vector<uint32_t>, uint32_t> m_attachmentSets;
+        uint32_t AttachmentSetId(const std::vector<VkFormat>& formats, bool depth);
+        bool ActiveTargetIsPack() const;
+        // An image barrier from a texture's current layout to `newLayout`,
+        // stages and accesses chosen for the two layouts; records the new
+        // layout on the texture.
+        void TransitionTexture(VkCommandBuffer cmd, VKTextureInfo& tex, VkImageLayout newLayout);
+        bool m_passSuspended = false;   // a copy ended the pass itself; BindRenderTarget must not
+        // The copies between passes (depth snapshots, feedback snapshots):
+        // whatever pass is recording ends, `record` records the copy with
+        // the two textures in TRANSFER layouts, and the pass resumes.
+        void CopyBetweenPasses(VKTextureInfo& src, VKTextureInfo& dst, const std::function<void(VkCommandBuffer)>& record);
 
     public:
         // Stamp a per-shader vertex layout used when building pipelines.
@@ -1004,6 +1105,16 @@ namespace Render {
             VkRenderPass renderPass = VK_NULL_HANDLE;
             uint32_t     colorCount = 1;
             bool         blendMax   = false;         // the depth bounds: MAX, not ADD
+            // A shader pack target (CreateGraphicsPipeline draws the
+            // caller's blend as given): stored GL-style, so the winding
+            // flips with the viewport; no depth attachment; the vertex
+            // layout of the engine shader a pack program stands in for.
+            bool         pack        = false;
+            bool         flipWinding = false;
+            bool         hasDepth    = true;
+            const VertexLayout* vertexLayout   = nullptr;
+            const VertexLayout* instanceLayout = nullptr;
+            const std::vector<uint32_t>* inputLocations = nullptr;   // a pack program's attributes (every one described)
         };
         static int OitPassConfig(OitPass pass) {
             switch (pass) {
@@ -1032,6 +1143,14 @@ namespace Render {
             VkDescriptorSet textureSet  = VK_NULL_HANDLE;  // block layout, set 0
             VkPipelineLayout pushLayout = VK_NULL_HANDLE;  // layout the constants were pushed with
             bool            pushValid   = false;
+            // A pack program's sampler set: rewritten only when a slot's
+            // view or sampler changed since the last draw of the frame.
+            VkDescriptorSet packSet = VK_NULL_HANDLE;
+            VkImageView     packViews[16] = {};
+            VkSampler       packSamplers[16] = {};
+            uint32_t        packUboOffset = ~0u;
+            VkDescriptorSet packUserSet = VK_NULL_HANDLE;
+            uint32_t        packUserOffset = ~0u;
         };
         RecordedBindings m_recorded;
         void ResetRecordedBindings();
@@ -1051,7 +1170,9 @@ namespace Render {
         // without rewriting any descriptors mid-frame.
         // Slots 0..3 as the portal layout's sets 0, 2, 4, 5; slots 4 and 5
         // are the block atlas's sprite arrays (set 7, bindings 0 and 1).
-        static constexpr uint32_t kMaxTextureSlots = 6;
+        // 16: a shader pack program's slots (set 0 of the pack layout); the
+        // engine's own draws use the first six.
+        static constexpr uint32_t kMaxTextureSlots = 16;
         TextureHandle m_boundTexture = INVALID_TEXTURE;       // legacy alias for slot 0
         TextureHandle m_boundTextures[kMaxTextureSlots] = {
             INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE, INVALID_TEXTURE,
@@ -1118,6 +1239,17 @@ namespace Render {
             VkImageView    depthView   = VK_NULL_HANDLE;
             VkFramebuffer  framebuffer = VK_NULL_HANDLE;
             TextureHandle  colorTexture = INVALID_TEXTURE;   // registered in m_textures
+            // A target over textures the caller owns (a shader pack's
+            // CreateRenderTargetFromTextures): up to eight colour
+            // attachments in their own formats and an optional depth
+            // texture, with a render pass of its own; nothing here is freed
+            // with it but the pass and framebuffer.
+            bool ownsImages = true;
+            std::vector<TextureHandle> colorTextures;
+            TextureHandle depthTexture = INVALID_TEXTURE;
+            VkRenderPass  renderPass = VK_NULL_HANDLE;
+            std::vector<VkFormat> formats;
+            uint32_t      attachmentsKey = 0;
         };
         std::unordered_map<uint32_t, VKRenderTargetInfo> m_renderTargets;
         VkRenderPass       m_targetRenderPass = VK_NULL_HANDLE;

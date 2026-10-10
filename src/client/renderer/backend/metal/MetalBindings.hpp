@@ -16,6 +16,7 @@ namespace Render::MetalBindings {
     constexpr uint32_t kBones         = 2;   // BonesUBO            (set 1 binding 1)
     constexpr uint32_t kUserUniform   = 3;   // BindUniformBuffer   (set 3)
     constexpr uint32_t kOitParams     = 4;   // OitProjParams       (set 6 binding 3)
+    constexpr uint32_t kPackUniforms  = 5;   // a shader pack program's uniform block (PackShaderDesc; set 1 binding 0)
 
     // Textures (+ samplers): BindTexture slots 0..3 at their own index —
     // slot 1 is set 2, slot 2 the texel buffer of set 4, slot 3 the lightmap
@@ -25,7 +26,10 @@ namespace Render::MetalBindings {
     constexpr uint32_t kTextureSlots  = 6;
     constexpr uint32_t kSpriteArray   = 7;   // BindTexture slot 4 (set 7 binding 0)
     constexpr uint32_t kSpriteArray2  = 8;   // BindTexture slot 5 (set 7 binding 1)
-    constexpr uint32_t kTextureIndices = 9;  // the argument tables' size
+    // A shader pack program binds its samplers at texture index = slot, 0..15
+    // (its own pipelines; nothing of the engine's shares a draw with it).
+    constexpr uint32_t kPackTextureSlots = 16;
+    constexpr uint32_t kTextureIndices = 16; // the argument tables' size
     // Improved Transparency's set 6 samplers: depth bounds, coefficients 0, 1.
     constexpr uint32_t kOitTexture0   = 4;
     constexpr uint32_t kOitTextures   = 3;

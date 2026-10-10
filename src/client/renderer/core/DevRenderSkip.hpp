@@ -29,6 +29,9 @@
 //         fogskip / lightskip (with fog / World Lighting OFF in the options:
 //         the terrain shaders' skip of the fog math / the lightmap samples
 //         is suspended, so the run A/Bs the skip itself);
+//         lightmode (the rectangles' light back to MC's four blended
+//         lightmap samples, from the default one sample at the blended
+//         light coords — OBEY_LIGHT_MODE);
 //         and five that swap something instead of skipping:
 //         weatherradius (Weather Radius 5), scale50 (Render Resolution 50 %),
 //         sceneblit (Vulkan: Render Resolution upscales by blit, not draw),

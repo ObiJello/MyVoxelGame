@@ -118,55 +118,7 @@ namespace Render {
     // UV is unused; color carries the colour.
     // ------------------------------------------------------------------
 
-    const char* PlayerRenderer::s_vertSource = R"(
-#version 330 core
 
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-
-uniform mat4 uMVP;
-// Optional pre-transform applied to the world-space stick-figure verts.
-// Identity for normal player rendering; for portal ghost passes this is
-// the source-to-destination portal pair matrix M, so the player appears
-// emerging from the destination portal in its mirrored pose.
-uniform mat4 uModel;
-
-out vec3 vWorldPos;
-out vec4 vColor;
-
-void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    vWorldPos    = worldPos.xyz;
-    gl_Position  = uMVP * worldPos;
-    vColor       = aColor;
-}
-)";
-
-    const char* PlayerRenderer::s_fragSource = R"(
-#version 330 core
-
-in vec3 vWorldPos;
-in vec4 vColor;
-out vec4 FragColor;
-
-// Optional clip plane for portal half-body ghost rendering.
-//   xyz = plane normal (world space)
-//   w   = -dot(normal, point on plane)
-// Pixel is discarded if dot(worldPos, xyz) + w < 0 — i.e. on the "wrong
-// side" of the plane. Default vec4(0) = no clipping (xyz==0 short-
-// circuits the test since the dot product is then zero and 0 + w < 0
-// only when w < 0; callers pass (0,0,0,0) for "off").
-uniform vec4 uClipPlane;
-
-void main() {
-    if (any(notEqual(uClipPlane.xyz, vec3(0.0))) &&
-        dot(vWorldPos, uClipPlane.xyz) + uClipPlane.w < 0.0) {
-        discard;
-    }
-    FragColor = vColor;
-}
-)";
 
     // ------------------------------------------------------------------
     // Convert line pairs into camera-facing thick triangle strips with a
@@ -259,9 +211,6 @@ void main() {
         }
         m_bubbleShader = g_renderBackend->CreateShaderFromFiles(
             "shaders/player_billboard.vert", "shaders/player_billboard.frag");
-        if (m_bubbleShader == INVALID_SHADER) {
-            m_bubbleShader = g_renderBackend->CreateShader(s_vertSource, s_fragSource);
-        }
         if (m_bubbleShader == INVALID_SHADER) {
             Log::Error("[PlayerRenderer] Failed to create the chat-bubble shader");
             return false;

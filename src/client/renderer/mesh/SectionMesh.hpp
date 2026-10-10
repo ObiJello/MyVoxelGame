@@ -104,6 +104,34 @@ namespace Render {
         idxs.swap(sorted);
     }
 
+    // The same grouping for a layer's quad records (one record = one quad):
+    // records reordered into facing-group order, ranges in RECORDS.
+    inline void GroupRecordsByFacing(std::vector<QuadRecord>& records, const std::vector<uint8_t>& facing,
+                                     uint32_t ranges[kFacingCount + 1]) {
+        const size_t quads = records.size();
+        for (int i = 0; i <= kFacingCount; ++i) ranges[i] = 0;
+        if (facing.size() != quads) {
+            for (int i = 0; i < kFacingCount; ++i) {
+                ranges[i + 1] = (kFacingGroupOrder[i] == kFacingAny || ranges[i] > 0) ?
+                                static_cast<uint32_t>(quads) : 0;
+            }
+            return;
+        }
+        uint32_t slotOf[kFacingCount];
+        for (int slot = 0; slot < kFacingCount; ++slot) slotOf[kFacingGroupOrder[slot]] = static_cast<uint32_t>(slot);
+        uint32_t counts[kFacingCount] = {};
+        for (size_t q = 0; q < quads; ++q) counts[slotOf[facing[q] < kFacingCount ? facing[q] : kFacingAny]] += 1;
+        for (int slot = 0; slot < kFacingCount; ++slot) ranges[slot + 1] = ranges[slot] + counts[slot];
+        std::vector<QuadRecord> sorted(quads);
+        uint32_t cursor[kFacingCount];
+        for (int slot = 0; slot < kFacingCount; ++slot) cursor[slot] = ranges[slot];
+        for (size_t q = 0; q < quads; ++q) {
+            const uint32_t slot = slotOf[facing[q] < kFacingCount ? facing[q] : kFacingAny];
+            sorted[cursor[slot]++] = records[q];
+        }
+        records.swap(sorted);
+    }
+
     struct SectionMesh {
         // Opaque geometry (solid blocks like stone, dirt)
         std::vector<TerrainVertex> opaqueVerts;
@@ -122,9 +150,24 @@ namespace Render {
         uint32_t opaqueFacingRanges[kFacingCount + 1] = {};
         uint32_t cutoutFacingRanges[kFacingCount + 1] = {};
 
+        // Quad records (QuadRecord, docs/quad-records.md): the layer's cube
+        // faces as one 16-byte record each, drawn by the record shader
+        // instead of as vertices — the second stream of the opaque and
+        // cutout layers. One facing per record; FinalizeFacingGroups orders
+        // them by facing group and fills the ranges (in records). Uploaded
+        // behind the layer's face-map records in the same slab region.
+        std::vector<QuadRecord> opaqueRecords;
+        std::vector<QuadRecord> cutoutRecords;
+        std::vector<uint8_t> opaqueRecordFacing;
+        std::vector<uint8_t> cutoutRecordFacing;
+        uint32_t opaqueRecordRanges[kFacingCount + 1] = {};
+        uint32_t cutoutRecordRanges[kFacingCount + 1] = {};
+
         void FinalizeFacingGroups() {
             GroupIndicesByFacing(opaqueIdxs, opaqueFacing, opaqueFacingRanges);
             GroupIndicesByFacing(cutoutIdxs, cutoutFacing, cutoutFacingRanges);
+            GroupRecordsByFacing(opaqueRecords, opaqueRecordFacing, opaqueRecordRanges);
+            GroupRecordsByFacing(cutoutRecords, cutoutRecordFacing, cutoutRecordRanges);
         }
 
         // Face map: the per-block records of this layer's greedy-merged
@@ -162,12 +205,20 @@ namespace Render {
             cutoutFacing.clear();
             opaqueFaceMap.clear();
             cutoutFaceMap.clear();
-            for (int i = 0; i <= kFacingCount; ++i) { opaqueFacingRanges[i] = 0; cutoutFacingRanges[i] = 0; }
+            opaqueRecords.clear();
+            cutoutRecords.clear();
+            opaqueRecordFacing.clear();
+            cutoutRecordFacing.clear();
+            for (int i = 0; i <= kFacingCount; ++i) {
+                opaqueFacingRanges[i] = 0; cutoutFacingRanges[i] = 0;
+                opaqueRecordRanges[i] = 0; cutoutRecordRanges[i] = 0;
+            }
         }
 
         // Check if any layer has geometry
         bool IsEmpty() const {
-            return opaqueVerts.empty() && cutoutVerts.empty() && translucentVerts.empty();
+            return opaqueVerts.empty() && cutoutVerts.empty() && translucentVerts.empty() &&
+                   opaqueRecords.empty() && cutoutRecords.empty();
         }
 
         // Get total vertex count across all layers
@@ -242,6 +293,15 @@ namespace Render {
         CachedDrawCmd opaqueDrawCmd;
         CachedDrawCmd cutoutDrawCmd;
         CachedDrawCmd translucentDrawCmd;
+        // The layer's quad-record stream (QuadRecord), in RECORD TEXELS of
+        // the slab: indexOffset = the first record's texel, indexCount = the
+        // record count, facingRanges = absolute texel boundaries. Drawn with
+        // the record shader over the shared index pattern (baseVertex = 4 x
+        // texel), never through the slab IBO.
+        CachedDrawCmd opaqueRecordCmd;
+        CachedDrawCmd cutoutRecordCmd;
+        uint32_t opaqueRecordCount = 0;
+        uint32_t cutoutRecordCount = 0;
 
         // Back-to-front ordering state for this section's translucent layer.
         // Centroids are kept (12 bytes a quad, versus 96 for the vertices) so a
@@ -267,15 +327,18 @@ namespace Render {
 
         // Check if any layer has renderable geometry
         bool HasGeometry() const {
-            return opaqueIndexCount > 0 || cutoutIndexCount > 0 || translucentIndexCount > 0;
+            return opaqueIndexCount > 0 || cutoutIndexCount > 0 || translucentIndexCount > 0 ||
+                   opaqueRecordCount > 0 || cutoutRecordCount > 0;
         }
 
         // Get total memory usage estimate
         size_t GetMemoryUsage() const {
             // Vertices are ~2/3 of the index count (4 per 6); uint32 indices
-            // on the GPU side, see ChunkMegaBuffer::INDEX_SIZE.
+            // on the GPU side, see ChunkMegaBuffer::INDEX_SIZE. A quad record
+            // is 16 bytes and draws over the shared index pattern.
             return (opaqueVertexCount + cutoutVertexCount + translucentVertexCount) * sizeof(TerrainVertex) +
-                   (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) * sizeof(uint32_t);
+                   (opaqueIndexCount + cutoutIndexCount + translucentIndexCount) * sizeof(uint32_t) +
+                   (opaqueRecordCount + cutoutRecordCount) * sizeof(QuadRecord);
         }
 
         // No-op: GPU resources are now owned by ChunkMegaBuffer.

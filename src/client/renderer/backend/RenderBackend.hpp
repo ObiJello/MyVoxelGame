@@ -421,6 +421,11 @@ namespace Render {
         }
         virtual void DestroyRenderTarget(RenderTargetHandle /*rt*/) {}
         virtual void BindRenderTarget(RenderTargetHandle /*rt*/) {}
+        // BindRenderTarget for a pass that overwrites every pixel of the
+        // target's colour attachments without blending (a full-screen
+        // quad): a tile-based backend need not load them first. Depth,
+        // when the target has one, is kept.
+        virtual void BindRenderTargetOverwriting(RenderTargetHandle rt) { BindRenderTarget(rt); }
 
         // Return the color attachment as a sampleable texture (for tone
         // map / bloom / refraction sub-pass shaders). Returns
@@ -447,6 +452,11 @@ namespace Render {
         // same size (a shader pack's depthtex1/depthtex2 snapshots). The
         // bound target is unchanged afterwards. Optional.
         virtual void BlitRenderTargetDepth(RenderTargetHandle /*src*/, RenderTargetHandle /*dst*/) {}
+        // Copy one colour texture into another of the same size and format
+        // (a shader pack's snapshot of a buffer a pass both reads and
+        // writes — OpenGL tolerates the feedback, Vulkan and Metal do not).
+        // The bound target is unchanged afterwards. False when unsupported.
+        virtual bool CopyTexture(TextureHandle /*src*/, TextureHandle /*dst*/) { return false; }
         // Copy the DEFAULT framebuffer's colour, as it stands at this call,
         // into `dst`'s colour attachment — the post chains' "minecraft:main"
         // input (Render::PostChain). `dst` must be the framebuffer's exact
@@ -497,6 +507,11 @@ namespace Render {
         // names), and a shader without an override binds `defaultTarget`.
         // A pack program may be its own override, to carry a target. Off,
         // nothing here costs a lookup. Optional; the Vulkan backend has none.
+        // Pack programs (PackShaderDesc): Vulkan and Metal build them from the
+        // run-time compiler's output; OpenGL compiles pack GLSL itself and
+        // never needs this.
+        virtual bool PackShadersSupported() const { return false; }
+        virtual ShaderHandle CreatePackShader(const PackShaderDesc& /*desc*/) { return INVALID_SHADER; }
         virtual void SetShaderOverrideMode(bool /*on*/, RenderTargetHandle /*defaultTarget*/) {}
         virtual void SetShaderOverride(ShaderHandle /*engine*/, ShaderHandle /*pack*/, RenderTargetHandle /*target*/) {}
         virtual void ClearShaderOverrides() {}
@@ -827,7 +842,9 @@ namespace Render {
     };
 
     // Factory function
-    // --metal4 (PlatformMain): Metal 4 where the Mac offers it, else Metal 3 (docs/metal4.md).
+    // Metal 4 where the Mac offers it (macOS 26, Apple silicon), the Metal 3
+    // backend otherwise — the default since 2026-10-09; --metal3 or
+    // OBEY_METAL4=0 keep Metal 3 (docs/metal4.md).
     void SetMetal4Requested(bool requested);
     std::unique_ptr<RenderBackend> CreateRenderBackend(BackendType type);
 

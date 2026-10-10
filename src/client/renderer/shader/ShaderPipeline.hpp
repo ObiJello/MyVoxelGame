@@ -61,6 +61,8 @@ namespace Render {
         float      skyBrightness = 1.0f; // terrain dim, 0.2667..1
         long long  dayTime  = 6000;      // world day time, ticks
         int        isEyeInWater = 0;     // 0 air, 1 water, 2 lava
+        float      rainStrength = 0.0f;  // MC Level.getRainLevel(partialTick), 0..1
+        float      thunderStrength = 0.0f; // MC Level.getThunderLevel(partialTick), 0..rainStrength
         int        eyeSkyLight = 15;     // sky light at the eye, 0..15 (MC eyeBrightness.y / 16)
         int        eyeBlockLight = 0;    // block light at the eye, 0..15
         float      deltaSeconds = 0.0f;
@@ -116,6 +118,11 @@ namespace Render {
             TextureFormat format = TextureFormat::RGBA8;
             TextureHandle main = INVALID_TEXTURE;
             TextureHandle alt  = INVALID_TEXTURE;
+            // Vulkan / Metal: a copy of `main` taken before the translucent
+            // pass for a gbuffers program that samples the buffer it draws
+            // into (a water program's reflections) — OpenGL reads the live
+            // attachment, which those backends do not allow.
+            TextureHandle feedback = INVALID_TEXTURE;
             bool          used = false;         // referenced by any pass
             bool          clear = true;         // colortexNClear: false keeps last frame's content
             glm::vec4     clearColor{0.0f};     // colortexNClearColor
@@ -133,7 +140,7 @@ namespace Render {
         // overrides; the rest through the backend's shader overrides.
         enum Family {
             kFamTerrain = 0, kFamWater, kFamEntities, kFamBlock, kFamSky, kFamClouds, kFamParticles,
-            kFamShadow, kFamilyCount
+            kFamWeather, kFamShadow, kFamilyCount
         };
 
         // Which texture-unit layout a program is drawn with: the composite
@@ -142,6 +149,10 @@ namespace Render {
         enum class Layout { Composite, Gbuffers };
 
         bool ReadPackFile(const std::string& rel, std::string& out) const;
+        TextureHandle ShownBuffer() const;
+        void ScanGbufferColorReads(const std::string& dir, const std::string* chosen);
+        ShaderHandle CreatePackProgram(const std::string& vertexCore, const std::string& fragmentCore, Layout layout,
+                                       int fragmentOutputs, const std::string& name, std::string& error);
         bool CompileProgram(const std::string& dir, const std::string& name, bool gbuffers, bool entityLayout,
                             Program& out, std::string& error);
         bool LoadPrograms(const std::string& dir, std::string& error);
@@ -165,11 +176,9 @@ namespace Render {
         void RemoveOverrides();
         void RenderShadowPass(const ShaderFrameInput& in);
         void RunDeferred();
-        void ProbeCentre(const char* what);
-        void ProbeTexture(TextureHandle tex, const char* what);
-        void ProbeThree(const char* what);
-        void ProbeNormals(const ShaderFrameInput& in);
         bool ProgramEnabled(const std::string& name) const;
+        std::map<std::string, int> SamplerUnits(Layout layout) const;
+        void DumpSource(const std::string& name, const std::string& vert, const std::string& frag) const;
         bool OptionIsOn(const std::string& name) const;
 
         bool        m_active = false;
@@ -216,6 +225,16 @@ namespace Render {
         // MC eyeBrightnessSmooth: eyeBrightness eased with a half-life.
         glm::vec2 m_eyeBrightnessSmooth{0.0f, 240.0f};
         bool      m_haveEyeSmooth = false;
+        // `wetness`: rainStrength eased with the pack's half-lives
+        // (shaders.properties wetnessHalflife / drynessHalflife, in ticks;
+        // Iris's SmoothedFloat), so the ground stays wet after the rain.
+        // depthtex2: the snapshot when OBEY_PACK_DEPTH2=1 asks for one,
+        // depthtex0 itself otherwise (CreateBuffers).
+        TextureHandle Depth2() const { return m_depth2 != INVALID_TEXTURE ? m_depth2 : m_depth; }
+        float     m_wetness = 0.0f;
+        bool      m_haveWetness = false;
+        float     m_wetnessHalflife = 600.0f;
+        float     m_drynessHalflife = 200.0f;
         std::map<std::string, std::string> m_options; // the player's option choices
         std::map<std::string, bool> m_toggles;        // every toggle option, as currently set
         std::vector<Program> m_passes;          // composite* then final
@@ -236,8 +255,21 @@ namespace Render {
         bool m_inScene = false;
         bool m_inShadowPass = false;
         bool m_suspended = false;
-        bool m_deferredRanThisFrame = false;
-        bool m_abEngineTerrain = false;   // frames 40..43: terrain by the engine's shader (diagnostic A/B)
+        std::vector<int> m_gbufColorReads;   // colour buffers the gbuffers programs sample, on the kGbufColor units
+        // Which depth snapshots any program samples: a copy nobody reads is
+        // a full-screen depth blit for nothing (2 ms each on an M4 at retina).
+        bool m_usesDepth1 = true, m_usesDepth2 = true, m_usesShadow1 = true;
+        // OBEY_PACK_DUMP: GPU time of the pack's own phases (the backend's
+        // timer queries), read back when ready and averaged over the dump's
+        // second — where a pack's frame goes.
+        enum PackPhase { kPhaseShadow = 0, kPhaseDeferred, kPhaseComposite, kPhaseCount };
+        GPUTimerHandle m_phaseTimer[kPhaseCount] = { INVALID_GPU_TIMER, INVALID_GPU_TIMER, INVALID_GPU_TIMER };
+        float          m_phaseMsSum[kPhaseCount] = { 0.0f, 0.0f, 0.0f };
+        int            m_phaseSamples[kPhaseCount] = { 0, 0, 0 };
+        bool           m_phaseTimersOn = false;
+        void BeginPhaseTimer(PackPhase phase);
+        void EndPhaseTimer(PackPhase phase);
+        void CollectPhaseTimers();
 
         // Shadow map.
         int           m_shadowRes = 0;

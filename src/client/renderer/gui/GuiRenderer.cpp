@@ -12,60 +12,7 @@
 namespace Render {
 
     // Shader source for textured GUI quads (position + UV + color tint)
-    static const char* guiTexturedVert = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
-layout(location = 2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec2 vTexCoord;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vTexCoord = aTexCoord;
-    vColor = aColor;
-}
-)";
 
-    static const char* guiTexturedFrag = R"(
-#version 330 core
-in vec2 vTexCoord;
-in vec4 vColor;
-out vec4 FragColor;
-uniform sampler2D uTexture;
-uniform float uAlphaTest;  // discard threshold; 0.0 means "discard only fully transparent pixels"
-void main() {
-    vec4 texColor = texture(uTexture, vTexCoord);
-    // Mirrors Vulkan gui_textured_vk.frag — see comment there for why this
-    // matters (lets the icon path write depth only on opaque pixels so the
-    // glint pass can mask itself via depth-test EQUAL).
-    if (texColor.a <= uAlphaTest) discard;
-    FragColor = texColor * vColor;
-}
-)";
-
-    // Shader source for solid/gradient fills (position + color, no texture)
-    static const char* guiColorVert = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aTexCoord;
-layout(location = 2) in vec4 aColor;
-uniform mat4 uMVP;
-out vec4 vColor;
-void main() {
-    gl_Position = uMVP * vec4(aPos, 1.0);
-    vColor = aColor;
-}
-)";
-
-    static const char* guiColorFrag = R"(
-#version 330 core
-in vec4 vColor;
-out vec4 FragColor;
-void main() {
-    FragColor = vColor;
-}
-)";
 
     GuiRenderer::~GuiRenderer() {
         Shutdown();
@@ -74,18 +21,11 @@ void main() {
     bool GuiRenderer::Initialize() {
         if (!g_renderBackend) return false;
 
-        // Create shaders — try file-based first (Vulkan SPIR-V), fall back to embedded source
+        // OpenGL compiles the .vert/.frag sources, Vulkan and Metal their _vk twins.
         m_texturedShader = g_renderBackend->CreateShaderFromFiles(
             "shaders/gui_textured.vert", "shaders/gui_textured.frag");
-        if (m_texturedShader == INVALID_SHADER) {
-            m_texturedShader = g_renderBackend->CreateShader(guiTexturedVert, guiTexturedFrag);
-        }
-
         m_colorShader = g_renderBackend->CreateShaderFromFiles(
             "shaders/gui_color.vert", "shaders/gui_color.frag");
-        if (m_colorShader == INVALID_SHADER) {
-            m_colorShader = g_renderBackend->CreateShader(guiColorVert, guiColorFrag);
-        }
 
         if (m_texturedShader == INVALID_SHADER || m_colorShader == INVALID_SHADER) {
             Log::Error("[GuiRenderer] Failed to create GUI shaders");

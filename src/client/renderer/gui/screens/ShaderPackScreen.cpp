@@ -143,7 +143,7 @@ namespace Render {
         g.DrawCenteredString(status, m_width / 2, 8 + FontRenderer::LINE_HEIGHT + 4,
                              active ? 0xFF80FF80 : (status == "Off" ? 0xFF808080 : 0xFFFF8080));
         RenderMenuSeparators(g, m_width, HEADER_H - 2, m_height - FOOTER_H);
-        g.DrawCenteredString("OpenGL only. Terrain, water, entities, sky, clouds, particles and shadows go through the pack; the hand does not yet",
+        g.DrawCenteredString("Packs run on the OpenGL renderer (the launcher's Renderer setting). Terrain, water, entities, sky, clouds, particles and shadows go through the pack; the hand does not yet",
                              m_width / 2, m_height - FOOTER_H - FontRenderer::LINE_HEIGHT - 2, 0xFFA0A0A0);
     }
 

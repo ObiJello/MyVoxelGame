@@ -45,69 +45,9 @@ namespace Render::Gizmos {
 
         // MC rendertype_lines.vsh on the block vertex layout (see lines_vk.vert
         // for the Vulkan twin and the encoding).
-        const char* kLineVert = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-uniform mat4 uMVP;
-uniform vec2 uScreenSize;
-uniform float uLineWidth;
-out vec4 vColor;
-vec3 decodeOctahedron(vec2 e) {
-    vec3 n = vec3(e.xy, 1.0 - abs(e.x) - abs(e.y));
-    float t = clamp(-n.z, 0.0, 1.0);
-    n.x += n.x >= 0.0 ? -t : t;
-    n.y += n.y >= 0.0 ? -t : t;
-    return normalize(n);
-}
-void main() {
-    vec3 dir = decodeOctahedron(aUV);
-    vec4 linePosStart = uMVP * vec4(aPos, 1.0);
-    vec4 linePosEnd   = uMVP * vec4(aPos + dir, 1.0);
-    vec3 ndc1 = linePosStart.xyz / linePosStart.w;
-    vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;
-    vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * uScreenSize);
-    vec2 lineOffset = vec2(-lineScreenDirection.y, lineScreenDirection.x) * uLineWidth / uScreenSize;
-    if (lineOffset.x < 0.0) lineOffset *= -1.0;
-    if (gl_VertexID % 2 == 0) gl_Position = vec4((ndc1 + vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
-    else                      gl_Position = vec4((ndc1 - vec3(lineOffset, 0.0)) * linePosStart.w, linePosStart.w);
-    vColor = aColor;
-}
-)";
-        const char* kLineFrag = R"(
-#version 330 core
-in vec4 vColor;
-out vec4 FragColor;
-void main() { FragColor = vColor; }
-)";
-        const char* kFillVert = R"(
-#version 330 core
-layout(location = 0) in vec3 aPos;
-layout(location = 1) in vec2 aUV;
-layout(location = 2) in vec4 aColor;
-uniform mat4 uMVP;
-uniform mat4 uModel;
-out vec3 vWorldPos;
-out vec4 vColor;
-void main() {
-    vec4 worldPos = uModel * vec4(aPos, 1.0);
-    vWorldPos = worldPos.xyz;
-    gl_Position = uMVP * worldPos;
-    vColor = aColor;
-}
-)";
-        const char* kFillFrag = R"(
-#version 330 core
-in vec3 vWorldPos;
-in vec4 vColor;
-out vec4 FragColor;
-uniform vec4 uClipPlane;
-void main() {
-    if (any(notEqual(uClipPlane.xyz, vec3(0.0))) && dot(vWorldPos, uClipPlane.xyz) + uClipPlane.w < 0.0) discard;
-    FragColor = vColor;
-}
-)";
+
+
+
 
         void Split(uint32_t argb, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) {
             a = static_cast<uint8_t>((argb >> 24) & 0xFF);
@@ -148,9 +88,7 @@ void main() {
         if (!g_renderBackend) return false;
         if (g_lineShader != INVALID_SHADER) return true;
         g_lineShader = g_renderBackend->CreateShaderFromFiles("shaders/lines.vert", "shaders/lines.frag");
-        if (g_lineShader == INVALID_SHADER) g_lineShader = g_renderBackend->CreateShader(kLineVert, kLineFrag);
         g_fillShader = g_renderBackend->CreateShaderFromFiles("shaders/player_billboard.vert", "shaders/player_billboard.frag");
-        if (g_fillShader == INVALID_SHADER) g_fillShader = g_renderBackend->CreateShader(kFillVert, kFillFrag);
         if (g_lineShader == INVALID_SHADER || g_fillShader == INVALID_SHADER) {
             Log::Error("[Gizmos] shader creation failed (lines %u, fills %u)", g_lineShader, g_fillShader);
             return false;

@@ -13,6 +13,7 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -53,5 +54,30 @@ namespace Render::PackGlsl {
     // (a pack's TAA or exposure history).
     struct ClearDecl { int index; bool hasClear; bool clear; bool hasColor; float color[4]; };
     std::vector<ClearDecl> FindClearDecls(const std::string& source);
+
+    // The second target (docs/shader-packs-port.md): the core-profile
+    // translation of a program's two stages rewritten as Vulkan GLSL for
+    // the run-time compiler (Shaders::PackCompiler) —
+    //   * every non-opaque uniform of both stages gathered into one std140
+    //     block, `PackUniforms` (set 1, binding 0), the same block in both
+    //     stages so a member has one offset; initializers are dropped (the
+    //     pipeline sets every uniform it declares);
+    //   * every sampler at `layout(set = 0, binding = unit)`, the unit from
+    //     `samplerUnits` (the pipeline's name → texture slot table) or a
+    //     free slot below 16 for a sampler the pipeline never binds;
+    //   * every varying at an explicit location, allocated from the vertex
+    //     stage's outputs and matched by name in the fragment stage;
+    //   * gl_VertexID / gl_InstanceID renamed, the pack's `texture` sampler
+    //     (a reserved name in GLSL 450) renamed;
+    //   * the fragment outputs sized to the pass's draw buffers (a Metal
+    //     pipeline must have an attachment for every output).
+    struct Vulkanized {
+        std::string vertex, fragment;
+        std::vector<std::pair<std::string, int>> samplers;   // name → slot, as bound
+        std::string error;
+    };
+    bool Vulkanize(const std::string& vertexCore, const std::string& fragmentCore,
+                   const std::map<std::string, int>& samplerUnits, int fragmentOutputs,
+                   Vulkanized& out);
 
 } // namespace Render::PackGlsl

@@ -204,8 +204,6 @@ namespace Render {
         // and a drawn figure's swim tilt lerps by it.
         float m_partialTick = 1.0f;
 
-        static const char* s_vertSource;
-        static const char* s_fragSource;
 
         // Each line segment becomes a 6-vert camera-facing thick triangle
         // strip: a stick figure's limbs are ~6 segments, ~36 vertices. The

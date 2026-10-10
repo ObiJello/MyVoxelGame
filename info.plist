@@ -17,6 +17,10 @@
     <key>CFBundleVersion</key>
     <string>0.1.0</string>
 
+    <!-- Contents/Resources/AppIcon.icns: the pre-rendered TNT (src/platform/icon/) -->
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+
     <!-- The executable’s filename inside Contents/MacOS/ -->
     <key>CFBundleExecutable</key>
     <string>MyVoxelGame</string>

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <regex>
 #include <sstream>
 
@@ -140,6 +141,116 @@ namespace Shaders {
             out += '\n';
         }
         return out;
+    }
+
+    // ── the pack's layout ────────────────────────────────────────────────
+
+    namespace {
+        // A properties file's logical lines: comments dropped, a trailing
+        // backslash continues the line. Preprocessor lines (#if MC_VERSION
+        // ...) are skipped with their contents taken as they come — the
+        // layout keys are not versioned in any pack seen.
+        void ForEachPropertyLine(const fs::path& file, const std::function<void(const std::string&, const std::string&)>& fn) {
+            std::ifstream in(file);
+            std::string line, pending;
+            while (std::getline(in, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                std::string t = Trim(line);
+                if (!pending.empty()) { t = pending + " " + t; pending.clear(); }
+                if (t.empty() || t[0] == '#') continue;
+                if (t.back() == '\\') { pending = t.substr(0, t.size() - 1); continue; }
+                const size_t eq = t.find('=');
+                if (eq == std::string::npos) continue;
+                fn(Trim(t.substr(0, eq)), Trim(t.substr(eq + 1)));
+            }
+        }
+        std::vector<std::string> Words(const std::string& text) {
+            std::vector<std::string> out;
+            std::stringstream ss(text);
+            std::string w;
+            while (ss >> w) out.push_back(w);
+            return out;
+        }
+        std::string LangOr(const std::map<std::string, std::string>& lang, const std::string& key, const std::string& fallback) {
+            auto it = lang.find(key);
+            return it != lang.end() ? it->second : fallback;
+        }
+    } // namespace
+
+    std::string PackLayout::OptionLabel(const std::string& option) const   { return LangOr(lang, "option." + option, option); }
+    std::string PackLayout::OptionComment(const std::string& option) const { return LangOr(lang, "option." + option + ".comment", ""); }
+    std::string PackLayout::ValueLabel(const std::string& option, const std::string& value) const {
+        return LangOr(lang, "value." + option + "." + value, value);
+    }
+    std::string PackLayout::ScreenLabel(const std::string& screen) const   { return LangOr(lang, "screen." + screen, screen); }
+    std::string PackLayout::ScreenComment(const std::string& screen) const { return LangOr(lang, "screen." + screen + ".comment", ""); }
+    std::string PackLayout::ProfileLabel(const std::string& profile) const { return LangOr(lang, "profile." + profile, profile); }
+
+    int PackLayout::MatchingProfile(const std::vector<Option>& options, const Overrides& overrides) const {
+        for (size_t i = 0; i < profiles.size(); ++i) {
+            bool all = true;
+            for (const auto& [name, value] : profiles[i].values) {
+                auto opt = std::find_if(options.begin(), options.end(), [&](const Option& o) { return o.name == name; });
+                if (opt == options.end()) continue;
+                const std::string cur = CurrentValue(*opt, overrides);
+                const std::string want = opt->isToggle ? (value == "true" ? "ON" : "OFF") : value;
+                if (cur != want) { all = false; break; }
+            }
+            if (all) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
+    PackLayout LoadLayout(const std::string& shadersDir) {
+        PackLayout layout;
+        const fs::path dir(shadersDir);
+        std::map<std::string, std::string> rawProfiles;   // name -> the line, inheritance resolved below
+        std::vector<std::string> profileOrder;
+        ForEachPropertyLine(dir / "shaders.properties", [&](const std::string& key, const std::string& value) {
+            if (key == "screen") {
+                layout.screens[""] = Words(value);
+            } else if (key.rfind("screen.", 0) == 0) {
+                const std::string rest = key.substr(7);
+                const size_t dot = rest.find('.');
+                if (dot == std::string::npos) layout.screens[rest] = Words(value);
+                else if (rest.substr(dot + 1) == "columns") layout.columns[rest.substr(0, dot)] = std::max(1, std::atoi(value.c_str()));
+            } else if (key == "sliders") {
+                for (const std::string& w : Words(value)) layout.sliders.insert(w);
+            } else if (key.rfind("profile.", 0) == 0) {
+                const std::string name = key.substr(8);
+                if (!rawProfiles.count(name)) profileOrder.push_back(name);
+                rawProfiles[name] = value;
+            }
+        });
+        // Profiles: `A=1` a value, `A` a toggle on, `!A` a toggle off,
+        // `profile.OTHER` the other profile's values first (OptiFine).
+        std::function<void(const std::string&, Overrides&, int)> resolve = [&](const std::string& name, Overrides& out, int depth) {
+            auto it = rawProfiles.find(name);
+            if (it == rawProfiles.end() || depth > 8) return;
+            for (const std::string& w : Words(it->second)) {
+                if (w.rfind("profile.", 0) == 0) { resolve(w.substr(8), out, depth + 1); continue; }
+                const size_t eq = w.find('=');
+                if (eq != std::string::npos) out[w.substr(0, eq)] = w.substr(eq + 1);
+                else if (!w.empty() && w[0] == '!') out[w.substr(1)] = "false";
+                else out[w] = "true";
+            }
+        };
+        for (const std::string& name : profileOrder) {
+            PackLayout::Profile p;
+            p.name = name;
+            resolve(name, p.values, 0);
+            layout.profiles.push_back(std::move(p));
+        }
+        // The language file: en_us.lang in any letter case, under lang/.
+        std::error_code ec;
+        for (const auto& e : fs::directory_iterator(dir / "lang", ec)) {
+            std::string fn = e.path().filename().string();
+            std::transform(fn.begin(), fn.end(), fn.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (fn != "en_us.lang") continue;
+            ForEachPropertyLine(e.path(), [&](const std::string& key, const std::string& value) { layout.lang[key] = value; });
+            break;
+        }
+        return layout;
     }
 
     std::string CurrentValue(const Option& option, const Overrides& overrides) {

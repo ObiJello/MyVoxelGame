@@ -28,8 +28,10 @@
 #include "TreeGrower.hpp"
 #include "common/core/JavaRandom.hpp"
 #include "common/core/Log.hpp"
+#include "common/sound/LevelEventSounds.hpp"
 #include "common/world/level/ILevelWrite.hpp"
 #include "common/world/level/World.hpp"
+#include "common/world/ticks/ScheduledTickAccess.hpp"
 
 #include <algorithm>
 #include <array>
@@ -715,6 +717,31 @@ namespace Game {
             }
         }
 
+        // CactusBlock.updateShape: any neighbour change that leaves the
+        // cactus unable to survive books a tick one tick out — the block is
+        // never broken inside the neighbour walk. Breaking the bottom of a
+        // column then cascades upward a tick per block, as in vanilla.
+        bool CactusUpdateShape(const IBlockAccess& level, const glm::ivec3& pos,
+                               BlockState state, Direction /*toNeighbour*/,
+                               BlockID /*neighbourId*/, BlockState& /*outState*/,
+                               ScheduledTickAccess* ticks) {
+            if (ticks && !CanSurviveAt(level, pos, state.Block())) {
+                ticks->ScheduleTick(pos, state.Block(), 1);
+            }
+            return false;   // shape unchanged
+        }
+
+        // CactusBlock.tick: `if (!canSurvive) level.destroyBlock(pos, true)`.
+        // World::DestroyBlock leaves MC destroyBlock's levelEvent 2001 (the
+        // break puff and sound) to its caller, as UpdateOrDestroy does.
+        void CactusTick(ILevelWrite& level, const glm::ivec3& pos,
+                        BlockState state, JavaRandom& /*random*/) {
+            if (CanSurviveAt(level, pos, state.Block())) return;
+            PlayLevelEventSound(level, nullptr, LevelEvent::PARTICLES_DESTROY_BLOCK, pos,
+                                static_cast<int>(state.RawId()), level.Random());
+            level.DestroyBlock(pos, true);
+        }
+
         // ────────────────────────────────────────────────────────────────────
         // BambooStalkBlock — BambooStalkBlock.java:60-140
         //
@@ -1174,6 +1201,10 @@ namespace Game {
         wireBonemeal("sugar_cane", &SugarCaneIsValidBonemealTarget,
                      &SugarCanePerformBonemeal);
         wireTick("cactus",     &CropIsRandomlyTicking, &CactusRandomTick);
+        if (Block* b = forSlug("cactus")) {
+            b->updateShape = &CactusUpdateShape;
+            b->tick        = &CactusTick;
+        }
 
         wireTick("grass_block", &SpreadingIsRandomlyTicking, &SpreadingRandomTick);
         wireTick("mycelium",    &SpreadingIsRandomlyTicking, &SpreadingRandomTick);

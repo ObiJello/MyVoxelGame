@@ -10,6 +10,7 @@
 #include "common/core/Profiling_Tracy.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -30,6 +31,7 @@ namespace Render {
                 case TextureFormat::RGBA32F:         return {MTLPixelFormatRGBA32Float, 16};
                 case TextureFormat::RGBA16:          return {MTLPixelFormatRGBA16Unorm, 8};
                 case TextureFormat::RGBA16UI:        return {MTLPixelFormatRGBA16Uint, 8};
+                case TextureFormat::RGBA32UI:        return {MTLPixelFormatRGBA32Uint, 16};
                 case TextureFormat::R11G11B10F:      return {MTLPixelFormatRG11B10Float, 4};
             }
             return {MTLPixelFormatRGBA8Unorm, 4};
@@ -337,7 +339,10 @@ namespace Render {
             desc.mipmapLevelCount = mipLevels;
             desc.storageMode = MTLStorageModePrivate;
             desc.usage = MTLTextureUsageShaderRead;
-            if (IsDepthFormat(f.format)) desc.usage |= MTLTextureUsageRenderTarget;
+            // Depth textures and textures created empty at one level are
+            // drawn into (a shader pack's colour buffers and depth copies,
+            // CreateRenderTargetFromTextures); the rest are only sampled.
+            if (IsDepthFormat(f.format) || (!data && mipLevels == 1)) desc.usage |= MTLTextureUsageRenderTarget;
             TextureInfo info;
             info.texture = M4HeapTexture(desc) ?: [m_device newTextureWithDescriptor:desc];
             if (!info.texture) {
@@ -381,6 +386,14 @@ namespace Render {
             info.label = "Tex#" + std::to_string(handle) + " " + std::to_string(width) + "x" + std::to_string(height) +
                          " L" + std::to_string(mipLevels);
             info.texture.label = [NSString stringWithUTF8String:info.label.c_str()];
+            if (data && IsDepthFormat(f.format)) {
+                // A depth texture with initial contents (the shader pack's
+                // "nothing nearer" 1x1 at depth 1): no buffer copy reaches a
+                // depth-stencil image, so its first texel's 24-bit depth
+                // (GL_UNSIGNED_INT_24_8's layout) clears the whole image.
+                const uint32_t packed = *static_cast<const uint32_t*>(data);
+                ClearDepthTextureOnUpload(info.texture, static_cast<double>(packed >> 8) / 16777215.0, info.label.c_str());
+            }
             m_textures[handle] = info;
             TrackAlloc(m_memStats.textureMemory, bytes, m_memStats.textureCount);
             return handle;
@@ -388,11 +401,14 @@ namespace Render {
     }
 
     void MetalBackend::EraseTextureEntry(TextureHandle handle) {
+        auto it = m_textures.find(handle);
+        const TextureInfo* info = it != m_textures.end() ? &it->second : nullptr;
         for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
             if (m_boundTextures[slot] == handle) {
                 m_boundTextures[slot] = INVALID_TEXTURE;
                 m_boundTextureInfo[slot] = nullptr;
             }
+            if (info && m_lastTexture2D[slot] == info) m_lastTexture2D[slot] = nullptr;
         }
         m_textures.erase(handle);
     }
@@ -813,6 +829,39 @@ namespace Render {
                                                  u.layer});
         }
 
+        // OBEY_MTL_FLUSH_LOG=1: what the flush carried, once a second — the
+        // "Texture flush" encoder's GPU time comes from these copies.
+        static const bool s_flushLog = std::getenv("OBEY_MTL_FLUSH_LOG") != nullptr;
+        if (s_flushLog) {
+            static uint64_t s_updates = 0, s_bytes = 0, s_frames = 0;
+            static std::map<uint32_t, std::pair<uint64_t, uint64_t>> s_perTexture;   // handle → (updates, bytes)
+            for (const PendingTextureUpdate& u : m_pendingTextureUpdates) {
+                ++s_updates;
+                s_bytes += u.byteSize;
+                auto& e = s_perTexture[u.texture];
+                ++e.first;
+                e.second += u.byteSize;
+            }
+            if (++s_frames % 60 == 0) {
+                std::string list;
+                for (const auto& [handle, e] : s_perTexture) {
+                    auto it = m_textures.find(handle);
+                    char buf[256];
+                    std::snprintf(buf, sizeof(buf), " [%s %dx%d L%u copies=%zu: %llu updates, %.1f KB]",
+                                  it != m_textures.end() && !it->second.label.empty() ? it->second.label.c_str() : "?",
+                                  it != m_textures.end() ? it->second.width : 0, it != m_textures.end() ? it->second.height : 0,
+                                  it != m_textures.end() ? it->second.mipLevels : 0u,
+                                  it != m_textures.end() ? it->second.frameCopies.size() : size_t{0},
+                                  static_cast<unsigned long long>(e.first), static_cast<double>(e.second) / 1024.0);
+                    list += buf;
+                }
+                Log::Info("[MetalFlush] %llu frames: %llu updates, %.1f KB/frame, per-frame-copy textures %zu;%s",
+                          static_cast<unsigned long long>(s_frames), static_cast<unsigned long long>(s_updates),
+                          static_cast<double>(s_bytes) / 1024.0 / 60.0, m_frameCopyTextures.size(), list.c_str());
+                s_updates = 0; s_bytes = 0; s_perTexture.clear();
+            }
+        }
+
         // The slot's copy now holds everything through this frame; records
         // every copy has taken are dropped.
         for (uint32_t handle : m_frameCopyTextures) {
@@ -858,6 +907,9 @@ namespace Render {
         if (slot < kMaxTextureSlots) {
             m_boundTextures[slot] = handle;
             m_boundTextureInfo[slot] = it != m_textures.end() ? &it->second : nullptr;
+            if (it != m_textures.end() && it->second.texture && !it->second.bufferTexture && it->second.layers == 1) {
+                m_lastTexture2D[slot] = &it->second;
+            }
         }
         if (it != m_textures.end()) {
             it->second.lastUsedFrame = m_frameNumber;
@@ -870,7 +922,7 @@ namespace Render {
         if (bit == m_buffers.end()) return INVALID_TEXTURE;
         const FormatInfo f = ToMetalFormat(format);
         if (format != TextureFormat::RGBA8 && format != TextureFormat::RGBA16 && format != TextureFormat::RGBA16UI &&
-            format != TextureFormat::RGBA16F && format != TextureFormat::RGBA32F) {
+            format != TextureFormat::RGBA32UI && format != TextureFormat::RGBA16F && format != TextureFormat::RGBA32F) {
             Log::Error("MetalBackend::CreateBufferTexture: unsupported format");
             return INVALID_TEXTURE;
         }
@@ -959,6 +1011,36 @@ namespace Render {
     // ========================================================================
     // RENDER TARGETS
     // ========================================================================
+
+    void MetalBackend::ClearDepthTextureOnUpload(id<MTLTexture> depth, double value, const char* label) {
+        @autoreleasepool {
+            if (m_metal4) {
+                M4UploadEncoder();
+                M4EndUploadEncoder();
+            } else {
+                if (m_uploadBlit) {
+                    [m_uploadBlit endEncoding];
+                    m_uploadBlit = nil;
+                }
+                if (!m_uploadCmd) m_uploadCmd = MakeCommandBuffer(@"Uploads", /*watchErrors=*/true);
+            }
+            MTLRenderPassDescriptor* clear = [MTLRenderPassDescriptor renderPassDescriptor];
+            clear.depthAttachment.texture = depth;
+            clear.depthAttachment.loadAction = MTLLoadActionClear;
+            clear.depthAttachment.clearDepth = value;
+            clear.depthAttachment.storeAction = MTLStoreActionStore;
+            if (depth.pixelFormat == MTLPixelFormatDepth32Float_Stencil8 || depth.pixelFormat == MTLPixelFormatDepth24Unorm_Stencil8) {
+                clear.stencilAttachment.texture = depth;
+                clear.stencilAttachment.loadAction = MTLLoadActionClear;
+                clear.stencilAttachment.storeAction = MTLStoreActionStore;
+            }
+            id clearEnc = m_metal4 ? M4MakeRenderEncoder(m_uploadCmd4, clear, static_cast<uint32_t>(depth.width),
+                                                         static_cast<uint32_t>(depth.height), /*resumed=*/false)
+                                   : [m_uploadCmd renderCommandEncoderWithDescriptor:clear];
+            [clearEnc setLabel:[NSString stringWithFormat:@"Clear %s", label]];
+            [clearEnc endEncoding];
+        }
+    }
 
     bool MetalBackend::CreateTargetImages(TargetInfo& rt) {
         @autoreleasepool {
@@ -1061,10 +1143,76 @@ namespace Render {
         return handle;
     }
 
+    uint32_t MetalBackend::AttachmentSetId(const std::vector<MTLPixelFormat>& formats, bool depth) {
+        std::vector<uint32_t> key;
+        for (MTLPixelFormat f : formats) key.push_back(static_cast<uint32_t>(f));
+        key.push_back(depth ? 1u : 0u);
+        auto it = m_attachmentSets.find(key);
+        if (it != m_attachmentSets.end()) return it->second;
+        const uint32_t id = static_cast<uint32_t>(m_attachmentSets.size()) + 1;
+        m_attachmentSets[key] = id;
+        return id;
+    }
+
+    RenderTargetHandle MetalBackend::CreateRenderTargetFromTextures(const TextureHandle* colors, int colorCount,
+                                                                    TextureHandle depth) {
+        if (!m_device || colorCount < 0 || colorCount > 8 || (colorCount > 0 && !colors)) return INVALID_RENDER_TARGET;
+        if (colorCount == 0 && depth == INVALID_TEXTURE) return INVALID_RENDER_TARGET;
+        TargetInfo rt;
+        rt.ownsImages = false;
+        for (int i = 0; i < colorCount; ++i) {
+            auto it = m_textures.find(colors[i]);
+            if (it == m_textures.end() || !it->second.texture || it->second.bufferTexture) {
+                Log::Error("MetalBackend: texture render target: colour %d is not a texture", i);
+                return INVALID_RENDER_TARGET;
+            }
+            const TextureInfo& t = it->second;
+            if (!(t.texture.usage & MTLTextureUsageRenderTarget)) {
+                Log::Error("MetalBackend: texture render target: %s was not created as a render target", t.label.c_str());
+                return INVALID_RENDER_TARGET;
+            }
+            if (i == 0) { rt.width = t.width; rt.height = t.height; }
+            else if (t.width != rt.width || t.height != rt.height) {
+                Log::Error("MetalBackend: texture render target: colour %d is %dx%d, attachment 0 %dx%d", i, t.width, t.height, rt.width, rt.height);
+                return INVALID_RENDER_TARGET;
+            }
+            rt.colors.push_back(t.texture);
+            rt.formats.push_back(t.format);
+        }
+        rt.hasDepth = depth != INVALID_TEXTURE;
+        if (rt.hasDepth) {
+            auto it = m_textures.find(depth);
+            if (it == m_textures.end() || !it->second.texture || it->second.format != kDepthFormat) {
+                Log::Error("MetalBackend: texture render target: the depth texture is not a %s depth-stencil texture",
+                           "Depth32Float_Stencil8");
+                return INVALID_RENDER_TARGET;
+            }
+            const TextureInfo& t = it->second;
+            if (colorCount == 0) { rt.width = t.width; rt.height = t.height; }
+            else if (t.width != rt.width || t.height != rt.height) {
+                Log::Error("MetalBackend: texture render target: the depth texture is %dx%d, the colour %dx%d", t.width, t.height, rt.width, rt.height);
+                return INVALID_RENDER_TARGET;
+            }
+            rt.depth = t.texture;
+        }
+        rt.color = rt.colors.empty() ? nil : rt.colors[0];
+        rt.colorTexture = colorCount > 0 ? colors[0] : INVALID_TEXTURE;   // the caller's entry, not owned here
+        rt.attachmentsKey = AttachmentSetId(rt.formats, rt.hasDepth);
+        const RenderTargetHandle handle = AllocHandle();
+        rt.label = "RT#" + std::to_string(handle) + " (textures)";
+        m_targets[handle] = rt;
+        return handle;
+    }
+
     void MetalBackend::DestroyRenderTarget(RenderTargetHandle handle) {
         auto it = m_targets.find(handle);
         if (it == m_targets.end()) return;
         if (m_activeTarget == handle) BindRenderTarget(INVALID_RENDER_TARGET);
+        if (!it->second.ownsImages) {
+            // Only the target: the textures stay the caller's.
+            m_targets.erase(it);
+            return;
+        }
         const size_t bytes = static_cast<size_t>(it->second.width) * static_cast<size_t>(it->second.height) * 9u;
         m_memStats.textureMemory -= std::min(m_memStats.textureMemory, bytes);
         m_memStats.totalAllocated -= std::min(m_memStats.totalAllocated, bytes);
@@ -1079,6 +1227,10 @@ namespace Render {
         if (it == m_targets.end()) return;
         TargetInfo& rt = it->second;
         if (rt.width == w && rt.height == h) return;
+        if (!rt.ownsImages) {
+            Log::Warning("MetalBackend: a texture render target is not resized here - recreate it over new textures");
+            return;
+        }
         if (m_activeTarget == handle) BindRenderTarget(INVALID_RENDER_TARGET);
         const size_t oldBytes = static_cast<size_t>(rt.width) * static_cast<size_t>(rt.height) * 9u;
         rt.width = w;

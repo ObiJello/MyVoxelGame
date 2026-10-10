@@ -13,6 +13,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -44,5 +45,43 @@ namespace Shaders {
 
     // The value an option currently has (override or default), for the UI.
     std::string CurrentValue(const Option& option, const Overrides& overrides);
+
+    // The pack's settings LAYOUT, as OptiFine and Iris read it from
+    // shaders.properties and the pack's language file:
+    //   screen=A B [SUB] <empty> <profile>      the main screen's items
+    //   screen.SUB=...                          a sub-screen; [SUB] links to it
+    //   screen.SUB.columns=N                    its column count (default 2)
+    //   sliders=A B                             options shown as sliders
+    //   profile.NAME=A=1 B !C profile.OTHER     a profile: option values
+    //   lang/en_us.lang: option.A=Label, option.A.comment=Tooltip,
+    //   value.A.1=Label, screen.SUB=Label, profile.NAME=Label.
+    struct PackLayout {
+        struct Profile {
+            std::string name;
+            Overrides   values;   // every option the profile sets (inheritance resolved)
+        };
+        // Items per screen, "" = the main screen; an item is an option name,
+        // "[NAME]" (a link), "<empty>" (a gap) or "<profile>" (the profile
+        // button). Empty when the pack declares no layout (every option is
+        // then listed flat).
+        std::map<std::string, std::vector<std::string>> screens;
+        std::map<std::string, int> columns;
+        std::set<std::string> sliders;
+        std::vector<Profile> profiles;
+        std::map<std::string, std::string> lang;
+
+        bool HasLayout() const { return screens.count("") > 0; }
+        // Labels from the language file, the raw name without one.
+        std::string OptionLabel(const std::string& option) const;
+        std::string OptionComment(const std::string& option) const;   // "" = none
+        std::string ValueLabel(const std::string& option, const std::string& value) const;
+        std::string ScreenLabel(const std::string& screen) const;
+        std::string ScreenComment(const std::string& screen) const;
+        std::string ProfileLabel(const std::string& profile) const;
+        // The profile whose every value the overrides (over the options'
+        // defaults) currently match, or -1 (Iris: "Custom").
+        int MatchingProfile(const std::vector<Option>& options, const Overrides& overrides) const;
+    };
+    PackLayout LoadLayout(const std::string& shadersDir);
 
 } // namespace Shaders

@@ -49,6 +49,7 @@ namespace Game { class World; }
 namespace Server {
 
     class ServerPlayer;
+    enum class DamageSource;   // ServerPlayer.hpp
     class PlayerSessionManager;
     class MobManager;
     class ItemEntityManager;
@@ -348,6 +349,9 @@ namespace Server {
         void OnEffectRemoved(const Game::MobEffectInstance& effect) override;
 
     private:
+        // The mob-system source as ServerPlayer's own DamageSource.
+        DamageSource PlayerDamageSourceOf(Game::MobDamageSource source) const;
+
         ServerPlayer* m_player;
         // The player's dimension epoch when this view was built.
         uint32_t      m_dimensionEpoch = 0;

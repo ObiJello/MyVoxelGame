@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <functional>
+#include <map>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -151,6 +153,7 @@ namespace Render {
         RenderTargetHandle CreateRenderTarget(const RenderTargetDesc& desc) override;
         void DestroyRenderTarget(RenderTargetHandle rt) override;
         void BindRenderTarget(RenderTargetHandle rt) override;
+        void BindRenderTargetOverwriting(RenderTargetHandle rt) override;
         TextureHandle GetRenderTargetColorTexture(RenderTargetHandle rt) const override;
         void ResizeRenderTarget(RenderTargetHandle rt, int w, int h) override;
         bool CopyFramebufferToRenderTarget(RenderTargetHandle dst) override;
@@ -197,13 +200,26 @@ namespace Render {
         void SetShaderIgnoresCommonMatrices(ShaderHandle shader) override;
         void DestroyShader(ShaderHandle handle) override;
         void BindShader(ShaderHandle handle) override;
-        void SetUniformMat4(ShaderHandle, const std::string& name, const glm::mat4& value) override { m_uniforms.SetMat4(name, value); }
-        void SetUniformVec4(ShaderHandle, const std::string& name, const glm::vec4& value) override { m_uniforms.SetVec4(name, value); }
-        void SetUniformVec3(ShaderHandle, const std::string& name, const glm::vec3& value) override { m_uniforms.SetVec3(name, value); }
-        void SetUniformVec2(ShaderHandle, const std::string& name, const glm::vec2& value) override { m_uniforms.SetVec2(name, value); }
-        void SetUniformFloat(ShaderHandle, const std::string& name, float value) override { m_uniforms.SetFloat(name, value); }
-        void SetUniformInt(ShaderHandle, const std::string& name, int value) override { m_uniforms.SetInt(name, value); }
-        void SetUniformIVec3(ShaderHandle, const std::string& name, const glm::ivec3& value) override { m_uniforms.SetIVec3(name, value); }
+        // A pack program (CreatePackShader) takes its uniforms into its own
+        // block by name; every other shader through the fixed layout.
+        void SetUniformMat4(ShaderHandle h, const std::string& name, const glm::mat4& value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetMat4(name, value); }
+        void SetUniformVec4(ShaderHandle h, const std::string& name, const glm::vec4& value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetVec4(name, value); }
+        void SetUniformVec3(ShaderHandle h, const std::string& name, const glm::vec3& value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetVec3(name, value); }
+        void SetUniformVec2(ShaderHandle h, const std::string& name, const glm::vec2& value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetVec2(name, value); }
+        void SetUniformFloat(ShaderHandle h, const std::string& name, float value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetFloat(name, value); }
+        void SetUniformInt(ShaderHandle h, const std::string& name, int value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetInt(name, value); }
+        void SetUniformIVec3(ShaderHandle h, const std::string& name, const glm::ivec3& value) override { if (!SetPackUniform(h, name, &value, sizeof(value))) m_uniforms.SetIVec3(name, value); }
+        void SetUniformIVec2(ShaderHandle h, const std::string& name, const glm::ivec2& value) override { SetPackUniform(h, name, &value, sizeof(value)); }
+        bool PackShadersSupported() const override { return true; }
+        ShaderHandle CreatePackShader(const PackShaderDesc& desc) override;
+        void SetShaderOverrideMode(bool on, RenderTargetHandle defaultTarget) override;
+        void SetShaderOverride(ShaderHandle engine, ShaderHandle pack, RenderTargetHandle target) override;
+        void ClearShaderOverrides() override;
+        std::vector<ShaderHandle> FindShadersBySource(
+            const std::function<bool(const std::string&, const std::string&)>& match) override;
+        RenderTargetHandle CreateRenderTargetFromTextures(const TextureHandle* colors, int colorCount, TextureHandle depth) override;
+        void BlitRenderTargetDepth(RenderTargetHandle src, RenderTargetHandle dst) override;
+        bool CopyTexture(TextureHandle src, TextureHandle dst) override;
 
         // Meshes
         MeshHandle CreateMesh(BufferHandle vertexBuffer, BufferHandle indexBuffer, const VertexLayout& layout) override;
@@ -360,6 +376,8 @@ namespace Render {
             uint8_t  config = 0;          // attachment formats (pipeline key): 0 frame / target, 1-3 OIT, 4 target without depth
             uint8_t  colorCount = 1;
             bool     clears = false;      // an unopened pass with clears to perform
+            std::vector<MTLPixelFormat> formats;   // configs 5 / 6: the attachments' formats
+            uint32_t attachmentsKey = 0;
         };
         Pass m_pass;
         // MTLRenderCommandEncoder, or MTL4RenderCommandEncoder on the
@@ -377,6 +395,7 @@ namespace Render {
         // readback copies it, the drawable shows it.
         bool m_endingFrame = false;
         RenderTargetHandle m_activeTarget = INVALID_RENDER_TARGET;
+        bool m_bindDiscardColor = false;   // BindRenderTargetOverwriting: the bind's colour loads are DontCare
         void BeginFramePass(bool resume);
         bool EnsureEncoder();
         void EndPass();
@@ -408,7 +427,11 @@ namespace Render {
         struct EncoderCache {
             __unsafe_unretained id<MTLRenderPipelineState> pipeline = nil;
             __unsafe_unretained id<MTLDepthStencilState>   depthStencil = nil;
-            int cull = 0, winding = 1, fill = 0, clip = 0;
+            // -1: not set on this encoder yet (PrepareDraw's winding value is
+            // 1 for a counter-clockwise front, 0 for clockwise — an
+            // initial 1 once matched it and left a fresh encoder on Metal's
+            // clockwise default, culling the whole world's front faces).
+            int cull = 0, winding = -1, fill = 0, clip = 0;
             bool  depthBiasValid = true;
             float biasConstant = 0.0f, biasSlope = 0.0f;
             uint32_t stencilRef = 0;
@@ -451,7 +474,7 @@ namespace Render {
         // in-pass clear; MoltenVK draws one too), with its own small
         // pipelines (by attachment config) and depth-stencil states.
         id<MTLLibrary> m_internalLibrary = nil;
-        std::unordered_map<uint32_t, id<MTLRenderPipelineState>> m_clearPipelines;
+        std::unordered_map<uint64_t, id<MTLRenderPipelineState>> m_clearPipelines;   // config | colour | attachment set
         bool CreateInternalPipelines();
         void DrawClearQuad(bool color, bool depth, bool stencil, float depthValue,
                            const MTLScissorRect& rect);
@@ -588,15 +611,34 @@ namespace Render {
 
         struct TargetInfo {
             int width = 0, height = 0;
-            id<MTLTexture> color = nil;
+            id<MTLTexture> color = nil;                      // colors[0]
             id<MTLTexture> depth = nil;                      // nil: RenderTargetDesc::depth false (config 4)
             bool           hasDepth = true;
             TextureHandle  colorTexture = INVALID_TEXTURE;   // registered in m_textures (not owned)
             std::string    label;                            // "RT#<handle>" until SetDebugLabel names it
+            // A target over textures the caller owns (CreateRenderTargetFromTextures):
+            // up to eight colour attachments in their own formats, the
+            // depth a sampleable texture; nothing here is freed with it.
+            bool ownsImages = true;
+            std::vector<id<MTLTexture>> colors;
+            std::vector<MTLPixelFormat> formats;
+            uint32_t attachmentsKey = 0;                     // the formats and depth, for the pipeline key
         };
         static constexpr uint8_t kConfigTargetNoDepth = 4;
+        // Targets over the caller's textures: their pipelines bake the pass's
+        // attachment formats (Pass::formats), with or without depth.
+        static constexpr uint8_t kConfigTextures = 5;
+        static constexpr uint8_t kConfigTexturesNoDepth = 6;
+        static constexpr bool ConfigFromPass(uint8_t config) { return config == kConfigTextures || config == kConfigTexturesNoDepth; }
         std::unordered_map<uint32_t, TargetInfo> m_targets;
+        // Every distinct (colour formats, depth) a texture target has had,
+        // numbered from 1: TargetInfo::attachmentsKey, 18 bits of the
+        // pipeline key.
+        std::map<std::vector<uint32_t>, uint32_t> m_attachmentSets;
+        uint32_t AttachmentSetId(const std::vector<MTLPixelFormat>& formats, bool depth);
         bool CreateTargetImages(TargetInfo& rt);
+        void ClearDepthTextureOnUpload(id<MTLTexture> depth, double value, const char* label);
+        void CopyBetweenPasses(id<MTLTexture> src, id<MTLTexture> dst, NSString* label);   // ends the pass, blits, resumes
         void ApplyTargetLabels(TargetInfo& rt);
 
         // ── Shaders and pipelines ────────────────────────────────────────
@@ -606,13 +648,36 @@ namespace Render {
             id<MTLLibrary>  vertLibrary = nil;   // where each came from: the Metal 4 compiler's function descriptors
             id<MTLLibrary>  fragLibrary = nil;
             std::string vertPath, fragPath;      // as the caller asked (the manifest's names)
+            // The GLSL sources behind the paths, read on the first
+            // FindShadersBySource (the pack pipeline's family lookup).
+            std::string vertexSource, fragmentSource;
+            bool sourcesLoaded = false;
             VertexLayout vertexLayout;           // empty: the 24-byte block layout
             VertexLayout instanceLayout;
             bool ignoresCommonMatrices = false;
             // 0 block, 1 portal (Common block), 3 / 4: portal / block + the
-            // Improved Transparency set — the OIT variants and composites.
+            // Improved Transparency set — the OIT variants and composites;
+            // 5: a shader pack program (its own uniform block and 16 slots).
             int layoutType = 0;
+            // Pack programs: the uniform block's CPU copy, written by name
+            // (SetPackUniform) and uploaded to the ring when a draw needs it.
+            uint32_t packBlockSize = 0;
+            std::vector<uint8_t> packBlock;
+            bool packDirty = true;
+            uint64_t packRingFrame = ~0ull;      // the frame the ring window was written in
+            id<MTLBuffer> packRing = nil;
+            size_t packRingOffset = 0;
+            std::unordered_map<std::string, PackUniformDesc> packUniforms;
+            uint32_t packSampler2D = 0;          // PackShaderDesc::sampler2DSlots
         };
+        static constexpr int kLayoutPack = 5;
+        bool SetPackUniform(ShaderHandle shader, const std::string& name, const void* data, size_t bytes);
+        // The shader-override mode (RenderBackend::SetShaderOverrideMode): the
+        // pack pipeline's programs and targets in place of the engine's.
+        struct ShaderOverride { ShaderHandle shader = INVALID_SHADER; RenderTargetHandle target = INVALID_RENDER_TARGET; };
+        bool m_overrideMode = false;
+        RenderTargetHandle m_overrideDefaultTarget = INVALID_RENDER_TARGET;
+        std::unordered_map<uint32_t, ShaderOverride> m_shaderOverrides;
         std::unordered_map<uint32_t, ShaderInfo> m_shaders;
         // shaders/metal/shaders.metallib (CMake, with the Metal toolchain):
         // every shader precompiled, with source and line tables for the
@@ -629,11 +694,38 @@ namespace Render {
             uint8_t       config = 0;
             id<MTLRenderPipelineState> pipeline = nil;
         };
-        std::unordered_map<uint64_t, PipelineRecord> m_pipelines;
+        // The key: the shader, config, blend and attachment set in `a`; in
+        // `b` the engine shader whose vertex layout a pack program draws
+        // with (the override's), 0 otherwise.
+        struct PipelineKeyT {
+            uint64_t a = 0;
+            uint32_t b = 0;
+            bool operator==(const PipelineKeyT& o) const { return a == o.a && b == o.b; }
+        };
+        struct PipelineKeyHash {
+            size_t operator()(const PipelineKeyT& k) const { return std::hash<uint64_t>()(k.a ^ (static_cast<uint64_t>(k.b) * 0x9E3779B97F4A7C15ull)); }
+        };
+        std::unordered_map<PipelineKeyT, PipelineRecord, PipelineKeyHash> m_pipelines;
+        // Under an override, the engine shader the bound pack program stands
+        // in for: its vertex layout is the pipeline's (the pack program's
+        // own registered layout when bound directly).
+        ShaderHandle m_packLayoutSource = INVALID_SHADER;
+        // A pack program drew this frame: on Metal 4 (no hazard tracking)
+        // every render encoder from then on waits for the fragment work
+        // before it, cleared attachments or not — a pack pass samples what
+        // the pass before it drew (the final pass into the frame samples
+        // the composites), which the load-action rule alone misses.
+        bool m_packFrame = false;
+        // The last plain 2D texture bound to each slot: what a pack program
+        // samples there when the engine has since bound a 2D array or a
+        // buffer texture to the slot (the terrain's sprite arrays on 4 / 5,
+        // where a pack's normals / specular live — OpenGL keeps the two
+        // targets apart, Metal has one index).
+        const TextureInfo* m_lastTexture2D[MetalBindings::kPackTextureSlots] = {};
         std::unordered_map<uint64_t, id<MTLDepthStencilState>> m_depthStencilStates;
         id<MTLRenderPipelineState> PipelineFor(const PipelineState& state, ShaderHandle shader, uint8_t config);
         id<MTLDepthStencilState> DepthStencilFor(const PipelineState& state);
-        static uint64_t PipelineKey(const PipelineState& state, ShaderHandle shader, uint8_t config);
+        PipelineKeyT PipelineKey(const PipelineState& state, ShaderHandle shader, uint8_t config) const;
         // The pipeline manifest (VKBackend's warm-up design): every (shader
         // paths, attachment config, state) this machine has built, rebuilt
         // behind the loading screen next session.
@@ -661,7 +753,7 @@ namespace Render {
         void BindVertexStream(uint32_t index, id<MTLBuffer> buffer, NSUInteger offset);
         void BindUniforms();
         void BindTextures();
-        static constexpr uint32_t kMaxTextureSlots = MetalBindings::kTextureSlots;
+        static constexpr uint32_t kMaxTextureSlots = MetalBindings::kPackTextureSlots;   // the engine binds 0..5, a pack program 0..15
         std::array<TextureHandle, kMaxTextureSlots> m_boundTextures{};
         // Their entries, resolved at BindTexture (an unordered_map element
         // stays put until erased; DestroyTexture unbinds it first).

@@ -134,10 +134,18 @@ namespace Render {
         // nullptr / 0 for a layer without merged rectangles.
         // `fadeStartMs`: the section's first-upload time (SectionFade.hpp),
         // written to its origin row's .w so the vertex shader can fade it in.
+        // records: the layer's quad records (QuadRecord, four words each,
+        // `recordCount` of them), stored right after the face-map records in
+        // the same region and drawn by the record shader over the shared
+        // index pattern (BindSlabForRecords, GetDrawCommand's recordTexel).
+        // Their origin-row slot and a rectangle's face-map index are patched
+        // at upload like the vertices'. A layer may be records only
+        // (vertexCount 0) or vertices only.
         bool UploadSection(const MegaBufferSectionKey& key,
                            const float* vertexData, size_t vertexCount,
                            const uint16_t* indexData, size_t indexCount,
-                           const uint32_t* faceMap = nullptr, size_t faceMapTexels = 0,
+                           const uint32_t* faceMap = nullptr, size_t faceMapWords = 0,
+                           const uint32_t* records = nullptr, size_t recordCount = 0,
                            int32_t fadeStartMs = 0);
 
         // Rewrites a section's indices in place, leaving its vertices alone.
@@ -175,9 +183,14 @@ namespace Render {
         // INDEX_SIZE. That is what lets the renderer fuse neighbouring
         // sections of one slab into a single sub-draw.
         struct DrawCommand {
-            int32_t indexCount;
+            int32_t indexCount;       // 0: the layer has no vertex stream
             uint32_t indexOffset;     // In indices, into the slab's IBO
             uint32_t slabIndex;       // Which slab to bind before drawing
+            // The quad-record stream: the first record's texel in the slab's
+            // face map and the record count (0: none). Drawn as 6 x count
+            // indices of the shared pattern with baseVertex 4 x recordTexel.
+            uint32_t recordTexel = 0;
+            uint32_t recordCount = 0;
         };
 
         bool GetDrawCommand(const MegaBufferSectionKey& key, DrawCommand& outCmd) const;
@@ -245,6 +258,10 @@ namespace Render {
 
         // Bind a specific slab's VBO and IBO via the render backend.
         void BindSlab(uint32_t slabIndex) const;
+        // The same slab for its quad-record stream: the shared index pattern
+        // (uint16, QuadRecord::kMaxQuadsPerRun quads of 0 1 2 0 2 3) instead
+        // of the slab IBO; the face map and origins as BindSlab binds them.
+        void BindSlabForRecords(uint32_t slabIndex) const;
 
         // Slab SLOTS, released holes included — the bound for a slab index
         // (draw entries, per-slab scratch arrays). Not a memory figure.
@@ -298,8 +315,13 @@ namespace Render {
         size_t GetMemoryUsageBytes() const;
         size_t GetTotalVertexCapacity() const;
         size_t GetTotalIndexCapacity() const;
-        size_t GetUsedVertices() const;
+        size_t GetUsedVertices() const;   // real vertices of live sections
         size_t GetUsedIndices() const;
+        // Live slab bytes: every region's units (vertices, face-map and
+        // quad records, padding) x VERTEX_STRIDE plus its indices.
+        size_t GetUsedBytes() const {
+            return m_usedVertexUnits * VERTEX_STRIDE + m_usedIndices * INDEX_SIZE;
+        }
 
         // ========================================================================
         // MAINTENANCE
@@ -431,9 +453,13 @@ namespace Render {
             size_t indexCount;
             uint16_t slot;          // origin-table row, patched into every vertex
             // Vertex-stride units the region actually occupies: the vertices
-            // plus the face-map records behind them (rounded up to whole
-            // 16-byte units). This, not vertexCount, is what gets freed.
+            // plus the face-map and quad records behind them (rounded up to
+            // whole units). This, not vertexCount, is what gets freed.
             size_t allocUnits = 0;
+            // The quad-record stream (QuadRecord): its first texel in the
+            // slab's face map and its length, 0 without one.
+            size_t recordTexel = 0;
+            size_t recordCount = 0;
             // Per-section index buffer, MC-style (CompiledSectionMesh ->
             // SectionBuffers.getIndexBuffer()). Only used when the pool was
             // initialised with perSectionIndexBuffers; INVALID_BUFFER otherwise
@@ -539,8 +565,15 @@ namespace Render {
         bool TryUploadToSlab(uint32_t slabIndex, const MegaBufferSectionKey& key,
                              const float* vertexData, size_t vertexCount,
                              const uint16_t* indexData, size_t indexCount,
-                             const uint32_t* faceMap, size_t faceMapTexels,
+                             const uint32_t* faceMap, size_t faceMapWords,
+                             const uint32_t* records, size_t recordCount,
                              int32_t fadeStartMs);
+
+        // The shared index pattern every record run is drawn with (see
+        // BindSlabForRecords): 0 1 2 0 2 3 per quad, uint16, so a run's
+        // baseVertex (4 x its first texel) turns the pattern into the
+        // record texels gl_VertexIndex >> 2 addresses. One per pool.
+        BufferHandle m_quadPatternIbo = INVALID_BUFFER;
 
         // Internal allocation (first-fit with bump fallback, per-slab)
         static bool AllocRegion(std::vector<Slab::FreeBlock>& freeList, size_t& highWater,
@@ -551,12 +584,13 @@ namespace Render {
         // Bytes per terrain vertex — must equal sizeof(Render::TerrainVertex)
         // and GetTerrainVertexLayout().stride: the packed 20-byte vertex.
         static constexpr size_t VERTEX_STRIDE = 20;
-        // Face-map records are RGBA16 texels (8 bytes) of the slab's buffer
-        // texture; the mesher's record arrays are uint32 words. A vertex unit
-        // is 20 bytes, so a region's record array starts at the next 8-byte
-        // boundary after its vertices — at most 4 bytes of padding, which one
-        // spare unit per face-mapped region always covers.
-        static constexpr size_t kRecordBytes  = 8;
+        // Face-map block records and quad records are RGBA32UI texels (16
+        // bytes) of the slab's buffer texture; the mesher's record arrays are
+        // uint32 words. A vertex unit is 20 bytes, so a region's record array
+        // starts at the next 16-byte boundary after its vertices — at most 12
+        // bytes of padding, which one spare unit per region with records
+        // always covers.
+        static constexpr size_t kRecordBytes  = 16;
         static constexpr size_t kWordsPerUnit = VERTEX_STRIDE / 4;
         static_assert(VERTEX_STRIDE % 4 == 0, "a vertex unit must hold whole record words");
 

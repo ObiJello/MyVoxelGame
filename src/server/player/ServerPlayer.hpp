@@ -603,6 +603,11 @@ namespace Server {
         static bool bypassesArmor(DamageSource source);
         // MC DamageTypeTags.IS_FIRE, on this port's sources.
         static bool isFireSource(DamageSource source);
+        // MC Player.isInvulnerableTo + Player.hurtServer's abilities check:
+        // creative/spectator (bar #bypasses_invulnerability) and the
+        // fall/fire/drowning damage rules. True means the hit is refused
+        // before LivingEntity.hurtServer runs — no hurt window, no flash.
+        bool isInvulnerableTo(DamageSource source) const;
 
         // /gamerule shared_vitals: this player takes the pool's values. A
         // drop in health is a hit (the hurt flash and cooldown, as damage()

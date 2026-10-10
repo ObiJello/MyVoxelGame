@@ -79,6 +79,17 @@ namespace Render {
         // Settings shows no control. OpenGL and Vulkan keep the option.
         static bool HalfResolutionAvailable();
 
+        // A shader pack is drawing the frame: rain and snow go through its
+        // gbuffers_weather program, whose vertex stage transforms MC's
+        // quads (position, uv, colour) and nothing else — the streak
+        // instancing and Rain Resolution: Half (their own vertex stages and
+        // targets) stand down while it is on. Set once a frame.
+        void SetShaderPackActive(bool on) { m_shaderPack = on; }
+        // The handles a pack pipeline overrides for its weather family: the
+        // particle program this renderer owns. Its sources are the particle
+        // system's, so a source match could not tell the two apart.
+        std::vector<ShaderHandle> PackShaders() const;
+
         // Extract, prepare and draw the columns for this view. `cameraPos` is
         // the eye in world doubles; `partialTick` the client tick fraction.
         // Draws nothing unless the dimension can have weather and the rain
@@ -159,8 +170,9 @@ namespace Render {
         // prepareInstances as instances: one per (column, repeat).
         void PrepareStreakInstances(std::vector<StreakInstance>& out, const std::vector<ColumnInstance>& columns,
                                     const glm::dvec3& cameraPos, float maxAlpha, int radius, float intensity) const;
-        bool StreaksActive() const { return m_streaksWanted && m_rainStreaks.usable && m_snowStreaks.usable; }
+        bool StreaksActive() const { return m_streaksWanted && !m_shaderPack && m_rainStreaks.usable && m_snowStreaks.usable; }
         bool          m_streaksWanted = true;
+        bool          m_shaderPack = false;     // SetShaderPackActive
         StreakSet     m_rainStreaks, m_snowStreaks;
         uint32_t      m_streakGeneration = 0;   // bumped when the sets are rebuilt (slots re-mesh)
         ShaderHandle  m_streakShader     = INVALID_SHADER;   // weather_streak.vert + the particle fragment

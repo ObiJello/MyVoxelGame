@@ -546,6 +546,13 @@ namespace Render {
         ShaderHandle m_opaqueShader = INVALID_SHADER;        // block.vert + block_opaque.frag (minimal discard)
         ShaderHandle m_cutoutShader = INVALID_SHADER;        // block.vert + block.frag (alpha discard)
         ShaderHandle m_solidShader = INVALID_SHADER;         // block.vert + block_solid.frag (zero discard)
+        // The quad-record stream's shaders (terrain_rec.vert + the same
+        // fragment shaders, no vertex input — Vertex.hpp QuadRecord,
+        // docs/quad-records.md). INVALID when the record shader failed to
+        // build: the records are then not drawn (the mesher still emits
+        // them only while OBEY_QUAD_RECORDS is on).
+        ShaderHandle m_opaqueRecShader = INVALID_SHADER;
+        ShaderHandle m_cutoutRecShader = INVALID_SHADER;
         ShaderHandle m_activeShader = INVALID_SHADER;        // Currently bound shader
         PassOverride m_passOverride[3];
         std::function<void()> m_beforeTranslucent;
@@ -734,6 +741,10 @@ namespace Render {
         // Atlas normally; the lazy 1x1 white texture in greedy-debug view.
         TextureHandle ActiveTerrainTexture();
         void BindSpriteTable(ShaderHandle shader);
+        // The record shader of a pass bound and given the pass's state
+        // (MVP, clip plane, environment, overlay, textures); the caller
+        // re-binds the pass shader afterwards.
+        void PrimeRecordShader(ShaderHandle shader, const Camera& camera);
         // OBEY_DUMP_VISIBLE=1 diagnostics: see PrepareVisibleSections.
         void DumpVisibleSections(const Camera& camera);
         bool m_enableSmartCull = true;  // Occlusion culling via VisibilitySet BFS
@@ -1053,11 +1064,20 @@ namespace Render {
             BufferHandle ibo;   // per-section-IBO layers only; INVALID_BUFFER otherwise
         };
         std::vector<DrawEntry> m_drawEntries;
+        // The layer's quad-record stream (GPUSectionData::opaqueRecordCmd):
+        // offset = the run's first record TEXEL, count = records. Drawn by
+        // SubmitRecordRuns with the record shader over the shared index
+        // pattern — one multi-draw per slab, exact-adjacent runs fused,
+        // never bridged (the texels between two sections' records are
+        // other sections' vertices).
+        std::vector<DrawEntry> m_recordEntries;
+        std::vector<int32_t>   m_recordBaseVertices;
+        int SubmitRecordRuns(ChunkMegaBuffer& megaBuffer);
         // Radix-sort scratch for SubmitMergedRuns (see RadixSortDrawEntries).
         std::vector<DrawEntry> m_sortScratch;
         std::vector<uint32_t>  m_sortKeys;
         std::vector<uint32_t>  m_sortKeysScratch;
-        void RadixSortDrawEntries();
+        void RadixSortDrawEntries(std::vector<DrawEntry>& entries);
 #ifdef TRACY_ENABLE
         std::vector<DrawEntry> m_diagFullEntries;   // sub-draw attribution, RenderLayerPass
 #endif

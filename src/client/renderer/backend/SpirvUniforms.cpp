@@ -103,6 +103,8 @@ namespace Render {
                 common.uFogEnv = value;
                 commonDirty = true;
             }
+        } else if (NameIs(name, "uTerrainLight")) {
+            if (common.uTerrainLight != value) { common.uTerrainLight = value; commonDirty = true; }
         } else if (NameIs(name, "uOverlayColor")) {
             // MC's entity overlay — the primed-TNT white flash. Its own
             // field rather than an alias onto uTint, because the block shaders

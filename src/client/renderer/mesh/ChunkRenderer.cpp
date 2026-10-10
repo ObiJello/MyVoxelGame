@@ -207,6 +207,20 @@ namespace Render {
             Log::Error("Failed to create solid block shader");
             return false;
         }
+        // The quad-record stream (Vertex.hpp QuadRecord): the record vertex
+        // shader with the same two fragment shaders, no vertex input. Opaque
+        // and cutout only — translucent keeps one back-to-front order per
+        // section and stays vertices. A failure here is not fatal: the
+        // records are skipped at draw and the log says why terrain is
+        // missing.
+        if (Mesher::QuadRecordsEnabled()) {
+            m_opaqueRecShader = createBlockShader("shaders/terrain_rec.vert", "shaders/terrain_opaque.frag");
+            m_cutoutRecShader = createBlockShader("shaders/terrain_rec.vert", "shaders/terrain_cutout.frag");
+            if (m_opaqueRecShader == INVALID_SHADER || m_cutoutRecShader == INVALID_SHADER) {
+                Log::Error("Failed to create the quad-record terrain shaders — cube faces will not draw "
+                           "(launch with OBEY_QUAD_RECORDS=0)");
+            }
+        }
         // Vulkan and Metal bake the vertex input into each shader's
         // pipelines; without a registered layout they fall back to the
         // 24-byte block layout and the 20-byte terrain buffers would be read
@@ -216,6 +230,10 @@ namespace Render {
         g_renderBackend->RegisterShaderVertexLayout(m_opaqueShader, GetTerrainVertexLayout());
         g_renderBackend->RegisterShaderVertexLayout(m_cutoutShader, GetTerrainVertexLayout());
         g_renderBackend->RegisterShaderVertexLayout(m_solidShader,  GetTerrainVertexLayout());
+        if (m_opaqueRecShader != INVALID_SHADER)
+            g_renderBackend->RegisterShaderVertexLayout(m_opaqueRecShader, GetNoVertexInputLayout());
+        if (m_cutoutRecShader != INVALID_SHADER)
+            g_renderBackend->RegisterShaderVertexLayout(m_cutoutRecShader, GetNoVertexInputLayout());
         m_backendShader = m_opaqueShader;
         m_shadersLoaded = true;
         Log::Info("Block shaders created (opaque + cutout + solid)");
@@ -270,6 +288,14 @@ namespace Render {
             if (m_solidShader != INVALID_SHADER) {
                 g_renderBackend->DestroyShader(m_solidShader);
                 m_solidShader = INVALID_SHADER;
+            }
+            if (m_opaqueRecShader != INVALID_SHADER) {
+                g_renderBackend->DestroyShader(m_opaqueRecShader);
+                m_opaqueRecShader = INVALID_SHADER;
+            }
+            if (m_cutoutRecShader != INVALID_SHADER) {
+                g_renderBackend->DestroyShader(m_cutoutRecShader);
+                m_cutoutRecShader = INVALID_SHADER;
             }
             if (m_whiteDebugTexture != INVALID_TEXTURE) {
                 g_renderBackend->DestroyTexture(m_whiteDebugTexture);
@@ -536,6 +562,10 @@ namespace Render {
             ApplyDebugOverlayUniform(cutoutPassShader);
             g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
             BindSpriteTable(cutoutPassShader);
+            if (m_cutoutRecShader != INVALID_SHADER && cutoutPassShader == m_cutoutShader) {
+                PrimeRecordShader(m_cutoutRecShader, camera);
+                g_renderBackend->BindShader(cutoutPassShader);
+            }
         }
 
         {
@@ -615,16 +645,22 @@ namespace Render {
         // section entering the view is never a frame late). The pass itself
         // would draw nothing, but the shader bind and uniform uploads in
         // front of it are not free on either backend.
-        if (m_visibleTranslucentSections <= 0) {
-            m_stats.translucentPassTimeMs = 0.0f;
-            return;
-        }
+        //
+        // The hook runs either way: a shader pack's deferred passes paint
+        // the sky and light the opaque scene from it, and a view with no
+        // translucent section in it (the sky, the sun over dry land) needs
+        // them just the same — skipped, the pack's sky stayed black and the
+        // composite's sun glow was drawn over black.
         if (m_beforeTranslucent) {
             m_beforeTranslucent();
             // The hook draws its own meshes (a shader pack's deferred
             // passes), which leaves THEIR vertex array bound; the slab
             // binds below would then be written into it. Ours again.
             if (m_meshes) m_meshes->BindSharedBlockVAO();
+        }
+        if (m_visibleTranslucentSections <= 0) {
+            m_stats.translucentPassTimeMs = 0.0f;
+            return;
         }
         // The translucent terrain shader (terrain_solid): blending handles
         // partial alpha, and it DISCARDS below the pass's cutout
@@ -2012,6 +2048,23 @@ namespace Render {
         // keeps sampling the white map — the in-run A/B of the skip.
         const bool worldLightingOn = Lightmap::WorldLightingOn() || Render::DevSkip("lightskip");
         g_renderBackend->SetUniformInt(shader, "uWorldLighting", worldLightingOn ? 1 : 0);
+        // A face-mapped rectangle's light per fragment (shadedVertexColor).
+        // OBEY_LIGHT_MODE=1 (the default): the block's four corner light
+        // COORDS blend across the face and the lightmap is sampled once;
+        // 0: MC's exact form, the four corner lightmap colours blend (four
+        // samples). Still frame 2026-10-09: 1 is +2.0 % fps, GPU frame
+        // -6 %; the lightmap's arithmetic evaluated per fragment instead
+        // (no texture) was -2 % and is gone. Mode 1 bends the blend inside a
+        // block by the lightmap curve's curvature — exact at the corners.
+        // OBEY_SKIP=lightmode is the in-run A/B back to 0.
+        static const int s_lightMode = [] {
+            const char* v = std::getenv("OBEY_LIGHT_MODE");
+            const int mode = v ? std::atoi(v) : 1;
+            if (v) Log::Info("ChunkRenderer: light mode %d (OBEY_LIGHT_MODE)", mode);
+            return mode == 0 ? 0 : 1;
+        }();
+        const int lightMode = (Lightmap::Enabled() && !DevSkip("lightmode")) ? s_lightMode : 0;
+        g_renderBackend->SetUniformVec4(shader, "uTerrainLight", glm::vec4(static_cast<float>(lightMode), 0.0f, 0.0f, 0.0f));
         // MC ChunkVisibility (options.chunkFade): the vertex shader turns a
         // section's upload time (its origin row's .w) and these two into a
         // 0..1 that the fragment shader mixes from the fog colour.
@@ -2097,6 +2150,23 @@ namespace Render {
             g_renderBackend->BindTexture(ActiveTerrainTexture(), 0);
         }
         BindSpriteTable(opaquePassShader);
+        // The record stream's shader takes the same state (OpenGL uniforms
+        // are per program; the texture binds are global). Only with the
+        // engine's own pass shader: a shader pack's replaces both streams'
+        // look, and under a pack the mesher emits no records.
+        if (m_opaqueRecShader != INVALID_SHADER && opaquePassShader == m_opaqueShader) {
+            PrimeRecordShader(m_opaqueRecShader, camera);
+            g_renderBackend->BindShader(opaquePassShader);
+        }
+    }
+
+    void ChunkRenderer::PrimeRecordShader(ShaderHandle shader, const Camera& camera) {
+        g_renderBackend->BindShader(shader);
+        g_renderBackend->SetUniformMat4(shader, "uMVP", m_cachedMVP);
+        g_renderBackend->SetUniformVec4(shader, "uPortalClipPlane", PortalClipPlane());
+        SetEnvironmentUniforms(shader, camera);
+        ApplyDebugOverlayUniform(shader);
+        BindSpriteTable(shader);
     }
 
     // The atlas sprite table (AtlasBuilder), texture slot 1 for every terrain
@@ -2166,7 +2236,8 @@ namespace Render {
         // Only the engine's own terrain shaders: a shader pack's replace them
         // and its G-buffer sits on the same units (ShaderPipeline). OBEY_SKIP=
         // spritearray leaves the arrays resident and unused — the in-run A/B.
-        const bool engineShader = shader == m_opaqueShader || shader == m_cutoutShader || shader == m_solidShader;
+        const bool engineShader = shader == m_opaqueShader || shader == m_cutoutShader || shader == m_solidShader ||
+                                  shader == m_opaqueRecShader || shader == m_cutoutRecShader;
         const TextureHandle spriteArray = g_atlasBuilder->GetSpriteArrayHandle(0);
         int spriteLayers = 0, spriteCap = 0;
         if (engineShader && spriteArray != INVALID_TEXTURE && !Render::DevSkip("spritearray")) {
@@ -2202,6 +2273,13 @@ namespace Render {
         if (layer == RenderLayer::Cutout) alphaTest = 0.5f;
         else if (layer == RenderLayer::Translucent) alphaTest = 0.1f;
         g_renderBackend->SetUniformFloat(m_activeShader, "uAlphaTest", alphaTest);
+        // The layer's quad-record shader (opaque and cutout, with the engine's
+        // own pass shader — see PrimeRecordShader); INVALID = no record stream
+        // this pass.
+        const ShaderHandle recShader =
+            (layer == RenderLayer::Opaque && PassShader(kPassOpaque, m_opaqueShader) == m_opaqueShader) ? m_opaqueRecShader :
+            (layer == RenderLayer::Cutout && PassShader(kPassCutout, m_cutoutShader) == m_cutoutShader) ? m_cutoutRecShader :
+            INVALID_SHADER;
 
         // Get the mega-buffer for this layer
         auto* megaBuffer = m_meshes ? m_meshes->GetMegaBuffer(layer) : nullptr;
@@ -2246,6 +2324,8 @@ namespace Render {
         // is time spent inside driver calls. If a pass shows milliseconds,
         // this tells you which side owns them.
         m_drawEntries.clear();
+        m_recordEntries.clear();
+        uint32_t totalRecordQuads = 0;
         m_orderedExactFrom = SIZE_MAX;
         // Sub-draw attribution (Tracy builds only): what the draw count would
         // be if every section were ONE entry (no facing-group splits), with
@@ -2264,6 +2344,64 @@ namespace Render {
                 // remeshed to empty, or unloaded — and it silently contributes
                 // nothing, exactly as MC's null getBuffers(layer) does.
                 if (!section.resolved) return;
+
+                // The quad-record stream first (the vertex block below may
+                // return early): the same facing-group skip, in RECORDS, into
+                // m_recordEntries. A skipped group between two visible runs
+                // is drawn anyway when small, as for the index runs.
+                const GPUSectionData::CachedDrawCmd* recordCmd =
+                    (layer == RenderLayer::Opaque) ? &section.resolved->opaqueRecordCmd :
+                    (layer == RenderLayer::Cutout) ? &section.resolved->cutoutRecordCmd : nullptr;
+                if (recShader != INVALID_SHADER && recordCmd && recordCmd->valid && recordCmd->indexCount > 0 &&
+                    recordCmd->slabIndex < slabCount) {
+                    uint32_t drawnQuads = 0;
+                    if (useFacing && recordCmd->hasFacing) {
+                        const float minX = static_cast<float>(section.chunkPos.x * 16);
+                        const float minY = static_cast<float>(Config::MinY + section.sectionY * 16);
+                        const float minZ = static_cast<float>(section.chunkPos.z * 16);
+                        const bool visible[kFacingCount] = {
+                            directional ? toLight.x < 0.0f : eye.x < minX + 16.0f,
+                            directional ? toLight.x > 0.0f : eye.x > minX,
+                            directional ? toLight.y < 0.0f : eye.y < minY + 16.0f,
+                            directional ? toLight.y > 0.0f : eye.y > minY,
+                            directional ? toLight.z < 0.0f : eye.z < minZ + 16.0f,
+                            directional ? toLight.z > 0.0f : eye.z > minZ,
+                            true,
+                        };
+                        const uint32_t bridgeQuads = splitMinIndices / 6u;
+                        int slot = 0;
+                        bool haveRun = false;
+                        uint32_t runBegin = 0, runEnd = 0;
+                        while (slot < kFacingCount) {
+                            if (!visible[kFacingGroupOrder[slot]]) { ++slot; continue; }
+                            int end = slot;
+                            while (end < kFacingCount && visible[kFacingGroupOrder[end]]) ++end;
+                            const uint32_t begin = recordCmd->facingRanges[slot];
+                            const uint32_t stop  = recordCmd->facingRanges[end];
+                            if (stop > begin) {
+                                if (haveRun && begin - runEnd <= bridgeQuads) {
+                                    runEnd = stop;
+                                } else {
+                                    if (haveRun) {
+                                        m_recordEntries.push_back({recordCmd->slabIndex, runBegin, runEnd - runBegin, INVALID_BUFFER});
+                                        drawnQuads += runEnd - runBegin;
+                                    }
+                                    runBegin = begin; runEnd = stop; haveRun = true;
+                                }
+                            }
+                            slot = end;
+                        }
+                        if (haveRun) {
+                            m_recordEntries.push_back({recordCmd->slabIndex, runBegin, runEnd - runBegin, INVALID_BUFFER});
+                            drawnQuads += runEnd - runBegin;
+                        }
+                    } else {
+                        m_recordEntries.push_back({recordCmd->slabIndex, recordCmd->indexOffset,
+                                                   static_cast<uint32_t>(recordCmd->indexCount), INVALID_BUFFER});
+                        drawnQuads = static_cast<uint32_t>(recordCmd->indexCount);
+                    }
+                    totalRecordQuads += drawnQuads;
+                }
 
                 const auto& cachedCmd = (layer == RenderLayer::Opaque)      ? section.resolved->opaqueDrawCmd :
                                         (layer == RenderLayer::Cutout)       ? section.resolved->cutoutDrawCmd :
@@ -2375,14 +2513,25 @@ namespace Render {
         }
 
         int subDraws = 0;
+        // The record stream first: its shader, its alpha test (a push
+        // constant on Vulkan/Metal, per program on OpenGL), the shared
+        // pattern per slab; then the pass shader back for the vertex stream.
+        if (!m_recordEntries.empty() && recShader != INVALID_SHADER) {
+            PROFILE_ZONE_N("SubmitRecords");
+            g_renderBackend->BindShader(recShader);
+            g_renderBackend->SetUniformFloat(recShader, "uAlphaTest", alphaTest);
+            subDraws += SubmitRecordRuns(*megaBuffer);
+            g_renderBackend->BindShader(m_activeShader);
+            if (m_meshes) m_meshes->BindSharedBlockVAO();
+        }
         if (!m_drawEntries.empty()) {
             PROFILE_ZONE_N("SubmitMultiDraw");
             if (megaBuffer->UsesPerSectionIndexBuffers()) {
-                subDraws = SubmitPerSectionIbos(*megaBuffer);
+                subDraws += SubmitPerSectionIbos(*megaBuffer);
             } else if (backToFront) {
-                subDraws = SubmitOrderedRuns(*megaBuffer);
+                subDraws += SubmitOrderedRuns(*megaBuffer);
             } else {
-                subDraws = SubmitMergedRuns(*megaBuffer);
+                subDraws += SubmitMergedRuns(*megaBuffer);
             }
         }
 
@@ -2411,6 +2560,12 @@ namespace Render {
             PROFILE_PLOT("Draws/Slabs",         slabs);   // actual sub-draws: Draws/Merged
         }
 #endif
+        // Quad records: one record = one quad = four vertices' worth of
+        // geometry; counted into the same totals (what the GPU drew) and on
+        // their own plot.
+        totalVerts   += totalRecordQuads * 4;
+        totalIndices += totalRecordQuads * 6;
+        PROFILE_PLOT("Geom/RecordQuads", static_cast<int64_t>(totalRecordQuads));
         m_stats.totalVerticesRendered += totalVerts;
         m_stats.totalIndicesRendered += totalIndices;
 
@@ -2475,18 +2630,18 @@ namespace Render {
     // too: a frustum-culled neighbour (wasted vertex work, invisible) or
     // zeroed free space (degenerate triangles, nothing). One multi-draw per
     // slab, as before; what changed is the number of commands inside it.
-    void ChunkRenderer::RadixSortDrawEntries() {
-        const size_t n = m_drawEntries.size();
+    void ChunkRenderer::RadixSortDrawEntries(std::vector<DrawEntry>& entries) {
+        const size_t n = entries.size();
         if (n < 2) return;
         bool keyFits = true;
         m_sortKeys.resize(n);
         for (size_t i = 0; i < n; ++i) {
-            const DrawEntry& e = m_drawEntries[i];
+            const DrawEntry& e = entries[i];
             if (e.offset >= (1u << 24) || e.slab >= 256u) { keyFits = false; break; }
             m_sortKeys[i] = (e.slab << 24) | e.offset;
         }
         if (!keyFits) {
-            std::sort(m_drawEntries.begin(), m_drawEntries.end(),
+            std::sort(entries.begin(), entries.end(),
                       [](const DrawEntry& a, const DrawEntry& b) {
                           return a.slab != b.slab ? a.slab < b.slab : a.offset < b.offset;
                       });
@@ -2494,7 +2649,7 @@ namespace Render {
         }
         m_sortScratch.resize(n);
         m_sortKeysScratch.resize(n);
-        DrawEntry* src = m_drawEntries.data();  DrawEntry* dst = m_sortScratch.data();
+        DrawEntry* src = entries.data();  DrawEntry* dst = m_sortScratch.data();
         uint32_t*  ksrc = m_sortKeys.data();    uint32_t*  kdst = m_sortKeysScratch.data();
         for (int shift = 0; shift < 32; shift += 8) {
             uint32_t hist[256] = {};
@@ -2514,9 +2669,67 @@ namespace Render {
             std::swap(src, dst);
             std::swap(ksrc, kdst);
         }
-        if (src != m_drawEntries.data()) {
-            std::copy(src, src + n, m_drawEntries.data());
+        if (src != entries.data()) {
+            std::copy(src, src + n, entries.data());
         }
+    }
+
+    // The quad-record stream of one layer pass: m_recordEntries sorted by
+    // (slab, record texel), exact-adjacent runs fused, one multi-draw per
+    // slab over the shared index pattern — 6 x quads indices from offset 0
+    // with baseVertex 4 x the run's first texel, so gl_VertexIndex >> 2
+    // walks the records (terrain_rec_vk.vert). No gap bridging: the texels
+    // between two sections' records belong to other sections' vertices.
+    int ChunkRenderer::SubmitRecordRuns(ChunkMegaBuffer& megaBuffer) {
+        PROFILE_ZONE_N("RecordRuns");
+        RadixSortDrawEntries(m_recordEntries);
+        int subDraws = 0;
+        m_runCounts.clear();
+        m_runByteOffsets.clear();
+        m_recordBaseVertices.clear();
+        auto pushRun = [&](size_t begin, size_t end) {
+            // The pattern covers kMaxQuadsPerRun quads; a longer fused run
+            // is split (a single section never exceeds it).
+            while (begin < end) {
+                const size_t quads = std::min(end - begin, static_cast<size_t>(QuadRecord::kMaxQuadsPerRun));
+                m_runCounts.push_back(static_cast<int32_t>(quads * 6));
+                m_runByteOffsets.push_back(0);
+                m_recordBaseVertices.push_back(static_cast<int32_t>(begin * 4));
+                begin += quads;
+            }
+        };
+        const size_t n = m_recordEntries.size();
+        size_t i = 0;
+        while (i < n) {
+            const uint32_t slab = m_recordEntries[i].slab;
+            size_t runBegin = m_recordEntries[i].offset;
+            size_t runEnd   = runBegin + m_recordEntries[i].count;
+            ++i;
+            for (; i < n && m_recordEntries[i].slab == slab; ++i) {
+                const DrawEntry& e = m_recordEntries[i];
+                const size_t eEnd = static_cast<size_t>(e.offset) + e.count;
+                if (e.offset <= runEnd) {
+                    runEnd = std::max(runEnd, eEnd);   // adjacent or overlapping: one run
+                } else {
+                    pushRun(runBegin, runEnd);
+                    runBegin = e.offset;
+                    runEnd   = eEnd;
+                }
+            }
+            pushRun(runBegin, runEnd);
+            if (!m_runCounts.empty()) {
+                megaBuffer.BindSlabForRecords(slab);
+                g_renderBackend->MultiDrawIndexedBaseVertex(
+                    m_runCounts.data(), m_runByteOffsets.data(), m_recordBaseVertices.data(),
+                    static_cast<uint32_t>(m_runCounts.size()), IndexType::Uint16);
+                m_stats.totalDrawCalls++;
+                subDraws += static_cast<int>(m_runCounts.size());
+                m_runCounts.clear();
+                m_runByteOffsets.clear();
+                m_recordBaseVertices.clear();
+            }
+        }
+        return subDraws;
     }
 
     int ChunkRenderer::SubmitMergedRuns(ChunkMegaBuffer& megaBuffer) {
@@ -2543,7 +2756,7 @@ namespace Render {
         // slab that ever exceeds it falls back to std::sort.
         {
             PROFILE_ZONE_N("MergeRuns.Sort");
-            RadixSortDrawEntries();
+            RadixSortDrawEntries(m_drawEntries);
         }
 
         // Gap bridging draws whatever sits between two nearby visible runs —
